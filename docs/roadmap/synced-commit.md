@@ -1,7 +1,7 @@
 # A power loss that tears no file
 
-Status: designed, 2026-11-14; phases 1 to 3 built (`store/commits.rs`, `store/synced_model.rs`, `store/kept.rs`,
-`store/record.rs`, `store/restore.rs`), 4 and 5 not. It is the answer to the one defect of the review of `ed20979` that was
+Status: designed, 2026-11-14; phases 1 to 4 built (`store/commits.rs`, `store/synced_model.rs`, `store/kept.rs`,
+`store/record.rs`, `store/restore.rs`), 5 not. It is the answer to the one defect of the review of `ed20979` that was
 left for a design (`../roadmap.md`, change 1): in the grouped mode a power loss can leave a file that is no commit's,
 which reads wrongly or ends the process that reads it. This is the fifth draft. One reader read the four before it
 against the store and LMDB's source: the first, a marker of commits not yet synced, did not hold; the others were
@@ -411,33 +411,42 @@ restore it can't make.
    | The largest file while a million notes have a tenth set each second for a minute | 667 MB | 655 MB |
 
    The `durable` write pays its second sync, as What it costs says. The second process's first write after a pause
-   longer than the sync's idle time pays a sync and a record before it begins, as The design says, and swings with
-   what that sync has to flush: two runs at the load given, against main's write, which pays none. The gates on the bound read as
-   met, and say little: beside an idle process the file was 52 MB larger than alone, under the bound of 64 MiB, but
-   the two are separate runs of a minute each, which commit at different rates, and the idle process, having written
+   longer than the sync's idle time pays a sync and a record before it begins, as The design says, and swings with what
+   that sync has to flush: two runs at the load given, against main's write, which pays none. The gates on the bound
+   read as met, and say little: beside an idle process the file was 52 MB larger than alone, under the bound of 64 MiB,
+   but the two are separate runs of a minute each, which commit at different rates, and the idle process, having written
    once and synced, holds no pin; the million notes' units left the file 12 MB larger than main's, under a quarter of
-   it. But the bound does not hold the file where commits outrun the disk: rewriting as fast as one
-   process commits, some 4,500 commits a second, the file was 268 MB after a second and 911 MB after eight, the pin
-   moving at each of 13 syncs. While the pin holds, every commit writes fresh pages, so a sync flushes all of them,
-   which takes long enough for as many again to be written: the file grows by what is committed while a sync runs,
-   and that has no bound. An 8 MiB bound made no difference (269 MB). Both were the measure's: the file's last page, which moves
-   only once the pages freed before the pin run out. The bound now measures what the pin keeps, and a write past it
-   waits for the sync (The design). With it, the same minute of rewriting ends with the file at the notes' 7 MB and
-   the bound past them: 74 MB with a fixed 64 MiB, 22 MB with 16 MiB, beside an idle process 75 and 24 MB, in as many
-   commits as before, 42,000 to 53,000 a minute (same machine, 2026-11-15, load about 60). The fixed part is 16 MiB.
-   Windows' boot, the volatile registry key, is built with this phase rather than the last: without it every death
-   there read as a loss, and a write that returned was undone when its process was killed, which the engine promises
-   it is not. The key is the current user's, which a process may make volatile without an administrator: a process
-   of another account, or a service, reads another boot, and where it opens a database alone after a death it
-   restores, losing what the dead process committed since its last sync, as a loss would. A boot all accounts share
-   is phase 5's. Until phase 4, a database is written in one mode at a time by its callers: a writable open of another mode than
-   the record's syncs the data and writes its mode's record, and nothing refuses two live writers of two modes.
-4. **The modes.** `syncEachCommit` and `syncs: false` alone and after a grouped writer that died with commits
-   unsynced, a backup into a directory and `replaceWith`. Done when the replay holds each, an open in another mode
-   than a live writer's is refused and one after it has gone is not, and a `syncEachCommit` writer is shown to
-   sync no more than it does today.
-5. **The boot on each platform, the notice, and a filesystem that loses what wasn't synced.** Done when an open
-   after a loss says what it opened at in the binding and the CLI until it is told it was read; each platform's
-   identity is shown gone after a machine is stopped hard and started, and what a fast startup does to Windows' is
-   written down, by hand on a machine of each; and the engine runs each night on Linux over a filesystem that
-   drops or tears what was not synced, and opens at the record's commit.
+   it. But the bound does not hold the file where commits outrun the disk: rewriting as fast as one process commits,
+   some 4,500 commits a second, the file was 268 MB after a second and 911 MB after eight, the pin moving at each of 13
+   syncs. While the pin holds, every commit writes fresh pages, so a sync flushes all of them, which takes long enough
+   for as many again to be written: the file grows by what is committed while a sync runs, and that has no bound. An 8
+   MiB bound made no difference (269 MB). Both were the measure's: the file's last page, which moves only once the pages
+   freed before the pin run out. The bound now measures what the pin keeps, and a write past it waits for the sync (The
+   design). With it, the same minute of rewriting ends with the file at the notes' 7 MB and the bound past them: 74 MB
+   with a fixed 64 MiB, 22 MB with 16 MiB, beside an idle process 75 and 24 MB, in as many commits as before, 42,000 to
+   53,000 a minute (same machine, 2026-11-15, load about 60). The fixed part is 16 MiB. Windows' boot, the volatile
+   registry key, is built with this phase rather than the last: without it every death there read as a loss, and a write
+   that returned was undone when its process was killed, which the engine promises it is not. The key is the current
+   user's, which a process may make volatile without an administrator: a process of another account, or a service, reads
+   another boot, and where it opens a database alone after a death it restores, losing what the dead process committed
+   since its last sync, as a loss would. A boot all accounts share is phase 5's. Phase 4 refuses two live writers of two
+   modes.
+4. **The modes.** `syncEachCommit` and `syncs: false` alone and after a grouped writer that died with commits unsynced,
+   a backup into a directory and `replaceWith`. Done when the replay holds each, an open in another mode than a live
+   writer's is refused and one after it has gone is not, and a `syncEachCommit` writer is shown to sync no more than it
+   does today. Built (2026-11-15): each writable open holds its mode's lock (`grouped.lock`, `ordered.lock`,
+   `unsynced.lock`), taken under the lock every open decides under once no writer of another mode holds its own, and
+   refused otherwise with `MODE_MISMATCH`, naming both modes. The first open of a mode that keeps no commit writes its
+   record where there is none as well as where the record is of another mode. A backup into a directory removes the
+   record and the saved meta pages a database there left, before it puts its copy there. `replaceWith` decides on its
+   source as a read-only open does, restoring it where its record asks, and holds it open while it reads it. The replay
+   (`engine/tests/power_loss.rs`) holds each: `syncEachCommit` alone and after a grouped writer that died, files a loss
+   leaves of each commit with the record beside them; `syncs: false` alone and after one, every file opened as it is and
+   none restored; a backup over a directory whose record says `failed`; and `replaceWith` from a file a loss left. A
+   `syncEachCommit` or `syncs: false` writer's commits leave the record as its open wrote it, and the environment's
+   flags say LMDB syncs each commit and nothing else.
+5. **The boot on each platform, the notice, and a filesystem that loses what wasn't synced.** Done when an open after a
+   loss says what it opened at in the binding and the CLI until it is told it was read; each platform's identity is
+   shown gone after a machine is stopped hard and started, and what a fast startup does to Windows' is written down, by
+   hand on a machine of each; and the engine runs each night on Linux over a filesystem that drops or tears what was not
+   synced, and opens at the record's commit.
