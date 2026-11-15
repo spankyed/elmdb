@@ -136,6 +136,9 @@ test('writes made beside a rebuild on the pool land, whichever commits first, an
   // made twenty-one commits between them
   assert.equal(db.sequence, before + 21);
   assert.ok(sequences.every((sequence, i) => i === 0 || sequence > sequences[i - 1]), `sequences ${sequences}`);
+  // The rebuild's commit is the one of the twenty-one none of the writes took
+  const rebuilt = Array.from({ length: 21 }, (_, i) => before + 1 + i).find((sequence) => !sequences.includes(sequence));
+  t.diagnostic(`the rebuild committed ${rebuilt - before} of 21: ${rebuilt - before - 1} writes before it, ${before + 21 - rebuilt} after`);
   assert.equal(packr.unpack(db.readSync(count))[0].n, 20020);
   assert.equal(db.checkSync().differences.length, 0);
 });

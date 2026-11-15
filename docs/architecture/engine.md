@@ -439,8 +439,10 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 `db.writeSync(batch, durable?)` applies a batch as one unit, on the calling thread, and answers once it has committed,
 or with `durable` once its sync has run. A write is never answered by a promise: what it answers, an entity's id and
 short code, and what it refuses are its caller's at the call, and a read made after it sees it. In the grouped mode a
-write outside a unit takes 38 to 60 µs and one inside a unit about 11 µs (`../evidence/phase-10.md`, D17's re-reading),
-and its sync runs later, on the store's own thread, which `db.durable()` waits for without holding the event loop.
+`set` committed alone took about 38 µs, one inside a unit about 11 µs and a `create` about 107 µs, through apack's
+engine (`../evidence/phase-10.md`, D17's re-reading, 2026-10-25), and the sync runs later on a thread of its own,
+which `db.durable()` waits for without holding the event loop. A batch of thousands of operations holds the calling
+thread for as long as it runs.
 
 A check, a rebuild and a backup can take as long as the database is large, so each also runs on a thread of the pool,
 answering a promise: `db.check()`, `db.rebuild(type?, index?)` and `db.backup(target)`, each a job of its own
@@ -450,8 +452,11 @@ the calling thread). A check and a backup read a snapshot, and the database's wr
 writes, in one unit of its own: a write made on the calling thread while it runs waits for the database's write lock
 until the rebuild commits, holding the event loop for that long, and one made before the rebuild has the lock commits
 first. Either order leaves derived data matching primary data, since a rebuild derives from what is committed when it
-begins. A rebuild is refused while a unit is open (`UNIT_OPEN`), as a write is, so it never waits on a unit only the
-calling thread can end. A process that exits by `process.exit()` runs the pool to its end first, so what was asked for
+begins. Every other call that takes the write lock waits for it the same way, holding the event loop: `begin`,
+`setSchema`, a purge, a rename, a load, `reset`, `replaceWith` and `close`. Rebuilds asked together run one after
+another. A rebuild is refused while a unit is open (`UNIT_OPEN`), as a write is: which of a unit begun and a
+rebuild asked for in the same turn takes the write lock first is the pool's timing, and the other waits or is
+refused. Call a rebuild with no unit open and await it before writing, or make the writes on another thread. A process that exits by `process.exit()` runs the pool to its end first, so what was asked for
 is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that has panicked) throws at
 the call in every form; a call on a closed database throws in the blocking forms and rejects the promise in the
 others. A close waits for the operations running, which for a large rebuild or backup is the whole of it, so the event
