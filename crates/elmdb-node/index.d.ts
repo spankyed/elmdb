@@ -3,12 +3,13 @@ import type { SchemaChange } from './protocol/SchemaChange.js'
 import type { CheckReport } from './protocol/CheckReport.js'
 import type { IndexStatus } from './protocol/IndexStatus.js'
 import type { Stats } from './protocol/Stats.js'
+import type { Restore } from './protocol/Restore.js'
 export type { ErrorCode } from './protocol/ErrorCode.js'
 export type { Written } from './protocol/Written.js'
 export type { BatchResult } from './protocol/BatchResult.js'
 export type { OpResult } from './protocol/OpResult.js'
 export type { ChangeSet } from './protocol/ChangeSet.js'
-export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats }
+export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats, Restore }
 
 /**
  * Which binding artifact the generated loader actually loaded: `'native'` for
@@ -32,8 +33,15 @@ export declare class Database {
    * Refused while a unit is open, in a read-only database, and for a change opening refuses
    */
   setSchema(schema: Schema): SchemaChange[]
-  /** What opening did: `{ schemaChanges: [{ path, change, effect }] }` */
-  get openReport(): { schemaChanges: SchemaChange[] }
+  /**
+   * What opening did: `{ schemaChanges: [{ path, change, effect }], restored, notBorneOut }`. `restored` is a
+   * restore this open or an earlier one made, a power loss or a failed sync having taken the database back to its
+   * last synced commit, with the sequence it opened at; every open reports it until `acknowledgeRestore()`.
+   * `notBorneOut` says the record beside the data file named another file than this one, which was opened as it is
+   */
+  get openReport(): { schemaChanges: SchemaChange[]; restored: Restore | null; notBorneOut: boolean }
+  /** Says the restore an open reported was read, so that no open reports it after; refused on a read-only handle */
+  acknowledgeRestore(): void
   /** Group commit's syncs so far */
   get syncs(): number
   /**

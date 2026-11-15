@@ -124,11 +124,16 @@ fn a_loss_after_commits_unsynced_restores_the_record_s_commit_and_the_database_t
     let lost = copied(dir.path(), true);
     let opened = Store::open(lost.path(), grouped()).unwrap();
     assert_eq!(newest(&opened), kept, "opened at the record's commit");
-    assert_eq!(opened.restored(), Some(kept));
+    // The notice names the sequence the database opened at, read once LMDB opened it, before any write
+    let noticed = crate::database::Restore { sequence: Some(opened.sequence()) };
+    assert_eq!(opened.restored(), Some(noticed));
     assert_eq!(get(&opened, "a").as_deref(), Some(&b"1"[..]));
     assert_eq!(get(&opened, "lost-0"), None);
     let record = record_in(lost.path()).unwrap();
-    assert!(record.boot.same(&boot::this_boot()) && record.restored == Some(kept), "{record:?}");
+    assert!(
+        record.boot.same(&boot::this_boot()) && record.restored == Some(record::Restored::Sequence(opened.sequence())),
+        "{record:?}"
+    );
     assert!(lost.path().join(record::RESTORED).exists(), "the meta pages written over are saved");
     // Its two meta pages are of one commit, which a sync takes
     let restored = opened.kept.as_ref().unwrap();
@@ -144,7 +149,16 @@ fn a_loss_after_commits_unsynced_restores_the_record_s_commit_and_the_database_t
     let again = Store::open(lost.path(), grouped()).unwrap();
     assert_eq!(get(&again, "again-7").as_deref(), Some(&vec![7u8; 20_000][..]));
     assert_eq!(get(&again, "lost-4"), None);
-    assert_eq!(again.restored(), Some(kept), "the notice stands until a caller says it was read");
+    assert_eq!(again.restored(), Some(noticed), "the notice stands until a caller says it was read");
+    // Said to be read: the record written again without it, and no open after reports it
+    again.acknowledge_restore().unwrap();
+    assert_eq!((again.restored(), record_in(lost.path()).unwrap().restored), (None, None));
+    again.close().unwrap();
+    let after = Store::open(lost.path(), grouped()).unwrap();
+    assert_eq!(after.restored(), None);
+    after.close().unwrap();
+    let again = Store::open(lost.path(), StoreOptions { read_only: true, ..grouped() }).unwrap();
+    assert_eq!(again.acknowledge_restore().unwrap_err().code, ErrorCode::ReadOnly, "a read-only handle acknowledged");
     again.close().unwrap();
     store.close().unwrap();
 }
@@ -212,7 +226,7 @@ fn a_failed_sync_refuses_the_next_commit_and_the_next_open_restores_the_record_s
     let _ = store.close();
     // Opened again in the same boot: what was committed after the failed sync's commit may not be on disk
     let store = Store::open(dir.path(), grouped()).unwrap();
-    assert_eq!((newest(&store), store.restored()), (kept, Some(kept)));
+    assert_eq!((newest(&store), store.restored().is_some()), (kept, true));
     assert_eq!((get(&store, "a").as_deref(), get(&store, "b")), (Some(&b"1"[..]), None));
     put(&store, "c", b"3").unwrap();
     synced(&store);

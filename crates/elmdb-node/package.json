@@ -33,6 +33,6 @@
       "aarch64-unknown-linux-musl",
       "x86_64-pc-windows-msvc"
     ],
-    "dtsHeader": "import type { Schema } from './protocol/Schema.js'\nimport type { SchemaChange } from './protocol/SchemaChange.js'\nimport type { CheckReport } from './protocol/CheckReport.js'\nimport type { IndexStatus } from './protocol/IndexStatus.js'\nimport type { Stats } from './protocol/Stats.js'\nexport type { ErrorCode } from './protocol/ErrorCode.js'\nexport type { Written } from './protocol/Written.js'\nexport type { BatchResult } from './protocol/BatchResult.js'\nexport type { OpResult } from './protocol/OpResult.js'\nexport type { ChangeSet } from './protocol/ChangeSet.js'\nexport type { Schema, SchemaChange, CheckReport, IndexStatus, Stats }\n"
+    "dtsHeader": "import type { Schema } from './protocol/Schema.js'\nimport type { SchemaChange } from './protocol/SchemaChange.js'\nimport type { CheckReport } from './protocol/CheckReport.js'\nimport type { IndexStatus } from './protocol/IndexStatus.js'\nimport type { Stats } from './protocol/Stats.js'\nimport type { Restore } from './protocol/Restore.js'\nexport type { ErrorCode } from './protocol/ErrorCode.js'\nexport type { Written } from './protocol/Written.js'\nexport type { BatchResult } from './protocol/BatchResult.js'\nexport type { OpResult } from './protocol/OpResult.js'\nexport type { ChangeSet } from './protocol/ChangeSet.js'\nexport type { Schema, SchemaChange, CheckReport, IndexStatus, Stats, Restore }\n"
   }
 }

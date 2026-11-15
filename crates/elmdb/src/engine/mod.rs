@@ -755,6 +755,12 @@ impl Database {
         Ok(self.store()?.sequence())
     }
 
+    /// Says the notice of a restore an open reported (`OpenReport::restored`) was read, so that no open reports it
+    /// after; refused on a read-only handle
+    pub fn acknowledge_restore(&self) -> Result<()> {
+        self.store()?.acknowledge_restore()
+    }
+
     /// Runs `reads` and hands `listener` the answer, then runs them again after each commit that writes into what they
     /// read, handing over each answer that differs from the one before. A listener is called after the commit, outside
     /// its transaction, on the thread that committed. A panicking listener is removed; an initial panic returns

@@ -77,8 +77,17 @@ pub(super) struct Record {
     pub roots: [u8; 32],
     /// The boot it was written in
     pub boot: Boot,
-    /// A restore was made, to this commit, and no caller has said it read so
-    pub restored: Option<u64>,
+    /// A restore was made, and no caller has said it read so
+    pub restored: Option<Restored>,
+}
+
+/// What a restore leaves for a caller to read, until one says it has
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Restored {
+    /// The LMDB commit the restore took the file to, until the open that made it reads that commit's sequence
+    Commit(u64),
+    /// The sequence the database opened at, which a caller knows its commits by
+    Sequence(u64),
 }
 
 impl Record {
@@ -105,8 +114,13 @@ impl Record {
         put(&self.body);
         put(&self.roots);
         put(self.boot.bytes());
-        put(&[u8::from(self.restored.is_some())]);
-        put(&self.restored.unwrap_or(0).to_le_bytes());
+        let (noticed, restored) = match self.restored {
+            None => (0, 0),
+            Some(Restored::Commit(commit)) => (1, commit),
+            Some(Restored::Sequence(sequence)) => (2, sequence),
+        };
+        put(&[noticed]);
+        put(&restored.to_le_bytes());
         debug_assert_eq!(at, FIELDS);
         let checksum = Sha256::digest(&slot[..FIELDS]);
         slot[FIELDS..FIELDS + CHECKSUM].copy_from_slice(&checksum);
@@ -145,9 +159,15 @@ impl Record {
         let body = take(BODY).try_into().expect("a body's bytes");
         let roots = take(32).try_into().expect("a checksum's bytes");
         let boot = Boot::from_bytes(take(32).try_into().expect("a boot's bytes"));
-        let noticed = take(1)[0] == 1;
-        let restored = u64_of(take(8));
-        Some(Self { count, mode, state, commit, body, roots, boot, restored: noticed.then_some(restored) })
+        let noticed = take(1)[0];
+        let value = u64_of(take(8));
+        let restored = match noticed {
+            0 => None,
+            1 => Some(Restored::Commit(value)),
+            2 => Some(Restored::Sequence(value)),
+            _ => return None,
+        };
+        Some(Self { count, mode, state, commit, body, roots, boot, restored })
     }
 
     /// This record written again as the next, in `state`: what an open or a sync writes over it
@@ -361,7 +381,7 @@ mod tests {
             body: [7; BODY],
             roots: [9; 32],
             boot: Boot::none(),
-            restored: Some(3),
+            restored: Some(Restored::Commit(3)),
         }
     }
 
@@ -395,7 +415,10 @@ mod tests {
     #[test]
     fn a_record_of_a_mode_follows_the_one_before_it_and_keeps_its_notice() {
         let next = of_mode(Some(&record(5)), Mode::Ordered, Boot::none());
-        assert_eq!((next.count, next.mode, next.commit, next.restored), (6, Mode::Ordered, 0, Some(3)));
+        assert_eq!(
+            (next.count, next.mode, next.commit, next.restored),
+            (6, Mode::Ordered, 0, Some(Restored::Commit(3)))
+        );
         assert_eq!(of_mode(None, Mode::Unsynced, Boot::none()).count, 1);
     }
 

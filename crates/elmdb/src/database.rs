@@ -52,6 +52,23 @@ impl Default for OpenOptions {
 pub struct OpenReport {
     /// The schema's changes, each with what opening did about it; every addition when the database is new
     pub schema_changes: Vec<SchemaChange>,
+    /// A restore this open or an earlier one made, which every open reports until a caller says it read it
+    /// (`Database::acknowledge_restore`)
+    pub restored: Option<Restore>,
+    /// The record beside the data file named another file than this one, put where the database's was: the file was
+    /// opened as it is
+    pub not_borne_out: bool,
+}
+
+/// A power loss or a failed sync took the database back to its last synced commit: the commits after it are gone
+/// (`docs/roadmap/synced-commit.md`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Restore {
+    /// The sequence the database opened at: none where the open that restored it couldn't write it down, a read-only
+    /// open on a filesystem it can't write
+    pub sequence: Option<u64>,
 }
 
 /// An open database. Closing it, or dropping it, syncs what is owed and releases the environment
@@ -150,6 +167,7 @@ impl Database {
             return Err(error);
         }
         let engine_schema = Arc::new(EngineSchema::stored(schema.clone(), hash));
+        let report = OpenReport { restored: store.restored(), not_borne_out: store.not_borne_out(), ..report };
         let store = Arc::new(store);
         let tracks: crate::engine::watch::SharedTracks = Default::default();
         let observing = Arc::new(RwLock::new(Arc::clone(&engine_schema)));
@@ -625,7 +643,7 @@ fn apply_schema(store: &Store, given: Option<Schema>, expected: Option<&EngineSc
     Ok(AppliedSchema {
         schema: Some(given),
         hash: Some(hash.into_bytes()),
-        report: OpenReport { schema_changes: changes },
+        report: OpenReport { schema_changes: changes, ..OpenReport::default() },
         unbuilt,
         commit: Some(commit),
     })

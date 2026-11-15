@@ -51,6 +51,7 @@ const ofDatabase = {
   schema: (db) => db.schema,
   setSchema: (db) => db.setSchema(schema),
   openReport: (db) => db.openReport,
+  acknowledgeRestore: (db) => db.acknowledgeRestore(),
   syncs: (db) => db.syncs,
   write: (db) => db.write(batch('Note-lost')),
   read: (db) => db.read(reads),
