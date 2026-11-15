@@ -582,15 +582,18 @@ loss, as every grouped file was. A test replays the loss in both modes (`testing
 
 A database is written in one mode at a time. Every writable open holds its mode's lock beside the data file
 (`grouped.lock`, `ordered.lock`, `unsynced.lock`, `format.md`), and an open in another mode than a writer that has the
-database open in another process is refused (`MODE_MISMATCH`), naming both; a read-only open takes none. The first
-writable open of `syncEachCommit` or `syncs: false` makes any restore owed, syncs the data file, since a writer of the
-grouped mode may have died with commits unsynced, and writes its mode's record, `ordered` or `unsynced`, before its
-first write: an open after a loss then opens the file as it is, never at a grouped record's commit whose pages the
-commits since wrote over. Neither mode writes the record again, so neither pays for it after its open. A backup into a
-directory removes the record a database there left, which names that file and not the copy, and `replaceWith` opens its
-source as an open does: at its record's commit where a loss left it to be restored, holding it open while it reads it.
-The replay holds each mode, alone and after a grouped writer that died with commits unsynced, a backup and `replaceWith`
-(`testing.md`, Power loss).
+database open in another process is refused (`MODE_MISMATCH`), naming both; a read-only open takes none. A writer that
+died lets its lock go once the system has closed its files, which Windows does a moment after the process ends, so an
+open of another mode just after a crash there may be refused for that moment. The first writable open of
+`syncEachCommit` or `syncs: false` makes any restore owed, syncs the data file, since a writer of the grouped mode may
+have died with commits unsynced, and writes its mode's record, `ordered` or `unsynced`, before its first write: an open
+after a loss then opens the file as it is, never at a grouped record's commit whose pages the commits since wrote over.
+Neither mode writes the record again, so a commit pays nothing it didn't; an open pays more: the first in the mode syncs
+the data file, a full flush on Apple, writes and syncs the record and syncs the directory, and each writable open after
+syncs the record it reads. A backup into a directory removes the record a database there left, which names that file and
+not the copy, and `replaceWith` opens its source as an open does: at its record's commit where a loss left it to be
+restored, holding it open while it reads it. The replay holds each mode, alone and after a grouped writer that died with
+commits unsynced, a backup and `replaceWith` (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
