@@ -116,7 +116,11 @@ fn named() -> Option<Vec<u8>> {
         // SAFETY: `key` is open, the name is NUL-terminated, and `bytes` holds the `len` bytes the call may write
         let answered =
             unsafe { RegQueryValueExW(key, name.as_ptr(), std::ptr::null(), &mut kind, bytes.as_mut_ptr(), &mut len) };
-        (answered == ERROR_SUCCESS && kind == REG_BINARY && len == 16).then_some(bytes)
+        let sixteen_binary_bytes = kind == REG_BINARY && len == 16;
+        // mutant-skip: replace && with \|\| in named
+        // A query that fails writes the type and size only where the value is larger than the buffer, the size then
+        // more than 16, and leaves the type 0 otherwise: no failure reads as a 16-byte binary value
+        (answered == ERROR_SUCCESS && sixteen_binary_bytes).then_some(bytes)
     };
     let write = || {
         let mut bytes = [0u8; 16];
