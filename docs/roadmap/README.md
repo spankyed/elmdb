@@ -21,6 +21,11 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [A power loss that tears no file](synced-commit.md) | Designed, not built: the grouped mode keeps the last synced commit, its pages by a read transaction LMDB gives no writer the pages of and its meta page by a record beside the data, so a database is opened at that commit after a power loss, or a sync that failed, where today its file may be no commit's |
 | [The text index at scale](text-index-at-scale.md) | Built: fuzzy terms by seeking, a term's places in blocks with their counts, lengths held by place, and ranking read from the two. Designed from readings at a million notes: a commit notes the place it changed and the builder files it |
 
+## Where the code lives
+
+- [EARS in elmdb's repository](ears.md): planned, not built. apack's `@apackdev/ears`, the fluent TypeScript API over
+  a database, moves here as `@elmdb/ears`, with what apack keeps, what it costs and the phases.
+
 ## Development improvements
 
 - [Libraries for safer implementation and easier development](development-libraries.md): staged platform bindings,
