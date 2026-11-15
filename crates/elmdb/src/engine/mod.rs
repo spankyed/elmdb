@@ -473,22 +473,6 @@ pub struct Written<'a> {
     pub sequence: u64,
 }
 
-/// A write that has committed and is owed a sync. Dropped without a wait, nothing says whether it became durable
-pub struct Unsynced {
-    sequence: u64,
-    store: Arc<Store>,
-}
-
-impl Unsynced {
-    /// Asks for a sync and waits for it, answering as a durable write does: `NOT_DURABLE` when it failed. The sync is
-    /// asked for here and not as the write commits, and covers every commit made before this call: of several writes
-    /// waited for after the last of them, the first wait's sync is the others' too
-    pub fn wait(self) -> Result<()> {
-        let synced = self.store.durable().map_or(Ok(()), crate::store::sync::Durable::wait);
-        Commit { sequence: self.sequence, synced }.finish()
-    }
-}
-
 impl Database {
     /// `write` with the batch as msgpack bytes and the answer as msgpack bytes (`Written`), as the binding takes them
     pub fn write_bytes(&self, batch: &[u8], durable: bool) -> Result<Vec<u8>> {
@@ -500,20 +484,6 @@ impl Database {
             sequence: changes.sequence,
         })
         .expect("an answer serializes"))
-    }
-
-    /// `write_bytes`, answered once the commit has landed and before its sync, with the sync to wait for
-    /// (`Unsynced::wait`): a caller with several writes in hand makes them all and waits once, where each made
-    /// durable would wait for a sync of its own. Its watches and tracked reads are told as the commit lands, before
-    /// the sync, where a durable write tells them after it
-    pub fn write_bytes_unsynced(&self, batch: &[u8]) -> Result<(Vec<u8>, Unsynced)> {
-        let batch = decode_batch(batch)?;
-        // The store the write goes to, held until its sync is waited for: a close waits for it, as for a durable write
-        let store = self.store()?;
-        let (results, changes) = self.write(&batch, false)?;
-        let answer = Written { results: &results.results, changes: &changes, sequence: changes.sequence };
-        let answer = rmp_serde::to_vec_named(&answer).expect("an answer serializes");
-        Ok((answer, Unsynced { sequence: changes.sequence, store }))
     }
 
     /// Compares every derived key with what primary data derives, and every row with the schema's rules
@@ -544,9 +514,12 @@ impl Database {
     pub fn rebuild(&self, index: Option<(&str, &str)>) -> Result<()> {
         let op = Op::rebuild(index);
         let result = op.in_scope(|| {
+            // One rebuild at a time: two that each found the map short would each grow it
+            let _one_at_a_time = self.rebuilding.lock();
             if index.is_none() {
                 self.store()?.make_room(REBUILD_ROOM)?;
             }
+            run_point!(REBUILD_ROOM_MADE);
             self.admin_unit(|t| derive::rebuild(t, index))
         });
         op.ended(result, "durable")

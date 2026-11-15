@@ -885,6 +885,10 @@ fn room_is_made_by_growing_the_map_to_as_many_times_what_is_in_use() {
     writer.release();
     store.end_unit();
     assert_eq!(store.map_size(), grown);
+    drop(store);
+    // A growth refused for any other reason is the caller's to hear: a read-only store grows nothing, and says why
+    let read_only = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    assert_eq!(read_only.make_room(1000).unwrap_err().code, ErrorCode::ReadOnly);
 }
 
 #[test]

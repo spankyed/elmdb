@@ -37,14 +37,10 @@ export declare class Database {
   /** Group commit's syncs so far */
   get syncs(): number
   /**
-   * Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
-   * the pool, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
-   * order they were asked for, a rebuild among them in its turn, and hold one thread of the pool between them; one
-   * is refused while a unit is open
+   * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of
+   * `{ results: OpResult[], changes: ChangeSet, sequence: number }` once it has committed. `durable` commits it with
+   * a sync. Refused while a unit is open (`UNIT_OPEN`): writes go through the unit then
    */
-  write(batch: Buffer, durable?: boolean | undefined | null): Promise<Buffer>
-  /** `write` on this thread, held until the batch is applied */
   writeSync(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
    * Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
@@ -81,8 +77,8 @@ export declare class Database {
    */
   get sequence(): number
   /**
-   * Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
-   * (`UNIT_OPEN`), and writes go through the unit
+   * Opens a unit that stays open across calls until it is committed or aborted; while it is, a write or a rebuild
+   * outside it is refused (`UNIT_OPEN`), and writes go through the unit
    */
   begin(): Unit
   /** Compares derived data with primary data and every row with the schema's rules, on a thread of the pool */
@@ -91,7 +87,8 @@ export declare class Database {
   checkSync(): CheckReport
   /**
    * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
-   * thread of the pool and in its turn among the writes asked for, as a write is
+   * thread of the pool, in one unit of its own: a write made on this thread while it runs waits for it to commit.
+   * Refused while a unit is open (`UNIT_OPEN`)
    */
   rebuild(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
   /** `rebuild` on this thread */
