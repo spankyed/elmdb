@@ -14,7 +14,9 @@ matter; `durable()` then resolves at once.
 The map starts at twice the data file, 64 MiB at least (`mapSizeBytes` sets it). A unit that fills it is aborted, the
 map doubled while the process has no transaction open, and the unit run again, up to 16 times: a unit is data, so the
 engine can run it again without the caller. A growth also keeps out whatever else reads through the map: a sync and
-each read of the environment's sizes wait for it as a transaction does. A map another process grew is adopted by the
+each read of the environment's sizes wait for it as a transaction does. A growth waits for the reads, checks and
+backups running to end; one for a write or a rebuild that is no unit's is refused (`UNIT_OPEN`) once a unit opens on
+another thread, rather than waiting on it, and a unit's own beginning grows before it holds anything. A map another process grew is adopted by the
 first read to meet it, `committedElsewhere` included, and by an open that meets it as it opens, each of whose
 transactions takes the grown map and is begun again. Mapping capacity and physical file length are separate. On Windows,
 a read-only view covers the current physical file: its configured bound is capped to that length at open and when
@@ -453,7 +455,8 @@ A check, a rebuild and a backup can take as long as the database is large, so ea
 answering a promise: `db.check()`, `db.rebuild(type?, index?)` and `db.backup(target)`, each a job of its own
 (`elmdb-node/src/jobs.rs`); their `…Sync` forms run on the calling thread. A rebuild of 200,000 notes held the event
 loop for its whole 3.5 s in its blocking form and for at most 2.9 ms on the pool (`../evidence/million-notes.md`, Off
-the calling thread). A check and a backup read a snapshot, and the database's writes go on beside them. A rebuild
+the calling thread). A check and a backup read a snapshot, and the database's writes go on beside them, except a write that must grow
+the map, which waits for them to end. A rebuild
 writes, in one unit of its own: a write made on the calling thread while it runs waits for the database's write lock
 until the rebuild commits, holding the event loop for that long, and one made before the rebuild has the lock commits
 first. Either order leaves derived data matching primary data, since a rebuild derives from what is committed when it
@@ -461,19 +464,21 @@ begins. Every other call that takes the write lock waits for it the same way, ho
 `setSchema`, a purge, a rename, a load, `reset`, `replaceWith` and `close`. Rebuilds asked together run one after
 another. A rebuild is refused while a unit is open (`UNIT_OPEN`), as a write is: which of a unit begun and a
 rebuild asked for in the same turn takes the write lock first is the pool's timing, and the other waits or is
-refused. Call a rebuild with no unit open and await it before writing, or make the writes on another thread. A process that exits by `process.exit()` runs the pool to its end first, so what was asked for
+refused. Call a rebuild with no unit open and await it before writing, or make the writes on another thread. A process
+that exits by `process.exit()` runs the pool to its end first, so what was asked for
 is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that has panicked) throws at
 the call in every form; a call on a closed database throws in the blocking forms and rejects the promise in the
 others. A close waits for the operations running, which for a large rebuild or backup is the whole of it, so the event
 loop is held by a close made during one. An operation not yet begun when the close takes the database rejects with
-`CLOSED` and does nothing. Each holds one thread of the pool, which Node shares with its file system work, for as long
+`CLOSED` and does nothing. Each holds one thread of the pool, a rebuild waiting for another's turn included, which
+Node shares with its file system work, for as long
 as it runs. A unit can also
 stay open across calls, as a caller's transaction running its own code between writes needs: `db.begin()` opens one,
 `unit.write(batch)` applies a batch in it, its writes read their own, and `unit.commit(durable?)` or `unit.abort()` ends
 it. One unit is open at a time, and while it is a write of the database refuses (`UNIT_OPEN`): its writes go through the
 unit. The unit's write transaction belongs to the thread that began it. A unit opening on a map more than half used
 grows the map first, since an open unit can't grow it. A background index build waits for an open unit to end, woken
-when it does, and goes on from where it stopped; so does any other write but the unit's.
+when it does, and goes on from where it stopped; any other write is refused (`UNIT_OPEN`).
 
 A batch is applied in a savepoint of its unit, so a refused operation keeps none of its batch, and the unit goes on.
 

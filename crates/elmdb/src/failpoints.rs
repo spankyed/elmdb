@@ -115,7 +115,7 @@ pub(crate) mod points {
     pub const READ_SNAPSHOT: &str = "engine::before_read_snapshot";
     /// A growth beside units has found no unit open and is about to try for the gate
     pub const GROWTH_GATE: &str = "store::growth_gate";
-    /// A rebuild has made room in the map and not yet begun its unit
+    /// A rebuild has its turn, has made whatever room it needs in the map, and has not yet begun its unit
     pub const REBUILD_ROOM_MADE: &str = "engine::rebuild_room_made";
     /// Reading the indexes still to build fails
     pub const INDEX_REFRESH: &str = "engine::index_refresh";
