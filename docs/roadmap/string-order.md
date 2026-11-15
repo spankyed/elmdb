@@ -1,10 +1,12 @@
 # A string's order read from its index
 
-Status: designed, 2026-11-14, and not built. It is the part of roadmap change 5 still open (`../roadmap.md`): an
-`orderBy` on a string field reads every entity of the set, where one on a number reads ten entries for its first ten.
-It adds derived keys to format 1 and moves what one of its keys holds, so it is built before format 1 is frozen
-(change 8). This is the fifth draft: each before it was read against the code by a second reader, the fourth was
-priced by a reading of what its writes cost, and what each changed is under What was set aside.
+Status: built, 2026-11-15, phases 1 to 4; phase 4's gate is met for the number's order and not for the names'
+(`../evidence/million-notes.md`, An order taken whole, against phase 2's walk). It was the part of roadmap change 5
+still open (`../roadmap.md`): an `orderBy` on a string field read every entity of the set, where one on a number
+read ten entries for its first ten. It adds derived keys to format 1 and moves what one of its keys holds, so it is
+built before format 1 is frozen (change 8). This is the fifth draft: each before it was read against the code by a
+second reader, the fourth was priced by a reading of what its writes cost, and what each changed is under What was
+set aside.
 
 ## Where it stands
 
@@ -528,4 +530,5 @@ A read pays one seek for each distinct string it hands on.
    hands each entity on, and the fifth reading read live entities only, by loops and not a plan: its recorded
    reads, the trash, and the size of limit at which it pays are designed when it is built. Done when every note of
    a million in the names' order, and in the number's, is read in under half the time phase 2 recorded, and the
-   model harness holds both to the rows.
+   model harness holds both to the rows. Read on 2026-11-15 beside phase 2's engine: the number's order in 0.17 and
+   0.27 of phase 2's time, the names' in 0.80 and 0.84, which is not yet under half.

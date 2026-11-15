@@ -422,3 +422,31 @@ What they say. An order of strings, a page of it and a range of it each read wha
 Every note in the names' order took 1.28 times what SQLite took in this run, where it took 3.1 times in the run
 above; whether it is under half its own time before, which `../roadmap/string-order.md`'s fourth phase asks, a
 run this loaded can't say, nor what the order adds to the two units: both are owed a run on a quiet machine.
+
+## An order taken whole, against phase 2's walk
+
+`../roadmap/string-order.md`'s fourth phase asks that every note of a million in the names' order, and in the
+number's, be read in under half the time phase 2 took. Phase 2 and phase 4 landed together, so phase 2's time was
+never read alone: it is read here beside phase 4's, by the same benchmark (`against-sqlite.mjs` as of this section,
+which adds every note in the number's order), on phase 2's engine, `5b691bb`, and on
+`session/string-order-followups` at `b79d868`, whose engine is main's `0e056b5` and an EXPLAIN field. Two runs of
+each, alternated, a million notes (Apple M1 Pro, 2026-11-15 from 03:27 to 03:49, Node 24.16.0, SQLite 3.53.0, the
+binding built in release). The load was 9.4 to 17.8 at the runs' ends and beginnings, from other sessions' work:
+the two arms are compared with each other, run against run, and no time here is a quiet machine's.
+
+| | phase 2, run 1 | phase 4, run 1 | phase 2, run 2 | phase 4, run 2 | SQLite, the four runs |
+|---|---:|---:|---:|---:|---:|
+| Every note in the names' order, a million ids handed over | 2,348 ms | 1,881 ms | 2,321 ms | 1,959 ms | 902 to 942 ms |
+| Every note in the number's order | 1,610 ms | 272 ms | 1,533 ms | 420 ms | 1,942 to 2,238 ms |
+| A unit that gives 1,000 notes each a name elsewhere in the order | 43.3 ms | 37.5 ms | 37.4 ms | 38.4 ms | |
+| A unit that gives 1,000 notes each the other status | 34.1 ms | 32.3 ms | 32.4 ms | 32.7 ms | |
+
+Both arms visited 1,000,092 entities for each whole order, ten for the first ten names, and held the same bytes: the
+name's index 113.2 MB, the status's 1.1 MB, the number's 27.0 MB, a note 1,327 bytes as loaded. The first ten names,
+the page of 50 and the range of 200 took the same in both, 0.05, 0.13 and 0.4 to 0.5 ms.
+
+What they say. The number's whole order takes a fifth of phase 2's time, 0.17 and 0.27 of it, and meets the gate.
+The names' takes 0.80 and 0.84 of it, and does not: resolving the order in its keys' order saves a fifth of the
+walk where the strings are a million distinct ones, each its own key of the order and its own entry. The number's
+whole order hands over as many ids and reads as many entities in under a quarter of the names' time, so what is
+left is the strings' own part: the order's million keys walked and their strings met with their entries. The two units are the same in both arms, phase 2 filing the same keys.
