@@ -107,6 +107,10 @@ Not used: core, layer, adapter, plugin, store (for a database), record store. "A
   `text`, `trigram`, `vector`, `ranks`, `changes`, `watch`, `admin`.
 - **Operation names say what they do.** `get` may answer nothing, `find` searches and may answer an empty list, `read`
   runs a plan; a name never says who may call it or which database it acts on (the caller holds the `Database`).
+- **The plain name blocks.** `read`, `write`, `check`, `rebuild` and `backup` answer on the calling thread, and the
+  forms that run on a thread of the pool and answer a promise are named `…Async` (principle 9). This is the reverse of
+  Node's own `readFile` and `readFileSync`, on purpose: the form a caller should reach for is the one with no suffix,
+  and here that is the blocking one, so a caller who writes `db.write(…)` and reads on gets what it wrote.
 - **Errors are one Rust enum of stable `SCREAMING_CASE` codes**, each with a message naming the fix; the TypeScript is
   generated. A code is never reused for another meaning.
 - **Units of measure are in the name:** `syncIdleMs`, `mapSizeBytes`.

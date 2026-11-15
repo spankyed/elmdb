@@ -98,7 +98,7 @@ if (mode === 'seed') {
     if (workload.vectorDims) {
       let embedded = 0;
       for (;;) {
-        const [pending] = packr.unpack(db.readSync(packr.pack({
+        const [pending] = packr.unpack(db.read(packr.pack({
           reads: [{ read: 'pendingEmbeddings', type: 'Note', index: 'meaning', limit: 100 }],
         })));
         if (!pending.chunks.length) break;

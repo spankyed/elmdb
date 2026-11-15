@@ -40,7 +40,7 @@ const db = Database.open('./notes', {
   },
 });
 
-db.writeSync(msgpack.pack({ ops: [
+db.write(msgpack.pack({ ops: [
   { op: 'create', type: 'Note', id: 'Note-a', fields: { title: 'Choosing a database' } },
   { op: 'create', type: 'Note', id: 'Note-b', fields: { title: 'Backups' } },
   { op: 'create', type: 'Note', id: 'Note-c', fields: { title: 'Database migrations' } },
@@ -49,7 +49,7 @@ db.writeSync(msgpack.pack({ ops: [
 ] }));
 
 const notes = { from: 'types', types: ['Note'] };
-const [found, top] = msgpack.unpack(db.readSync(msgpack.pack({ track: 1, reads: [
+const [found, top] = msgpack.unpack(db.read(msgpack.pack({ track: 1, reads: [
   { read: 'query', plan: { start: notes, steps: [{ step: 'search', query: 'databse' }], terminal: { answer: 'ids' } } },
   { read: 'query', plan: { start: notes, steps: [{ step: 'ranked', index: 'noteRank' }, { step: 'limit', n: 1 }], terminal: { answer: 'ids' } } },
 ] })));
@@ -58,7 +58,7 @@ console.log(found.ids); // what the misspelled search found
 console.log(top.ids);   // the most central note
 
 const edit = { op: 'set', id: 'Note-c', fields: { title: 'Schema migrations' } };
-const { changes } = msgpack.unpack(db.writeSync(msgpack.pack({ ops: [edit] })));
+const { changes } = msgpack.unpack(db.write(msgpack.pack({ ops: [edit] })));
 console.log(changes.touched); // the tracked reads this commit wrote into: re-run token 1
 db.close();
 ```
@@ -91,14 +91,14 @@ It uses N-API, so a Node or Electron upgrade needs no rebuild.
 | Platforms | macOS, Linux (glibc and musl) and Windows on x64; macOS and Linux on arm64 |
 | Not in scope | a server, replication, or access control |
 
-**Durability:** a commit is visible at once and synced within about a second. `db.writeSync(batch, true)` returns once
+**Durability:** a commit is visible at once and synced within about a second. `db.write(batch, true)` returns once
 its sync is done, and `await db.durable()` waits for every commit before it to be on disk without holding the event
 loop. `NOT_DURABLE` means the commit landed but its sync failed, so don't blindly retry it.
 
 **Writes block; long maintenance doesn't have to.** A write runs on the calling thread and answers there, so what it
-created and what it refused are known at the call, and a read after it sees it. `db.check`, `db.rebuild` and
-`db.backup` run on a thread of the pool and answer a promise, so a large rebuild doesn't hold the event loop;
-`db.checkSync`, `db.rebuildSync` and `db.backupSync` are the blocking forms. A rebuild holds the database's write lock
+created and what it refused are known at the call, and a read after it sees it. `db.checkAsync`, `db.rebuildAsync`,
+`db.backupAsync` and `db.readAsync` run on a thread of the pool and answer a promise, so a large rebuild doesn't hold
+the event loop; the plain name is always the blocking form. A rebuild holds the database's write lock
 until it commits, so a write, a unit or a schema change made while one runs waits for it, holding the event loop:
 await a rebuild before writing. A close waits for an operation that is running, so one made during a long rebuild
 holds the event loop until it ends.

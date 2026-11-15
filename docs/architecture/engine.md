@@ -424,8 +424,10 @@ the process makes no further database calls; expiration depends on the operating
 A commit here clears the cache, and an older read finishing after that clear cannot return its snapshot to it.
 Active reads and open units keep their snapshots until they finish. The worker owns only the cache, cannot keep
 the database itself alive, and is joined on normal close; process-exit cleanup detaches it with bounded locking.
-The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.readSync(reads)` runs on the calling thread. `db.read(reads)` runs on a thread of the pool, in a snapshot of its
-own, and resolves with the same answer, so a large read doesn't block the event loop.
+The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.read(reads)` runs on the calling thread. `db.readAsync(reads)` runs on a thread of the pool and resolves with the
+same answer, so a large read doesn't block the event loop. Its snapshot is the last commit as the read begins there,
+not as it is asked for, so a write made after the call may be in its answer: holding a snapshot from the call to the
+pool's thread would hold the store's gate across threads, and the gate is held by the thread that takes it.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 
@@ -436,7 +438,7 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 
 ## Writes: batches and units
 
-`db.writeSync(batch, durable?)` applies a batch as one unit, on the calling thread, and answers once it has committed,
+`db.write(batch, durable?)` applies a batch as one unit, on the calling thread, and answers once it has committed,
 or with `durable` once its sync has run. A write is never answered by a promise: what it answers, an entity's id and
 short code, and what it refuses are its caller's at the call, and a read made after it sees it. In the grouped mode a
 `set` committed alone took about 38 µs, one inside a unit about 11 µs and a `create` about 107 µs, through apack's
@@ -445,8 +447,8 @@ which `db.durable()` waits for without holding the event loop. A batch of thousa
 thread for as long as it runs.
 
 A check, a rebuild and a backup can take as long as the database is large, so each also runs on a thread of the pool,
-answering a promise: `db.check()`, `db.rebuild(type?, index?)` and `db.backup(target)`, each a job of its own
-(`elmdb-node/src/jobs.rs`); their `…Sync` forms run on the calling thread. A rebuild of 200,000 notes held the event
+answering a promise: `db.checkAsync()`, `db.rebuildAsync(type?, index?)` and `db.backupAsync(target)`, each a job
+of its own (`elmdb-node/src/jobs.rs`); `db.check()`, `db.rebuild()` and `db.backup()` run on the calling thread. A rebuild of 200,000 notes held the event
 loop for its whole 3.5 s in its blocking form and for at most 2.9 ms on the pool (`../evidence/million-notes.md`, Off
 the calling thread). A check and a backup read a snapshot, and the database's writes go on beside them. A rebuild
 writes, in one unit of its own: a write made on the calling thread while it runs waits for the database's write lock

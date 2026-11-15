@@ -277,13 +277,8 @@ impl Database {
     /// `{ results: OpResult[], changes: ChangeSet, sequence: number }` once it has committed. `durable` commits it with
     /// a sync. Refused while a unit is open (`UNIT_OPEN`): writes go through the unit then
     #[napi]
-    pub fn write_sync<'env>(
-        &self,
-        env: &'env Env,
-        batch: Buffer,
-        durable: Option<bool>,
-    ) -> Result<BufferSlice<'env>, Code> {
-        self.guarded("Database.writeSync", || {
+    pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
+        self.guarded("Database.write", || {
             answer(env, &self.inner.write_bytes(&batch, durable.unwrap_or(false)).map_err(to_js)?)
         })
     }
@@ -291,14 +286,15 @@ impl Database {
     /// Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
     /// answer per read
     #[napi]
-    pub fn read_sync<'env>(&self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
-        self.guarded("Database.readSync", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
+    pub fn read<'env>(&self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
+        self.guarded("Database.read", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
     }
 
-    /// `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop
+    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop. Its snapshot is the last commit
+    /// as the read begins there, not as it is asked for: a write made after the call may be in its answer
     #[napi(ts_return_type = "Promise<Buffer>")]
-    pub fn read<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
-        self.guarded("Database.read", || {
+    pub fn read_async<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
+        self.guarded("Database.readAsync", || {
             let task =
                 ReadTask { db: self.inner.again(), health: self.health.clone(), reads: reads.to_vec(), failed: None };
             spawned(env, task)
@@ -410,57 +406,56 @@ impl Database {
         })
     }
 
-    /// Compares derived data with primary data and every row with the schema's rules, on a thread of the pool
-    #[napi(ts_return_type = "Promise<CheckReport>")]
-    pub fn check<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
+    /// Compares derived data with primary data and every row with the schema's rules
+    #[napi(ts_return_type = "CheckReport")]
+    pub fn check(&self) -> Result<serde_json::Value, Code> {
         self.guarded("Database.check", || {
+            let report = self.inner.check().map_err(to_js)?;
+            Ok(serde_json::to_value(report).expect("a report serializes"))
+        })
+    }
+
+    /// `check` on a thread of the pool, in a snapshot of its own: the database's writes go on beside it
+    #[napi(ts_return_type = "Promise<CheckReport>")]
+    pub fn check_async<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
+        self.guarded("Database.checkAsync", || {
             self.job(
                 env,
-                "Database.check, on a thread of the pool,",
+                "Database.checkAsync, on a thread of the pool,",
                 |db| db.check().map(|report| serde_json::to_value(report).expect("a report serializes")),
                 jobs::value,
             )
         })
     }
 
-    /// `check` on this thread
-    #[napi(ts_return_type = "CheckReport")]
-    pub fn check_sync(&self) -> Result<serde_json::Value, Code> {
-        self.guarded("Database.checkSync", || {
-            let report = self.inner.check().map_err(to_js)?;
-            Ok(serde_json::to_value(report).expect("a report serializes"))
+    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's, in
+    /// one unit of its own. Refused while a unit is open (`UNIT_OPEN`)
+    #[napi]
+    pub fn rebuild(&self, entity_type: Option<String>, index: Option<String>) -> Result<(), Code> {
+        self.guarded("Database.rebuild", || {
+            let one = rebuild_target(entity_type, index)?;
+            self.inner
+                .rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str())))
+                .map_err(to_js)
         })
     }
 
-    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
-    /// thread of the pool, in one unit of its own: a write made on this thread while it runs waits for it to commit.
-    /// Refused while a unit is open (`UNIT_OPEN`)
+    /// `rebuild` on a thread of the pool: a write made on this thread while it runs waits for it to commit
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn rebuild<'env>(
+    pub fn rebuild_async<'env>(
         &self,
         env: &'env Env,
         entity_type: Option<String>,
         index: Option<String>,
     ) -> Result<Unknown<'env>, Code> {
-        self.guarded("Database.rebuild", || {
+        self.guarded("Database.rebuildAsync", || {
             let one = rebuild_target(entity_type, index)?;
             self.job(
                 env,
-                "Database.rebuild, on a thread of the pool,",
+                "Database.rebuildAsync, on a thread of the pool,",
                 move |db| db.rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()))),
                 jobs::nothing,
             )
-        })
-    }
-
-    /// `rebuild` on this thread
-    #[napi]
-    pub fn rebuild_sync(&self, entity_type: Option<String>, index: Option<String>) -> Result<(), Code> {
-        self.guarded("Database.rebuildSync", || {
-            let one = rebuild_target(entity_type, index)?;
-            self.inner
-                .rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str())))
-                .map_err(to_js)
         })
     }
 
@@ -544,19 +539,18 @@ impl Database {
         self.guarded("Database.renameRelation", || self.inner.rename_relation(&from, &to).map_err(to_js))
     }
 
-    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own, on a thread of
-    /// the pool
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn backup<'env>(&self, env: &'env Env, target: String) -> Result<Unknown<'env>, Code> {
-        self.guarded("Database.backup", || {
-            self.job(env, "Database.backup, on a thread of the pool,", move |db| db.backup(target), jobs::nothing)
-        })
+    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own
+    #[napi]
+    pub fn backup(&self, target: String) -> Result<(), Code> {
+        self.guarded("Database.backup", || self.inner.backup(target).map_err(to_js))
     }
 
-    /// `backup` on this thread
-    #[napi]
-    pub fn backup_sync(&self, target: String) -> Result<(), Code> {
-        self.guarded("Database.backupSync", || self.inner.backup(target).map_err(to_js))
+    /// `backup` on a thread of the pool, copying a snapshot: the database's writes go on beside it
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn backup_async<'env>(&self, env: &'env Env, target: String) -> Result<Unknown<'env>, Code> {
+        self.guarded("Database.backupAsync", || {
+            self.job(env, "Database.backupAsync, on a thread of the pool,", move |db| db.backup(target), jobs::nothing)
+        })
     }
 
     /// Every entry replaced by another database's primary data, derived data rebuilt under this schema
@@ -622,7 +616,7 @@ impl Task for ReadTask {
 
     fn compute(&mut self) -> napi::Result<Vec<u8>> {
         let (db, reads) = (&self.db, &self.reads);
-        let read = self.health.caught("Database.read, on a thread of the pool,", || db.read_bytes(reads));
+        let read = self.health.caught("Database.readAsync, on a thread of the pool,", || db.read_bytes(reads));
         read.and_then(|read| read).map_err(|error| {
             let reason = error.message.clone();
             self.failed = Some(error);

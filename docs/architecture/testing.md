@@ -403,7 +403,7 @@ V8 is still freeing answers they dropped, which only Windows can fail: with exte
 and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
 `windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
 
-`offthread.test.mjs` holds the three operations that run on the pool beside their blocking forms: a check, a rebuild
+`offthread.test.mjs` holds the three operations that run on the pool, `…Async`, beside their blocking forms: a check, a rebuild
 and a backup answer what their blocking forms answer, a rebuild of 20,000 notes leaves timers turning until it
 answers, a failure rejects with its code, and a refusal made before the work throws. A rebuild asked for while a unit
 is open is refused with `UNIT_OPEN`, and runs once the unit has committed; twenty blocking writes made while a rebuild
@@ -414,8 +414,8 @@ the rebuild has committed and ran to its end; and of a child that drops its hand
 rebuild is answered after the handle is collected, the child saying it was; and of five children that each make a
 read, a durable wait, a check, a rebuild or a backup answering a promise and then drop the handle, that each handle
 is collected: napi-rs roots the object of a method that returns a task for the task's sake and never lets it go, so
-every promise the binding answers is spawned instead. Each
-`…Sync` form is the blocking one the rest of the suite calls.
+every promise the binding answers is spawned instead. Each blocking form, the plain name, is the one the rest of the
+suite calls.
 
 ## Platforms
 
@@ -657,7 +657,7 @@ peak heap. It reports whether debug assertions are enabled. Fixture creation and
 preexisting/native allocations, mappings and RSS are outside that measurement. Keep CPU timing apart
 from dhat instrumentation. Normalize totals by the recorded iterations rather than truncated text ratios.
 
-After building the binding, `node crates/elmdb-node/bench/reads.mjs --json` emits raw readSync and decode
+After building the binding, `node crates/elmdb-node/bench/reads.mjs --json` emits raw read and decode
 nanosecond samples, answer sizes/checksums, source commit/dirty state, actual loaded binary checksum,
 runtime and host information. The fixture version and cache/measurement policy travel with the samples.
 Use balanced separate baseline/candidate trials on one host; do not combine unlike manifests. Source

@@ -48,9 +48,9 @@ test('every answer in bytes is memory V8 allocated, which freeing calls nothing 
     answered.push(name);
   };
 
-  owned('Database.writeSync', db.writeSync(create('Note-1')));
-  owned('Database.readSync', db.readSync(count));
-  owned('Database.read', await db.read(count));
+  owned('Database.write', db.write(create('Note-1')));
+  owned('Database.read', db.read(count));
+  owned('Database.readAsync', await db.readAsync(count));
   owned('Database.changedSince', db.changedSince(['Note'], since, 100));
   const unit = db.begin();
   owned('Unit.write', unit.write(create('Note-2')));
