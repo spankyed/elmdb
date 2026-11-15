@@ -551,7 +551,7 @@ fields and relation kinds touched, each relation with its ends as they are and, 
 had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
 checkpoint does not raise it). A batch's result carries
-the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
+the change set and the sequence (`Written`, generated as `protocol/Written.ts`), and so does a unit's commit, so a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
 in either order. `db.sequence` is the last commit's.
 

@@ -4,6 +4,7 @@ import type { CheckReport } from './protocol/CheckReport.js'
 import type { IndexStatus } from './protocol/IndexStatus.js'
 import type { Stats } from './protocol/Stats.js'
 export type { ErrorCode } from './protocol/ErrorCode.js'
+export type { Written } from './protocol/Written.js'
 export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats }
 
 /**
