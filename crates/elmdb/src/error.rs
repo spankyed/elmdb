@@ -97,6 +97,9 @@ pub enum ErrorCode {
     IndexBuilding,
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
+    /// An open that found the database to be restored to its last synced commit, after a power loss or a failed sync,
+    /// and couldn't make the restore: another process has it open, or the open can't write its data file
+    RestorePending,
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to
     /// be on disk. Retrying the operation would apply it twice
     NotDurable,
@@ -166,6 +169,7 @@ impl ErrorCode {
             Self::AlreadyListening => "ALREADY_LISTENING",
             Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
+            Self::RestorePending => "RESTORE_PENDING",
             Self::NotDurable => "NOT_DURABLE",
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",

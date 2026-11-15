@@ -27,11 +27,19 @@ pub(crate) struct WriterLock {
     #[cfg(target_os = "macos")]
     _held: Option<macos::Hold>,
     _turn: parking_lot::ArcMutexGuard<parking_lot::RawMutex, ()>,
+    /// The grouped mode's pin, held for a unit until it ends (`kept::Writing`)
+    _writing: Option<super::kept::Writing>,
 }
 
 impl WriterLock {
     /// Lets the next writer in, as dropping it would; spelled out where that has to happen before the scope ends
     pub(crate) fn release(self) {}
+
+    /// The lock, holding the pin a unit made sure of for as long as the unit holds it
+    pub(super) fn writing(mut self, writing: Option<super::kept::Writing>) -> Self {
+        self._writing = writing;
+        self
+    }
 }
 
 /// What a writer takes before LMDB's write lock
@@ -72,6 +80,7 @@ impl Writers {
             #[cfg(target_os = "macos")]
             _held: self.held.as_ref().map(macos::Held::hold).transpose()?,
             _turn: turn,
+            _writing: None,
         })
     }
 }

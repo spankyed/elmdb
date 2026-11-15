@@ -1,12 +1,13 @@
 # A power loss that tears no file
 
-Status: designed, 2026-11-14, and not built. It is the answer to the one defect of the review of `ed20979` that was
+Status: designed, 2026-11-14; phases 1 to 3 built (`store/commits.rs`, `store/synced_model.rs`, `store/kept.rs`,
+`store/record.rs`, `store/restore.rs`), 4 and 5 not. It is the answer to the one defect of the review of `ed20979` that was
 left for a design (`../roadmap.md`, change 1): in the grouped mode a power loss can leave a file that is no commit's,
 which reads wrongly or ends the process that reads it. This is the fifth draft. One reader read the four before it
 against the store and LMDB's source: the first, a marker of commits not yet synced, did not hold; the others were
 this design, and what each reading changed is under What was set aside. The fourth was read as a protocol to model,
-and found ready once three of its steps were restated, which this draft does. Its first phase is built
-(`store/commits.rs`).
+and found ready once three of its steps were restated, which this draft does; the model then settled how a meta page
+is taken, which this draft states.
 
 ## Where it stands
 
@@ -72,7 +73,7 @@ and what was is whole.
 | What | Holds |
 |---|---|
 | The pin | a read transaction a process writing in the grouped mode holds while it has commits not yet synced, at the commit the record names or an earlier one |
-| `synced`, a file beside the data file | the record: the body of the meta page of the last commit known to be on disk, a checksum of the two root pages it names, the boot it was written in, the mode the database is written in, a state, a notice, a count of the records written, and a checksum of them all |
+| `synced`, a file beside the data file | the record: the body of the meta page of the last commit known to be on disk, a checksum of the two root pages it names and of the root of each named database the main tree's root lists, the boot it was written in, the mode the database is written in, a state, a notice, a count of the records written, and a checksum of them all |
 | `synced.restored` | the two meta pages a restore wrote over, as they were, written once |
 | Lock files, one for each purpose | nothing: that a process has the database open, that one writes it in a mode, and that one is writing the record |
 
@@ -84,8 +85,9 @@ and what was is whole.
   unix and goes when it closes any descriptor of that file, and on Windows keeps other processes from reading the
   range. LMDB's lock file is none of them, and a test holds that nothing but LMDB opens it.
 - **A meta page is taken whole.** A sync begins a read transaction and reads its commit's meta page; it takes it
-  only if the file's other meta page is of no later commit, and otherwise begins again. A commit two after it
-  writes that page field by field, and a read beside it could take one commit's free tree with another's rows.
+  only if LMDB's newest commit is still that one once the page is read, and otherwise begins again. A commit two
+  after it writes that page field by field, and a read beside it could take one commit's free tree with another's
+  rows; while the newest is still the read's, the next commit has not landed, so the one after it hasn't begun.
 - **A sync moves the pin, in this order**: a read transaction is begun and its meta page taken; the record is
   read, a process's memory of it being no more than the least it can be; the data file is synced; the record is
   written and synced; the transaction that was the pin is ended. If the process has no commit after the one the
@@ -171,7 +173,9 @@ any write. An open that finds a restore to make and can't make it is refused (`R
 to close the other processes, or to open the database writable once. The restore saves the file's two meta pages
 beside it if none are saved, writes the record's meta body to both, from the map's size on as LMDB writes one, syncs
 the file, and writes the record again as of this boot, `kept`, with the notice: stopped at any step, the next open
-makes it again from the same record. LMDB then opens at the record's commit.
+makes it again from the same record. LMDB then opens at the record's commit. The
+record's notice is written first, the rest of the record as it was: a restore stopped once the meta pages are written
+leaves the next open nothing to restore, and it still says one was made.
 
 **A sync that fails** writes the record `failed`. From then the process refuses every commit, as it refuses every
 wait today, and keeps its pin until it ends; a process that finds the record `failed` at its own sync does the same,
@@ -242,6 +246,12 @@ first is the cost the format's rule accepts until a release has users (`../archi
   held back every page another process freed, for as long as it stayed open.
 - **The other meta page required to be earlier**, as the third draft had it. A new database's two are the same,
   as are a restored one's, and its first sync would never have taken one.
+- **The other meta page required to be of no later commit**, as the fifth draft had it. A writer that died with its
+  commit's meta page written and LMDB's lock file not told leaves the other page later for good, and no sync
+  would take one again: the model found it (`store/synced_model.rs`).
+- **A checksum of the two root pages alone.** The main tree's root lists the named databases, and changes only when
+  one of their records does: two databases made alike would share it, and a file put in place of the other's would
+  be taken for it. Each named database's root, elmdb's own among them, is written again by every commit.
 - **A record that only its state ties to the file.** The second draft. A backup copied over the data file, or any
   file put there with later commits, would have had the old file's trees written into it at the next loss.
 - **Writers of other modes told by one write of the record**, as the second draft had it. A grouped writer's
@@ -352,6 +362,53 @@ first is the cost the format's rule accepts until a release has users (`../archi
      process's sync, which the next loss doesn't undo.
    Read beside today's, and gates of nothing: a `durable` write, a commit of one process, and the first write of a
    second while the first is writing.
+
+   *As built.* Held by tests (`engine/tests/power_loss.rs`, `store/kept_tests.rs`): the replay with the record and
+   without the pin, the replay's old assertion and `engine.md`'s paragraph taken out, the pin of another process
+   through writes of values on overflow pages, a process ended at each step of a sync and of a restore, a restored
+   database's workload and `check()`, the refusal beside another process, the read-only open with no boot, a
+   restored database's sync, the commit forced beside the meta page's read, a failed sync and another process's
+   sync after it, a sync made due by the bound, a `durable` write beside another process's sync that took an earlier
+   commit's meta page, which the next loss keeps, an open beside another process's first sync before its write,
+   which waits for the record, and a write run again after its map grew two commits past the record's, which syncs
+   before it and leaves a loss the record's commit; and, by hand for its size, a write that spills its pages to the file
+   before its commit, given every page the record's commit freed, which a loss leaves at the record's commit whole
+   and which, with the pin turned off, writes over the record's root pages, so that the open refuses to restore.
+   LMDB spills a transaction past `MDB_IDL_UM_MAX` dirty pages (`midl.h`), some 2 GiB at Apple silicon's 16 KiB pages:
+   the test takes 17 s there and 5 GB of memory (2026-11-15). The run again after a growth and the spill are held
+   apart: the suite's own bound on a test's map, 1 GiB, keeps one test from doing both.
+
+   *The readings* (`cargo run --release -p elmdb --example kept-readings`, Apple M1 Pro, 10 cores, 2026-11-15, the
+   machine's load 17 to 55; main at `fad679b` with the same example copied in), medians of 200:
+
+   | Reading | This phase | main |
+   |---|---|---|
+   | A `durable` write | 9.8 to 10.0 ms | 5.3 to 5.4 ms |
+   | A commit of one process | 38.7 µs | 32 to 36 µs |
+   | A second process's first write, 150 ms after its last, while another writes (load 59 to 134) | 0.9 and 8.9 ms | 0.4 and 0.6 ms |
+   | The file after a minute of commits of 100 sets over 10,000 notes, alone | 290 MB | 7 MB |
+   | The same beside a process that wrote once and stays open | 342 MB | 7 MB |
+   | The largest file while a million notes have a tenth set each second for a minute | 667 MB | 655 MB |
+
+   The `durable` write pays its second sync, as What it costs says. The second process's first write after a pause
+   longer than the sync's idle time pays a sync and a record before it begins, as The design says, and swings with
+   what that sync has to flush: two runs at the load given, against main's write, which pays none. The gates on the bound read as
+   met, and say little: beside an idle process the file was 52 MB larger than alone, under the bound of 64 MiB, but
+   the two are separate runs of a minute each, which commit at different rates, and the idle process, having written
+   once and synced, holds no pin; the million notes' units left the file 12 MB larger than main's, under a quarter of
+   it. But the bound does not hold the file where commits outrun the disk: rewriting as fast as one
+   process commits, some 4,500 commits a second, the file was 268 MB after a second and 911 MB after eight, the pin
+   moving at each of 13 syncs. While the pin holds, every commit writes fresh pages, so a sync flushes all of them,
+   which takes long enough for as many again to be written: the file grows by what is committed while a sync runs,
+   and that has no bound. An 8 MiB bound made no difference (269 MB). What would bound it is a write that waits, once
+   the file is past the bound and a sync is running, for that sync: not built.
+   Windows' boot, the volatile registry key, is built with this phase rather than the last: without it every death
+   there read as a loss, and a write that returned was undone when its process was killed, which the engine promises
+   it is not. The key is the current user's, which a process may make volatile without an administrator: a process
+   of another account, or a service, reads another boot, and where it opens a database alone after a death it
+   restores, losing what the dead process committed since its last sync, as a loss would. A boot all accounts share
+   is phase 5's. Until phase 4, a database is written in one mode at a time by its callers: a writable open of another mode than
+   the record's syncs the data and writes its mode's record, and nothing refuses two live writers of two modes.
 4. **The modes.** `syncEachCommit` and `syncs: false` alone and after a grouped writer that died with commits
    unsynced, a backup into a directory and `replaceWith`. Done when the replay holds each, an open in another mode
    than a live writer's is refused and one after it has gone is not, and a `syncEachCommit` writer is shown to

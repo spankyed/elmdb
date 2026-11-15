@@ -137,6 +137,22 @@ and a load by the build after it. That is how our databases are converted once, 
 
 The dump version is the file's, not the stored format's: it moves only when `Load` does.
 
+## Beside the data file
+
+A database's directory holds LMDB's two files, `data.mdb` and `lock.mdb`, and elmdb's own (`store/record.rs`):
+
+| File | What it holds |
+|---|---|
+| `synced` | the record of the last commit the grouped mode knows to be on disk (`engine.md`, Durability): two slots of 4096 bytes, written in turn in place, each the 8 bytes `elmdbsyn`, a u32 version (1), then little-endian the count of records written, the mode (1 grouped, 2 synced each commit, 3 unsynced), the state (1 kept, 2 failed), the LMDB transaction of the commit, that commit's 136-byte meta page body as LMDB writes it, a SHA-256 of its root pages and of each named database's root, a SHA-256 of the boot it was written in or zeros for none, a byte and a u64 of the commit a restore took the database to, and a SHA-256 of all of it. The slot of the higher count that reads is the record |
+| `synced.restored` | the two meta pages the first restore wrote over, as they were |
+| `open.lock` | nothing: locked shared by every open for as long as it is open |
+| `synced.lock` | nothing: locked by the one reading or writing the record, and by an open as it decides what to open at |
+| `writer.lock` | nothing: on macOS, locked by the writer inside a write transaction (`store/writers.rs`) |
+
+A record of another version reads as no record. The record names an LMDB transaction and a meta page, so a file put
+in place of the data file that the record's commit and root pages don't match is opened as it is, a record that
+says `failed` excepted, which is refused.
+
 ## LMDB
 
 elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch.

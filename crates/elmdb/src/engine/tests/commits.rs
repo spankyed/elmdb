@@ -53,6 +53,7 @@ fn committed_operations_notify_before_reporting_a_failed_sync() {
         let into = seen.clone();
         db.watch(reads.clone(), Box::new(move |answer| into.lock().unwrap().push(answer.clone()))).unwrap();
         let before = db.sequence().unwrap();
+        let synced_schema = db.schema();
         let _failure = FailedSync::arm(&db);
         let mut changed_schema = schema();
         changed_schema.types.remove("Task");
@@ -84,10 +85,16 @@ fn committed_operations_notify_before_reporting_a_failed_sync() {
             assert_eq!(db.schema(), Some(changed_schema));
         }
         assert!(db.check().unwrap().is_clean(), "{operation} left consistent indexes");
-        let committed_schema = db.schema();
         assert!(db.close().is_err(), "the failed sync stays failed until reopen");
+        // Opened again it is at the last commit known to be on disk: what the commits since wrote may not be, the
+        // failed sync having been theirs (`docs/roadmap/synced-commit.md`, A sync that fails)
         let reopened = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
-        assert_eq!(reopened.schema(), committed_schema, "{operation} schema agrees after reopen");
+        assert_eq!(reopened.sequence().unwrap(), before, "{operation} reopens at the last synced commit");
+        assert_eq!(reopened.schema(), synced_schema, "{operation} schema is the last synced commit's");
+        // The rebuild's database had an index entry taken out to have one to rebuild, and is restored to that
+        if operation != "rebuild" {
+            assert!(reopened.check().unwrap().is_clean(), "{operation} restored to a consistent commit");
+        }
     }
 }
 
