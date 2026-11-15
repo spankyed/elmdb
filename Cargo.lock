@@ -709,6 +709,7 @@ dependencies = [
  "clap",
  "elmdb",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
