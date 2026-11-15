@@ -23,11 +23,13 @@ pub struct Policy {
     cap: Duration,
     first_unsynced: Option<Instant>,
     last_commit: Option<Instant>,
+    /// A sync was asked for now, whatever the time: what the pin holds back passed its bound
+    forced: Option<Instant>,
 }
 
 impl Policy {
     pub fn new(idle: Duration, cap: Duration) -> Self {
-        Self { idle, cap, first_unsynced: None, last_commit: None }
+        Self { idle, cap, first_unsynced: None, last_commit: None, forced: None }
     }
 
     pub fn on_commit(&mut self, now: Instant) {
@@ -35,15 +37,22 @@ impl Policy {
         self.last_commit = Some(now);
     }
 
+    /// A sync is due now, once something is committed since the last began
+    pub fn on_bound(&mut self, now: Instant) {
+        self.forced = Some(now);
+    }
+
     /// A sync began: the commits before it are its, and the next commit starts the timers again
     pub fn on_sync_started(&mut self) {
         self.first_unsynced = None;
         self.last_commit = None;
+        self.forced = None;
     }
 
     /// When the next sync is due, or `None` while nothing was committed since the last began
     pub fn due_at(&self) -> Option<Instant> {
-        Some((self.last_commit? + self.idle).min(self.first_unsynced? + self.cap))
+        let timed = (self.last_commit? + self.idle).min(self.first_unsynced? + self.cap);
+        Some(self.forced.map_or(timed, |forced| forced.min(timed)))
     }
 }
 
@@ -161,6 +170,14 @@ impl GroupCommit {
         state.committed += 1;
         let now = self.shared.clock.now();
         state.policy.on_commit(now);
+        self.shared.changed.notify_all();
+    }
+
+    /// Makes a sync due now, whatever the time
+    pub fn due_now(&self) {
+        let mut state = self.shared.lock();
+        let now = self.shared.clock.now();
+        state.policy.on_bound(now);
         self.shared.changed.notify_all();
     }
 

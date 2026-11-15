@@ -5,11 +5,14 @@
 pub struct PlainMutex<T>(shuttle::sync::Mutex<T>);
 
 impl<T> PlainMutex<T> {
+    pub(crate) fn new(value: T) -> Self {
+        Self(shuttle::sync::Mutex::new(value))
+    }
+
     pub(crate) fn lock(&self) -> shuttle::sync::MutexGuard<'_, T> {
         self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    #[cfg(test)]
     pub(crate) fn try_lock(&self) -> Option<shuttle::sync::MutexGuard<'_, T>> {
         self.0.try_lock().ok()
     }

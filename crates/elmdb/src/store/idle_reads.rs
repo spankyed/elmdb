@@ -76,9 +76,12 @@ impl IdleReads {
     }
 
     pub fn clear(&self) {
-        let mut state = self.shared.state.lock().expect("the idle cache lock is never poisoned");
-        state.generation = state.generation.wrapping_add(1);
-        state.entries.clear();
+        clear(&self.shared);
+    }
+
+    /// What clears this cache from elsewhere: a sync that takes a map another process grew
+    pub fn clearer(&self) -> Clear {
+        Clear(Arc::clone(&self.shared))
     }
 
     pub fn close(&mut self) {
@@ -108,6 +111,21 @@ impl IdleReads {
     pub fn len(&self) -> usize {
         self.shared.state.lock().unwrap().entries.len()
     }
+}
+
+/// Clears an idle cache, without its worker
+pub(super) struct Clear(Arc<Shared>);
+
+impl Clear {
+    pub fn clear(&self) {
+        clear(&self.0);
+    }
+}
+
+fn clear(shared: &Shared) {
+    let mut state = shared.state.lock().expect("the idle cache lock is never poisoned");
+    state.generation = state.generation.wrapping_add(1);
+    state.entries.clear();
 }
 
 impl Drop for IdleReads {
