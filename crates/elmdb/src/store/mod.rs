@@ -1125,7 +1125,11 @@ impl Store {
     /// is open
     pub fn make_room(&self, times: usize) -> Result<()> {
         while self.map_short_of(times) {
-            self.grow_beside_units()?;
+            match self.grow_beside_units() {
+                // Nothing grows while a unit is open: the write this room is for is refused for it in turn
+                Err(error) if error.code == ErrorCode::UnitOpen => return Ok(()),
+                grown => grown?,
+            }
         }
         Ok(())
     }
