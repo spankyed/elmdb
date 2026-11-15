@@ -1,4 +1,6 @@
 node_modules/
 target/
+# The scratch target a mutated or scratch copy of the tree builds into (`cargo xtask scratch-target`)
+target-scratch/
 *.node
 __pycache__/

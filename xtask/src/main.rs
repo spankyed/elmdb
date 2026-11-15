@@ -12,6 +12,8 @@
 //! - `check-sync`: fails when engine code outside `src/sync/` locks, waits or keeps per-thread state through `std` or
 //!   parking_lot directly, rather than through `crate::sync`, which the concurrency models swap for Loom's and
 //!   Shuttle's, unless the file is listed in `UNMODELLED` with its reason; a listed file that no longer does is stale.
+//! - `check-commits`: fails when engine code outside `src/store/commits.rs` commits a write transaction, so every
+//!   commit passes the one module that holds what must be true of each.
 //! - `mutant-exclusions`: writes `target/mutants.toml`, the configuration a mutation run reads with `--config`, and
 //!   prints its path: `.cargo/mutants.toml` with an `exclude_re` for each `// mutant-skip:` comment in the source, which
 //!   sits above the line it excuses and holds the reason. Nothing it writes is committed, so the comment is the one
@@ -22,14 +24,18 @@
 //!   `exclude_re` there names a line, which only a comment may.
 //! - `compare`: runs one command on two revisions in turn and prints each reading beside the load as its run ended; it
 //!   reports and decides nothing (`docs/architecture/testing.md`, Comparing two revisions).
-//! - `sweep`: removes from the build directory what no recent build used, through `cargo-sweep` (`docs/architecture/
+//! - `sweep`: bounds each build directory this checkout uses, its target, the models' and the scratch target, removing
+//!   what no recent build used, through `cargo-sweep`, and the incremental directories it leaves (`docs/architecture/
 //!   testing.md`, The build directory).
+//! - `scratch-target`: makes and prints the directory a mutated or scratch copy of the tree builds into, beside this
+//!   checkout's target, which `sweep` bounds with the rest.
 //! - `pre-push`: every check CI runs on a change, the change's mutants included, cheapest first, stopping at the first
 //!   that fails: what to run before a push.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod build_dir;
 mod compare;
 mod generate;
 mod pre_push;
@@ -44,8 +50,10 @@ fn main() -> ExitCode {
         Some("check-icu-exact") => check_icu_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
-        Some("sweep") => sweep(&workspace_root()),
+        Some("sweep") => build_dir::sweep(&workspace_root()),
+        Some("scratch-target") => scratch_target(&workspace_root()),
         Some("check-sync") => check_sync(&workspace_root()),
+        Some("check-commits") => check_commits(&workspace_root()),
         Some("mutant-exclusions") => mutant_exclusions(&workspace_root()),
         Some("check-mutant-exclusions") => check_mutant_exclusions(&workspace_root()),
         Some("pre-push") => {
@@ -60,12 +68,13 @@ fn main() -> ExitCode {
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
                     ("serial Leiden", &|| check_leiden_serial(&root)),
                     ("crate::sync", &|| check_sync(&root)),
+                    ("one place commits", &|| check_commits(&root)),
                     ("mutant exclusions", &|| check_mutant_exclusions(&root)),
                 ],
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-icu-exact | check-diagnostics-off | check-leiden-serial | check-sync | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-icu-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
                 .to_owned(),
         ),
     };
@@ -76,38 +85,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// The cargo-sweep this task runs, pinned as the repository pins its dependencies
-const CARGO_SWEEP: &str = "0.8.0";
-/// Artifacts no build has used for this many days go
-const SWEEP_DAYS: &str = "14";
-/// And past this size, the oldest go until the build directory fits
-const SWEEP_MAX_SIZE: &str = "15GB";
-
-/// Cargo never removes an artifact from a build directory: a build of other code or other features hashes a new one
-/// beside the last, so a long-lived build directory grows with every branch built in it. This removes what a toolchain
-/// no longer installed made, what no build has used for `SWEEP_DAYS`, and then the oldest until it is under
-/// `SWEEP_MAX_SIZE`, printing what each pass freed
-fn sweep(root: &Path) -> Result<(), String> {
-    let installed = Command::new("cargo").args(["sweep", "--version"]).output().is_ok_and(|out| out.status.success());
-    if !installed {
-        return Err(format!(
-            "cargo-sweep isn't installed: cargo install cargo-sweep --version '={CARGO_SWEEP}' --locked"
-        ));
-    }
-    for pass in [vec!["--installed"], vec!["--time", SWEEP_DAYS], vec!["--maxsize", SWEEP_MAX_SIZE]] {
-        let status = Command::new("cargo")
-            .arg("sweep")
-            .args(&pass)
-            .arg(root)
-            .status()
-            .map_err(|e| format!("cargo sweep {}: {e}", pass.join(" ")))?;
-        if !status.success() {
-            return Err(format!("cargo sweep {} failed with {status}", pass.join(" ")));
-        }
-    }
-    Ok(())
 }
 
 /// The engine's files that lock, wait or keep per-thread state outside `crate::sync`, each with why: what isn't
@@ -415,6 +392,59 @@ fn unmodelled_files(source: &Path) -> Result<std::collections::BTreeSet<String>,
     Ok(found)
 }
 
+/// The engine's one module that commits a write transaction, relative to its source
+const COMMITS: &str = "store/commits.rs";
+
+/// Fails on engine code outside `COMMITS` that commits a write transaction, naming each line: a commit made
+/// elsewhere is one the store's rule for every commit never sees
+fn check_commits(root: &Path) -> Result<(), String> {
+    let found = commits_outside(&root.join("crates/elmdb/src"))?;
+    if found.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "these commit a write transaction outside crates/elmdb/src/{COMMITS}: {found:?}; commit through that \
+         module's functions, which are where every commit is held to the store's rule"
+    ))
+}
+
+/// The lines of the engine's source, tests aside, that commit a write transaction outside `COMMITS`, as
+/// `file:line`
+fn commits_outside(source: &Path) -> Result<Vec<String>, String> {
+    let mut found = Vec::new();
+    let mut pending = vec![source.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let path = entry.map_err(|e| e.to_string())?.path();
+            let relative = path.strip_prefix(source).expect("under source").to_string_lossy().replace('\\', "/");
+            if path.is_dir() {
+                if !relative.ends_with("tests") {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if !relative.ends_with(".rs") || relative.ends_with("tests.rs") || relative == COMMITS {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            for (at, line) in text.lines().enumerate() {
+                if commits_a_write(line) {
+                    found.push(format!("{relative}:{}", at + 1));
+                }
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
+/// Whether a line of code commits a write transaction: heed's own commit of one, which takes no argument where
+/// the engine's commits of a unit do, or its making of databases, which commits the transaction it is given
+fn commits_a_write(line: &str) -> bool {
+    let code = line.trim_start();
+    !code.starts_with("//") && (code.contains(".commit()") || code.contains("create_databases_and_commit("))
+}
+
 /// Whether a line of code reaches a lock, a condition variable or a thread-local other than `crate::sync`'s
 fn locks_outside_sync(line: &str) -> bool {
     let code = line.trim_start();
@@ -425,6 +455,15 @@ fn locks_outside_sync(line: &str) -> bool {
         && ["Mutex", "Condvar", "RwLock", "Barrier"].iter().any(|primitive| code.contains(primitive));
     let thread_local = code.contains("thread_local!") && !code.contains("crate::sync::thread_local!");
     std_lock || code.contains("parking_lot::") || thread_local
+}
+
+/// `cargo xtask scratch-target`: the scratch target, made, its path printed for a copy to build into with
+/// `CARGO_TARGET_DIR`
+fn scratch_target(root: &Path) -> Result<(), String> {
+    let scratch = build_dir::scratch(&build_dir::target_dir(root)?);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+    println!("{}", scratch.display());
+    Ok(())
 }
 
 fn workspace_root() -> PathBuf {
@@ -725,6 +764,27 @@ fn a() {
         let found: Vec<String> = unmodelled_files(src).unwrap().into_iter().collect();
         assert_eq!(found, ["engine/local.rs", "engine/locked.rs", "engine/parked.rs"]);
         assert!(!locks_outside_sync("    // parking_lot::Mutex"));
+    }
+
+    #[test]
+    fn a_commit_outside_the_one_module_is_found_and_one_in_it_or_in_a_test_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("crates/elmdb/src");
+        std::fs::create_dir_all(src.join("store")).unwrap();
+        std::fs::create_dir_all(src.join("engine/tests")).unwrap();
+        std::fs::write(src.join("store/commits.rs"), "fn commit(txn: RwTxn) { txn.commit() }\n").unwrap();
+        std::fs::write(src.join("store/tests.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
+        std::fs::write(src.join("engine/tests/uses.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
+        // A unit's commit takes whether it is durable, the mirror's its sequences, and a comment commits nothing
+        let unit = "fn f(unit: Unit) {\n    // txn.commit() is the store's\n    unit.commit(false);\n    mirror.commit(1, 2, None);\n}\n";
+        std::fs::write(src.join("engine/unit.rs"), unit).unwrap();
+        assert_eq!(super::check_commits(dir.path()), Ok(()));
+        std::fs::write(src.join("store/mod.rs"), "fn f(txn: RwTxn) {\n\n    txn.commit()?;\n}\n").unwrap();
+        let made = "fn f(env: &Env, wtxn: RwTxn) {\n    env.create_databases_and_commit(wtxn, |_, _| todo!());\n}\n";
+        std::fs::write(src.join("engine/made.rs"), made).unwrap();
+        let refused = super::check_commits(dir.path()).unwrap_err();
+        assert!(refused.contains(r#"["engine/made.rs:2", "store/mod.rs:3"]"#), "{refused}");
+        assert!(refused.contains("crates/elmdb/src/store/commits.rs"), "{refused}");
     }
 
     #[test]
