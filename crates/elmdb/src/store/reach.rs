@@ -510,4 +510,37 @@ mod tests {
         assert_eq!(named_roots(&page_with_a_named_root(P_LEAF, 42)), vec![42], "a plain value is no database");
         assert_eq!(named_roots(&page_with_a_named_root(P_BRANCH, 42)), Vec::<u64>::new());
     }
+
+    #[test]
+    fn a_node_whose_head_runs_past_its_page_names_no_root() {
+        // The plain value's node moved to six bytes before the page's end: its flags, within the page, name a
+        // database, and its root would be read past the page
+        let mut page = page_with_a_named_root(P_LEAF, 42);
+        let at = page.len() - 6;
+        page[PAGE_HEADER + 2..PAGE_HEADER + 4].copy_from_slice(&(at as u16).to_ne_bytes());
+        page[at + 4..at + 6].copy_from_slice(&F_SUBDATA.to_ne_bytes());
+        assert_eq!(named_roots(&page), vec![42]);
+    }
+
+    #[test]
+    fn the_newer_meta_page_is_of_the_higher_commit_and_the_first_where_both_are_of_one() {
+        use std::io::Write;
+        const PSIZE: usize = 4096;
+        // A meta page of `txnid`, its body's bytes past the magic all `mark`
+        let meta = |txnid: u64, mark: u8| {
+            let mut page = vec![mark; PSIZE];
+            page[META_MAGIC..META_MAGIC + 4].copy_from_slice(&MAGIC.to_ne_bytes());
+            page[META_TXNID..META_TXNID + 8].copy_from_slice(&txnid.to_ne_bytes());
+            page
+        };
+        let newer = |first: Vec<u8>, second: Vec<u8>| {
+            let mut file = tempfile::tempfile().unwrap();
+            file.write_all(&[first, second].concat()).unwrap();
+            newer_meta_page(&mut file, PSIZE).map(|meta| (meta.txnid, meta.body[4]))
+        };
+        assert_eq!(newer(meta(5, 1), meta(5, 2)), Some((5, 1)), "of one commit");
+        assert_eq!(newer(meta(5, 1), meta(6, 2)), Some((6, 2)));
+        assert_eq!(newer(meta(7, 1), meta(6, 2)), Some((7, 1)));
+        assert_eq!(newer(vec![0; PSIZE], meta(6, 2)), Some((6, 2)), "the first no meta page");
+    }
 }
