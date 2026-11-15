@@ -361,6 +361,35 @@ fn child_of_the_kept_tests() {
             }
             drop(store);
         }
+        // Holds the database open; at each line it reads commits (and with `sync`, waits for its sync), and at a line
+        // that begins `pause `, first pauses the step `ELMDB_KEPT_AT` names of its next sync, whichever thread reaches
+        // it, until a line more
+        "pause" => {
+            let store = Store::open(&path, grouped()).unwrap();
+            println!("holding");
+            let point = named(&std::env::var("ELMDB_KEPT_AT").unwrap());
+            // A line at a time, the input's lock let go between them, so the paused step can read its own
+            let line = || {
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).ok().filter(|read| *read > 0).map(|_| line.trim().to_owned())
+            };
+            while let Some(asked) = line() {
+                let (pause, asked) =
+                    asked.strip_prefix("pause ").map_or((false, asked.as_str()), |asked| (true, asked));
+                if pause {
+                    failpoints::run_once_at(point, &store.path, move || {
+                        println!("paused");
+                        let _ = line();
+                    });
+                }
+                let done = match asked {
+                    "sync" => store.durable().unwrap().wait(),
+                    _ => put(&store, asked, b"written"),
+                };
+                println!("synced {}", done.is_ok());
+            }
+            drop(store);
+        }
         other => panic!("no such child: {other}"),
     }
 }
@@ -368,6 +397,7 @@ fn child_of_the_kept_tests() {
 fn named(point: &str) -> &'static str {
     match point {
         "sync-pinned" => points::SYNC_PINNED,
+        "sync-taken" => points::SYNC_TAKEN,
         "sync-data" => points::SYNC_DATA,
         "record-written" => points::RECORD_WRITTEN,
         "sync-recorded" => points::SYNC_RECORDED,
@@ -398,6 +428,60 @@ fn child(dir: &Path, what: &str) -> String {
 
 /// A child that holds the database in `dir` open with a commit unsynced, until it is dropped
 struct Holder(std::process::Child);
+
+/// A child that pauses at a step of its process's syncs whenever it is asked to
+struct Pauser {
+    child: std::process::Child,
+    lines: Box<dyn Iterator<Item = String>>,
+}
+
+impl Pauser {
+    fn open(dir: &Path, at: &str) -> Self {
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "store::kept_tests::child_of_the_kept_tests", "--nocapture"])
+            .env("ELMDB_KEPT_DB", dir)
+            .env("ELMDB_KEPT_DO", "pause")
+            .env("ELMDB_KEPT_AT", at)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let lines = BufReader::new(child.stdout.take().unwrap()).lines().map_while(std::result::Result::ok);
+        let mut pauser = Self { child, lines: Box::new(lines) };
+        pauser.until("holding");
+        pauser
+    }
+
+    fn until(&mut self, said: &str) {
+        assert!(self.lines.any(|line| line.contains(said)), "the child said no {said:?}");
+    }
+
+    fn say(&mut self, line: &str) {
+        use std::io::Write;
+        writeln!(self.child.stdin.as_mut().unwrap(), "{line}").unwrap();
+    }
+
+    /// Asks for `what`, a sync or a key to write, and waits until the child is paused in it
+    fn pause_in(&mut self, what: &str) {
+        self.say(&format!("pause {what}"));
+        self.until("paused");
+    }
+
+    /// Lets the paused step go on, and answers whether what was asked then succeeded
+    fn go_on(&mut self) -> bool {
+        self.say("go on");
+        let said = self.lines.find(|line| line.contains("synced ")).expect("the child answered");
+        said.contains("synced true")
+    }
+}
+
+impl Drop for Pauser {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        let _ = self.child.wait();
+    }
+}
 
 impl Holder {
     /// Asks the holder to commit and sync, and answers what it said of it
@@ -529,6 +613,89 @@ fn what_the_pin_holds_back_makes_a_sync_due_whatever_the_time() {
     };
     assert!(!synced_within(u64::MAX / 8, Duration::from_secs(1)), "a sync was due by the time");
     assert!(synced_within(1 << 20, Duration::from_secs(20)), "the bound made no sync due");
+}
+
+#[test]
+fn a_durable_write_beside_another_process_s_slower_sync_is_kept_by_the_next_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path(), grouped()).unwrap().close().unwrap();
+    // The other process has a commit unsynced, and its sync has taken that commit's meta page and stopped before the
+    // record's lock
+    let mut slower = Pauser::open(dir.path(), "sync-taken");
+    slower.say("b");
+    slower.until("synced true");
+    slower.pause_in("sync");
+    // This one writes past it, durable: the record names this commit once the write returns
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    store
+        .write(|txn, db| db.put(txn, &crate::format::key::encode(&["x".into()]), b"durable").map_err(Into::into), true)
+        .unwrap();
+    let durable = newest(&store);
+    assert_eq!(record_in(dir.path()).unwrap().commit, durable);
+    // The slower sync goes on with its earlier commit, and writes no record back
+    assert!(slower.go_on());
+    assert_eq!(record_in(dir.path()).unwrap().commit, durable, "the record went back");
+    let lost = copied(dir.path(), true);
+    store.close().unwrap();
+    drop(slower);
+    let opened = Store::open(lost.path(), grouped()).unwrap();
+    assert_eq!(get(&opened, "x").as_deref(), Some(&b"durable"[..]), "a loss undid a durable write");
+    opened.close().unwrap();
+}
+
+#[test]
+fn an_open_beside_another_process_s_sync_waits_for_its_record() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path(), grouped()).unwrap().close().unwrap();
+    // A process open since before another's commit, unsynced, whose next write finds it and syncs before it begins:
+    // stopped with the data synced and the record not yet written, its lock held
+    let mut writer = Pauser::open(dir.path(), "sync-data");
+    let holder = Holder::hold(dir.path());
+    writer.pause_in("c");
+    // Read-only, so the record's lock it waits for is the one it decides under, and not the one a writable open's own
+    // record would take after it
+    let path = dir.path().to_owned();
+    let (opened, open) = std::sync::mpsc::channel();
+    let opening = std::thread::spawn(move || {
+        let store = Store::open(&path, StoreOptions { read_only: true, ..grouped() }).unwrap();
+        opened.send(()).unwrap();
+        store
+    });
+    assert!(open.recv_timeout(Duration::from_millis(500)).is_err(), "the open decided beside a record being written");
+    assert!(writer.go_on(), "the write after its sync");
+    open.recv_timeout(Duration::from_secs(20)).expect("the open went on once the record was written");
+    let store = opening.join().unwrap();
+    // Beside other processes it opens as the file is, which a record names no part of: what it waited for was the
+    // record's lock, and it reads what is there
+    assert_eq!(get(&store, "b").as_deref(), Some(&b"2"[..]));
+    store.close().unwrap();
+    drop(writer);
+    drop(holder);
+}
+
+#[test]
+fn a_write_run_again_after_its_map_grew_syncs_before_it_and_a_loss_keeps_the_record_s_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(1 << 20), ..grouped() }).unwrap();
+    put(&store, "a", &vec![1u8; 20_000]).unwrap();
+    synced(&store);
+    // Two commits after the record's, which free its pages for a third to take once no pin keeps them
+    put(&store, "a", &vec![2u8; 20_000]).unwrap();
+    put(&store, "b", &vec![3u8; 20_000]).unwrap();
+    let before = newest(&store);
+    // Too large for the map: aborted, the map grown with the pin ended, and run again, its pin made sure of first,
+    // which syncs and records the newest commit since it is later than the record's
+    put(&store, "big", &vec![4u8; 4 << 20]).unwrap();
+    assert!(store.map_size() > 1 << 20, "the map grew");
+    assert_eq!(record_in(dir.path()).unwrap().commit, before, "the record named the commit before the write");
+    let lost = copied(dir.path(), true);
+    store.close().unwrap();
+    let opened = Store::open(lost.path(), grouped()).unwrap();
+    assert_eq!(newest(&opened), before);
+    assert_eq!(get(&opened, "a").as_deref(), Some(&vec![2u8; 20_000][..]));
+    assert_eq!(get(&opened, "b").as_deref(), Some(&vec![3u8; 20_000][..]));
+    assert_eq!(get(&opened, "big"), None);
+    opened.close().unwrap();
 }
 
 #[test]
