@@ -182,6 +182,37 @@ test('a durable write of a handle nothing else holds is answered once the handle
   assert.equal(said, 'collectedanswered');
 });
 
+test('a handle that ran a check, a rebuild or a backup on the pool is collected once nothing holds it', (t) => {
+  // A job holds the database by a hold of its own, so nothing roots the handle's JavaScript object for it: a handle
+  // dropped after its job has answered is collected like one that never started one. Each child prints how many
+  // milliseconds the collection took, or `kept` after five seconds of collections that never found it
+  const said = {};
+  for (const what of ['check', 'rebuild', 'backup']) {
+    const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const child = [
+      `const { Database } = require(${JSON.stringify(binding)});`,
+      `let db = Database.open(${JSON.stringify(join(dir, 'db'))}, { syncs: false });`,
+      'const began = Date.now();',
+      'let collected = null;',
+      'const registry = new FinalizationRegistry(() => { collected = Date.now() - began; });',
+      'registry.register(db, 0);',
+      `const asked = ${what === 'backup' ? `db.backup(${JSON.stringify(join(dir, 'copy'))})` : `db.${what}()`};`,
+      'db = undefined;',
+      'asked.then(() => {',
+      '  const until = Date.now() + 5000;',
+      '  (function wait() {',
+      '    global.gc();',
+      "    if (collected === null && Date.now() < until) return setImmediate(wait);",
+      "    process.stdout.write(collected === null ? 'kept' : 'collected');",
+      '  })();',
+      '});',
+    ].join('\n');
+    said[what] = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 60_000 });
+  }
+  assert.deepEqual(said, { check: 'collected', rebuild: 'collected', backup: 'collected' });
+});
+
 test('a process that ends while V8 frees the answers it dropped ends cleanly', { timeout: 120_000 }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));

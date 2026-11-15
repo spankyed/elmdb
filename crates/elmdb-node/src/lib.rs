@@ -150,18 +150,24 @@ impl Database {
         ran
     }
 
-    /// A job on the database, on a thread of the pool, answering what `work` answers as `convert` makes it
-    fn job<T, V>(
+    /// A job on the database, on a thread of the pool, answering a promise of what `work` answers as `convert` makes
+    /// it. Spawned rather than returned as an `AsyncTask`: napi-rs roots the JavaScript object of a method that returns
+    /// one, for the task's sake, and that root outlives the task, so a handle that ever started one would never be
+    /// collected. The job holds the database itself, by its own hold (`Held`), and needs no root
+    fn job<'env, T, V>(
         &self,
+        env: &'env Env,
         export: &'static str,
         work: impl FnOnce(&elmdb::Database) -> elmdb::Result<T> + Send + 'static,
         convert: fn(&Env, T) -> napi::Result<V>,
-    ) -> AsyncTask<Job<T, V>>
+    ) -> Result<Unknown<'env>, Code>
     where
         T: Send + 'static,
-        V: ToNapiValue + TypeName,
+        V: ToNapiValue + TypeName + 'static,
     {
-        AsyncTask::new(Job::new(self.inner.again(), self.health.clone(), export, work, convert))
+        let job = Job::new(self.inner.again(), self.health.clone(), export, work, convert);
+        let spawned = env.spawn(job).map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))?;
+        Ok(spawned.promise_object().to_unknown())
     }
 
     /// A write to the database on a thread of the pool, in its turn among those asked for, answering a promise of
@@ -455,13 +461,14 @@ impl Database {
 
     /// Compares derived data with primary data and every row with the schema's rules, on a thread of the pool
     #[napi(ts_return_type = "Promise<CheckReport>")]
-    pub fn check(&self) -> Result<AsyncTask<Job<serde_json::Value, Unknown<'static>>>, Code> {
+    pub fn check<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.check", || {
-            Ok(self.job(
+            self.job(
+                env,
                 "Database.check, on a thread of the pool,",
                 |db| db.check().map(|report| serde_json::to_value(report).expect("a report serializes")),
                 jobs::value,
-            ))
+            )
         })
     }
 
@@ -592,9 +599,9 @@ impl Database {
     /// A compacted copy of one moment of the database into `target`, which opens as a database of its own, on a thread of
     /// the pool
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn backup(&self, target: String) -> Result<AsyncTask<Job<(), ()>>, Code> {
+    pub fn backup<'env>(&self, env: &'env Env, target: String) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.backup", || {
-            Ok(self.job("Database.backup, on a thread of the pool,", move |db| db.backup(target), jobs::nothing))
+            self.job(env, "Database.backup, on a thread of the pool,", move |db| db.backup(target), jobs::nothing)
         })
     }
 

@@ -412,8 +412,10 @@ rebuild are answered by one sync, ten awaited in turn by one each, and one with 
 rebuild. Writes asked for in the turn a database is closed reject as closed, the ones behind none that landed.
 `exit.test.mjs` asks a rebuild and forty writes behind it of a child process that then calls `process.exit()`: all
 forty are there and the rebuild ran to its end; and of a child that drops its handle with a rebuild and a durable
-write in flight, that the write is answered after the handle is collected, the child saying it was. Each
-`…Sync` form is the blocking one the rest of the suite calls.
+write in flight, that the write is answered after the handle is collected, the child saying it was; and of three
+children that each run a check, a rebuild or a backup and then drop the handle, that each handle is collected:
+napi-rs roots the object of a method that returns a task for the task's sake and never lets it go, so the pool's jobs
+are spawned instead. Each `…Sync` form is the blocking one the rest of the suite calls.
 
 ## Platforms
 
