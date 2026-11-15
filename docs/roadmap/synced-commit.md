@@ -103,10 +103,22 @@ and what was is whole.
   transaction), before the unit that filled the map is run again. The pin's own beginning can meet a map another
   process grew, and takes it as any transaction does. One process writing pays nothing by this rule; of two, one
   pays a sync at its first write after a pause while the other is writing, and pays it outside LMDB's write lock.
-- **A sync is due by what the pin holds back as well as by time**: once the file's last page is further past what
-  it was at the pin than a bound, the greater of a fixed size and a fraction of the file, whichever process's
-  commits moved it. Only a process that holds a pin asks: one that holds none holds nothing back. A file grows
-  by that bound and by what is committed while a sync runs, and no further.
+- **A sync is due by what the pin holds back as well as by time, and a write waits for it**: once the pages that
+  commits from the pin's on freed, which no commit may take while the pin is there, are more than a bound, the
+  greater of a fixed size and a fraction of the file, whichever process's commits freed them. They are read from
+  the newest commit's free tree, by seeks under a read transaction at it. A write past the bound waits, before it
+  begins and outside every lock, for a sync of the commits made so far, which moves the pin. So a file grows by that
+  bound, by an eighth of it more before the free tree is read again (once in 16 asks, two to a write, and whenever the
+  file has grown by that much since), by a single write larger than the bound, and by writes already past their check
+  when it was crossed. What a process measures is its own pin's: another process's older pin keeps more, until that
+  process's own sync, which its timers make due within a second, and a read transaction a caller holds keeps more for as
+  long as it is held, as it does today. Only a process that holds a pin asks: one that holds none holds nothing back.
+  The file's last page is not the measure: where commits rewrite what they change, the file grows only once the pages
+  freed before the pin run out, so a sync due by its growth leaves the pin holding a cycle's pages and a bound more,
+  each cycle more than the last (the readings below).
+- **A process relies only on a record it has synced itself.** A record read from the file may be one its writer
+  wrote and died before syncing: an open syncs the record it reads before relying on it, and a sync syncs the
+  record it reads before writing the other slot, so a loss never leaves neither of the two newest records on disk.
 - **A record is written by one process at a time and its commit never goes back.** Its writer holds the record's
   lock between processes and a mutex within one, and writes the commit of its pin only where that is later than
   the record's: of two processes syncing at once, the one whose pin is earlier writes nothing, or a commit a
@@ -177,10 +189,21 @@ makes it again from the same record. LMDB then opens at the record's commit. The
 record's notice is written first, the rest of the record as it was: a restore stopped once the meta pages are written
 leaves the next open nothing to restore, and it still says one was made.
 
-**A sync that fails** writes the record `failed`. From then the process refuses every commit, as it refuses every
-wait today, and keeps its pin until it ends; a process that finds the record `failed` at its own sync does the same,
-as does one whose sync before a write fails: only a restore writes over it. If the record can't be written either,
-the database goes on as it does today, which the error says.
+**A sync whose data's flush or record's write fails** writes the record `failed`. From then the process refuses every
+commit, as it refuses every wait today, and keeps its pin until it ends; a process that finds the record `failed` at its
+own sync does the same, as does one whose sync before a write fails so: only a restore writes over it. If the record
+can't be written either, the process refuses its commits all the same, and an open of the database in this boot opens at
+its newest commit, which the error says. A sync that fails as it reads or flushes the record is final too, and writes
+nothing. One that fails as its read transaction begins, which a full reader table fails, or as it reads the root pages
+after the data's flush, has written nothing to rely on: it fails the waits on it alone. The pin doesn't move until a
+sync succeeds, so while what it keeps is past the bound every write is refused before it begins, once a sync it asks for
+has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again after a pause, where a full
+reader table is the cause, until other processes, or threads of its own, end the read transactions they hold; the index
+builder waits it out, a second at a time, and runs its work again only once a write would go on, and
+`waitForIndexBuilds` meanwhile answers `SYNC_BEHIND` rather than waiting on it. A write that went on would grow the file
+past the bound, without end while the failure lasted. The next sync is tried at once by a `durable` wait or a write past
+the bound, and by the timer the sync interval after the failure, a second by default and 100 ms at the least, whether or
+not anything is committed since.
 
 **What else writes the data file.** A backup made into a directory, and `replaceWith`, write the record for the data
 they put there or remove it. `replaceWith` opens its source as an open does, record and all.
@@ -195,24 +218,21 @@ first is the cost the format's rule accepts until a release has users (`../archi
 
 ## What it costs
 
-- **Nothing on the path of a write of the one process writing.** Of two processes writing in turn, the one that
-  begins while the other has commits unsynced pays a sync before its first.
-- **A sync of the record after each sync of the data**, on the thread that syncs: two syncs where there was one. A
-  `durable` write waits for both, about 8 ms where it was 4.0 on an Apple M1 Pro by `engine.md`'s reading of
-  2026-11-12, which is what `syncEachCommit` costs there.
-- **A reader's place in the lock file** for a process with commits unsynced.
-- **Pages freed since the pin wait for the next record before they are used again**, and a file's length doesn't
-  shrink: it grows by the bound above and by what is committed while a sync runs. The engine drops idle read
-  transactions after each commit so that none holds freed pages (`Store::committed`); the pin holds a bound's
-  worth by design.
-- **A sync where a map is resized**, when commits are unsynced or another process committed meanwhile.
-- **A sync and a record at each writable open** that finds a later commit than the record's, and a record at the
-  first open of a boot.
-- **An open after a power loss loses the commits after the last sync**, as the grouped mode says. So does a
-  process that died with commits unsynced where the machine then restarts before the database is opened again,
-  cleanly or not: today a clean restart keeps them.
-- **Two refusals that are new**: an open in another mode than a live writer's, and an open that finds a restore it
-  can't make.
+- **Nothing on the path of a write of the one process writing.** Of two processes writing in turn, the one that begins
+while the other has commits unsynced pays a sync before its first. - **A sync of the record after each sync of the
+data**, on the thread that syncs: two syncs where there was one. A `durable` write waits for both, about 8 ms where it
+was 4.0 on an Apple M1 Pro by `engine.md`'s reading of 2026-11-12, which is what `syncEachCommit` costs there. - **A
+reader's place in the lock file** for a process with commits unsynced. - **Pages freed since the pin wait for the next
+record before they are used again**, and a file's length doesn't shrink: it grows by the bound above, by an eighth of it
+more before the free tree is read again, by a single write larger than the bound, and by writes already past their check
+when it was crossed, a write past the bound waiting for the sync. The engine drops idle read transactions after each
+commit so that none holds freed pages (`Store::committed`); the pin holds a bound's worth by design. - **A sync where a
+map is resized**, when commits are unsynced or another process committed meanwhile. - **A sync and a record at each
+writable open** that finds a later commit than the record's, and a record at the first open of a boot. - **An open after
+a power loss loses the commits after the last sync**, as the grouped mode says. So does a process that died with commits
+unsynced where the machine then restarts before the database is opened again, cleanly or not: today a clean restart
+keeps them. - **Two refusals that are new**: an open in another mode than a live writer's, and an open that finds a
+restore it can't make.
 
 ## What was set aside
 
@@ -400,8 +420,11 @@ first is the cost the format's rule accepts until a release has users (`../archi
    process commits, some 4,500 commits a second, the file was 268 MB after a second and 911 MB after eight, the pin
    moving at each of 13 syncs. While the pin holds, every commit writes fresh pages, so a sync flushes all of them,
    which takes long enough for as many again to be written: the file grows by what is committed while a sync runs,
-   and that has no bound. An 8 MiB bound made no difference (269 MB). What would bound it is a write that waits, once
-   the file is past the bound and a sync is running, for that sync: not built.
+   and that has no bound. An 8 MiB bound made no difference (269 MB). Both were the measure's: the file's last page, which moves
+   only once the pages freed before the pin run out. The bound now measures what the pin keeps, and a write past it
+   waits for the sync (The design). With it, the same minute of rewriting ends with the file at the notes' 7 MB and
+   the bound past them: 74 MB with a fixed 64 MiB, 22 MB with 16 MiB, beside an idle process 75 and 24 MB, in as many
+   commits as before, 42,000 to 53,000 a minute (same machine, 2026-11-15, load about 60). The fixed part is 16 MiB.
    Windows' boot, the volatile registry key, is built with this phase rather than the last: without it every death
    there read as a loss, and a write that returned was undone when its process was killed, which the engine promises
    it is not. The key is the current user's, which a process may make volatile without an administrator: a process

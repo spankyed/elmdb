@@ -1298,9 +1298,10 @@ fn what_reads_through_the_map_waits_for_a_resize_of_it_to_end() {
     // A process that is exiting waits on no thread, one resizing the map among them: it syncs what it can read
     put(&store, "a", b"owed").unwrap();
     let resizing = store.gate.write();
-    assert_eq!(store.sync_owed().unwrap_err().code, ErrorCode::Io);
+    let deadline = || std::time::Instant::now() + Duration::from_secs(1);
+    assert_eq!(store.sync_owed(deadline()).unwrap_err().code, ErrorCode::Io);
     drop(resizing);
-    store.sync_owed().unwrap();
+    store.sync_owed(deadline()).unwrap();
 }
 /// A store of many rows, of which `destroy` removes them all in one commit, and its data file's path
 fn filled(dir: &tempfile::TempDir, destroy: bool) -> std::path::PathBuf {

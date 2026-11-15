@@ -403,8 +403,9 @@ impl Database {
                     Some(schema) => schema,
                     None => {
                         let store = self.store.lock().expect("the store slot's lock is never poisoned").clone();
+                        // The caller's wait is spent: the record's locks are tried, and not waited for
                         if let Some(store) = store {
-                            store.sync_owed()?;
+                            store.sync_owed(deadline)?;
                         }
                         return Ok(false);
                     }
@@ -434,12 +435,17 @@ impl Database {
                     // Dropped by the close that closes: one refused for an open unit, or given up on below, leaves the
                     // database open, and its listener is still to hear the builder's commits
                     self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
-                    let closed = if at_exit { store.close_at_exit(wait.unwrap_or_default()) } else { store.close() };
+                    // At exit, within what is left of the caller's wait, which the loop has spent part of
+                    let left = deadline.map_or(std::time::Duration::ZERO, |deadline| {
+                        deadline.saturating_duration_since(std::time::Instant::now())
+                    });
+                    let closed = if at_exit { store.close_at_exit(left) } else { store.close() };
                     return closed.map(|()| true);
                 }
                 Err(shared) => {
-                    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-                        let synced = if at_exit { shared.sync_owed() } else { Ok(()) };
+                    if let Some(deadline) = deadline.filter(|deadline| std::time::Instant::now() >= *deadline) {
+                        // The caller's wait is spent: the record's locks are tried, and not waited for
+                        let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
                         synced?;
                         // The database stays open with its builder stopped: what is left to build is queued again,
@@ -645,6 +651,44 @@ mod tests {
 
     fn quiet() -> OpenOptions {
         OpenOptions { syncs: false, ..Default::default() }
+    }
+
+    // Each gives a margin past its wait for the flush of the data the exit makes, a full flush of the drive on Apple,
+    // slow on a loaded machine
+    #[test]
+    fn an_exit_given_up_on_for_an_operation_s_store_tries_the_record_and_is_over_within_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
+        // An operation holds the store past the wait, and a sync of another thread the record
+        let store = db.store().unwrap();
+        let held = store.hold_record();
+        let began = std::time::Instant::now();
+        assert_eq!(db.close_at_exit(Duration::from_millis(300)).unwrap_err().code, ErrorCode::Io);
+        let took = began.elapsed();
+        // Bounded, the record being held a minute: what a flush beside a loaded suite takes is no part of the test
+        assert!(took < Duration::from_secs(10), "{took:?}, for a wait of 300 ms");
+        drop(held);
+        drop(store);
+    }
+
+    #[test]
+    fn an_exit_whose_store_comes_free_late_closes_within_what_is_left_of_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
+        // An operation lets the store go 2.5 s into a wait of 3, and a sync of another thread holds the record past
+        // both: a close given the whole wait again would take 5.5 s
+        let store = db.store().unwrap();
+        let held = store.hold_record();
+        let operation = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2500));
+            drop(store);
+        });
+        let began = std::time::Instant::now();
+        assert_eq!(db.close_at_exit(Duration::from_secs(3)).unwrap_err().code, ErrorCode::Io);
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(4500), "{took:?}, for a wait of 3 s");
+        operation.join().unwrap();
+        drop(held);
     }
 
     #[test]

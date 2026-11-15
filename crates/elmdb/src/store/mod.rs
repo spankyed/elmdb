@@ -301,6 +301,23 @@ enum Claimed<'a, H> {
 /// How long a growth beside units tries for the gate before it looks again whether a unit has opened
 const GROWTH_GATE_TRY: Duration = Duration::from_millis(5);
 
+/// The record held by another thread for a test (`Store::hold_record`), let go as this drops
+#[cfg(test)]
+pub(crate) struct HeldRecord {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    holder: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl Drop for HeldRecord {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(holder) = self.holder.take() {
+            let _ = holder.join();
+        }
+    }
+}
+
 /// How many times one write grows the map before giving up with `MAP_FULL`
 const MAX_GROWTHS: usize = 16;
 
@@ -860,6 +877,7 @@ impl Store {
         let mut growths = 0;
         loop {
             run_point!(WRITE_RESERVATION);
+            self.hold_to_the_bound()?;
             // Before the write lock, and before the transaction, which may write pages before it commits
             let writing = self.ensure_pin()?;
             run_point!(WRITE_PINNED);
@@ -911,6 +929,41 @@ impl Store {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Holds a write back before it begins, while what the pin holds back is past its bound, until a sync of the
+    /// commits made so far has landed: the sync moves the pin, and the pages freed before it are used again. Where
+    /// commits outrun the disk, every commit while the pin holds writes fresh pages, and without this the file grows by
+    /// all that is committed while a sync runs, which a sync of more pages makes longer. Outside every lock, as the
+    /// sync takes them all. The write is refused where the sync failed: as every commit is refused, where it failed as
+    /// it read or flushed the record or flushed the data; and otherwise, having written nothing to rely on, as a full
+    /// reader table fails it, with `SYNC_BEHIND`, which the caller may try again. The pin doesn't move until a sync
+    /// succeeds, so a write that went on would grow the file past the bound, without end while the failure lasted; and
+    /// since a refused write frees nothing, every write is refused until then, each after a sync of its own
+    pub(crate) fn hold_to_the_bound(&self) -> Result<()> {
+        if let (Some(kept), Some(commit)) = (&self.kept, &self.commit)
+            && kept.past_bound()
+            && let Err(failure) = commit.durable().wait()
+        {
+            // A failure that refuses every commit refuses this one as the commits are refused, whichever wait met it
+            if let Some(refused) = kept.refused() {
+                return Err(refused);
+            }
+            return Err(Error::new(
+                ErrorCode::SyncBehind,
+                format!(
+                    "Nothing of this write was made: what the last synced commit of the database at {} keeps from \
+                     reuse is past its bound, and the sync that would let it go failed having written nothing to rely on \
+                     ({}). \
+                     Try the write again, after a pause: it goes on once a sync succeeds. A sync that keeps failing \
+                     for a full reader table goes on once other processes, or threads of this one, end the read \
+                     transactions they hold",
+                    self.path.display(),
+                    failure.message
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Makes sure this process holds the grouped mode's pin, for a write about to begin its transaction
@@ -1190,6 +1243,14 @@ impl Store {
         op: &Op,
     ) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         self.check_writable()?;
+        // Refused before any wait, as the reservation would refuse it: a unit's owner asking again would otherwise wait
+        // on a sync that may wait on its unit, to take a map another process grew
+        if self.unit_is_open() {
+            return Err(Error::new(ErrorCode::UnitOpen, "A unit is already open on this database"));
+        }
+        // Before the unit's place is reserved: while it waits, writes on other threads go on rather than being refused
+        // as beside an open unit
+        self.hold_to_the_bound()?;
         self.unit.reserve()?;
         // Let go when the unit doesn't begin, whether it is refused or what begins it panics
         let reserved = Reserved(self);
@@ -1398,8 +1459,9 @@ impl Store {
 
     /// Syncs on the calling thread what group commit owes, without its worker, as a process that is exiting does. The
     /// gate is tried and not waited for: a thread that held it for a growth may be gone with it, and a map being grown
-    /// isn't one to read through
-    pub fn sync_owed(&self) -> Result<()> {
+    /// isn't one to read through. The locks the grouped mode's record takes are waited for until `deadline`: a live
+    /// thread holds one until its sync ends, and one that ended holds it for good
+    pub fn sync_owed(&self, deadline: Instant) -> Result<()> {
         match self.commit {
             Some(_) => {
                 failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
@@ -1410,7 +1472,7 @@ impl Store {
                     ));
                 };
                 match &self.kept {
-                    Some(kept) => kept.sync_at_exit(),
+                    Some(kept) => kept.sync_at_exit(deadline),
                     None => self.env.force_sync().map_err(Into::into),
                 }
             }
@@ -1423,7 +1485,7 @@ impl Store {
     /// to close, which a handle a gone thread held would keep open
     pub fn close_at_exit(mut self, wait: Duration) -> Result<()> {
         let deadline = Instant::now() + wait;
-        let synced = self.sync_owed();
+        let synced = self.sync_owed(deadline);
         if let Some(commit) = self.commit.take() {
             commit.stop_at_exit(deadline.saturating_duration_since(Instant::now()));
         }
@@ -1465,6 +1527,21 @@ impl Store {
         if let Some(kept) = &self.kept {
             kept.unpinned.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// The grouped mode's record held by another thread, as a sync of it does, until what this returns is dropped
+    #[cfg(test)]
+    pub(crate) fn hold_record(&self) -> HeldRecord {
+        let kept = Arc::clone(self.kept.as_ref().expect("a store of the grouped mode"));
+        let (taken, took) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let _record = kept.record_guard();
+            taken.send(()).expect("the test waits for the record to be held");
+            let _ = released.recv_timeout(Duration::from_secs(60));
+        });
+        took.recv().expect("the record is held");
+        HeldRecord { release: Some(release), holder: Some(holder) }
     }
 
     /// Sets the fixed part of the bound past which what the pin holds back makes a sync due, for a test
@@ -1513,6 +1590,13 @@ struct EnvSyncer {
 impl Syncer for EnvSyncer {
     fn sync(&self) -> Result<()> {
         self.kept.sync(&|| self.kept.adopt())
+    }
+
+    /// Final where the process refuses its commits: the sync, or a write's, failed as it read or flushed the record or
+    /// flushed the data. Every wait then fails with that failure, whichever sync met it. One that failed short of a
+    /// flush, as a full reader table fails it, wrote nothing to rely on, and the next sync tries again
+    fn final_failure(&self, _failure: &Error) -> Option<Error> {
+        self.kept.failure()
     }
 }
 

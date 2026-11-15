@@ -106,7 +106,10 @@ export declare class Database {
    * its `Changed`
    */
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
-  /** Blocks until every index waiting to be built is built or has failed */
+  /**
+   * Blocks until every index waiting to be built is built or has failed, or answers what holds a build up while the
+   * builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again after a pause to wait on
+   */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
   purge(what: PurgeTarget): void

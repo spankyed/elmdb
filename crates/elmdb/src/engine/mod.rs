@@ -650,7 +650,17 @@ impl Database {
                 "A unit is open, and an index build waits for it to end: commit or abort it, then wait for the builds",
             ));
         }
-        waiter.wait();
+        // Held up by what refused its work with nothing made, the builder waits it out: told so, the caller tries again
+        if let Some(held) = waiter.wait() {
+            return Err(Error::new(
+                held.code,
+                format!(
+                    "The index builds wait for what refused their last write, and go on once it passes: call this again \
+                     after a pause to wait on. What refused it: {}",
+                    held.message
+                ),
+            ));
+        }
         let failures = self.builder().as_ref().map(Builder::failures).unwrap_or_default();
         if failures.is_empty() {
             return Ok(());

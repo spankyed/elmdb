@@ -138,6 +138,8 @@ pub(crate) mod points {
     pub const WRITE_PINNED: &str = "store::write_pinned";
     /// Runs as a unit is begun once it has made sure of its pin, before it takes the write transaction
     pub const UNIT_PINNED: &str = "store::unit_pinned";
+    /// A sync of the grouped mode fails before it has written anything, as a reader table that stays full fails it
+    pub const SYNC_BEGIN: &str = "store::sync_begin";
     /// Runs in a sync of the grouped mode once it has begun the read transaction its pin moves to, before it reads
     /// that commit's meta page from the file
     pub const SYNC_PINNED: &str = "store::sync_pinned";

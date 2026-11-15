@@ -125,18 +125,19 @@ there, `adopt_replacement(epoch)` takes it as seen, and answers false if another
 ## Reads: plans
 
 A call carries several reads, answered from one snapshot (or, in a unit, from its own transaction) in one msgpack
-envelope, an answer per read. A read is a query plan, or a direct read: an entity's row, one of its fields (with
-whether it is present), a relation's row (with its `weight`, for a kind declared weighted), `findRelations` by kind
-and ends, `wouldCreateCycle` (the walk a link's
-`CYCLE` check makes, a trashed entity's edges included), and search's
-`suggest`, `findLabels` and `pendingEmbeddings`, and `catalog`: each declared type with its live entities and the fields its entities have
-held, each declared kind with its relations, and the declared roles. `catalog` reads one key per name, so a watch over it
-runs again only when a count moves or a field is first written; `stats()` is the walk, for what only a walk answers. A search naming an index its type lacks, or none on a type with none or several, is refused
+envelope, an answer per read. A read is a query plan, or a direct read: an entity's row, one of its fields (with whether
+it is present), a relation's row (with its `weight`, for a kind declared weighted), `findRelations` by kind and ends,
+`wouldCreateCycle` (the walk a link's `CYCLE` check makes, a trashed entity's edges included), and search's `suggest`,
+`findLabels` and `pendingEmbeddings`, and `catalog`: each declared type with its live entities and the fields its
+entities have held, each declared kind with its relations, and the declared roles. `catalog` reads one key per name, so
+a watch over it runs again only when a count moves or a field is first written; `stats()` is the walk, for what only a
+walk answers. A search naming an index its type lacks, or none on a type with none or several, is refused
 (`UNKNOWN_INDEX`). A `search`, a `hybrid` or a `suggest` over a text index still being built is refused
 (`INDEX_BUILDING`): its terms and statistics are the answer, with no rows to walk in their place as a value or a trigram
-index's are, so read part way it would answer from the entities filed so far and say nothing of the rest. `waitForIndexBuilds`
-resolves once it is built; a tracked read and a watch are told by the commit that ends the build (below, Change sets
-and watch).
+index's are, so read part way it would answer from the entities filed so far and say nothing of the rest.
+`waitForIndexBuilds` resolves once it is built, and is refused with what holds a build up while the builder waits that
+out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller to make again; a tracked read and a watch are told by
+the commit that ends the build (below, Change sets and watch).
 
 A plan is a scope, a start, steps and a terminal:
 
@@ -519,49 +520,65 @@ A batch is data, so the engine can retry it (after growing the map, `design.md`)
 
 ## Durability
 
-A unit is visible when it commits and survives the process crashing once `write` returns. Surviving the machine
-failing is a sync: group commit syncs once writes pause for `syncIdleMs` (100 ms) and at most `syncIntervalMs` (1 s)
-after the first unsynced commit, on a background thread. `db.durable()` resolves once everything committed before it is
-on disk, and rejects if the sync it waits on fails. A failed sync is final until the database is reopened: an OS may
-mark the pages it couldn't write clean and drop them (PostgreSQL's "fsyncgate"), so a later sync that succeeds proves
-nothing about them, and every later commit is built on them; every wait after it rejects, naming it. A write or a
-commit passed `durable` commits with a sync, and throws `NOT_DURABLE` if that sync fails, the commit having been made
-and its change set delivered. Admin and schema mutations use the same finalization: they report `NOT_DURABLE` after
-notifying watches, with committed data and in-memory schema already installed. Empty-index markers are settled inside
-the schema/reset/replace transaction, not by a second commit. A caller must not retry the mutation as though it had been
-refused; the error names its sequence, and `db.sequence` gives the current commit without parsing the message.
-The failed call does not return its touched-token list: callers managing tracked tokens must conservatively invalidate
-all of them on `NOT_DURABLE`. Native watches have already been finalized. apack follows that invalidation rule.
-`close()` syncs what is owed, and reports a sync that failed.
+A unit is visible when it commits and survives the process crashing once `write` returns. Surviving the machine failing
+is a sync: group commit syncs once writes pause for `syncIdleMs` (100 ms) and at most `syncIntervalMs` (1 s) after the
+first unsynced commit, on a background thread. `db.durable()` resolves once everything committed before it is on disk,
+and rejects if the sync it waits on fails. A sync that fails as it reads or flushes the record, or flushes the data, is
+final until the database is reopened: an OS may mark the pages it couldn't write clean and drop them (PostgreSQL's
+"fsyncgate"), so a later sync that succeeds proves nothing about them, and every later commit is built on them; every
+wait after it rejects, naming it. One that wrote nothing to rely on is not (below). A write or a commit passed `durable`
+commits with a sync, and throws `NOT_DURABLE` if that sync fails, the commit having been made and its change set
+delivered. Admin and schema mutations use the same finalization: they report `NOT_DURABLE` after notifying watches, with
+committed data and in-memory schema already installed. Empty-index markers are settled inside the schema/reset/replace
+transaction, not by a second commit. A caller must not retry the mutation as though it had been refused; the error names
+its sequence, and `db.sequence` gives the current commit without parsing the message. The failed call does not return
+its touched-token list: callers managing tracked tokens must conservatively invalidate all of them on `NOT_DURABLE`.
+Native watches have already been finalized. apack follows that invalidation rule. `close()` syncs what is owed, and
+reports a sync that failed.
 
-`syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made,
-its pages before the meta page that names them, so a commit that returned survives the machine losing power, and no
-group commit runs. On Apple a full sync (`F_FULLFSYNC`, which LMDB makes of the data file) follows each commit as well, since
-LMDB writes the meta page with `O_DSYNC`, which doesn't flush the drive's cache there. A write's `durable` and `durable()`
-then answer at once, since each commit was synced. The price is a
-sync for every commit: on an Apple M1 Pro at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three
-rounds, after the Apple full sync was added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs;
-4.0 ms for a durable write in the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped mode, where a commit that returned
-may be lost to a power loss until its sync, a moment later, and nothing before it is: the last synced commit is kept
-(`../roadmap/synced-commit.md`). A process with commits not yet synced holds a read transaction, the pin, at a commit
-on disk, so LMDB gives no writer that commit's pages, and a write makes sure of the pin before its transaction
-begins. A sync begins a read transaction at the newest commit, takes its meta page while LMDB's newest is still that
-one, syncs the data, writes that commit's meta page to the record beside the data file (`synced`, `format.md`) and
-syncs it, and only then lets the old pin go; a process that owes nothing then holds no pin. An open that finds the
-record written in another boot, a later commit on the file and no other process with the database open writes the
-record's meta page over the file's two, the two it wrote over saved once in `synced.restored`, and so opens at that
-commit, whatever the loss left of the pages after it. A process's death leaves its commits to the OS, which holds
-them: a database another process has open, or whose record is of this boot, opens at its newest commit. A sync that
-fails marks the record `failed`, the process refuses every commit after it, and the next open restores the record's
-commit, in this boot too; an open that finds a restore to make beside another process, or can't write the data
-file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's `kern.bootsessionuuid`, and on Windows a
-random value the first process to ask writes in a volatile registry key under the current user, which a restart or a
-logoff takes away; where none can be read, a process's death costs the commits since its last sync, as a loss would. A
-sync is also due once the file's last page is past the pin's by 64 MiB or a quarter of the file, whichever is more,
-since the pages freed since the pin wait for the next record. The cost is a second sync after each, the record's: a
-`durable` write waits for both. A database written by an elmdb from before the record keeps no pin and reads no
-record, and its file may be no commit's after a loss, as every grouped file was. A test replays the loss in both
-modes (`testing.md`, Power loss).
+`syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made, its
+pages before the meta page that names them, so a commit that returned survives the machine losing power, and no group
+commit runs. On Apple a full sync (`F_FULLFSYNC`, which LMDB makes of the data file) follows each commit as well, since
+LMDB writes the meta page with `O_DSYNC`, which doesn't flush the drive's cache there. A write's `durable` and
+`durable()` then answer at once, since each commit was synced. The price is a sync for every commit: on an Apple M1 Pro
+at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three rounds, after the Apple full sync was
+added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs; 4.0 ms for a durable write in
+the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped
+mode, where a commit that returned may be lost to a power loss until its sync, a moment later, and nothing before it is:
+the last synced commit is kept (`../roadmap/synced-commit.md`). A process with commits not yet synced holds a read
+transaction, the pin, at a commit on disk, so LMDB gives no writer that commit's pages, and a write makes sure of the
+pin before its transaction begins. A sync begins a read transaction at the newest commit, takes its meta page while
+LMDB's newest is still that one, syncs the data, writes that commit's meta page to the record beside the data file
+(`synced`, `format.md`) and syncs it, and only then lets the old pin go; a process that owes nothing then holds no pin.
+An open that finds the record written in another boot, a later commit on the file and no other process with the database
+open writes the record's meta page over the file's two, the two it wrote over saved once in `synced.restored`, and so
+opens at that commit, whatever the loss left of the pages after it. A process's death leaves its commits to the OS,
+which holds them: a database another process has open, or whose record is of this boot, opens at its newest commit. A
+sync that fails as it reads or flushes the record, or flushes the data, is final: the process refuses every commit after
+it, and where the data's flush or the record's write failed it marks the record `failed`, so that the next open restores
+the record's commit, in this boot too. One that fails short of those, as its read transaction begins, which a full
+reader table fails, or as it reads the root pages after the data's flush, has written nothing to rely on: it fails the
+waits on it alone. The pin doesn't move until a sync succeeds, so while what it keeps is past the bound every write is
+refused before it begins, once a sync it asks for has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the
+caller tries it again after a pause, where a full reader table is the cause, until other processes, or threads of its
+own, end the read transactions they hold. The index builder waits it out, a second at a time, and runs its work again
+only once a write would go on, as it waits out a full reader table its own reads meet; `waitForIndexBuilds` meanwhile
+answers what holds the builds up (`SYNC_BEHIND` or `READERS_FULL`) rather than waiting on it. The next sync is tried at
+once by a `durable` wait or a write past the bound, and by the timer `syncIntervalMs` after the failure, or 100 ms where
+that is less, whether or not anything is committed since. An open that finds a restore to make beside another process,
+or can't write the data file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's
+`kern.bootsessionuuid`, and on Windows a random value the first process to ask writes in a volatile registry key under
+the current user, which a restart or a logoff takes away; where none can be read, a process's death costs the commits
+since its last sync, as a loss would. A sync is also due once the pages commits from the pin's on freed, which wait for
+the next record before any commit may take them, are more than 16 MiB or a quarter of the file, whichever is more, as
+read from the free tree; and a write past that waits, before it begins, for the sync. So the file grows by the bound, by
+what is written before the free tree is read again (once the file has grown by an eighth of the bound, or once in 16
+asks, which a write makes two of), by a single write larger than the bound, and by writes already past their check when
+it was crossed. A pin of another process older than this one's keeps more, until that process's own sync, which its
+timers make due within `syncIntervalMs` (1 s); a read transaction a caller holds keeps more for as long as it is held,
+as it does today. The cost is a second sync after each, the record's: a `durable` write waits for both. A database
+written by an elmdb from before the record keeps no pin and reads no record, and its file may be no commit's after a
+loss, as every grouped file was. A test replays the loss in both modes (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent

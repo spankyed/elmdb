@@ -96,7 +96,8 @@ It uses N-API, so a Node or Electron upgrade needs no rebuild.
 
 **Durability:** a commit is visible at once and synced within about a second. `db.write(batch, true)` returns once
 its sync is done, and `await db.durable()` waits for every commit before it to be on disk without holding the event
-loop. `NOT_DURABLE` means the commit landed but its sync failed, so don't blindly retry it.
+loop. `NOT_DURABLE` means the commit landed but its sync failed, so don't blindly retry it. `SYNC_BEHIND` means nothing
+was written, as the syncs that let the file be reused are failing for now: try it again after a pause.
 
 **Writes block; long maintenance doesn't have to.** A write runs on the calling thread and answers there, so what it
 created and what it refused are known at the call, and a read after it sees it. `db.checkAsync`, `db.rebuildAsync`,
