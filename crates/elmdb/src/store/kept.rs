@@ -207,6 +207,7 @@ impl Kept {
             run_point!(SYNC_PINNED at &self.dir);
             // A commit landed as the page was read: the newer one is taken instead
             let Some(meta) = self.take_meta(&txn)? else { continue };
+            run_point!(SYNC_TAKEN at &self.dir);
             return self.record_at(txn, &meta);
         }
     }
@@ -386,6 +387,7 @@ impl Kept {
             // Another process committed since the record this one relies on: a sync and a record first, outside
             // LMDB's write lock, which leave the pin held for this write
             let Some(meta) = self.take_meta(&txn)? else { continue };
+            run_point!(SYNC_TAKEN at &self.dir);
             self.record_at(txn, &meta)?;
         }
     }

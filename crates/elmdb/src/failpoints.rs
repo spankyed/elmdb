@@ -132,6 +132,8 @@ pub(crate) mod points {
     /// Runs in a sync of the grouped mode once it has begun the read transaction its pin moves to, before it reads
     /// that commit's meta page from the file
     pub const SYNC_PINNED: &str = "store::sync_pinned";
+    /// Runs in a sync of the grouped mode once it has taken its commit's meta page, before it takes the record's lock
+    pub const SYNC_TAKEN: &str = "store::sync_taken";
     /// Runs in a sync of the grouped mode once the data file is synced, before the record is written
     pub const SYNC_DATA: &str = "store::sync_data";
     /// Runs in a sync of the grouped mode once the record is synced, before the pin is moved

@@ -368,10 +368,13 @@ first is the cost the format's rule accepts until a release has users (`../archi
    through writes of values on overflow pages, a process ended at each step of a sync and of a restore, a restored
    database's workload and `check()`, the refusal beside another process, the read-only open with no boot, a
    restored database's sync, the commit forced beside the meta page's read, a failed sync and another process's
-   sync after it, and a sync made due by the bound. Not yet: values that spill, which take a transaction of more
-   dirty pages than LMDB keeps in memory (`MDB_IDL_UM_MAX` of them, `midl.h`); the readings of the bound over a minute and the million-note
-   load; the unit run again after its map grew, with a loss replayed over what it wrote before its commit; an open
-   beside a write's first sync; a `durable` write beside a second process's sync; and the readings beside today's.
+   sync after it, a sync made due by the bound, a `durable` write beside another process's sync that took an earlier
+   commit's meta page, which the next loss keeps, an open beside another process's first sync before its write,
+   which waits for the record, and a write run again after its map grew two commits past the record's, which syncs
+   before it and leaves a loss the record's commit. Not yet: values that spill, which take a transaction of more
+   dirty pages than LMDB keeps in memory (`MDB_IDL_UM_MAX` of them, `midl.h`), and with them the pages a write run
+   again after its map grew writes before its commit; the readings of the bound over a minute and the million-note
+   load; and the readings beside today's.
    Windows' boot, the volatile registry key, is built with this phase rather than the last: without it every death
    there read as a loss, and a write that returned was undone when its process was killed, which the engine promises
    it is not. Until phase 4, a database is written in one mode at a time by its callers: a writable open of another mode than
