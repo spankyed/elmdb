@@ -2826,10 +2826,13 @@ mod crash {
             }
             let after_next = model_state(&model);
             let got = state_of(&db);
+            // What the open made of the record beside the files: a death opens at the newest commit, and a restore
+            // here would be the record's doing
+            let restored = db.store().unwrap().restored();
             assert!(
                 got == after_acked || got == after_next,
                 "seed {seed}: killed after {acked} acknowledged steps, the files hold neither the state after them nor after one more\n\
-                 differing from the acknowledged state: {}\nthe step in flight: {:?}",
+                 differing from the acknowledged state: {}\nthe step in flight: {:?}\nrestored to: {restored:?}",
                 differences(&got, &after_acked),
                 steps.get(acked)
             );

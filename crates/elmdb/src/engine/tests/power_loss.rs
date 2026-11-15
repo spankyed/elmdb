@@ -7,10 +7,12 @@
 //!   that names them. So a loss leaves the commit before with any of the next one's pages and not its meta page, or
 //!   the next one whole.
 //! - **Commits synced in groups**: nothing is synced between two of group commit's syncs, so a loss leaves the last
-//!   synced file with any of the pages written since, a meta page as soon as the pages it names.
+//!   synced file with any of the pages written since, a meta page as soon as the pages it names, and the record
+//!   beside it that the last sync wrote (`docs/roadmap/synced-commit.md`). The open after the loss restores the
+//!   record's commit, whose pages the pin kept from every commit after it.
 //!
 //! A file survives when it opens, `check()` finds nothing, and it holds what the commits acknowledged by then wrote,
-//! or one more. This replays LMDB's order of writes as its source gives it, on a file: it is no test of a disk, a
+//! or one more; in the grouped mode, what the last sync's commit held. This replays LMDB's order of writes as its source gives it, on a file: it is no test of a disk, a
 //! filesystem or a controller that acknowledges a sync it hasn't done.
 
 use std::collections::BTreeMap;
@@ -87,8 +89,12 @@ fn with(from: &[u8], to: &[u8], pages: &[usize], page: usize) -> Vec<u8> {
 fn held(image: &[u8], ids: usize) -> Result<Model, String> {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("data.mdb"), image).unwrap();
-    let db =
-        Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).map_err(|e| e.to_string())?;
+    held_at(dir.path(), ids)
+}
+
+/// `held` of the database in `dir`, with whatever record is beside its data file
+fn held_at(dir: &Path, ids: usize) -> Result<Model, String> {
+    let db = Database::open(dir, OpenOptions { syncs: false, ..Default::default() }).map_err(|e| e.to_string())?;
     let report = db.check().map_err(|e| e.to_string())?;
     if !report.is_clean() {
         return Err(format!("check: {report:?}"));
@@ -205,11 +211,15 @@ fn aborted(status: &std::process::ExitStatus) -> bool {
 /// other way fails here
 fn held_apart(image: &[u8]) -> Read {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("image");
-    std::fs::write(&path, image).unwrap();
+    std::fs::write(dir.path().join("data.mdb"), image).unwrap();
+    held_apart_in(dir.path())
+}
+
+/// `held_apart` of the database in `dir`, with whatever record is beside its data file
+fn held_apart_in(dir: &Path) -> Read {
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "engine::tests::power_loss::child_says_what_a_file_holds", "--nocapture"])
-        .env("ELMDB_POWER_LOSS_FILE", &path)
+        .env("ELMDB_POWER_LOSS_DIR", dir)
         .output()
         .unwrap();
     let said = String::from_utf8_lossy(&child.stdout);
@@ -238,65 +248,159 @@ fn held_apart(image: &[u8]) -> Read {
 #[test]
 #[ignore = "run only by the next test, as its child process"]
 fn child_says_what_a_file_holds() {
-    let Ok(path) = std::env::var("ELMDB_POWER_LOSS_FILE") else { return };
-    match held(&std::fs::read(path).unwrap(), COMMITS) {
+    let Ok(dir) = std::env::var("ELMDB_POWER_LOSS_DIR") else { return };
+    match held_at(Path::new(&dir), COMMITS) {
         Ok(model) => println!("held {}", serde_json::to_string(&model).unwrap()),
         Err(refused) => println!("refused {}", refused.replace('\n', " ")),
     }
 }
 
-/// Whether a file a power loss left survives: it holds what some run of the commits, from the first acknowledged
-/// before the loss on, wrote
-fn survives(held: Result<Model, String>, models: &[Model], acknowledged: usize) -> bool {
-    held.is_ok_and(|model| models[acknowledged..].contains(&model))
+/// The record beside the data file, as the operating system holds it
+fn record(dir: &Path) -> Vec<u8> {
+    std::fs::read(dir.join(crate::store::RECORD_FILE)).unwrap()
+}
+
+/// How often the grouped workload syncs, in commits
+const SYNC_EVERY: usize = 8;
+
+/// What a run of the grouped workload leaves: the data file after each commit, the records with the file each was
+/// written for, the models, and the page size
+type Grouped = (Vec<Vec<u8>>, Vec<(usize, Vec<u8>)>, Vec<Model>, usize);
+
+/// The grouped workload, synced at every `SYNC_EVERY`th commit and at no other: the data file after each commit, the
+/// first being the database as opened, the record after each sync with the file it was written for, and the models.
+/// `unpinned` turns the pin off, its transaction ended as soon as it is begun
+fn grouped_run(unpinned: bool) -> Grouped {
+    let dir = tempfile::tempdir().unwrap();
+    let grouped = OpenOptions { sync_idle_ms: 600_000, sync_interval_ms: 600_000, ..Default::default() };
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema()), ..grouped }).unwrap();
+    let store = db.store().unwrap();
+    if unpinned {
+        store.unpin();
+    }
+    let page = store.page_size();
+    // The open's own commits are synced and recorded as it opens
+    let mut model = Model::new();
+    let (mut files, mut models) = (vec![file(dir.path())], vec![model.clone()]);
+    let mut records = vec![(0, record(dir.path()))];
+    for n in 0..COMMITS {
+        commit(&db, &mut model, n);
+        if (n + 1) % SYNC_EVERY == 0 {
+            db.durable().unwrap().wait().unwrap();
+            records.push((n + 1, record(dir.path())));
+        }
+        files.push(file(dir.path()));
+        models.push(model.clone());
+    }
+    drop(store);
+    db.close().unwrap();
+    (files, records, models, page)
+}
+
+/// The database a loss left: the data file `image` and the record `record`, written in another boot
+fn lost(image: &[u8], record: &[u8]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("data.mdb"), image).unwrap();
+    std::fs::write(dir.path().join(crate::store::RECORD_FILE), crate::store::record_of_another_boot(record)).unwrap();
+    dir
+}
+
+/// Some of the ways a loss leaves `pages` written and not: none, all, each half, every second one, and a few that a
+/// seed tosses a coin for, each page in turn
+fn tossed(pages: &[usize], seed: u32) -> Vec<Vec<usize>> {
+    let half = pages.len() / 2;
+    let mut some = vec![
+        Vec::new(),
+        pages.to_vec(),
+        pages.iter().copied().step_by(2).collect(),
+        pages[..half].to_vec(),
+        pages[half..].to_vec(),
+    ];
+    let mut state = seed;
+    for _ in 0..4 {
+        some.push(
+            pages
+                .iter()
+                .copied()
+                .filter(|_| {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    state >> 31 == 1
+                })
+                .collect(),
+        );
+    }
+    some.sort();
+    some.dedup();
+    some
 }
 
 #[test]
-fn commits_synced_in_groups_do_not_survive_a_power_loss_between_two_syncs() {
-    // A long while between syncs, so that none runs during the workload: every commit is acknowledged, none synced
-    let grouped = OpenOptions { sync_idle_ms: 600_000, sync_interval_ms: 600_000, ..Default::default() };
-    let (files, models, page) = run(grouped);
-    let (synced, last) = (&files[0], &files[COMMITS]);
-    // With nothing written since the sync on disk, the file is whole and holds none of what was acknowledged:
-    // where each commit is synced, the same loss leaves the last of them
-    assert_eq!(held(synced, COMMITS).as_ref(), Ok(&models[0]));
-    assert!(!survives(held(synced, COMMITS), &models, COMMITS), "every commit was acknowledged, and none is there");
-    let (each, synced_models, _) = run(OpenOptions { sync_each_commit: true, ..Default::default() });
-    assert!(survives(held(&each[COMMITS], COMMITS), &synced_models, COMMITS));
-    // With every page on disk it is the last commit's
-    assert!(survives(held(last, COMMITS), &models, COMMITS));
-    // The pages written since the sync are of every commit, and nothing orders them on disk: with some of them
-    // there and the rest not, the file is some commit's only by chance. Some such files don't open, or hold tasks no
-    // commit left
-    let pages = written(synced, last, page);
-    let (meta, data): (Vec<usize>, Vec<usize>) = pages.iter().partition(|&&at| at < 2);
-    assert!(!meta.is_empty() && data.len() > 8, "{pages:?}");
-    let mut state = 0x2545_f491_u32;
-    let mut lost = Vec::new();
-    for _ in 0..24 {
-        // The meta pages, and each other page or not by a coin a seed tosses
-        let mut some = meta.clone();
-        for &at in &data {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            if state >> 31 == 1 {
-                some.push(at);
+fn commits_synced_in_groups_survive_a_power_loss_at_the_last_synced_commit() {
+    let (files, records, models, page) = grouped_run(false);
+    let mut tried = 0;
+    for (window, (synced, record)) in records.iter().enumerate() {
+        // The pages written after a sync, until the next is on disk: the next sync's data is synced before its
+        // record is written, so a loss up to the next record leaves this one
+        let next = records.get(window + 1).map_or(COMMITS, |(next, _)| *next);
+        for until in [synced + 1, synced + 3, next].into_iter().filter(|until| *until <= next && *until > *synced) {
+            let pages = written(&files[*synced], &files[until], page);
+            for some in tossed(&pages, until as u32) {
+                let dir = lost(&with(&files[*synced], &files[until], &some, page), record);
+                assert_eq!(
+                    held_at(dir.path(), COMMITS).as_ref(),
+                    Ok(&models[*synced]),
+                    "a loss after commit {until}, with pages {some:?} of {pages:?} written since the sync at {synced}"
+                );
+                tried += 1;
             }
-        }
-        match held_apart(&with(synced, last, &some, page)) {
-            Read::Holds(model) if models.contains(&model) => {}
-            Read::Holds(_) => lost.push("tasks no commit left".to_owned()),
-            Read::Refused(why) => lost.push(why),
-            // The fault of a read past the file's end is what the open's check of a short file is there to stop: a
-            // file that check let through, and no loss to count
-            Read::Faulted(how) => {
-                panic!("a file a power loss could leave was read past its end ({how}), pages {some:?}")
-            }
-            // A file torn within its length can end its reader too, by LMDB's abort on a page it can't read as one of
-            // the tree it is in: not survived, and not what the open's check is for
-            Read::Aborted(how) => lost.push(format!("its reader aborted ({how})")),
         }
     }
-    assert!(!lost.is_empty(), "every file of some of the pages was some commit's");
+    assert!(tried > 60, "{tried} files tried");
+}
+
+#[test]
+fn a_restored_database_takes_a_workload_over_the_lost_commits_numbers_and_passes_check() {
+    let (files, records, models, page) = grouped_run(false);
+    let ((synced, record), (next, _)) = (&records[1], &records[2]);
+    // Every commit up to the next sync's on disk but the record's: all of them lost, and their transaction numbers
+    // the restored database's to use again
+    let image = with(&files[*synced], &files[*next], &written(&files[*synced], &files[*next], page), page);
+    let dir = lost(&image, record);
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema()), ..Default::default() }).unwrap();
+    let mut model = models[*synced].clone();
+    for n in *synced..next + 4 {
+        commit(&db, &mut model, n);
+    }
+    db.durable().unwrap().wait().unwrap();
+    db.close().unwrap();
+    assert_eq!(held_at(dir.path(), COMMITS).as_ref(), Ok(&model));
+}
+
+#[test]
+fn without_the_pin_a_power_loss_takes_the_record_s_commit_too() {
+    let (files, records, models, page) = grouped_run(true);
+    let mut lost_commits = Vec::new();
+    for (window, (synced, record)) in records.iter().enumerate() {
+        let Some((next, _)) = records.get(window + 1) else { continue };
+        // Every page written since the sync on disk, its record not yet: the commits after the sync wrote over the
+        // pages of its commit, which no pin kept
+        let image = with(&files[*synced], &files[*next], &written(&files[*synced], &files[*next], page), page);
+        let dir = lost(&image, record);
+        match held_apart_in(dir.path()) {
+            Read::Holds(model) if model == models[*synced] => {}
+            Read::Holds(_) => lost_commits.push(format!("{synced}: tasks no commit left")),
+            Read::Refused(why) => lost_commits.push(format!("{synced}: {why}")),
+            Read::Aborted(how) => lost_commits.push(format!("{synced}: its reader aborted ({how})")),
+            Read::Faulted(how) => panic!("a restored file was read past its end ({how})"),
+        }
+    }
+    assert!(!lost_commits.is_empty(), "every restore without the pin was whole");
+}
+
+#[test]
+fn a_file_cut_short_of_pages_its_trees_reach_is_refused_before_it_is_read() {
+    let (files, _, _, page) = grouped_run(false);
+    let last = &files[COMMITS];
     // Cut to half its pages, the last commit's file lacks pages its trees reach: refused by the open's check, where a
     // reader let through would fault on the first of them it touched
     match held_apart(&last[..last.len() / 2 / page * page]) {
@@ -304,7 +408,6 @@ fn commits_synced_in_groups_do_not_survive_a_power_loss_between_two_syncs() {
         Read::Faulted(how) => panic!("the last commit's file, cut to half its pages, was read past its end ({how})"),
         Read::Holds(_) | Read::Aborted(_) => panic!("the last commit's file, cut to half its pages, was read"),
     }
-    // Refused as LMDB refuses a file it can't read, or holding no commit's tasks: a loss of some pages is not survived
 }
 
 #[test]

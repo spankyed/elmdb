@@ -20,7 +20,7 @@ use heed::{RoTxn, WithoutTls};
 use crate::error::{Error, ErrorCode, Result};
 
 /// The page header: the page number, two bytes of padding, the flags, and the bounds of the page's free space
-const PAGE_HEADER: usize = 16;
+pub(super) const PAGE_HEADER: usize = 16;
 const MAGIC: u32 = 0xBEEF_C0DE;
 const P_BRANCH: u16 = 0x01;
 const P_LEAF: u16 = 0x02;
@@ -41,6 +41,7 @@ const META_MAIN_ROOT: usize = PAGE_HEADER + 24 + DB_RECORD + DB_ROOT;
 const META_LAST_PAGE: usize = PAGE_HEADER + 24 + 2 * DB_RECORD;
 const META_TXNID: usize = META_LAST_PAGE + 8;
 const META_LEN: usize = META_TXNID + 8;
+const _: () = assert!(META_LEN - PAGE_HEADER == super::record::BODY, "a record holds a meta page's body whole");
 
 /// What a commit's meta page names: the roots of its free and main trees, and the last page of the file as it left
 /// it. Held no longer than the read transaction at that commit, which keeps the trees' pages as the commit left them
@@ -84,6 +85,19 @@ pub(super) fn main_tree_pages(file: &mut File, psize: usize, pages: u64, txnid: 
     Ok(walk.seen.iter().filter(|seen| **seen).count())
 }
 
+/// The pages the trees from `roots` reach, in a file of whole pages of `psize` bytes, for a test that watches them
+#[cfg(test)]
+pub(super) fn pages_of(file: &mut File, psize: usize, roots: [u64; 2], path: &Path) -> Result<Vec<u64>> {
+    let pages = file.metadata()?.len() / psize as u64;
+    let mut walk = Walk { file, psize, pages, path, seen: vec![false; pages as usize], highest: 0 };
+    for root in roots {
+        if let Some(missing) = walk.tree(root)? {
+            return Err(refused(path, &format!("reaches page {missing} past its end")));
+        }
+    }
+    Ok(walk.seen.iter().enumerate().filter(|(_, seen)| **seen).map(|(at, _)| at as u64).collect())
+}
+
 /// The meta page of the commit `snapshot` reads at, if the file holds it. Either meta page may be torn, and the two
 /// are written in turn: the commit after the next writes over this one
 pub(super) fn meta<'snapshot>(
@@ -93,6 +107,60 @@ pub(super) fn meta<'snapshot>(
 ) -> Option<Meta<'snapshot>> {
     let (free, main, last_page) = meta_of(file, psize, snapshot.id() as u64)?;
     Some(Meta { free, main, last_page, _held: PhantomData })
+}
+
+/// One of the file's two meta pages as the file holds it: the commit it says it is, its body, and what the body names
+pub(super) struct MetaPage {
+    pub(super) txnid: u64,
+    pub(super) body: [u8; super::record::BODY],
+}
+
+impl MetaPage {
+    /// The roots of the free tree and the main tree
+    pub(super) fn roots(&self) -> [u64; 2] {
+        roots_of(&self.body)
+    }
+
+    pub(super) fn last_page(&self) -> u64 {
+        u64_at(&self.body, META_LAST_PAGE - PAGE_HEADER)
+    }
+}
+
+/// The roots of the free tree and the main tree a meta page's body names
+pub(super) fn roots_of(body: &[u8; super::record::BODY]) -> [u64; 2] {
+    [u64_at(body, META_FREE_ROOT - PAGE_HEADER), u64_at(body, META_MAIN_ROOT - PAGE_HEADER)]
+}
+
+/// The roots of the named databases a page of the main tree lists, where it is a leaf: the trees the main tree's
+/// root reaches by name, elmdb's own among them
+pub(super) fn named_roots(page: &[u8]) -> Vec<u64> {
+    if u16_at(page, 10) & P_LEAF == 0 {
+        return Vec::new();
+    }
+    nodes(page)
+        .filter(|node| node + 8 <= page.len())
+        .filter(|node| u16_at(page, node + 4) & F_SUBDATA != 0)
+        .map(|node| u64_at(page, node + 8 + u16_at(page, node + 6) as usize + DB_ROOT))
+        .collect()
+}
+
+/// The meta page in `slot`, 0 or 1, where it reads as one: LMDB's magic, and whole as far as a read of it goes
+pub(super) fn meta_page(file: &mut File, psize: usize, slot: u64) -> Option<MetaPage> {
+    let page = read_at(file, slot * psize as u64, META_LEN)?;
+    if u32_at(&page, META_MAGIC) != MAGIC {
+        return None;
+    }
+    let body = page[PAGE_HEADER..META_LEN].try_into().expect("a meta page's body");
+    Some(MetaPage { txnid: u64_at(&page, META_TXNID), body })
+}
+
+/// The file's newer meta page, the one LMDB opens it at: of the higher commit, the first where both are of one
+pub(super) fn newer_meta_page(file: &mut File, psize: usize) -> Option<MetaPage> {
+    let (first, second) = (meta_page(file, psize, 0), meta_page(file, psize, 1));
+    match (first, second) {
+        (Some(first), Some(second)) => Some(if second.txnid > first.txnid { second } else { first }),
+        (first, second) => first.or(second),
+    }
 }
 
 /// The free tree's root, the main tree's and the last page, of the meta page transaction `txnid` wrote

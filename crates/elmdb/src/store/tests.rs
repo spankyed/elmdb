@@ -1586,7 +1586,7 @@ fn a_file_that_holds_every_page_its_meta_page_names_is_not_read_for_its_trees() 
     let mut file = std::fs::File::open(&data).unwrap();
     let page = super::page_size_of(&mut file, &data).unwrap();
     assert_eq!(std::fs::metadata(&data).unwrap().len(), (store.env.info().last_page_number as u64 + 1) * page as u64);
-    let opening = super::Opening { env: &store.env, dir: store.path(), read_only: false };
+    let opening = super::Opening { env: &store.env, dir: store.path(), read_only: false, kept: None };
     assert!(!super::short_of_its_pages(&opening, &mut file, page, &data).unwrap(), "a whole file is not short");
 }
 

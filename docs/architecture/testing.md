@@ -96,9 +96,12 @@ workload the file is copied, the pages that differ from one copy to the next are
 loss could leave are made from them. In the synced-each-commit mode LMDB writes a commit's pages, syncs, then writes the
 meta page that names them, so any part of the next commit's pages with the meta page not yet written leaves the commit
 before whole; every such file must open, pass `check()`, and hold the commit before, with any of the next commit's
-pages present. In the grouped mode nothing orders the pages written since the last sync, so a file with a meta page and
-only some of the pages it names is not some commit's, and at least one such file must fail to hold a commit's state:
-that is the trade the mode states. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
+pages present. In the grouped mode nothing orders the pages written since the last sync, and the workload syncs
+every eighth commit: for a loss after each of the commits since a sync, and after the next sync's data, the files
+are the synced file with some of the pages written since and the record that sync wrote, opened as of another
+boot. Every one must restore the record's commit, pass `check()` and hold that commit's tasks. The same run with the
+pin turned off must leave a file that doesn't, the commits after the sync having written over its pages: the pin is
+what the replay holds. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
 disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
 itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
 such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
@@ -115,11 +118,21 @@ extended under. A
 torn file that is refused counts as a file that didn't survive.
 
 A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
-aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files did on Linux (CI,
-2026-11-13, `SIGABRT`), and none on Apple silicon, whose pages are larger. A release build has them off, and reads
-such a page as it finds it. The replay counts a file whose reader aborted as one that didn't survive. It fails on a
-reader ended by the fault of a read past the file's end, which the open's check is there to stop and which a file cut
-to half its pages shows it stopping, and on a child that says nothing and ended any other way.
+aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files, kept by no pin, did
+on Linux (CI, 2026-11-13, `SIGABRT`), and none on Apple silicon, whose pages are larger. A release build has them off,
+and reads such a page as it finds it. The replay without the pin reads each file in a child, and counts a file whose
+reader aborted as one that didn't survive. It fails on a reader ended by the fault of a read past the file's end,
+which the open's check is there to stop and which a file cut to half its pages shows it stopping, and on a child that
+says nothing and ended any other way.
+
+`store/kept_tests.rs` holds the rest of what keeps the grouped mode's last synced commit. A child process is ended at
+each step of a sync and of a restore: a death after it opens at the newest commit, and a loss after it at the
+commit the record on disk names, as the model says (`store/synced_model.rs`). A commit forced between a sync's read
+transaction and its reading of that commit's meta page leaves the record naming the later commit. Another process's
+pin keeps every page its commit's trees reach as it was through this process's writes of values on overflow pages,
+and once ended lets them be written over. A failed sync refuses the next commit and is restored at the next open; an
+open beside another process that finds a restore to make is refused, and a read-only open beside a writer with
+commits unsynced opens where no boot can be read.
 
 ## Failpoints
 
