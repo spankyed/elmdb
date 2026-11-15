@@ -565,6 +565,60 @@ fn by_tag(take: usize) -> Json {
     json!([{ "step": "orderBy", "field": "tag" }, { "step": "limit", "n": take }])
 }
 
+#[test]
+fn a_whole_order_whose_keys_and_entries_disagree_reads_as_one_handed_on_an_entity_at_a_time() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    // More strings than are each sought, each its own, so a whole order meets their entries by a walk
+    write(&db, (0..400).map(|i| item(&i.to_string(), json!({ "tag": format!("t{i:03}") }))).collect()).unwrap();
+    let build = stored(&db, "byTag").0.unwrap().build;
+    let running = order::running("root").unwrap();
+    let room = keys::order_room("Item", "byTag", &[]).unwrap();
+    let key = |string: &str| {
+        let sort_key = order::sort_key(&running.collator, string, room);
+        keys::order_string("Item", "byTag", build, &[], &sort_key, string)
+    };
+    // Keys of strings no entity holds, before the first entry, among the others and past the last, and none for two
+    // strings entities hold, the first and one among the others
+    unit(&db, |t| {
+        ["s", "t100x", "t250x", "u"].into_iter().try_for_each(|stale| t.put(&key(stale), &[]))?;
+        ["t000", "t300"].into_iter().try_for_each(|gone| t.del(&key(gone)))
+    });
+    let (whole, _) = read(&db, json!([{ "step": "orderBy", "field": "tag" }]), None);
+    let (limited, _) = read(&db, by_tag(10_000), None);
+    assert_eq!(whole, limited);
+    // Every entity whose string has a key, in the strings' order
+    let expected: Vec<String> = (1..400).filter(|i| *i != 300).map(|i| format!("Item-{i}")).collect();
+    assert_eq!(whole, expected);
+}
+
+#[test]
+fn a_whole_order_with_a_key_of_no_sort_key_or_of_no_string_or_place_is_corrupt() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    write(&db, (0..3).map(|i| item(&i.to_string(), json!({ "tag": format!("t{i}") }))).collect()).unwrap();
+    let build = stored(&db, "byTag").0.unwrap().build;
+    let under = keys::order_range("Item", "byTag", build, &[]);
+    let whole = json!([{ "step": "orderBy", "field": "tag" }]);
+    let plan =
+        json!({ "start": { "from": "types", "types": ["Item"] }, "steps": whole, "terminal": { "answer": "ids" } });
+    let op = serde_json::from_value::<ReadOp>(json!({ "read": "query", "plan": plan })).unwrap();
+    // A string where the sort key's bytes are, and where the string or place is, bytes whose last nine are a number's
+    let bad = [
+        [Part::String("t".into()), Part::Bool(false), Part::String("t".into())],
+        [Part::Bytes(b"t".to_vec()), Part::Bool(false), Part::Bytes(vec![4, 1, 2, 3, 4, 5, 6, 7])],
+    ];
+    for parts in bad {
+        let key = [under.as_slice(), &crate::format::key::encode(&parts)].concat();
+        unit(&db, |t| t.put(&key, &[]));
+        let error = db.read(&Reads { reads: vec![op.clone()], track: None }).unwrap_err();
+        assert_eq!(error.code, crate::ErrorCode::Corrupted, "{parts:?}: {error}");
+        unit(&db, |t| t.del(&key));
+    }
+    // And without them the order reads
+    assert_eq!(read(&db, whole, None).0, ids(&["0", "1", "2"]));
+}
+
 fn ids(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| format!("Item-{name}")).collect()
 }
