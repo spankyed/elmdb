@@ -1,6 +1,8 @@
 //! What an open does with the record before LMDB opens the file (`docs/roadmap/synced-commit.md`, What an open does),
-//! holding the record's lock: whether the file is opened as it is or at the record's commit, the restore that takes it
-//! there, and the record an open of another mode writes for its mode.
+//! holding the record's lock: whether a writable open's mode is refused beside a writer of another mode, whether the
+//! file is opened as it is or at the record's commit, the restore that takes it there, and the record the first open of
+//! a mode that keeps no commit writes for its mode. The open holds the lock that says it has the database open, and a
+//! writable one its mode's, for as long as it is open (`Presence`).
 //!
 //! A restore is the one write to a file LMDB owns. It is made only by an open that holds the database alone, no other
 //! process having it open: another process takes its next transaction's number from LMDB's lock file and its trees
@@ -174,9 +176,9 @@ fn mode_lock(dir: &Path, mode: Mode) -> Result<File> {
                 return Err(Error::new(
                     ErrorCode::ModeMismatch,
                     format!(
-                        "The database at {} is open for writing in the {} in another process, and this open asks for \
-                         the {}: one database is written in one mode at a time. Open it in the {}, or once the other \
-                         process has closed it",
+                        "The database at {} is open for writing in the {} in another process, or in one closing in \
+                         this process, and this open asks for the {}: one database is written in one mode at a time. \
+                         Open it in the {}, or once the other has closed it",
                         dir.display(),
                         other.as_opened(),
                         mode.as_opened(),

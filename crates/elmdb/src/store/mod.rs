@@ -420,8 +420,9 @@ pub struct Store {
     /// the notice
     #[cfg_attr(not(test), allow(dead_code))]
     not_borne_out: bool,
-    /// The lock that says this process has the database open, held shared until the environment has closed: an open
-    /// that finds it unheld may restore the file. Last, so it is let go after everything else a dropped store holds
+    /// The locks that say this process has the database open, and in which mode a writable one writes it, held shared
+    /// until the environment has closed: an open that finds the first unheld may restore the file, and one of another
+    /// mode is refused while the second is held. Last, so they are let go after everything else a dropped store holds
     presence: Option<restore::Presence>,
 }
 
@@ -482,8 +483,6 @@ pub(crate) fn read_txn(env: &Env<WithoutTls>) -> heed::Result<RoTxn<'_, WithoutT
     with_reader_recovery(env, || env.read_txn())
 }
 
-// LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
-// mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
 /// What an open of the database in `dir` decides before it reads it, for a reader that opens it itself: a restore made
 /// where the record asks for one, and the lock that says it is open, held until what this answers is dropped
 pub(crate) fn decide_for_reading(dir: &Path) -> Result<impl Sized> {
@@ -491,6 +490,8 @@ pub(crate) fn decide_for_reading(dir: &Path) -> Result<impl Sized> {
     Ok(decided.presence)
 }
 
+// LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
+// mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
 pub(crate) fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
     registered(env, path, &read_txn(env)?)
 }
