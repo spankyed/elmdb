@@ -26,7 +26,7 @@ import { Packr } from 'msgpackr';
 
 // Integers that don't fit 32 bits, such as the times in `createdAt` and `updatedAt`, cross as 64-bit integers, which
 // msgpackr decodes as BigInt unless told otherwise; 'auto' answers a number up to 2^53 and an exact BigInt past it,
-// as an `any` or `object` value can hold
+// as a `number`, `any` or `object` field can hold
 const msgpack = new Packr({ useRecords: false, mapsAsObjects: true, int64AsType: 'auto' });
 
 const db = Database.open('./notes', {
