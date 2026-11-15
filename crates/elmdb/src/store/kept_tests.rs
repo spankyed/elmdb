@@ -111,6 +111,51 @@ fn a_process_that_died_with_commits_unsynced_is_opened_at_its_newest_commit() {
     store.close().unwrap();
 }
 
+#[test]
+fn a_writable_open_that_can_t_write_the_notice_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    synced(&store);
+    put(&store, "b", b"2").unwrap();
+    let lost = copied(dir.path(), true);
+    store.close().unwrap();
+    failpoints::fail_once_at(points::RESTORE_NOTE, &lost.path().canonicalize().unwrap());
+    let Err(refused) = Store::open(lost.path(), grouped()) else { panic!("an open went on without its notice") };
+    assert!(refused.message.contains("Injected failure to note the restore"), "{refused}");
+    // The next open notes it
+    let store = Store::open(lost.path(), grouped()).unwrap();
+    assert_eq!(store.restored(), Some(crate::database::Restore { sequence: Some(store.sequence()) }));
+    store.close().unwrap();
+}
+
+#[test]
+fn an_open_whose_commit_another_open_moved_past_reports_the_notice_that_open_noted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let earlier = newest(&store);
+    put(&store, "b", b"2").unwrap();
+    synced(&store);
+    store.close().unwrap();
+    // A notice of a restore to a commit the file has moved past, whose sequence another open is about to note
+    let mut file = RecordFile::open(dir.path(), true).unwrap().unwrap();
+    let record = record_in(dir.path()).unwrap();
+    file.write(&record::Record { restored: Some(record::Restored::Commit(earlier)), ..record.next(record.state) })
+        .unwrap();
+    let at = dir.path().canonicalize().unwrap();
+    let noting = at.clone();
+    failpoints::run_once_at(points::RESTORE_NOTING, &at, move || {
+        let mut file = RecordFile::open(&noting, true).unwrap().unwrap();
+        let record = file.read().unwrap().unwrap();
+        file.write(&record::Record { restored: Some(record::Restored::Sequence(77)), ..record.next(record.state) })
+            .unwrap();
+    });
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    assert_eq!(store.restored(), Some(crate::database::Restore { sequence: Some(77) }));
+    store.close().unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn a_read_only_open_that_can_t_write_the_notice_reports_the_restore_without_its_sequence() {

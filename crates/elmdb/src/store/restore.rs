@@ -280,6 +280,7 @@ fn pending(dir: &Path, why: &str) -> Error {
 /// Makes a restore's notice of the LMDB commit it took the file to, `commit`, name `sequence`, that commit's: answers
 /// the notice the record holds after
 pub(super) fn note(dir: &Path, commit: u64, sequence: u64) -> Result<Option<Restored>> {
+    failure_point!(RESTORE_NOTE at dir, Error::new(ErrorCode::Io, "Injected failure to note the restore"));
     let lock = record::lock_file(dir, record::RECORD_LOCK)?;
     let _locked = record::exclusive(&lock)?;
     let mut file = RecordFile::open(dir, true)?.expect("a record's file a writable open makes");

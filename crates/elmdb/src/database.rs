@@ -669,6 +669,60 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn an_open_after_a_loss_reports_the_restore_and_its_sequence_until_a_caller_acknowledges_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let note = |id: &str| -> crate::Batch {
+            serde_json::from_value(
+                json!({ "ops": [{ "op": "create", "type": "Note", "id": id, "fields": { "title": "t" } }] }),
+            )
+            .unwrap()
+        };
+        let options = OpenOptions {
+            schema: Some(note_schema(None)),
+            sync_idle_ms: 600_000,
+            sync_interval_ms: 600_000,
+            ..Default::default()
+        };
+        let db = Database::open(&path, options).unwrap();
+        db.write(&note("Note-1"), true).unwrap();
+        let synced = db.sequence().unwrap();
+        db.write(&note("Note-2"), false).unwrap();
+        // The files as a loss leaves them: the record written in another boot, a commit since it on the file
+        let lost = |into: &Path| {
+            std::fs::create_dir_all(into).unwrap();
+            std::fs::copy(path.join("data.mdb"), into.join("data.mdb")).unwrap();
+            let record = std::fs::read(path.join(crate::store::RECORD_FILE)).unwrap();
+            std::fs::write(into.join(crate::store::RECORD_FILE), crate::store::record_of_another_boot(&record))
+                .unwrap();
+        };
+        let restored = dir.path().join("restored");
+        lost(&restored);
+        db.close().unwrap();
+        let opened = Database::open(&restored, OpenOptions::default()).unwrap();
+        let report = opened.open_report();
+        assert_eq!((report.restored, report.not_borne_out), (Some(Restore { sequence: Some(synced) }), false));
+        assert_eq!(opened.sequence().unwrap(), synced, "opened at the record's commit");
+        opened.acknowledge_restore().unwrap();
+        opened.close().unwrap();
+        let again = Database::open(&restored, OpenOptions::default()).unwrap();
+        assert_eq!(again.open_report().restored, None, "reported again once acknowledged");
+        again.close().unwrap();
+        // The record beside another database's data file: opened as it is, and said so
+        let other = tempfile::tempdir().unwrap();
+        let elsewhere =
+            Database::open(other.path(), OpenOptions { schema: Some(note_schema(None)), ..quiet() }).unwrap();
+        elsewhere.write(&note("Note-9"), false).unwrap();
+        elsewhere.close().unwrap();
+        let swapped = dir.path().join("swapped");
+        lost(&swapped);
+        std::fs::copy(other.path().join("data.mdb"), swapped.join("data.mdb")).unwrap();
+        let opened = Database::open(&swapped, quiet()).unwrap();
+        assert_eq!((opened.open_report().restored, opened.open_report().not_borne_out), (None, true));
+        opened.close().unwrap();
+    }
+
     fn quiet() -> OpenOptions {
         OpenOptions { syncs: false, ..Default::default() }
     }

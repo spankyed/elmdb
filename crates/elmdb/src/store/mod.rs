@@ -703,6 +703,7 @@ impl Store {
     /// write leaves that to the next open
     fn note_the_restore(&self) -> Result<()> {
         let Some(record::Restored::Commit(commit)) = *self.restored.lock() else { return Ok(()) };
+        run_point!(RESTORE_NOTING at &self.path);
         if self.env.info().last_txn_id as u64 != commit {
             // Another process opened the database since, and may have noted the sequence before it wrote: the
             // record's notice is the one to report
