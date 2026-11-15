@@ -107,6 +107,9 @@ pub enum ErrorCode {
     /// that would let it go failed having written nothing to rely on, as a full reader table fails it. Nothing of the
     /// write was made, and it may be tried again: it goes on once a sync succeeds
     SyncBehind,
+    /// A writable open in another mode than a writer that has the database open in another process: the grouped mode
+    /// (the default), `syncEachCommit` or `syncs: false`. One database is written in one mode at a time
+    ModeMismatch,
     /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
     /// locks
     AlreadyLoaded,
@@ -176,6 +179,7 @@ impl ErrorCode {
             Self::RestorePending => "RESTORE_PENDING",
             Self::NotDurable => "NOT_DURABLE",
             Self::SyncBehind => "SYNC_BEHIND",
+            Self::ModeMismatch => "MODE_MISMATCH",
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",
             Self::NumbersExhausted => "NUMBERS_EXHAUSTED",

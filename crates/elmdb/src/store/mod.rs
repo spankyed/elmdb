@@ -420,9 +420,10 @@ pub struct Store {
     /// the notice
     #[cfg_attr(not(test), allow(dead_code))]
     not_borne_out: bool,
-    /// The lock that says this process has the database open, held shared until the environment has closed: an open
-    /// that finds it unheld may restore the file. Last, so it is let go after everything else a dropped store holds
-    presence: Option<std::fs::File>,
+    /// The locks that say this process has the database open, and in which mode a writable one writes it, held shared
+    /// until the environment has closed: an open that finds the first unheld may restore the file, and one of another
+    /// mode is refused while the second is held. Last, so they are let go after everything else a dropped store holds
+    presence: Option<restore::Presence>,
 }
 
 /// Every commit up to `through` is one this handle made or has noticed; `elsewhere` says another's was among them since
@@ -480,6 +481,13 @@ fn with_reader_recovery<T>(env: &Env<WithoutTls>, mut begin: impl FnMut() -> hee
 
 pub(crate) fn read_txn(env: &Env<WithoutTls>) -> heed::Result<RoTxn<'_, WithoutTls>> {
     with_reader_recovery(env, || env.read_txn())
+}
+
+/// What an open of the database in `dir` decides before it reads it, for a reader that opens it itself: a restore made
+/// where the record asks for one, and the lock that says it is open, held until what this answers is dropped
+pub(crate) fn decide_for_reading(dir: &Path) -> Result<impl Sized> {
+    let decided = restore::decide(&dir.canonicalize()?, None, boot::this_boot())?;
+    Ok(decided.presence)
 }
 
 // LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes

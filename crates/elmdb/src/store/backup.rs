@@ -49,13 +49,29 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
     let synced = (|| -> Result<()> {
         failure_point!(BACKUP_PUBLISHED, Error::new(ErrorCode::Io, "injected sync failure"));
         #[cfg(unix)]
-        for dir in sync_dirs {
+        for dir in &sync_dirs {
             std::fs::File::open(dir)?.sync_all()?;
         }
+        // A record beside a data file the directory held names that file, and none of the copy's: let go once the
+        // copy is there, so no open takes the copy for a file the record doesn't bear out, refused where it says
+        // `failed`. Not before: a publication that failed leaves the old file, which its record still guards. And not
+        // before the copy's name is synced, above: a filesystem that orders what a directory holds as it likes could
+        // otherwise keep the record's removal and lose the copy, leaving the old file unguarded. Stopped between the
+        // two, the copy is opened as it is under a `kept` record and refused under a `failed` one, which a backup
+        // made again clears
+        for gone in [super::record::RECORD, super::record::RESTORED] {
+            if let Err(error) = std::fs::remove_file(target.join(gone))
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(error.into());
+            }
+        }
+        #[cfg(unix)]
+        std::fs::File::open(&target)?.sync_all()?;
         Ok(())
     })();
     synced.map_err(|error| Error::new(ErrorCode::Io, format!(
-        "The backup at {} was published, but directory syncing failed: {error}. The complete backup is visible; retrying backup is safe",
+        "The backup at {} was published, but syncing its directory or removing the record a database there left failed: {error}. The complete backup is visible; retrying backup is safe",
         target.display())))
 }
 

@@ -384,6 +384,9 @@ impl Database {
         if !source.join("data.mdb").is_file() {
             return Err(Error::new(ErrorCode::NoDatabase, format!("No database at {}", source.display())));
         }
+        // Opened as an open opens it: at the last synced commit where the record asks for a restore, and held open
+        // while it is read, so that no open that finds it alone restores it meanwhile
+        let _opened = crate::store::decide_for_reading(source)?;
         let mut options = EnvOpenOptions::new().read_txn_without_tls();
         options.max_dbs(8);
         #[cfg(windows)]
