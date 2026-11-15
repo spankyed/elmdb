@@ -635,3 +635,46 @@ fn a_writer_waits_for_the_one_before_it_until_that_one_s_commit_is_accounted_for
     let report = db.check().unwrap();
     assert!(report.is_clean(), "{report:?}");
 }
+
+#[test]
+fn a_rebuild_that_must_grow_the_map_is_refused_by_a_unit_begun_on_another_thread_rather_than_waiting_on_it() {
+    use crate::failpoints::{self, points};
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(small(&dir));
+    // Over a third of the map in use, so a rebuild of everything grows it first: text that compresses little, written
+    // until the map holds less than three times what is used
+    let mut i = 0u64;
+    while !db.store().unwrap().map_short_of(3) {
+        let body: String =
+            (0..40_000u64).map(|j| char::from(b'a' + ((i * 7_919 + j * j * 104_729) % 26) as u8)).collect();
+        write(&db, vec![json!({ "op": "create", "type": "Task", "id": format!("Task-{i}"), "fields": { "a": body } })])
+            .unwrap();
+        i += 1;
+    }
+    // The rebuild, on a thread of its own as the pool's, has found no unit open and is about to try for the gate
+    let (at_the_gate, is_at_the_gate) = mpsc::channel();
+    let (go_on, may_go_on) = mpsc::channel::<()>();
+    let (answered, has_answered) = mpsc::channel();
+    let rebuilding = {
+        let db = std::sync::Arc::clone(&db);
+        std::thread::spawn(move || {
+            failpoints::run_once_here(points::GROWTH_GATE, move || {
+                at_the_gate.send(()).unwrap();
+                may_go_on.recv().unwrap();
+            });
+            answered.send(db.rebuild(None)).unwrap();
+        })
+    };
+    is_at_the_gate.recv_timeout(Duration::from_secs(10)).expect("the rebuild came to grow the map");
+    // A unit begins on this thread, as one on the event loop's would, holding the gate for its whole life
+    let mut unit = db.begin().unwrap();
+    go_on.send(()).unwrap();
+    let refused = has_answered
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the rebuild answered while the unit was open, rather than waiting for it to end");
+    assert_eq!(refused.unwrap_err().code, ErrorCode::UnitOpen);
+    unit.abort();
+    rebuilding.join().unwrap();
+    db.rebuild(None).unwrap();
+    assert!(db.check().unwrap().is_clean());
+}

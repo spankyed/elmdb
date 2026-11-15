@@ -113,6 +113,8 @@ pub(crate) mod points {
     pub const LOAD_PUBLISHED: &str = "dump::after_load_publish";
     /// Runs before a read takes its snapshot
     pub const READ_SNAPSHOT: &str = "engine::before_read_snapshot";
+    /// A growth beside units has found no unit open and is about to try for the gate
+    pub const GROWTH_GATE: &str = "store::growth_gate";
     /// A rebuild has made room in the map and not yet begun its unit
     pub const REBUILD_ROOM_MADE: &str = "engine::rebuild_room_made";
     /// Reading the indexes still to build fails
