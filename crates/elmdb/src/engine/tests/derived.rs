@@ -282,6 +282,28 @@ fn rebuilds_asked_on_two_threads_run_one_after_the_other() {
 }
 
 #[test]
+fn the_thread_whose_rebuild_holds_its_turn_rebuilds_again_in_it() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(with_schema(&dir, notes(base_fields(), json!({}))).unwrap());
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "kind": "a" } })]).unwrap();
+    // A rebuild's commit is delivered to the watches with its turn held, and a listener whose answer the rebuild
+    // repaired may rebuild in turn, on that thread: holding the turn, the thread is let in again
+    let (done, is_done) = mpsc::channel();
+    let holder = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            let _turn = db.rebuilding.lock();
+            done.send(db.rebuild(None)).unwrap();
+        })
+    };
+    is_done.recv_timeout(Duration::from_secs(10)).expect("a rebuild in its own turn answered").unwrap();
+    holder.join().unwrap();
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn rebuilding_one_index_refuses_one_the_schema_doesnt_declare() {
     let dir = tempfile::tempdir().unwrap();
     let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
