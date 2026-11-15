@@ -99,6 +99,9 @@ fn named() -> Option<Vec<u8>> {
             0,
             std::ptr::null(),
             REG_OPTION_VOLATILE,
+            // mutant-skip: replace \| with \^ in named
+            // The two share only READ_CONTROL, the right to read the key's security, which `^` drops and nothing here
+            // asks for: the value's query and set rights are kept either way
             KEY_READ | KEY_WRITE,
             std::ptr::null(),
             &mut key,
