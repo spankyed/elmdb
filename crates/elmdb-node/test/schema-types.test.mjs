@@ -87,21 +87,23 @@ test('the canonical form a database answers is a Schema, every absent option nul
 
 test('a write answers what its generated type declares, field for field', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
+  /** @type {import('../index.js').Database | undefined} */
+  let db;
+  // Closed before its directory is removed: Windows won't remove a file that is mapped
+  t.after(() => {
+    db?.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
   /** @type {{ Packr: new (options: object) => { pack(value: unknown): Buffer, unpack(bytes: Buffer): unknown } }} */
   const { Packr } = require('msgpackr');
   const packr = new Packr({ useRecords: false, mapsAsObjects: true });
-  const db = Database.open(dir, {
+  db = Database.open(dir, {
     syncs: false,
     schema: {
       $schema: 'https://elmdb.dev/schema/1.json',
       relations: { cites: { cardinality: 'many-to-many' } },
       types: { Note: { fields: { title: { type: 'string' } } } },
     },
-  });
-  // Closed before its directory is removed: Windows won't remove a file that is mapped
-  t.after(() => {
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
   });
   const answer = packr.unpack(db.writeSync(packr.pack({
     ops: [

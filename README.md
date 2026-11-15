@@ -24,9 +24,10 @@ A good fit for knowledge tools, document libraries and other desktop apps with c
 import { Database } from 'elmdb';
 import { Packr } from 'msgpackr';
 
-// Integers past 2^32, such as the times in `createdAt` and `updatedAt`, cross as 64-bit integers, which msgpackr
-// decodes as BigInt unless `int64AsType: 'number'`; a 64-bit value past 2^53 in an `any` field is rounded then
-const msgpack = new Packr({ useRecords: false, mapsAsObjects: true, int64AsType: 'number' });
+// Integers that don't fit 32 bits, such as the times in `createdAt` and `updatedAt`, cross as 64-bit integers, which
+// msgpackr decodes as BigInt unless told otherwise; 'auto' answers a number up to 2^53 and an exact BigInt past it,
+// as an `any` or `object` value can hold
+const msgpack = new Packr({ useRecords: false, mapsAsObjects: true, int64AsType: 'auto' });
 
 const db = Database.open('./notes', {
   schema: {
