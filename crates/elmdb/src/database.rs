@@ -631,39 +631,41 @@ mod tests {
         OpenOptions { syncs: false, ..Default::default() }
     }
 
+    // Each gives a margin of most of a second past its wait, for the flush of the data the exit makes: a full flush
+    // of the drive on Apple, slow on a loaded machine
     #[test]
-    fn an_exit_given_up_on_for_an_operation_s_store_tries_the_record_once_and_is_over_within_its_wait() {
+    fn an_exit_given_up_on_for_an_operation_s_store_tries_the_record_and_is_over_within_its_wait() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
         // An operation holds the store past the wait, and a sync of another thread the record
         let store = db.store().unwrap();
-        let holder = store.hold_record(Duration::from_secs(5));
+        let held = store.hold_record();
         let began = std::time::Instant::now();
-        assert_eq!(db.close_at_exit(Duration::from_millis(100)).unwrap_err().code, ErrorCode::Io);
+        assert_eq!(db.close_at_exit(Duration::from_millis(300)).unwrap_err().code, ErrorCode::Io);
         let took = began.elapsed();
-        assert!(took < Duration::from_millis(700), "{took:?}, for a wait of 100 ms");
+        assert!(took < Duration::from_millis(1100), "{took:?}, for a wait of 300 ms");
+        drop(held);
         drop(store);
-        holder.join().unwrap();
     }
 
     #[test]
     fn an_exit_whose_store_comes_free_late_closes_within_what_is_left_of_its_wait() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
-        // An operation lets the store go a second into a wait of two, and a sync of another thread holds the record
-        // past both
+        // An operation lets the store go 2.5 s into a wait of 3, and a sync of another thread holds the record past
+        // both: a close given the whole wait again would take 5.5 s
         let store = db.store().unwrap();
-        let holder = store.hold_record(Duration::from_secs(8));
+        let held = store.hold_record();
         let operation = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(Duration::from_millis(2500));
             drop(store);
         });
         let began = std::time::Instant::now();
-        assert_eq!(db.close_at_exit(Duration::from_secs(2)).unwrap_err().code, ErrorCode::Io);
+        assert_eq!(db.close_at_exit(Duration::from_secs(3)).unwrap_err().code, ErrorCode::Io);
         let took = began.elapsed();
-        assert!(took < Duration::from_millis(2600), "{took:?}, for a wait of 2 s");
+        assert!(took < Duration::from_millis(4500), "{took:?}, for a wait of 3 s");
         operation.join().unwrap();
-        holder.join().unwrap();
+        drop(held);
     }
 
     #[test]

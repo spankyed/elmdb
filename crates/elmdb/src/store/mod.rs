@@ -298,6 +298,23 @@ enum Claimed<'a, H> {
     Unpinned,
 }
 
+/// The record held by another thread for a test (`Store::hold_record`), let go as this drops
+#[cfg(test)]
+pub(crate) struct HeldRecord {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    holder: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(test)]
+impl Drop for HeldRecord {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(holder) = self.holder.take() {
+            let _ = holder.join();
+        }
+    }
+}
+
 /// How many times one write grows the map before giving up with `MAP_FULL`
 const MAX_GROWTHS: usize = 16;
 
@@ -1478,18 +1495,19 @@ impl Store {
         }
     }
 
-    /// A thread that holds the grouped mode's record for `held`, as a sync of another thread does, once it holds it
+    /// The grouped mode's record held by another thread, as a sync of it does, until what this returns is dropped
     #[cfg(test)]
-    pub(crate) fn hold_record(&self, held: Duration) -> std::thread::JoinHandle<()> {
+    pub(crate) fn hold_record(&self) -> HeldRecord {
         let kept = Arc::clone(self.kept.as_ref().expect("a store of the grouped mode"));
         let (taken, took) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
         let holder = std::thread::spawn(move || {
-            let _record = kept.record_lock();
+            let _record = kept.record_guard();
             taken.send(()).expect("the test waits for the record to be held");
-            std::thread::sleep(held);
+            let _ = released.recv_timeout(Duration::from_secs(60));
         });
         took.recv().expect("the record is held");
-        holder
+        HeldRecord { release: Some(release), holder: Some(holder) }
     }
 
     /// Sets the fixed part of the bound past which what the pin holds back makes a sync due, for a test

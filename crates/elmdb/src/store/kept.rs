@@ -483,7 +483,7 @@ impl Kept {
 
     /// The record's lock, which a test holds as a sync of another thread would
     #[cfg(test)]
-    pub(super) fn record_lock(&self) -> RecordGuard<'_> {
+    pub(super) fn record_guard(&self) -> RecordGuard<'_> {
         self.record.lock()
     }
 
