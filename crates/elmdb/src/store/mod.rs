@@ -915,7 +915,8 @@ impl Store {
     /// made so far has landed: the sync moves the pin, and the pages freed before it are used again. Where commits
     /// outrun the disk, every commit while the pin holds writes fresh pages, and without this the file grows by all
     /// that is committed while a sync runs, which a sync of more pages makes longer. Outside every lock, as the sync
-    /// takes them all. A sync that fails marks the process failed, and the write is then refused (`Kept::ensure_pin`)
+    /// takes them all. A sync whose data or record failed marks the process failed, and the write is then refused
+    /// (`Kept::ensure_pin`); one that failed before them, as its read transaction began, lets the write go on
     fn hold_to_the_bound(&self) {
         if let (Some(kept), Some(commit)) = (&self.kept, &self.commit)
             && kept.past_bound()
@@ -1494,10 +1495,8 @@ struct EnvSyncer {
 }
 
 impl Syncer for EnvSyncer {
-    /// A sync of the grouped mode, whose failure, at any step, is final as a failed sync of the data is: every commit
-    /// after it is refused, and group commit fails every wait (`sync.rs`)
     fn sync(&self) -> Result<()> {
-        self.kept.sync(&|| self.kept.adopt()).map_err(|error| self.kept.fail(error))
+        self.kept.sync(&|| self.kept.adopt())
     }
 }
 

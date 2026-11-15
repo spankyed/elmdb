@@ -118,9 +118,10 @@ pub(super) fn freed_from(file: &mut File, psize: usize, root: u64, from: u64) ->
             let (lo, hi, node_flags) = (u16_at(&page, node), u16_at(&page, node + 2), u16_at(&page, node + 4));
             if flags & P_BRANCH != 0 {
                 // mutant-skip: replace << with >> in freed_from
-                // A branch node's flags hold its child's page number past 2^32 pages, 16 TiB at 4 KiB pages: no test
-                // file is so large, and below it the flags are 0 whichever way they are shifted
-                stack.push(lo as u64 | (hi as u64) << 16 | (node_flags as u64) << 32);
+                // A branch node's flags hold its child's page number past 2^32 pages, 2 TiB at LMDB's smallest page:
+                // no test file is so large, and below it the flags are 0 whichever way they are shifted
+                let high = (node_flags as u64) << 32;
+                stack.push(lo as u64 | (hi as u64) << 16 | high);
                 continue;
             }
             if flags & P_LEAF == 0 || u64_at(&page, node + 8) < from {
@@ -455,12 +456,14 @@ mod tests {
 
     #[test]
     fn the_free_tree_is_read_through_a_branch_to_a_far_page_and_a_list_on_a_page_of_its_own() {
-        let psize = 4096;
+        // LMDB's smallest page, so a page past 2^16 of them is some 34 MB in: sparse where the filesystem makes it so,
+        // and written out where it doesn't, as Windows' doesn't by default
+        let psize = 512;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("free");
         let mut file =
             std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
-        // Past 2^16 pages, so the child's number has bits in the node's high size word; sparse, so it costs nothing
+        // Past 2^16 pages, so the child's number has bits in the node's high size word
         let (leaf, list) = (65_537u64, 65_540u64);
         file.set_len((list + 1) * psize as u64).unwrap();
         let mut put = |pgno: u64, page: &[u8]| {

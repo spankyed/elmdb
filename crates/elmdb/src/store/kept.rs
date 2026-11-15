@@ -330,13 +330,13 @@ impl Kept {
     /// `sync` in a process that is exiting, whose other threads may be gone: one that ended while it held the record
     /// leaves the record as it was, and the data is synced all the same
     pub(super) fn sync_at_exit(&self) -> Result<()> {
-        // A thread that ended while it read the data file or the record holds its lock for good
-        if self.record.try_lock().is_none() || self.data.try_lock().is_none() {
+        // A thread that ended while it held the record, the data file's handle or the pin's state holds it for good
+        if self.record.try_lock().is_none() || self.data.try_lock().is_none() || self.state.try_lock().is_none() {
             self.sync_data()?;
             return Err(Error::new(
                 ErrorCode::Io,
-                "The record beside the data file was being written as the process exited, so it names an earlier \
-                 commit than the last one synced",
+                "The record beside the data file, its handle or the pin's state was in use as the process exited, so \
+                 the record names an earlier commit than the last one synced",
             ));
         }
         self.sync(&|| Err(Error::new(ErrorCode::Io, "Another process grew the map as this one exited")))
@@ -378,7 +378,7 @@ impl Kept {
     }
 
     /// Refuses every commit of this process from now on, keeping its pin until it ends
-    pub(super) fn fail(&self, error: Error) -> Error {
+    fn fail(&self, error: Error) -> Error {
         self.state.lock().failed.get_or_insert_with(|| error.clone());
         error
     }
@@ -470,12 +470,16 @@ impl Kept {
         }
         let Some((kept, file)) = self.kept_from_reuse(pinned) else { return self.past.load(Relaxed) };
         let past = beyond(kept, file, self.bound.load(Relaxed));
-        // An answer for a pin that has moved since is no answer: the new pin asks again
-        if self.state.lock().pin.as_ref().is_some_and(|pin| pin.commit == pinned) {
+        // An answer for a pin that has moved since is no answer: the new pin asks again. Kept under the state, which
+        // a new pin is made under, so none is made between the check and the stores
+        let state = self.state.lock();
+        let current = state.pin.as_ref().is_some_and(|pin| pin.commit == pinned);
+        if current {
             self.past.store(past, Relaxed);
             self.walked_at.store(last, Relaxed);
         }
-        past
+        drop(state);
+        past && current
     }
 
     /// The bytes of the pages commits from `pinned` on freed, and of the file's pages, as the newest commit's free tree

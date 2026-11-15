@@ -515,38 +515,38 @@ The failed call does not return its touched-token list: callers managing tracked
 all of them on `NOT_DURABLE`. Native watches have already been finalized. apack follows that invalidation rule.
 `close()` syncs what is owed, and reports a sync that failed.
 
-`syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made,
-its pages before the meta page that names them, so a commit that returned survives the machine losing power, and no
-group commit runs. On Apple a full sync (`F_FULLFSYNC`, which LMDB makes of the data file) follows each commit as well, since
-LMDB writes the meta page with `O_DSYNC`, which doesn't flush the drive's cache there. A write's `durable` and `durable()`
-then answer at once, since each commit was synced. The price is a
-sync for every commit: on an Apple M1 Pro at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three
-rounds, after the Apple full sync was added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs;
-4.0 ms for a durable write in the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped mode, where a commit that returned
-may be lost to a power loss until its sync, a moment later, and nothing before it is: the last synced commit is kept
-(`../roadmap/synced-commit.md`). A process with commits not yet synced holds a read transaction, the pin, at a commit
-on disk, so LMDB gives no writer that commit's pages, and a write makes sure of the pin before its transaction
-begins. A sync begins a read transaction at the newest commit, takes its meta page while LMDB's newest is still that
-one, syncs the data, writes that commit's meta page to the record beside the data file (`synced`, `format.md`) and
-syncs it, and only then lets the old pin go; a process that owes nothing then holds no pin. An open that finds the
-record written in another boot, a later commit on the file and no other process with the database open writes the
-record's meta page over the file's two, the two it wrote over saved once in `synced.restored`, and so opens at that
-commit, whatever the loss left of the pages after it. A process's death leaves its commits to the OS, which holds
-them: a database another process has open, or whose record is of this boot, opens at its newest commit. A sync that
-fails marks the record `failed`, the process refuses every commit after it, and the next open restores the record's
-commit, in this boot too; an open that finds a restore to make beside another process, or can't write the data
+`syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made, its
+pages before the meta page that names them, so a commit that returned survives the machine losing power, and no group
+commit runs. On Apple a full sync (`F_FULLFSYNC`, which LMDB makes of the data file) follows each commit as well, since
+LMDB writes the meta page with `O_DSYNC`, which doesn't flush the drive's cache there. A write's `durable` and
+`durable()` then answer at once, since each commit was synced. The price is a sync for every commit: on an Apple M1 Pro
+at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three rounds, after the Apple full sync was
+added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs; 4.0 ms for a durable write in
+the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped
+mode, where a commit that returned may be lost to a power loss until its sync, a moment later, and nothing before it is:
+the last synced commit is kept (`../roadmap/synced-commit.md`). A process with commits not yet synced holds a read
+transaction, the pin, at a commit on disk, so LMDB gives no writer that commit's pages, and a write makes sure of the
+pin before its transaction begins. A sync begins a read transaction at the newest commit, takes its meta page while
+LMDB's newest is still that one, syncs the data, writes that commit's meta page to the record beside the data file
+(`synced`, `format.md`) and syncs it, and only then lets the old pin go; a process that owes nothing then holds no pin.
+An open that finds the record written in another boot, a later commit on the file and no other process with the database
+open writes the record's meta page over the file's two, the two it wrote over saved once in `synced.restored`, and so
+opens at that commit, whatever the loss left of the pages after it. A process's death leaves its commits to the OS,
+which holds them: a database another process has open, or whose record is of this boot, opens at its newest commit. A
+sync that fails marks the record `failed`, the process refuses every commit after it, and the next open restores the
+record's commit, in this boot too; an open that finds a restore to make beside another process, or can't write the data
 file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's `kern.bootsessionuuid`, and on Windows a
 random value the first process to ask writes in a volatile registry key under the current user, which a restart or a
 logoff takes away; where none can be read, a process's death costs the commits since its last sync, as a loss would. A
-sync is also due once the pages commits from the pin's on freed, which wait for the next record before any commit
-may take them, are more than 16 MiB or a quarter of the file, whichever is more, read from the free tree; and a write
-past that waits, before it begins, for the sync, so the file grows by the bound, and an eighth of it the free tree is
-read again after, and no further. A pin of another process older than this one's, or a read transaction held long, keeps
-more, until its own sync, which its timers make due within a second. The cost is a second
-sync after each, the record's: a
-`durable` write waits for both. A database written by an elmdb from before the record keeps no pin and reads no
-record, and its file may be no commit's after a loss, as every grouped file was. A test replays the loss in both
-modes (`testing.md`, Power loss).
+sync is also due once the pages commits from the pin's on freed, which wait for the next record before any commit may
+take them, are more than 16 MiB or a quarter of the file, whichever is more, as read from the free tree; and a write
+past that waits, before it begins, for the sync. So the file grows by the bound, by what is written before the free tree
+is read again (once the file has grown by an eighth of the bound, or once in 16 writes), by a single write larger than
+the bound, and by writes already past their check when it was crossed. A pin of another process older than this one's,
+or a read transaction a caller holds long, keeps more, until that process's own sync, which its timers make due within
+`syncIntervalMs` (1 s). The cost is a second sync after each, the record's: a `durable` write waits for both. A database
+written by an elmdb from before the record keeps no pin and reads no record, and its file may be no commit's after a
+loss, as every grouped file was. A test replays the loss in both modes (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
