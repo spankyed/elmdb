@@ -393,15 +393,18 @@ first is the cost the format's rule accepts until a release has users (`../archi
    |---|---|---|
    | A `durable` write | 9.8 to 10.0 ms | 5.3 to 5.4 ms |
    | A commit of one process | 38.7 µs | 32 to 36 µs |
-   | A second process's first write after a pause while another writes | 4.7 to 5.0 ms | 5.1 to 5.7 ms |
+   | A second process's first write, 150 ms after its last, while another writes (load 59 to 134) | 0.9 and 8.9 ms | 0.4 and 0.6 ms |
    | The file after a minute of commits of 100 sets over 10,000 notes, alone | 290 MB | 7 MB |
    | The same beside a process that wrote once and stays open | 342 MB | 7 MB |
    | The largest file while a million notes have a tenth set each second for a minute | 667 MB | 655 MB |
 
-   The `durable` write pays its second sync, as What it costs says. The second process's first write is mostly its
-   wait for the other's write lock, on both sides, and shows nothing of the sync it pays. The gates on the bound hold
-   as written: the idle process adds 52 MB, under the bound of 64 MiB, and the million notes' units 12 MB, under a
-   quarter of the file. But the bound does not hold the file where commits outrun the disk: rewriting as fast as one
+   The `durable` write pays its second sync, as What it costs says. The second process's first write after a pause
+   longer than the sync's idle time pays a sync and a record before it begins, as The design says, and swings with
+   what that sync has to flush: two runs at the load given, against main's write, which pays none. The gates on the bound read as
+   met, and say little: beside an idle process the file was 52 MB larger than alone, under the bound of 64 MiB, but
+   the two are separate runs of a minute each, which commit at different rates, and the idle process, having written
+   once and synced, holds no pin; the million notes' units left the file 12 MB larger than main's, under a quarter of
+   it. But the bound does not hold the file where commits outrun the disk: rewriting as fast as one
    process commits, some 4,500 commits a second, the file was 268 MB after a second and 911 MB after eight, the pin
    moving at each of 13 syncs. While the pin holds, every commit writes fresh pages, so a sync flushes all of them,
    which takes long enough for as many again to be written: the file grows by what is committed while a sync runs,
@@ -412,7 +415,10 @@ first is the cost the format's rule accepts until a release has users (`../archi
    commits as before, 42,000 to 53,000 a minute (same machine, 2026-11-15, load about 60). The fixed part is 16 MiB.
    Windows' boot, the volatile registry key, is built with this phase rather than the last: without it every death
    there read as a loss, and a write that returned was undone when its process was killed, which the engine promises
-   it is not. Until phase 4, a database is written in one mode at a time by its callers: a writable open of another mode than
+   it is not. The key is the current user's, which a process may make volatile without an administrator: a process
+   of another account, or a service, reads another boot, and where it opens a database alone after a death it
+   restores, losing what the dead process committed since its last sync, as a loss would. A boot all accounts share
+   is phase 5's. Until phase 4, a database is written in one mode at a time by its callers: a writable open of another mode than
    the record's syncs the data and writes its mode's record, and nothing refuses two live writers of two modes.
 4. **The modes.** `syncEachCommit` and `syncs: false` alone and after a grouped writer that died with commits
    unsynced, a backup into a directory and `replaceWith`. Done when the replay holds each, an open in another mode
