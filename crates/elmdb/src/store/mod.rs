@@ -484,6 +484,13 @@ pub(crate) fn read_txn(env: &Env<WithoutTls>) -> heed::Result<RoTxn<'_, WithoutT
 
 // LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
 // mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
+/// What an open of the database in `dir` decides before it reads it, for a reader that opens it itself: a restore made
+/// where the record asks for one, and the lock that says it is open, held until what this answers is dropped
+pub(crate) fn decide_for_reading(dir: &Path) -> Result<impl Sized> {
+    let decided = restore::decide(&dir.canonicalize()?, None, boot::this_boot())?;
+    Ok(decided.presence)
+}
+
 pub(crate) fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
     registered(env, path, &read_txn(env)?)
 }
