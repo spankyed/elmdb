@@ -195,11 +195,13 @@ own sync does the same, as does one whose sync before a write fails so: only a r
 can't be written either, the process refuses its commits all the same, and an open of the database in this boot opens at
 its newest commit, which the error says. A sync that fails as it reads or flushes the record is final too, and writes
 nothing. One that fails short of a flush, as its read transaction begins, which a full reader table fails, or as it
-reads the root pages after the data's flush, has written nothing to rely on: it fails the waits on it alone, and refuses
-nothing after it but a write past the bound, with its failure, which the caller may try again. That write would grow the
-file past the bound, without end while the failure lasted, since the pin doesn't move until a sync succeeds. The next
-sync is tried at once by a `durable` wait or a write past the bound, and by the timer the sync interval after the
-failure, a second by default and 100 ms at the least, whether or not anything is committed since.
+reads the root pages after the data's flush, has written nothing to rely on: it fails the waits on it alone. The pin
+doesn't move until a sync succeeds, so while what it keeps is past the bound every write is refused before it begins,
+once a sync it asks for has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again
+after a pause, ending read transactions it holds long where a full reader table is the cause; the index builder waits
+and tries its chunk again. A write that went on would grow the file past the bound, without end while the failure
+lasted. The next sync is tried at once by a `durable` wait or a write past the bound, and by the timer the sync interval
+after the failure, a second by default and 100 ms at the least, whether or not anything is committed since.
 
 **What else writes the data file.** A backup made into a directory, and `replaceWith`, write the record for the data
 they put there or remove it. `replaceWith` opens its source as an open does, record and all.

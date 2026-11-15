@@ -18,8 +18,9 @@
 //!   where the data's flush or the record's write failed the record says so.
 //! - No record is written once the process refuses its commits: a flush that succeeds after one that failed proves
 //!   nothing of the pages the OS may have dropped.
-//! - One that fails short of a flush, as a full reader table fails it, refuses nothing after it but a write past the
-//!   bound, which it would have let grow the file (`Store::hold_to_the_bound`), and the next sync tries again.
+//! - One that fails short of a flush, as a full reader table fails it, refuses nothing for good: while the pin is past
+//!   its bound, which it can't leave until a sync succeeds, a write is refused before it begins once a sync it asks for
+//!   has failed so too (`SYNC_BEHIND`, `Store::hold_to_the_bound`), since it would grow the file past the bound.
 //!
 //! Locks are taken in one order: the gate, held for reading from a read transaction's beginning until it is the pin,
 //! then the record's, then the data file's handle; the gate is read again within, which it lets a reader do whenever
@@ -621,15 +622,30 @@ mod tests {
         put(&store, "a");
         past_the_bound(&store);
         // As a reader table full for a moment fails it: the write, which would grow the file past the bound, is
-        // refused with that, which its caller may try again
+        // refused, and its caller may try it again
         let failing = failpoints::fail_while_at(points::SYNC_BEGIN, &store.path);
         let key = crate::format::key::encode(&["b".into()]);
         let refused = store.write(|txn, db| db.put(txn, &key, b"1").map_err(Into::into), false).unwrap_err();
-        assert_eq!(refused.code, ErrorCode::ReadersFull);
+        assert_eq!(refused.code, ErrorCode::SyncBehind);
+        assert!(refused.message.contains("Injected full reader table"), "{refused}");
         assert!(store.kept.as_ref().unwrap().refused().is_none(), "the process refuses its commits");
         drop(failing);
         put(&store, "b");
         store.close().unwrap();
+    }
+
+    #[test]
+    fn a_write_past_the_bound_whose_sync_failed_for_good_is_refused_as_every_commit_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), grouped()).unwrap();
+        put(&store, "a");
+        past_the_bound(&store);
+        let failing = failpoints::fail_while_at(points::SYNC, &store.path);
+        let key = crate::format::key::encode(&["b".into()]);
+        let refused = store.write(|txn, db| db.put(txn, &key, b"1").map_err(Into::into), false).unwrap_err();
+        assert_eq!(refused.message, store.kept.as_ref().unwrap().refused().unwrap().message);
+        drop(failing);
+        assert!(store.close().is_err());
     }
 
     #[test]

@@ -103,6 +103,10 @@ pub enum ErrorCode {
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to
     /// be on disk. Retrying the operation would apply it twice
     NotDurable,
+    /// A write refused before it began: what the last synced commit keeps from reuse passed its bound, and the sync
+    /// that would let it go failed before it wrote anything, as a full reader table fails it. Nothing of the write was
+    /// made, and it may be tried again: it goes on once a sync succeeds
+    SyncBehind,
     /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
     /// locks
     AlreadyLoaded,
@@ -171,6 +175,7 @@ impl ErrorCode {
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
             Self::RestorePending => "RESTORE_PENDING",
             Self::NotDurable => "NOT_DURABLE",
+            Self::SyncBehind => "SYNC_BEHIND",
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",
             Self::NumbersExhausted => "NUMBERS_EXHAUSTED",
