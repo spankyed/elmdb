@@ -432,7 +432,7 @@ fn the_mode_asks_lmdb_for_each_commit_sync_and_the_grouped_mode_for_none() {
 /// writes in a cache of its own until it is synced and drops it on a command: a loss made by a filesystem, and not a
 /// replay of LMDB's order. In each round a writer in a child process commits the grouped workload, syncing at every
 /// `SYNC_EVERY`th commit, and dies in its third sync once the data is flushed and before the record is written (even
-/// rounds), or between its second sync and its third (odd rounds). The job's script, `ELMDB_LOSSY_LOSE`, then drops what
+/// rounds), or one to four commits after its second sync (odd rounds). The job's script, `ELMDB_LOSSY_LOSE`, then drops what
 /// wasn't synced and the kernel's copy of the files. The database opened after, as of another boot, must hold what the
 /// last sync the writer saw finish held, and pass `check()`. With `ELMDB_LOSSY_UNPINNED` the writer holds no pin, and
 /// the job requires this to fail
@@ -464,14 +464,14 @@ fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_
         // That the filesystem lost something: a writer that died between syncs left the file at its last sync, which
         // needs no restore, where the commits it made since, kept, would; one that died once a sync's data was
         // flushed left later commits on disk than its record, which a restore takes back
+        // Without the pin the commits after the record's write over its pages, the file doesn't bear the record out,
+        // and nothing is restored: the model's check below is the one that run is to fail
         let db = Database::open(&path, OpenOptions { syncs: false, ..Default::default() }).unwrap();
         let restored = db.open_report().restored.is_some();
         db.close().unwrap();
-        assert_eq!(
-            restored,
-            round.is_multiple_of(2),
-            "round {round}: restored {restored}: the filesystem kept what wasn't synced or lost what was, or the \
-             commits after the record's wrote over its pages, which the file then doesn't bear out"
+        assert!(
+            std::env::var("ELMDB_LOSSY_UNPINNED").is_ok() || restored == round.is_multiple_of(2),
+            "round {round}: restored {restored}, so the filesystem kept what wasn't synced or lost what was"
         );
         assert_eq!(held_at(&path, COMMITS).as_ref(), Ok(&model_after(synced)), "round {round}, synced at {synced}");
     }
@@ -515,7 +515,8 @@ fn child_writes_until_it_dies() {
             db.durable().unwrap().wait().unwrap();
             println!("synced {}", n + 1);
         }
-        if !round.is_multiple_of(2) && n + 1 == 2 * SYNC_EVERY + 1 + round {
+        // Rounds 1, 3, 5 and 7: one to four commits after the second sync, before the third
+        if !round.is_multiple_of(2) && n + 1 == 2 * SYNC_EVERY + 1 + round / 2 {
             std::process::abort();
         }
     }

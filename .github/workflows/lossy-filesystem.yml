@@ -91,8 +91,16 @@ jobs:
           ELMDB_LOSSY_UNPINNED: "1"
         run: |
           mkdir -p "$ELMDB_LOSSY_DIR"
-          if cargo test -p elmdb --lib -- --ignored --exact "$TEST" --nocapture --test-threads=1; then
+          # Only the failure of the database's check counts: what it held against what its last sync held. Another
+          # failure, a writer that never synced or a script that broke, says nothing of the test
+          if cargo test -p elmdb --lib -- --ignored --exact "$TEST" --nocapture --test-threads=1 > unpinned.log 2>&1; then
+            cat unpinned.log
             echo "::error::the test passed with the writer's pin turned off: it can't tell a torn database from a whole one"
+            exit 1
+          fi
+          cat unpinned.log
+          if ! grep -Eq "round [0-9]+, synced at [0-9]+" unpinned.log; then
+            echo "::error::the test failed with the pin off, but not at the database's check"
             exit 1
           fi
 
