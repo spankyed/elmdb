@@ -3039,8 +3039,13 @@ impl<R: Read> Query<'_, R> {
                     }
                     Ok(())
                 });
-                failed = named.err();
-                failed.is_none() && sought.peek().is_some()
+                match named {
+                    Ok(()) => sought.peek().is_some(),
+                    Err(error) => {
+                        failed = Some(error);
+                        false
+                    }
+                }
             })?;
             if let Some(error) = failed {
                 return Err(error);

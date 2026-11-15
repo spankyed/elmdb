@@ -510,6 +510,10 @@ fn build_step(
             let (first, past) = crate::format::key::prefix_range(&keys::order_range(entity_type, index, build, &[]));
             let mut stale: Vec<Vec<u8>> = Vec::new();
             for (from, to) in [(&low, &first), (&past, &high)] {
+                // A unit's share taken from the keys before the build, those after it are the next unit's
+                if stale.len() >= limit {
+                    break;
+                }
                 t.visit_within(from, to, |key, _| {
                     stale.push(key.to_vec());
                     stale.len() < limit
@@ -554,6 +558,8 @@ fn keys_from(
             next
         }
     };
+    // mutant-skip: replace < with <= in keys_from
+    // Only the range's own key is read before the walk, and only for an index on one field, which has no key under it
     if read.len() < limit {
         t.visit_from(under, &from, |key, stored| {
             read.push((key.to_vec(), stored.to_vec()));

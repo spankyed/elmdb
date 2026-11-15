@@ -559,10 +559,6 @@ mod tests {
         fn now(&self) -> Instant {
             self.0
         }
-
-        fn is_manual(&self) -> bool {
-            true
-        }
     }
 
     #[test]

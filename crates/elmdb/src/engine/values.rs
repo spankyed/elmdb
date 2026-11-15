@@ -353,6 +353,15 @@ pub fn as_time(value: &Value) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_string_is_long_past_the_bytes_an_index_has_an_entry_for() {
+        let (most, past) = ("a".repeat(super::MAX_INDEXED_STRING), "a".repeat(super::MAX_INDEXED_STRING + 1));
+        assert!(!super::long(&most) && super::long(&past));
+        assert!(
+            super::index_part(&most.as_str().into()).is_some() && super::index_part(&past.as_str().into()).is_none()
+        );
+    }
+
     use super::*;
     use crate::schema::FieldDef;
 

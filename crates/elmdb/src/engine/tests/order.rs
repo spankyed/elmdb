@@ -956,10 +956,12 @@ fn a_build_the_builder_begins_again_is_put_off_and_begun_when_its_wait_is_over()
         let ops = vec![json!({ "op": "create", "type": "Item", "fields": { "tag": "b" } })];
         write(db, ops).unwrap();
     };
+    // Nothing is left for the builder once an order is built, and nothing is put off
+    let idle = |db: &Database| db.builder().as_ref().map_or(Vec::new(), |builder| builder.pending()).is_empty();
     // The first build this builder begins of the order begins at once
     ended(&db);
     db.wait_for_index_builds().unwrap();
-    assert!(readable(&db));
+    assert!(readable(&db) && idle(&db));
     // The second is put off: the wait for the builds doesn't wait for it, and the order is not built
     ended(&db);
     db.wait_for_index_builds().unwrap();
@@ -972,5 +974,33 @@ fn a_build_the_builder_begins_again_is_put_off_and_begun_when_its_wait_is_over()
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     assert!(began.elapsed() >= std::time::Duration::from_millis(700), "{:?}", began.elapsed());
+    db.wait_for_index_builds().unwrap();
+    assert!(idle(&db));
     clean(&db);
+}
+
+#[test]
+fn a_sweep_deletes_its_share_of_another_build_s_keys_a_unit() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    write(&db, vec![item("1", json!({ "tag": "a" }))]).unwrap();
+    let marker = stored(&db, "byTag").0.unwrap();
+    // Two keys under a build before the marker's, and one after it
+    let key = |build: u64, string: &str| {
+        keys::order_string("Item", "byTag", build, &[], &order::SortKey { bytes: vec![0x2b], cut: false }, string)
+    };
+    assert!(marker.build > 0);
+    let stale = [key(marker.build - 1, "x"), key(marker.build - 1, "y"), key(marker.build + 5, "z")];
+    unit(&db, |t| stale.iter().try_for_each(|stale| t.put(stale, &[])));
+    let left = |db: &Database| stale.iter().filter(|stale| db.snapshot(|s| s.contains(stale)).unwrap()).count();
+    let step = |step: Step| unit(&db, |t| order::build_unit(t, "Item", "byTag", step, true, 1)).0;
+    let sweep = Step::Sweep { build: marker.build };
+    assert_eq!(step(sweep.clone()), sweep);
+    assert_eq!(left(&db), 2);
+    assert_eq!(step(sweep.clone()), sweep);
+    assert_eq!(left(&db), 1);
+    assert_eq!(step(sweep.clone()), sweep);
+    assert_eq!(left(&db), 0);
+    assert_eq!(step(sweep), Step::Done);
+    assert_eq!(strings(&db, "byTag"), ["a"]);
 }
