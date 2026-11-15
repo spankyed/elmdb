@@ -499,14 +499,17 @@ fn what_the_pin_holds_back_makes_a_sync_due_whatever_the_time() {
         for n in 0..200 {
             put(&store, &format!("w-{}", n % 4), &vec![n as u8; 64 << 10]).unwrap();
         }
-        let (syncs, grown) = (store.syncs(), store.file_size());
+        let grown = store.file_size();
+        // A sync the bound made due may still be running: a durable wait ends after it, and runs one sync of its own
+        synced(&store);
+        let syncs = store.syncs();
         store.close().unwrap();
         (syncs, grown)
     };
     let (unbounded_syncs, unbounded) = grown(u64::MAX / 8);
     let (bounded_syncs, bounded) = grown(1 << 20);
-    assert_eq!(unbounded_syncs, 0, "no sync was due by the time");
-    assert!(bounded_syncs > 0, "the bound made syncs due");
+    assert_eq!(unbounded_syncs, 1, "no sync was due by the time, and the wait ran its own");
+    assert!(bounded_syncs > 1, "the bound made syncs due");
     // The file grows by the bound and by what is committed while a sync runs, which a slow sync makes the most of
     assert!(bounded < unbounded, "{bounded} bytes with a bound of 1 MiB, {unbounded} without");
 }
