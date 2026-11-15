@@ -236,7 +236,7 @@ fn checks_what_each_index_covers() {
         ),
         (
             json!({ "kind": "value", "fields": ["scratch"] }),
-            "types.Message.indexes.x.fields[0]: a value index can't hold a object field (\"scratch\") (declared by default-setup)",
+            "types.Message.indexes.x.fields[0]: a value index can't hold an object field (\"scratch\") (declared by default-setup)",
         ),
         (
             json!({ "kind": "value", "fields": ["text", "text"] }),
@@ -260,7 +260,7 @@ fn checks_what_each_index_covers() {
         ),
         (
             json!({ "kind": "vector", "from": ["sender"], "dims": 8, "model": "m" }),
-            "types.Message.indexes.x.from[0]: a vector index embeds string and any fields, and \"sender\" is a enum field (declared by default-setup)",
+            "types.Message.indexes.x.from[0]: a vector index embeds string and any fields, and \"sender\" is an enum field (declared by default-setup)",
         ),
         (
             json!({ "kind": "vector", "from": ["text"], "dims": 8, "model": "m", "metric": "dot" }),
@@ -284,7 +284,7 @@ fn checks_what_each_index_covers() {
         ),
         (
             json!({ "kind": "trigram", "fields": ["sender"] }),
-            "types.Message.indexes.x.fields[0]: a trigram index reads string and any fields, and \"sender\" is a enum field (declared by default-setup)",
+            "types.Message.indexes.x.fields[0]: a trigram index reads string and any fields, and \"sender\" is an enum field (declared by default-setup)",
         ),
         (
             json!({ "kind": "graph" }),

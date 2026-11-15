@@ -210,7 +210,9 @@ fn yes() -> bool {
     true
 }
 
-/// What each operation answered, in the batch's order, and what the batch changed
+/// What each operation answered, in the batch's order: a unit's write answers it, a database's write answers it beside
+/// the commit's change set, and across the binding the same `results` sit in `Written`, with the change set and
+/// sequence
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]

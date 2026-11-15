@@ -572,6 +572,10 @@ binary. `read-allocations` counts each read's allocations with dhat. Readings: `
 `search-cost [NOTES [TIMES]]` prints what a search's best ten, its count and all its ids cost, for a word every note
 holds and one a twelfth hold, over 200,000 notes unless told otherwise; with TIMES it reads the first that many times
 and prints nothing, for a sampler.
+`profile-order FIELD [NOTES [ITERATIONS [DIR]]]` reads every note in the order of `name`, a string no other note
+holds, or of `n`, a number, over a million notes as `against-sqlite.mjs` loads them unless told otherwise; it checks
+the answer against a sort, then repeats the read, printing each one's milliseconds, and given DIR it loads the notes
+there once and reads them again on later runs.
 
 **The gates shown failing.** `scripts/check-maintenance-verification.py --output <new directory>` archives the source
 with current changes into a disposable directory, restores the export and value collectors that held whole collections,

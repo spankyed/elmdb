@@ -369,6 +369,8 @@ impl Database {
     }
 
     fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
+        // The whole close's: an operation that keeps the store, and at exit the schema's lock, share it
+        let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         // A watch's listener, or the listener of the builder's commits, which runs on the builder's thread: a close
         // waits for the operation the listener is called from, and for the store that thread holds
         if crate::engine::watch::in_callback(&self.tracks) {
@@ -391,8 +393,22 @@ impl Database {
         };
         let (taken, running) = {
             // Held while the builder is told to stop and the store is taken, so a schema change can't start a builder
-            // after; released before either is waited for
-            let _schema = self.engine_schema.write();
+            // after; released before either is waited for. At exit it is waited for until the deadline: on Windows the
+            // exit handlers run after every other thread was ended, and one ended holding the schema for reading (a
+            // write waiting for its sync) never lets it go. Given up on, the database is synced and left open
+            let _schema = match (at_exit, deadline) {
+                (true, Some(deadline)) => match self.engine_schema.try_write_until(deadline) {
+                    Some(schema) => schema,
+                    None => {
+                        let store = self.store.lock().expect("the store slot's lock is never poisoned").clone();
+                        if let Some(store) = store {
+                            store.sync_owed()?;
+                        }
+                        return Ok(false);
+                    }
+                },
+                _ => self.engine_schema.write(),
+            };
             let mut slot = self.store.lock().expect("the store slot's lock is never poisoned");
             match slot.as_ref() {
                 None => return Ok(true),
@@ -410,7 +426,6 @@ impl Database {
         run_point!(CLOSE_TAKEN);
         // An operation that took the store before the close finishes first, and none keeps it long. The slot is free
         // meanwhile, so an operation that asks for the store again is told the database is closed rather than waiting
-        let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         loop {
             match Arc::try_unwrap(store) {
                 Ok(store) => {
@@ -628,6 +643,27 @@ mod tests {
 
     fn quiet() -> OpenOptions {
         OpenOptions { syncs: false, ..Default::default() }
+    }
+
+    #[test]
+    fn a_close_at_exit_gives_up_on_the_schema_a_thread_holds_past_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path().join("db"), quiet()).unwrap());
+        // The schema held for reading, as a write waiting for its sync holds it, by a thread the exit never sees end
+        let held = db.engine_schema.read();
+        let (closed, has_closed) = std::sync::mpsc::channel();
+        let closing = {
+            let db = Arc::clone(&db);
+            std::thread::spawn(move || closed.send(db.close_at_exit(Duration::from_millis(100))).unwrap())
+        };
+        let answer =
+            has_closed.recv_timeout(Duration::from_secs(10)).expect("the close at exit gave up within its wait");
+        assert!(!answer.unwrap(), "left open, the schema being held");
+        drop(held);
+        closing.join().unwrap();
+        assert!(db.is_open());
+        db.close().unwrap();
+        assert!(!db.is_open());
     }
 
     #[test]

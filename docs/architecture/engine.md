@@ -65,7 +65,10 @@ other targets refuse process-claim acquisition as unsupported.
 On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
 Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a
 process killed by a signal, or one ending with a unit open, leaves them in the system's table until a later open of
-the same path, taking the lock first, replaces them and a close removes them.
+the same path, taking the lock first, replaces them and a close removes them. A close as the process ends waits no
+longer than its deadline for what another thread holds, an operation keeping the store or the schema a write holds
+while it waits for its sync, since on Windows that thread may already have been ended; given up on, it syncs what is
+owed and leaves the database open.
 
 ## Schema
 
@@ -314,8 +317,10 @@ an answer:
   it, under a terminal that answers of every entity, reads the places first and names the entities at them by one
   walk of the type's entities in place order, putting the ids back in the order's, where naming each as it is
   handed on is a seek for each; the entries of its strings are met by one walk of the index's entries the same way
-  when they are 256 or more. An order of fewer than one in eight of the type's live entities, which equalities or
-  a range keep, names each by its own seek, and one a `limit`, `first` or `exists` may stop is handed on an entity
+  when they are 256 or more. Its strings are kept as the bytes of their parts of the order's keys, and sorted by
+  them for that walk, which is their entries' order: only a run of keys the collator orders again is decoded, one
+  of a cut sort key or holding an entity filed by its place, and every run under a range. An order of fewer than
+  one in eight of the type's live entities, which equalities or a range keep, names each by its own seek, and one a `limit`, `first` or `exists` may stop is handed on an entity
   at a time, so a page reads its own. It holds its places in memory, and a tracked read of a whole order is one a
   commit to any entity of the type writes into.
 - **A least and a greatest are an order's ends.** `least` and `greatest` of a field over a set an order of that
@@ -553,8 +558,9 @@ Every commit produces a change set: the entities created, changed, trashed, rest
 fields and relation kinds touched, each relation with its ends as they are and, for one the commit moved, the ends it
 had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
-checkpoint does not raise it). A batch's result carries
-the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
+checkpoint does not raise it). A database's write answers each operation's result and the commit's change set, which
+holds its sequence, and across the binding the three cross as `Written` (generated as `protocol/Written.ts`); a unit's
+commit answers its change set, whose `sequence` is the commit's, and a unit's write its results alone (`BatchResult`). So a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
 in either order. `db.sequence` is the last commit's.
 
