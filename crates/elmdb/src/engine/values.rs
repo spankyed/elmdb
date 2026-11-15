@@ -253,16 +253,16 @@ fn takes(t: &ValueType, v: &Value) -> std::result::Result<(), String> {
         ValueType::Number => as_number(v).is_some_and(f64::is_finite),
         // Within ±2^53, compared exactly: 2^53 + 1 rounds to the bound as a float
         ValueType::Integer => {
+            // A whole number, and whether it is within the bound; a fraction, NaN or an infinity is none
             let within = match v {
-                Value::Integer(i) => i.as_i64().is_some_and(|n| n.unsigned_abs() <= 1 << 53),
-                _ => as_number(v).is_some_and(|n| n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0),
+                Value::Integer(i) => Some(i.as_i64().is_some_and(|n| n.unsigned_abs() <= 1 << 53)),
+                _ => as_number(v).filter(|n| n.fract() == 0.0).map(|n| n.abs() <= 9_007_199_254_740_992.0),
             };
-            let whole =
-                matches!(v, Value::Integer(_)) || as_number(v).is_some_and(|n| n.is_finite() && n.fract() == 0.0);
-            if !within && whole {
-                return Err("it is past ±2^53".to_owned());
+            match within {
+                Some(true) => true,
+                Some(false) => return Err("it is past ±2^53, which a number field holds".to_owned()),
+                None => false,
             }
-            within
         }
         ValueType::Boolean => v.is_bool(),
         ValueType::Bytes => matches!(v, Value::Binary(_)),
@@ -394,11 +394,23 @@ mod tests {
         for n in [1i64 << 53, -(1i64 << 53)] {
             assert!(ok(ValueType::Integer, Value::from(n)).is_ok(), "{n}");
         }
-        for n in [(1i64 << 53) + 1, -(1i64 << 53) - 1, i64::MIN] {
-            let refused = ok(ValueType::Integer, Value::from(n)).unwrap_err().message;
-            assert!(refused.contains("an integer") && refused.contains("past ±2^53"), "{n}: {refused}");
+        let reason = |v: Value| ok(ValueType::Integer, v).unwrap_err().message;
+        for past in [
+            Value::from((1i64 << 53) + 1),
+            Value::from(-(1i64 << 53) - 1),
+            Value::from(i64::MIN),
+            Value::from(u64::MAX),
+            Value::from(9_007_199_254_740_994.0),
+            Value::from(-1e300),
+        ] {
+            let refused = reason(past.clone());
+            assert!(refused.contains("is an integer: it is past ±2^53"), "{past}: {refused}");
         }
-        assert!(ok(ValueType::Integer, Value::from(u64::MAX)).is_err());
+        // No whole number: refused for what it is, not for the bound
+        for none in [Value::from(3.5), Value::from(f64::NAN), Value::from(f64::INFINITY)] {
+            let refused = reason(none.clone());
+            assert!(refused.contains("it got a number"), "{none}: {refused}");
+        }
         assert!(ok(ValueType::Object, Value::from(1)).unwrap_err().message.contains("an object"));
         assert!(ok(ValueType::Bytes, "a".into()).unwrap_err().message.contains("is bytes:"));
         let list_of_any = ValueType::List { of: Box::new(ValueType::Any) };
