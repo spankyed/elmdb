@@ -385,6 +385,13 @@ fn a_whole_order_is_resolved_in_the_order_of_its_keys_as_one_handed_on_an_entity
         })
         .collect();
     values.push(Some("z".repeat(300).into()));
+    // A string so many hold that its places are in blocks
+    values.extend((0..300).map(|_| Some("many".into())));
+    // Strings whose sort keys are cut, in one run the collator orders apart from their bytes
+    values.extend(["b", "B", "a", "A", "e\u{301}", "é"].map(|last| Some(format!("{}{last}", "Q".repeat(200)).into())));
+    // And one past what an index has an entry for, filed by its place, which the collator holds equal to a string
+    // with an entry: both are in one run of a whole sort key, where the bytes order them and not the keys
+    values.extend([Some(format!("a{}", "\0".repeat(300)).into()), Some("a".into())]);
     let all = load(&db, "Item", &values);
     db.wait_for_index_builds().unwrap();
     write(&db, (0..all.len()).step_by(13).map(|at| op(json!({ "op": "trash", "id": all[at] }))).collect());
@@ -398,7 +405,7 @@ fn a_whole_order_is_resolved_in_the_order_of_its_keys_as_one_handed_on_an_entity
             assert_eq!(visits as usize, all.len(), "{scope}: each place is read once");
             // A page with no limit goes on past its cursor: one of a shared string, one of a string of its own,
             // the long one, a number and an entity without a value
-            for at in [2usize, 3, 0, 1, all.len() - 1, 11] {
+            for at in [2usize, 3, 0, 1, 700, 11] {
                 let (rest, _) = same(&db, scope, |field| json!([order(field, descending), after(&all[at])]));
                 let expected = match whole.iter().position(|id| *id == all[at]) {
                     Some(found) => &whole[found + 1..],

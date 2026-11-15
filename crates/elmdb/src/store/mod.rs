@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use heed::types::Bytes;
 use heed::{CommitOrAbort, Env, EnvFlags, EnvOpenOptions, RoTxn, RwTxn, WithoutTls};
 use parking_lot::lock_api::ArcRwLockReadGuard;
-use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard};
+use parking_lot::{RawRwLockRecursive, RecursiveRwLock, RecursiveRwLockReadGuard, RecursiveRwLockWriteGuard};
 
 use crate::diagnostics::{Op, names};
 use crate::engine::mirror::{EdgeDelta, EdgeMirror};
@@ -297,6 +297,9 @@ enum Claimed<'a, H> {
     /// The pin the write made sure of was ended, by a growth, before the transaction began
     Unpinned,
 }
+
+/// How long a growth beside units tries for the gate before it looks again whether a unit has opened
+const GROWTH_GATE_TRY: Duration = Duration::from_millis(5);
 
 /// The record held by another thread for a test (`Store::hold_record`), let go as this drops
 #[cfg(test)]
@@ -921,7 +924,7 @@ impl Store {
                 Err(e) if e.code == ErrorCode::MapFull && growths < MAX_GROWTHS => {
                     growths += 1;
                     op.record(names::GROWTHS, || growths as u64);
-                    self.grow()?;
+                    self.grow_beside_units()?;
                 }
                 Err(e) => return Err(e),
             }
@@ -1312,7 +1315,7 @@ impl Store {
     }
 
     /// Whether `times` what the map has in use is more than the map
-    fn map_short_of(&self, times: usize) -> bool {
+    pub(crate) fn map_short_of(&self, times: usize) -> bool {
         let _gate = self.gate();
         let info = self.env.info();
         let page = self.env.unnamed_database_stat().page_size as usize;
@@ -1324,10 +1327,12 @@ impl Store {
     /// with less it would run until the map is full, and then again in a larger one. Nothing grows while a unit
     /// is open
     pub fn make_room(&self, times: usize) -> Result<()> {
-        // A growth waits for an open unit to end, which one of this thread's never would: the write this is for
-        // is refused while one is open
-        while !self.unit_is_open() && self.map_short_of(times) {
-            self.grow()?;
+        while self.map_short_of(times) {
+            match self.grow_beside_units() {
+                // Nothing grows while a unit is open: the write this room is for is refused for it in turn
+                Err(error) if error.code == ErrorCode::UnitOpen => return Ok(()),
+                grown => grown?,
+            }
         }
         Ok(())
     }
@@ -1358,10 +1363,37 @@ impl Store {
         self.db
     }
 
-    /// Doubles the map, holding every transaction of this process off while it does
+    /// Doubles the map, holding every transaction of this process off while it does: for a unit about to begin,
+    /// whose reserved place means no other unit is open to wait for
     pub fn grow(&self) -> Result<()> {
         self.check_writable()?;
-        let _gate = self.gate.write();
+        let gate = self.gate.write();
+        self.grow_holding(gate)
+    }
+
+    /// `grow`, for a write or a rebuild that is no unit's own: the gate is taken only while no unit is open, and the
+    /// growth refused (`UNIT_OPEN`) once one is, as the write it is for would be. A unit holds the gate for reading
+    /// for its whole life, and one begun on another thread, the event loop's while this runs on a thread of the
+    /// pool, would leave a growth waiting on it for as long as that thread waits on the growth
+    pub fn grow_beside_units(&self) -> Result<()> {
+        self.check_writable()?;
+        loop {
+            if self.unit_is_open() {
+                return Err(Error::new(
+                    ErrorCode::UnitOpen,
+                    "A unit opened while the map was to grow, holding the database's one write transaction: commit or \
+                     abort it, then write",
+                ));
+            }
+            run_point!(GROWTH_GATE);
+            if let Some(gate) = self.gate.try_write_for(GROWTH_GATE_TRY) {
+                return self.grow_holding(gate);
+            }
+        }
+    }
+
+    /// `grow`'s work, the gate held for writing
+    fn grow_holding(&self, _gate: RecursiveRwLockWriteGuard<'_, ()>) -> Result<()> {
         self.drop_idle();
         // A pin is a transaction too: the write that grows makes sure of it again before it runs again
         if let Some(kept) = &self.kept {

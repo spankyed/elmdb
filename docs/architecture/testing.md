@@ -64,15 +64,29 @@ mutant that keeps one growing fails its test instead of filling the disk.
 
 ## The build directory
 
-Cargo never removes an artifact from a build directory: a build of other code, or the same code with other features
-(`diagnostics` on and off), hashes a new one beside the last. So:
+Cargo never removes an artifact from a build directory: a build with other dependencies, features (`diagnostics` on
+and off), flags (the models' `--cfg`) or profile hashes a new one beside the last, where an edit of a crate's own code
+builds over its old one. Branches differ in just those, so a long-lived build directory grows with every branch built
+in it. So:
 
 - **A worktree builds into its own `target/`**, and removing the worktree frees it. Pointing several checkouts at one
   build directory with `CARGO_TARGET_DIR` saves a cold build per worktree, but removing a worktree then frees nothing,
   and the shared directory grows with every branch any of them built.
-- **A long-lived build directory is swept:** `cargo xtask sweep` removes what a toolchain no longer installed made,
-  what no build has used for 14 days, and then the oldest until it is under 15 GB, through `cargo-sweep` (`cargo
-  install cargo-sweep --version '=0.8.0' --locked`).
+- **Every build directory a checkout uses is swept, by `pre-push` before it builds anything:** the checkout's target,
+  the concurrency models' (`target/loom`, `target/shuttle`) and the scratch target. `cargo xtask sweep` removes, through
+  `cargo-sweep` (`cargo install cargo-sweep --version '=0.8.0' --locked`), what a toolchain no longer installed made,
+  what no build has used for 14 days, and then the oldest until the target and the scratch target are under 15 GB
+  each and a model's under 5 GB. It then removes the incremental compilation directories cargo-sweep leaves, one for
+  each variant of a crate ever built: those no build has written to for 14 days, and all but the two latest of a
+  crate's, leaving any a build wrote to in the last hour, which may be another checkout's running now
+  (`xtask/src/build_dir.rs`).
+- **A mutated or scratch copy of the tree builds into the scratch target**, `CARGO_TARGET_DIR=$(cargo xtask
+  scratch-target)`, beside the checkout's target and not in it: one directory for every such copy, whatever its path,
+  which the sweep bounds with the rest, where a target in a copy's own directory would be left behind with it.
+- **A run that builds is refused below 20 GB free:** `pre-push` once it has swept, and `scripts/mutants-in-diff.py`,
+  whose copies build from cold in the system's temporary directory. Started with less, a run fills the disk part way
+  through, and the builds and tests running beside it with it. A CI runner, whose disk is its run's alone and holds
+  less than that, isn't held to it (`CI` set).
 - **Dev and test builds carry line tables, not full debug info** (`[profile.dev]` in `Cargo.toml`, which has the
   reading): backtraces keep their files and lines, and `CARGO_PROFILE_DEV_DEBUG=full` gives one build a debugger's view
   of locals.
@@ -380,7 +394,7 @@ argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
 A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
-factory, and the work six exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
+factory, and the work five exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
 naming it, which has that export panic the first time it is called. The child calls it, by a table it fails
 without an entry of for the name, and expects `PANICKED` naming the export and the place; the handle then refuses
 a call, still answers its path and whether it is open, and closes; the unit it had open has ended, whether the
@@ -402,16 +416,18 @@ V8 is still freeing answers they dropped, which only Windows can fail: with exte
 and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
 `windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
 
-`offthread.test.mjs` holds the four operations that run on the pool: a write, a check, a rebuild and a backup answer a
-promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its code, and a
-refusal made before the work throws. Sixty writes asked for without an await commit in the order asked, each straight
-after the one before; and with a rebuild running and three times as many writes waiting behind it as the pool has
-threads, random bytes asked of the pool are answered before the rebuild ends. Forty durable writes asked for behind a
-rebuild are answered by one sync, ten awaited in turn by one each, and one with a rebuild behind it before the
-rebuild. Writes asked for in the turn a database is closed reject as closed, the ones behind none that landed.
-`exit.test.mjs` asks a rebuild and forty writes behind it of a child process that then calls `process.exit()`: all
-forty are there and the rebuild ran to its end; and of a child that drops its handle with a rebuild and a durable
-write in flight, that the write is answered after the handle is collected, the child saying it was. Each
+`offthread.test.mjs` holds the three operations that run on the pool beside their blocking forms: a check, a rebuild
+and a backup answer what their blocking forms answer, a rebuild of 20,000 notes leaves timers turning until it
+answers, a failure rejects with its code, and a refusal made before the work throws. A rebuild asked for while a unit
+is open is refused with `UNIT_OPEN`, and runs once the unit has committed; twenty blocking writes made while a rebuild
+of 20,000 notes is on its way each land, in order, with the rebuild one commit among them, and the database checks
+clean; a rebuild asked for in the turn the database is closed either runs or rejects as closed, and the database opened
+again is whole and checks clean. `exit.test.mjs` asks a rebuild of a child process that then calls `process.exit()`:
+the rebuild has committed and ran to its end; and of a child that drops its handle with a rebuild in flight, that the
+rebuild is answered after the handle is collected, the child saying it was; and of five children that each make a
+read, a durable wait, a check, a rebuild or a backup answering a promise and then drop the handle, that each handle
+is collected: napi-rs roots the object of a method that returns a task for the task's sake and never lets it go, so
+every promise the binding answers is spawned instead. Each
 `…Sync` form is the blocking one the rest of the suite calls.
 
 ## Platforms
@@ -569,6 +585,10 @@ binary. `read-allocations` counts each read's allocations with dhat. Readings: `
 `search-cost [NOTES [TIMES]]` prints what a search's best ten, its count and all its ids cost, for a word every note
 holds and one a twelfth hold, over 200,000 notes unless told otherwise; with TIMES it reads the first that many times
 and prints nothing, for a sampler.
+`profile-order FIELD [NOTES [ITERATIONS [DIR]]]` reads every note in the order of `name`, a string no other note
+holds, or of `n`, a number, over a million notes as `against-sqlite.mjs` loads them unless told otherwise; it checks
+the answer against a sort, then repeats the read, printing each one's milliseconds, and given DIR it loads the notes
+there once and reads them again on later runs.
 
 **The gates shown failing.** `scripts/check-maintenance-verification.py --output <new directory>` archives the source
 with current changes into a disposable directory, restores the export and value collectors that held whole collections,
@@ -609,10 +629,10 @@ commit at a twentieth of the notes and at all of them, for a note of three terms
 of wall time and as the process's CPU per commit; the best ten and the count for a word every note holds and one a
 twelfth hold, ten of the first word's matches past a cursor near the end of them, and whether it has a match; a
 misspelled word; the ten lowest and the ten highest of an indexed number, the ten lowest of the half of the notes a
-status keeps, the count of the last 500 of it, and a page of fifty near the end of creation order and one near the
-end of the number's order; of the names' order, its first ten, a page of fifty near the end of the loaded notes', the
-count by a range of the loaded notes' last (200 at a million notes), and every note in it, which is mostly the time
-to hand over that many ids; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
+status keeps, the count of the last 500 of it, a page of fifty near the end of creation order and one near the
+end of the number's order, and every note in the number's order; of the names' order, its first ten, a page of fifty
+near the end of the loaded notes', the count by a range of the loaded notes' last (200 at a million notes), and every
+note in it; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
 elsewhere in the order, and one that gives each the other status, neither stamping the notes as changed, which
 SQLite's table has no column for; a check, a rebuild and a compaction. For elmdb alone it also reads how many
 entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine, and the

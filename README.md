@@ -24,7 +24,10 @@ A good fit for knowledge tools, document libraries and other desktop apps with c
 import { Database } from 'elmdb';
 import { Packr } from 'msgpackr';
 
-const msgpack = new Packr({ useRecords: false, mapsAsObjects: true });
+// Integers that don't fit 32 bits, such as the times in `createdAt` and `updatedAt`, cross as 64-bit integers, which
+// msgpackr decodes as BigInt unless told otherwise; 'auto' answers a number up to 2^53 and an exact BigInt past it,
+// as a `number`, `any` or `object` field can hold
+const msgpack = new Packr({ useRecords: false, mapsAsObjects: true, int64AsType: 'auto' });
 
 const db = Database.open('./notes', {
   schema: {
@@ -91,19 +94,18 @@ It uses N-API, so a Node or Electron upgrade needs no rebuild.
 | Platforms | macOS, Linux (glibc and musl) and Windows on x64; macOS and Linux on arm64 |
 | Not in scope | a server, replication, or access control |
 
-**Durability:** a commit is visible at once and synced within about a second. `db.write(batch, true)` resolves once its
-sync is done, and `db.writeSync(batch, true)` returns then. `NOT_DURABLE` means the commit landed but its sync failed, so
-don't blindly retry it. `SYNC_BEHIND` means nothing was written, as the syncs that let the file be reused are failing
-for now: try it again after a pause.
+**Durability:** a commit is visible at once and synced within about a second. `db.writeSync(batch, true)` returns once
+its sync is done, and `await db.durable()` waits for every commit before it to be on disk without holding the event
+loop. `NOT_DURABLE` means the commit landed but its sync failed, so don't blindly retry it. `SYNC_BEHIND` means nothing
+was written, as the syncs that let the file be reused are failing for now: try it again after a pause.
 
-**Off the calling thread:** `db.write`, `db.check`, `db.rebuild` and `db.backup` run on a thread of the pool and answer a
-promise, so a large rebuild doesn't hold the event loop; `db.writeSync`, `db.checkSync`, `db.rebuildSync` and
-`db.backupSync` are the blocking forms. Writes and rebuilds are applied one at a time in the order you asked for them,
-so a write sees what the one asked before it committed, and however many are waiting on a database they hold one of
-Node's pool threads between them. Durable writes asked for one after another are synced together and answered once the sync has run. Await a write whose
-answer or failure the next one depends on, and before a blocking call that
-must come after it: `writeSync`, `begin` and the other blocking calls don't wait their turn among them. A close waits
-for an operation that is running, so one made during a long rebuild holds the event loop until it ends.
+**Writes block; long maintenance doesn't have to.** A write runs on the calling thread and answers there, so what it
+created and what it refused are known at the call, and a read after it sees it. `db.check`, `db.rebuild` and
+`db.backup` run on a thread of the pool and answer a promise, so a large rebuild doesn't hold the event loop;
+`db.checkSync`, `db.rebuildSync` and `db.backupSync` are the blocking forms. A rebuild holds the database's write lock
+until it commits, so a write, a unit or a schema change made while one runs waits for it, holding the event loop:
+await a rebuild before writing. A close waits for an operation that is running, so one made during a long rebuild
+holds the event loop until it ends.
 
 **Power loss:** by default commits are synced in groups: once writes have paused for 100 ms, and once a second while
 they go on. If the machine loses power between two syncs, the commits since the last sync can be lost. The file can

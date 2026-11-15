@@ -102,8 +102,6 @@ pub struct Database {
     health: Health,
     /// The unit this handle began last, which a panic of the handle ends: the JavaScript object of it holds it too
     unit: std::cell::RefCell<Option<UnitSlot>>,
-    /// The writes asked of this handle for the pool, applied in the order they were asked for (`jobs::Writes`)
-    writes: jobs::Writes,
 }
 
 /// A unit as its JavaScript object and the handle that began it share it, on the thread that began it: empty once
@@ -132,6 +130,19 @@ fn end_unit(slot: &UnitSlot) {
     }
 }
 
+/// `task` on a thread of the pool, answering its promise. Spawned, never returned as an `AsyncTask`: napi-rs roots the
+/// JavaScript object of a method that returns one, for the task's sake, and a handle that had answered one was never
+/// collected after (`exit.test.mjs` drops a handle after each call that answers a promise and waits for its
+/// collection). Each task holds the database by a hold of its own (`Held`), so it needs no root
+fn spawned<'env, T>(env: &'env Env, task: T) -> Result<Unknown<'env>, Code>
+where
+    T: Task,
+    T::JsValue: 'env,
+{
+    let work = env.spawn(task).map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))?;
+    Ok(work.promise_object().to_unknown())
+}
+
 impl Database {
     /// Runs an export's work, refused once the handle has panicked. A panic in it ends the unit the handle has
     /// open: what the panic left in memory is not known, and the unit's transaction is part of it
@@ -150,43 +161,20 @@ impl Database {
         ran
     }
 
-    /// A job on the database, on a thread of the pool, answering what `work` answers as `convert` makes it
-    fn job<T, V>(
-        &self,
-        export: &'static str,
-        work: impl FnOnce(&elmdb::Database) -> elmdb::Result<T> + Send + 'static,
-        convert: fn(&Env, T) -> napi::Result<V>,
-    ) -> AsyncTask<Job<T, V>>
-    where
-        T: Send + 'static,
-        V: ToNapiValue + TypeName,
-    {
-        AsyncTask::new(Job::new(self.inner.again(), self.health.clone(), export, work, convert))
-    }
-
-    /// A write to the database on a thread of the pool, in its turn among those asked for, answering a promise of
-    /// what `work` answers as `convert` makes it
-    fn queued<'env, T, V>(
+    /// A job on the database, on a thread of the pool, answering a promise of what `work` answers as `convert` makes
+    /// it (`spawned`)
+    fn job<'env, T, V>(
         &self,
         env: &'env Env,
         export: &'static str,
-        durable: bool,
-        work: impl FnOnce(&elmdb::Database) -> elmdb::Result<(T, Option<elmdb::Unsynced>)> + Send + 'static,
+        work: impl FnOnce(&elmdb::Database) -> elmdb::Result<T> + Send + 'static,
         convert: fn(&Env, T) -> napi::Result<V>,
-    ) -> Result<Object<'env>, Code>
+    ) -> Result<Unknown<'env>, Code>
     where
         T: Send + 'static,
-        V: ToNapiValue + 'static,
+        V: ToNapiValue + TypeName + 'static,
     {
-        self.writes
-            .queue(
-                env,
-                jobs::Of { db: self.inner.again(), health: self.health.clone(), export },
-                durable,
-                work,
-                convert,
-            )
-            .map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))
+        spawned(env, Job::new(self.inner.again(), self.health.clone(), export, work, convert))
     }
 
     fn end_unit_once_panicked(&self) {
@@ -231,12 +219,7 @@ impl Database {
             };
             let inner = std::sync::Arc::new(elmdb::Database::open(path, options).map_err(to_js)?);
             exit::close_at_exit(&env, &inner).map_err(|e| napi::Error::new(Code("LMDB"), e.reason.clone()))?;
-            Ok(Self {
-                inner: Held::new(inner),
-                health: Health::default(),
-                unit: std::cell::RefCell::default(),
-                writes: jobs::Writes::default(),
-            })
+            Ok(Self { inner: Held::new(inner), health: Health::default(), unit: std::cell::RefCell::default() })
         })
     }
 
@@ -290,30 +273,9 @@ impl Database {
         self.guarded("Database.syncs", || self.inner.syncs().map(|n| n as f64).map_err(to_js))
     }
 
-    /// Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
-    /// the pool, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
-    /// order they were asked for, a rebuild among them in its turn, and hold one thread of the pool between them; one
-    /// is refused while a unit is open
-    #[napi(ts_return_type = "Promise<Buffer>")]
-    pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<Object<'env>, Code> {
-        self.guarded("Database.write", || {
-            let batch = batch.to_vec();
-            self.queued(
-                env,
-                "Database.write, on a thread of the pool,",
-                durable.unwrap_or(false),
-                // A durable write's sync is waited for after the durable writes behind it, one sync between them
-                move |db| match durable.unwrap_or(false) {
-                    true => db.write_bytes_unsynced(&batch).map(|(answer, unsynced)| (answer, Some(unsynced))),
-                    false => db.write_bytes(&batch, false).map(|answer| (answer, None)),
-                },
-                jobs::bytes,
-            )
-        })
-    }
-
-    /// `write` on this thread, held until the batch is applied
+    /// Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of
+    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }` once it has committed. `durable` commits it with
+    /// a sync. Refused while a unit is open (`UNIT_OPEN`): writes go through the unit then
     #[napi]
     pub fn write_sync<'env>(
         &self,
@@ -335,16 +297,11 @@ impl Database {
 
     /// `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop
     #[napi(ts_return_type = "Promise<Buffer>")]
-    pub fn read(&self, reads: Buffer) -> Result<AsyncTask<ReadTask>, Code> {
+    pub fn read<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.read", || {
-            Ok({
-                AsyncTask::new(ReadTask {
-                    db: self.inner.again(),
-                    health: self.health.clone(),
-                    reads: reads.to_vec(),
-                    failed: None,
-                })
-            })
+            let task =
+                ReadTask { db: self.inner.again(), health: self.health.clone(), reads: reads.to_vec(), failed: None };
+            spawned(env, task)
         })
     }
 
@@ -442,8 +399,8 @@ impl Database {
         self.guarded("Database.sequence", || self.inner.sequence().map(|n| n as f64).map_err(to_js))
     }
 
-    /// Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
-    /// (`UNIT_OPEN`), and writes go through the unit
+    /// Opens a unit that stays open across calls until it is committed or aborted; while it is, a write or a rebuild
+    /// outside it is refused (`UNIT_OPEN`), and writes go through the unit
     #[napi]
     pub fn begin(&self) -> Result<Unit, Code> {
         self.guarded("Database.begin", || {
@@ -455,13 +412,14 @@ impl Database {
 
     /// Compares derived data with primary data and every row with the schema's rules, on a thread of the pool
     #[napi(ts_return_type = "Promise<CheckReport>")]
-    pub fn check(&self) -> Result<AsyncTask<Job<serde_json::Value, Unknown<'static>>>, Code> {
+    pub fn check<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.check", || {
-            Ok(self.job(
+            self.job(
+                env,
                 "Database.check, on a thread of the pool,",
                 |db| db.check().map(|report| serde_json::to_value(report).expect("a report serializes")),
                 jobs::value,
-            ))
+            )
         })
     }
 
@@ -475,24 +433,21 @@ impl Database {
     }
 
     /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
-    /// thread of the pool and in its turn among the writes asked for, as a write is
+    /// thread of the pool, in one unit of its own: a write made on this thread while it runs waits for it to commit.
+    /// Refused while a unit is open (`UNIT_OPEN`)
     #[napi(ts_return_type = "Promise<void>")]
     pub fn rebuild<'env>(
         &self,
         env: &'env Env,
         entity_type: Option<String>,
         index: Option<String>,
-    ) -> Result<Object<'env>, Code> {
+    ) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.rebuild", || {
             let one = rebuild_target(entity_type, index)?;
-            self.queued(
+            self.job(
                 env,
                 "Database.rebuild, on a thread of the pool,",
-                false,
-                move |db| {
-                    let one = one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()));
-                    db.rebuild(one).map(|()| ((), None))
-                },
+                move |db| db.rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()))),
                 jobs::nothing,
             )
         })
@@ -593,9 +548,9 @@ impl Database {
     /// A compacted copy of one moment of the database into `target`, which opens as a database of its own, on a thread of
     /// the pool
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn backup(&self, target: String) -> Result<AsyncTask<Job<(), ()>>, Code> {
+    pub fn backup<'env>(&self, env: &'env Env, target: String) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.backup", || {
-            Ok(self.job("Database.backup, on a thread of the pool,", move |db| db.backup(target), jobs::nothing))
+            self.job(env, "Database.backup, on a thread of the pool,", move |db| db.backup(target), jobs::nothing)
         })
     }
 
@@ -637,15 +592,13 @@ impl Database {
     /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
     /// the database is closed
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn durable(&self) -> Result<AsyncTask<DurableTask>, Code> {
+    pub fn durable<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.durable", || {
-            Ok({
-                let task = match self.inner.durable() {
-                    Ok(durable) => DurableTask { durable: Some(durable), health: self.health.clone(), failed: None },
-                    Err(error) => DurableTask { durable: None, health: self.health.clone(), failed: Some(error) },
-                };
-                AsyncTask::new(task)
-            })
+            let task = match self.inner.durable() {
+                Ok(durable) => DurableTask { durable: Some(durable), health: self.health.clone(), failed: None },
+                Err(error) => DurableTask { durable: None, health: self.health.clone(), failed: Some(error) },
+            };
+            spawned(env, task)
         })
     }
 

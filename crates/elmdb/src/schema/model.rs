@@ -283,6 +283,13 @@ impl ValueType {
         }
     }
 
+    /// Its name as a message says it, with its article: "an integer", "a string"
+    pub fn named(&self) -> String {
+        let name = self.name();
+        let article = if name.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" };
+        format!("{article} {name}")
+    }
+
     /// Whether a value index can hold it: a scalar the key codec orders, a list of those, or `any`, of whose values
     /// the index holds the scalars (the rest are found by walking the type's rows)
     pub fn is_value_indexable(&self) -> bool {

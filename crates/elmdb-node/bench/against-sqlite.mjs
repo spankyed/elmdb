@@ -130,9 +130,10 @@ const OPEN_LOWEST = [{ step: 'where', field: 'status', value: 'open' }, ...LOWES
 const atLeast = (least) => [{ step: 'range', field: 'n', atLeast: least, below: NOTES }];
 const pageAfter = (cursor) => [{ step: 'after', id: cursor }, { step: 'limit', n: 50 }];
 const pageByNumberAfter = (cursor) => [{ step: 'orderBy', field: 'n' }, { step: 'after', id: cursor }, { step: 'limit', n: 50 }];
+// Every note in the number's order
+const BY_NUMBER = [{ step: 'orderBy', field: 'n' }];
 // The same of the names: the first ten, a page of fifty past a cursor, the names from one on that are a loaded
-// note's (the ranked notes' and the commits' are past `m`), and every note in the names' order, which is mostly the
-// time to hand a caller that many ids
+// note's (the ranked notes' and the commits' are past `m`), and every note in the names' order
 const BY_NAME = [{ step: 'orderBy', field: 'name' }];
 const FIRST_BY_NAME = [...BY_NAME, { step: 'limit', n: 10 }];
 const pageByNameAfter = (cursor) => [...BY_NAME, { step: 'after', id: cursor }, { step: 'limit', n: 50 }];
@@ -190,6 +191,7 @@ function elmdb() {
     pageByNameAfter: (cursor) => query(pageByNameAfter(cursor), { answer: 'ids' }).ids,
     namesFrom: (least) => query(namesFrom(least), { answer: 'count' }).n,
     allByName: () => query(BY_NAME, { answer: 'ids' }).ids,
+    allByNumber: () => query(BY_NUMBER, { answer: 'ids' }).ids,
     // A unit that gives each of the notes another name, and one that gives each the other status
     rename: (notes) => db.writeSync(packr.pack({
       ops: notes.map((i) => ({ op: 'set', id: id(i), fields: { name: otherNameOf(i) }, touch: false })),
@@ -216,6 +218,7 @@ function elmdb() {
         pageByNameNearEndVisited: visited(pageByNameAfter(id(NEAR_END_BY_NAME))),
         lastNamesVisited: visited(namesFrom(nameOf(NEAR_END_BY_NAME))),
         allByNameVisited: visited(BY_NAME),
+        allByNumberVisited: visited(BY_NUMBER),
       };
     },
     check: () => {
@@ -282,6 +285,7 @@ function sqlite() {
   );
   const namesFrom = db.prepare('SELECT count(*) AS n FROM notes WHERE name >= ? AND name < ?');
   const allByName = db.prepare('SELECT id FROM notes ORDER BY name, rowid');
+  const allByNumber = db.prepare('SELECT id FROM notes ORDER BY n, rowid');
   const rename = db.prepare('UPDATE notes SET name = ? WHERE id = ?');
   const restatus = db.prepare('UPDATE notes SET status = ? WHERE id = ?');
   const unit = (work) => {
@@ -316,6 +320,7 @@ function sqlite() {
     pageByNameAfter: (cursor) => pageByNameAfter.all(cursor).map((row) => row.id),
     namesFrom: (least) => namesFrom.get(least, 'm').n,
     allByName: () => allByName.all().map((row) => row.id),
+    allByNumber: () => allByNumber.all().map((row) => row.id),
     rename: (notes) => unit(() => notes.forEach((i) => rename.run(otherNameOf(i), id(i)))),
     restatus: (notes) => unit(() => notes.forEach((i) => restatus.run(i % 2 ? 'done' : 'open', id(i)))),
     check: () => assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok', 'sqlite: integrity_check'),
@@ -397,6 +402,7 @@ function measure(name, engine) {
     pageByName: engine.pageByNameAfter(id(NEAR_END_BY_NAME)),
     namesFrom: engine.namesFrom(nameOf(NEAR_END_BY_NAME)),
     allByName: digest(engine.allByName()),
+    allByNumber: digest(engine.allByNumber()),
   };
   // What every note holds, what a twelfth hold, and a word one letter off one a sixth hold
   if (engine.text) {
@@ -432,6 +438,7 @@ function measure(name, engine) {
     pageByNameNearEndMs: timed(5, () => engine.pageByNameAfter(id(NEAR_END_BY_NAME))).ms,
     lastNamesMs: timed(5, () => engine.namesFrom(nameOf(NEAR_END_BY_NAME))).ms,
     allByNameMs: timed(3, () => engine.allByName()).ms,
+    allByNumberMs: timed(3, () => engine.allByNumber()).ms,
   };
   if (engine.visited) {
     out.searches.everyBestTenVisited = engine.visited('the');

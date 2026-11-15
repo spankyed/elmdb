@@ -22,7 +22,9 @@ failure. It checks what is committed, and refuses a tree with uncommitted change
 cargo xtask pre-push              # cheapest first; --base REF when the branch merges into another than origin/main
 ```
 
-What it can't run is CI's: the other platforms' builds and suites, and the Valgrind readings.
+It sweeps the build directories first and refuses to start below 20 GB free (`cargo xtask sweep`, `testing.md`, The
+build directory). What it can't run is CI's: the other platforms' builds and suites, and the Valgrind readings. A
+mutated or scratch copy of the tree builds with `CARGO_TARGET_DIR=$(cargo xtask scratch-target)`.
 
 While working, run what your change touches:
 
