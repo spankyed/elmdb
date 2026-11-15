@@ -172,6 +172,18 @@ crates = sorted((p["name"], Path(p["manifest_path"]).parent.relative_to(root).as
                 for p in metadata["packages"])
 assert crates, "the workspace names no crate"
 
+# Each job's copy builds the workspace from cold in the system's temporary directory: below the floor `cargo xtask
+# pre-push` holds a run to (`xtask/src/build_dir.rs`, FLOOR) the disk would fill part way through, and the copies with
+# it, and whatever else the machine runs. Nothing is run when nothing is in scope, so nothing is asked of the disk then.
+# A CI runner's disk is its run's alone, which a full disk ends and nothing more, and holds less than the floor
+FLOOR = 20 << 30
+if scope != [] and not os.environ.get("CI"):
+    import tempfile
+    free = shutil.disk_usage(tempfile.gettempdir()).free
+    if free < FLOOR:
+        sys.exit(f"{tempfile.gettempdir()} has {free / (1 << 30):.1f} GB free, less than the {FLOOR >> 30} GB a mutation "
+                 "run's copies build in: free space first, `cargo xtask sweep` among the ways")
+
 # cargo-mutants builds each job's copy of the tree in a directory of its own; a CARGO_TARGET_DIR from the caller would
 # put every copy's build in one, where a job can run another's test binary and report a caught mutant as missed
 env = {key: value for key, value in os.environ.items() if key != "CARGO_TARGET_DIR"}

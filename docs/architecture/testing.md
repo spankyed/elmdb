@@ -64,15 +64,29 @@ mutant that keeps one growing fails its test instead of filling the disk.
 
 ## The build directory
 
-Cargo never removes an artifact from a build directory: a build of other code, or the same code with other features
-(`diagnostics` on and off), hashes a new one beside the last. So:
+Cargo never removes an artifact from a build directory: a build with other dependencies, features (`diagnostics` on
+and off), flags (the models' `--cfg`) or profile hashes a new one beside the last, where an edit of a crate's own code
+builds over its old one. Branches differ in just those, so a long-lived build directory grows with every branch built
+in it. So:
 
 - **A worktree builds into its own `target/`**, and removing the worktree frees it. Pointing several checkouts at one
   build directory with `CARGO_TARGET_DIR` saves a cold build per worktree, but removing a worktree then frees nothing,
   and the shared directory grows with every branch any of them built.
-- **A long-lived build directory is swept:** `cargo xtask sweep` removes what a toolchain no longer installed made,
-  what no build has used for 14 days, and then the oldest until it is under 15 GB, through `cargo-sweep` (`cargo
-  install cargo-sweep --version '=0.8.0' --locked`).
+- **Every build directory a checkout uses is swept, by `pre-push` before it builds anything:** the checkout's target,
+  the concurrency models' (`target/loom`, `target/shuttle`) and the scratch target. `cargo xtask sweep` removes, through
+  `cargo-sweep` (`cargo install cargo-sweep --version '=0.8.0' --locked`), what a toolchain no longer installed made,
+  what no build has used for 14 days, and then the oldest until the target and the scratch target are under 15 GB
+  each and a model's under 5 GB. It then removes the incremental compilation directories cargo-sweep leaves, one for
+  each variant of a crate ever built: those no build has written to for 14 days, and all but the two latest of a
+  crate's, leaving any a build wrote to in the last hour, which may be another checkout's running now
+  (`xtask/src/build_dir.rs`).
+- **A mutated or scratch copy of the tree builds into the scratch target**, `CARGO_TARGET_DIR=$(cargo xtask
+  scratch-target)`, beside the checkout's target and not in it: one directory for every such copy, whatever its path,
+  which the sweep bounds with the rest, where a target in a copy's own directory would be left behind with it.
+- **A run that builds is refused below 20 GB free:** `pre-push` once it has swept, and `scripts/mutants-in-diff.py`,
+  whose copies build from cold in the system's temporary directory. Started with less, a run fills the disk part way
+  through, and the builds and tests running beside it with it. A CI runner, whose disk is its run's alone and holds
+  less than that, isn't held to it (`CI` set).
 - **Dev and test builds carry line tables, not full debug info** (`[profile.dev]` in `Cargo.toml`, which has the
   reading): backtraces keep their files and lines, and `CARGO_PROFILE_DEV_DEBUG=full` gives one build a debugger's view
   of locals.

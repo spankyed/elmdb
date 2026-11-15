@@ -24,14 +24,18 @@
 //!   `exclude_re` there names a line, which only a comment may.
 //! - `compare`: runs one command on two revisions in turn and prints each reading beside the load as its run ended; it
 //!   reports and decides nothing (`docs/architecture/testing.md`, Comparing two revisions).
-//! - `sweep`: removes from the build directory what no recent build used, through `cargo-sweep` (`docs/architecture/
+//! - `sweep`: bounds each build directory this checkout uses, its target, the models' and the scratch target, removing
+//!   what no recent build used, through `cargo-sweep`, and the incremental directories it leaves (`docs/architecture/
 //!   testing.md`, The build directory).
+//! - `scratch-target`: makes and prints the directory a mutated or scratch copy of the tree builds into, beside this
+//!   checkout's target, which `sweep` bounds with the rest.
 //! - `pre-push`: every check CI runs on a change, the change's mutants included, cheapest first, stopping at the first
 //!   that fails: what to run before a push.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
+mod build_dir;
 mod compare;
 mod generate;
 mod pre_push;
@@ -46,7 +50,8 @@ fn main() -> ExitCode {
         Some("check-icu-exact") => check_icu_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
-        Some("sweep") => sweep(&workspace_root()),
+        Some("sweep") => build_dir::sweep(&workspace_root()),
+        Some("scratch-target") => scratch_target(&workspace_root()),
         Some("check-sync") => check_sync(&workspace_root()),
         Some("check-commits") => check_commits(&workspace_root()),
         Some("mutant-exclusions") => mutant_exclusions(&workspace_root()),
@@ -69,7 +74,7 @@ fn main() -> ExitCode {
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-icu-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | pre-push>"
+            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-icu-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
                 .to_owned(),
         ),
     };
@@ -80,38 +85,6 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
-}
-
-/// The cargo-sweep this task runs, pinned as the repository pins its dependencies
-const CARGO_SWEEP: &str = "0.8.0";
-/// Artifacts no build has used for this many days go
-const SWEEP_DAYS: &str = "14";
-/// And past this size, the oldest go until the build directory fits
-const SWEEP_MAX_SIZE: &str = "15GB";
-
-/// Cargo never removes an artifact from a build directory: a build of other code or other features hashes a new one
-/// beside the last, so a long-lived build directory grows with every branch built in it. This removes what a toolchain
-/// no longer installed made, what no build has used for `SWEEP_DAYS`, and then the oldest until it is under
-/// `SWEEP_MAX_SIZE`, printing what each pass freed
-fn sweep(root: &Path) -> Result<(), String> {
-    let installed = Command::new("cargo").args(["sweep", "--version"]).output().is_ok_and(|out| out.status.success());
-    if !installed {
-        return Err(format!(
-            "cargo-sweep isn't installed: cargo install cargo-sweep --version '={CARGO_SWEEP}' --locked"
-        ));
-    }
-    for pass in [vec!["--installed"], vec!["--time", SWEEP_DAYS], vec!["--maxsize", SWEEP_MAX_SIZE]] {
-        let status = Command::new("cargo")
-            .arg("sweep")
-            .args(&pass)
-            .arg(root)
-            .status()
-            .map_err(|e| format!("cargo sweep {}: {e}", pass.join(" ")))?;
-        if !status.success() {
-            return Err(format!("cargo sweep {} failed with {status}", pass.join(" ")));
-        }
-    }
-    Ok(())
 }
 
 /// The engine's files that lock, wait or keep per-thread state outside `crate::sync`, each with why: what isn't
@@ -482,6 +455,15 @@ fn locks_outside_sync(line: &str) -> bool {
         && ["Mutex", "Condvar", "RwLock", "Barrier"].iter().any(|primitive| code.contains(primitive));
     let thread_local = code.contains("thread_local!") && !code.contains("crate::sync::thread_local!");
     std_lock || code.contains("parking_lot::") || thread_local
+}
+
+/// `cargo xtask scratch-target`: the scratch target, made, its path printed for a copy to build into with
+/// `CARGO_TARGET_DIR`
+fn scratch_target(root: &Path) -> Result<(), String> {
+    let scratch = build_dir::scratch(&build_dir::target_dir(root)?);
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+    println!("{}", scratch.display());
+    Ok(())
 }
 
 fn workspace_root() -> PathBuf {
