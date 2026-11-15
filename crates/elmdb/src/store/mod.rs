@@ -857,6 +857,7 @@ impl Store {
         let mut growths = 0;
         loop {
             run_point!(WRITE_RESERVATION);
+            self.hold_to_the_bound();
             // Before the write lock, and before the transaction, which may write pages before it commits
             let writing = self.ensure_pin()?;
             run_point!(WRITE_PINNED);
@@ -907,6 +908,19 @@ impl Store {
                 }
                 Err(e) => return Err(e),
             }
+        }
+    }
+
+    /// Holds a write back before it begins, while what the pin holds back is past its bound, until a sync of the commits
+    /// made so far has landed: the sync moves the pin, and the pages freed before it are used again. Where commits
+    /// outrun the disk, every commit while the pin holds writes fresh pages, and without this the file grows by all
+    /// that is committed while a sync runs, which a sync of more pages makes longer. Outside every lock, as the sync
+    /// takes them all. A sync that fails leaves the write to be refused, as every write is then (`Kept::ensure_pin`)
+    fn hold_to_the_bound(&self) {
+        if let (Some(kept), Some(commit)) = (&self.kept, &self.commit)
+            && kept.past_bound()
+        {
+            let _ = commit.durable().wait();
         }
     }
 
@@ -1195,6 +1209,7 @@ impl Store {
                 self.grow()?;
             }
             run_point!(UNIT_RESERVED);
+            self.hold_to_the_bound();
             loop {
                 let writing = self.ensure_pin()?;
                 run_point!(UNIT_PINNED);

@@ -98,6 +98,42 @@ pub(super) fn pages_of(file: &mut File, psize: usize, roots: [u64; 2], path: &Pa
     Ok(walk.seen.iter().enumerate().filter(|(_, seen)| **seen).map(|(at, _)| at as u64).collect())
 }
 
+/// The pages the free tree at `root` lists as freed by commits from `from` on: what a reader at `from` keeps from reuse,
+/// LMDB giving a writer only what commits before the oldest reader freed. Each record is a commit's number and the
+/// list of the pages it freed, whose first word is their count, on an overflow page where the list is long. Read by
+/// seeks; a page that doesn't read as the tree's adds nothing
+pub(super) fn freed_from(file: &mut File, psize: usize, root: u64, from: u64) -> u64 {
+    let mut freed = 0;
+    let mut stack = vec![root];
+    // No tree holds more pages than the file: a cycle a torn page made ends there
+    let mut budget = file.metadata().map_or(0, |m| m.len() / psize as u64);
+    while let Some(pgno) = stack.pop() {
+        if pgno == NONE || budget == 0 {
+            continue;
+        }
+        budget -= 1;
+        let Some(page) = read_at(file, pgno * psize as u64, psize) else { continue };
+        let flags = u16_at(&page, 10);
+        for node in nodes(&page).filter(|node| node + 8 <= page.len()) {
+            let (lo, hi, node_flags) = (u16_at(&page, node), u16_at(&page, node + 2), u16_at(&page, node + 4));
+            if flags & P_BRANCH != 0 {
+                stack.push(lo as u64 | (hi as u64) << 16 | (node_flags as u64) << 32);
+                continue;
+            }
+            if flags & P_LEAF == 0 || u64_at(&page, node + 8) < from {
+                continue;
+            }
+            let data = node + 8 + u16_at(&page, node + 6) as usize;
+            freed += if node_flags & F_BIGDATA != 0 {
+                read_at(file, u64_at(&page, data) * psize as u64 + PAGE_HEADER as u64, 8).map_or(0, |b| u64_at(&b, 0))
+            } else {
+                u64_at(&page, data)
+            };
+        }
+    }
+    freed
+}
+
 /// The meta page of the commit `snapshot` reads at, if the file holds it. Either meta page may be torn, and the two
 /// are written in turn: the commit after the next writes over this one
 pub(super) fn meta<'snapshot>(

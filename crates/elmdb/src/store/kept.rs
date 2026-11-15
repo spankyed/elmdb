@@ -32,10 +32,12 @@ use super::record::{self, Mode, Record, RecordFile, State};
 use crate::error::{Error, ErrorCode, Result};
 use crate::sync::PlainMutex;
 
-/// How far the file's last page may move past the pin's before a sync is due, whatever the time: the greater of this
-/// and a fraction of the file
-const BOUND_BYTES: u64 = super::MAP_STEP as u64;
+/// How much the pin may keep from reuse, in the pages commits after its own freed, before a sync is due whatever the
+/// time and a write waits for it: the greater of this and a fraction of the file
+const BOUND_BYTES: u64 = 16 << 20;
 const BOUND_FRACTION: u64 = 4;
+/// What the pin keeps is read from the free tree once in this many asks, which reads a few of its pages
+const WALK_EVERY: u32 = 16;
 
 /// The pin, the record and what this process knows of both
 pub(super) struct Kept {
@@ -59,6 +61,9 @@ pub(super) struct Kept {
     pub(super) unpinned: std::sync::atomic::AtomicBool,
     /// The fixed part of the bound, which a test makes small
     bound: std::sync::atomic::AtomicU64,
+    /// Whether the pin was past the bound when the free tree was last read, and the asks since
+    past: std::sync::atomic::AtomicBool,
+    asked: std::sync::atomic::AtomicU32,
     /// The syncs of the record file this process's syncs have made, which a test counts
     #[cfg(test)]
     pub(super) record_syncs: std::sync::atomic::AtomicU64,
@@ -79,8 +84,8 @@ struct Pinned {
 struct Pin {
     /// Held for the pages it keeps, never read through; none only where a test turned the pin off
     _txn: Option<RoTxn<'static, WithoutTls>>,
-    /// The file's last page as the pin was taken, which `past_bound` measures from
-    last_page: u64,
+    /// The commit it is at: the pages commits from it on free are what it keeps from reuse
+    commit: u64,
 }
 
 /// A write of this process that holds the pin: while one is, no sync ends it. Dropped when the write has ended, its
@@ -98,10 +103,10 @@ impl Drop for Writing {
     }
 }
 
-/// Whether a file whose last page is `last`, of `page` bytes, is past a pin taken at `pinned` by more than the bound:
-/// the greater of `fixed` bytes and a fraction of the file
-fn beyond(last: u64, pinned: u64, page: u64, fixed: u64) -> bool {
-    last.saturating_sub(pinned) * page > fixed.max((last + 1) * page / BOUND_FRACTION)
+/// Whether a pin that keeps `kept` bytes from reuse in a file of `file` bytes keeps more than the bound: the greater
+/// of `fixed` bytes and a fraction of the file
+fn beyond(kept: u64, file: u64, fixed: u64) -> bool {
+    kept > fixed.max(file / BOUND_FRACTION)
 }
 
 /// What every commit after a failed sync is refused with
@@ -151,18 +156,24 @@ impl Kept {
             #[cfg(test)]
             unpinned: std::sync::atomic::AtomicBool::new(false),
             bound: std::sync::atomic::AtomicU64::new(BOUND_BYTES),
+            past: std::sync::atomic::AtomicBool::new(false),
+            asked: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             record_syncs: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
     /// The pin for a transaction: it, or nothing where a test turned the pin off
-    fn pin(&self, txn: RoTxn<'static, WithoutTls>, last_page: u64) -> Pin {
+    fn pin(&self, txn: RoTxn<'static, WithoutTls>) -> Pin {
+        let commit = txn.id() as u64;
+        // A new pin keeps nothing yet: what an earlier one kept is asked of the free tree again
+        self.past.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.asked.store(0, std::sync::atomic::Ordering::Relaxed);
         #[cfg(test)]
         if self.unpinned.load(std::sync::atomic::Ordering::Relaxed) {
-            return Pin { _txn: None, last_page };
+            return Pin { _txn: None, commit };
         }
-        Pin { _txn: Some(txn), last_page }
+        Pin { _txn: Some(txn), commit }
     }
 
     /// A read transaction at the newest commit, with the gate held for it: held until the transaction is the pin, so
@@ -300,7 +311,7 @@ impl Kept {
             let mut state = self.state.lock();
             state.remembered = Some(state.remembered.map_or(named, |remembered| remembered.max(named)));
             // The old pin goes only now, the record that names a later commit being on disk
-            let old = state.pin.replace(self.pin(txn, meta.last_page()));
+            let old = state.pin.replace(self.pin(txn));
             if state.writing == 0 && !owes(&state) {
                 state.pin = None;
             }
@@ -390,8 +401,6 @@ impl Kept {
                 Err(error) => return Err(error.into()),
             };
             let commit = txn.id() as u64;
-            // Read before the state is taken, which is never held while the gate is waited for
-            let last_page = self.env.info().last_page_number as u64;
             {
                 let mut state = self.state.lock();
                 if state.pin.is_some() {
@@ -399,7 +408,7 @@ impl Kept {
                 }
                 // A pin at the record's commit or before, or at a file's first commit, which no commit is before
                 if commit == 0 || state.remembered.is_some_and(|remembered| commit <= remembered) {
-                    state.pin = Some(self.pin(txn, last_page));
+                    state.pin = Some(self.pin(txn));
                     return Ok(writing);
                 }
             }
@@ -435,20 +444,46 @@ impl Kept {
         state.last = state.last.max(txnid);
     }
 
-    /// Whether the file's last page is past the pin's by more than the bound, which makes a sync due whatever the time
+    /// Whether what the pin keeps from reuse is past the bound, which makes a sync due whatever the time and holds a
+    /// write back until it lands. It is what commits from the pin's on freed, which no commit may take while the pin
+    /// is there: where a commit rewrites what it changes, the file grows by all of it once the pages freed before the
+    /// pin run out. Read from the free tree once in `WALK_EVERY` asks, and asked again of it as the pin moves
     pub(super) fn past_bound(&self) -> bool {
-        let Some(pinned) = self.state.lock().pin.as_ref().map(|pin| pin.last_page) else { return false };
-        let last = {
-            let _gate = self.gate.read();
-            self.env.info().last_page_number as u64
-        };
-        beyond(last, pinned, self.page as u64, self.bound.load(std::sync::atomic::Ordering::Relaxed))
+        use std::sync::atomic::Ordering::Relaxed;
+        let Some(pinned) = self.state.lock().pin.as_ref().map(|pin| pin.commit) else { return false };
+        if !self.asked.fetch_add(1, Relaxed).is_multiple_of(WALK_EVERY) {
+            return self.past.load(Relaxed);
+        }
+        let Some((kept, file)) = self.kept_from_reuse(pinned) else { return self.past.load(Relaxed) };
+        let past = beyond(kept, file, self.bound.load(Relaxed));
+        self.past.store(past, Relaxed);
+        past
+    }
+
+    /// The bytes of the pages commits from `pinned` on freed, and of the file's pages, as the newest commit's free tree
+    /// and meta page say: read under a read transaction at that commit, which keeps the tree's pages as they are. None
+    /// where a commit landed as its meta page was read
+    fn kept_from_reuse(&self, pinned: u64) -> Option<(u64, u64)> {
+        let _gate = self.gate.read();
+        let txn = super::with_reader_recovery(&self.env, || self.env.clone().static_read_txn()).ok()?;
+        let commit = txn.id() as u64;
+        let mut data = self.data.lock();
+        let meta = reach::meta_page(&mut data, self.page, commit % 2).filter(|meta| meta.txnid == commit)?;
+        let page = self.page as u64;
+        let kept = reach::freed_from(&mut data, self.page, meta.roots()[0], pinned) * page;
+        Some((kept, (meta.last_page() + 1) * page))
     }
 
     /// Sets the fixed part of the bound, for a test of what it does at a size a test reaches
     #[cfg(test)]
     pub(super) fn set_bound(&self, bytes: u64) {
         self.bound.store(bytes, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The commit the pin is at, for a test
+    #[cfg(test)]
+    pub(super) fn pinned_at(&self) -> Option<u64> {
+        self.state.lock().pin.as_ref().map(|pin| pin.commit)
     }
 
     /// The record's commit as this process relies on it, for a test
@@ -464,14 +499,11 @@ mod tests {
 
     #[test]
     fn the_bound_is_the_greater_of_its_fixed_size_and_a_quarter_of_the_file() {
-        let page = 4096;
-        // A file of 1,000 pages: a quarter is 1,024,000 bytes, under a fixed 2 MiB, which is 512 pages of growth
-        assert!(!beyond(1000, 1000 - 512, page, 2 << 20), "at the bound");
-        assert!(beyond(1000, 1000 - 513, page, 2 << 20), "a page past it");
-        // A file whose last page is 9,999: a quarter of its 10,000 pages, 2,500 of them, is over the fixed MiB
-        assert!(!beyond(9_999, 9_999 - 2_500, page, 1 << 20), "at a quarter of the file");
-        assert!(beyond(9_999, 9_999 - 2_501, page, 1 << 20), "a page past it");
-        // A pin later than the file's last page, as a restore leaves it, is past nothing
-        assert!(!beyond(10, 20, page, 0));
+        // A file of 4 MiB: a quarter is 1 MiB, under a fixed 2 MiB
+        assert!(!beyond(2 << 20, 4 << 20, 2 << 20), "at the bound");
+        assert!(beyond((2 << 20) + 1, 4 << 20, 2 << 20), "a byte past it");
+        // A file of 40 MiB: a quarter, 10 MiB, is over the fixed MiB
+        assert!(!beyond(10 << 20, 40 << 20, 1 << 20), "at a quarter of the file");
+        assert!(beyond((10 << 20) + 1, 40 << 20, 1 << 20), "a byte past it");
     }
 }

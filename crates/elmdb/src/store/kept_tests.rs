@@ -675,6 +675,45 @@ fn a_write_run_again_after_its_map_grew_syncs_before_it_and_a_loss_keeps_the_rec
 }
 
 #[test]
+fn a_write_past_the_bound_waits_for_its_sync_and_the_file_grows_by_the_bound_alone() {
+    // Values written over again and again, which free as much as they take, as fast as one process commits: without
+    // the wait the file grows by all that is committed while each sync runs, some 15 MB here
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    store.set_bound(1 << 20);
+    for n in 0..200 {
+        put(&store, &format!("w-{}", n % 4), &vec![n as u8; 64 << 10]).unwrap();
+    }
+    let grown = store.file_size();
+    store.close().unwrap();
+    // What the four values hold, the bound past it, and a commit's own pages past that
+    assert!(grown < 6 << 20, "{grown} bytes, for four values of 64 KiB and a bound of 1 MiB");
+}
+
+#[test]
+fn what_the_pin_keeps_from_reuse_is_what_commits_from_its_own_freed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", &vec![1u8; 100_000]).unwrap();
+    let pinned = kept(&store).pinned_at().expect("a process with a commit unsynced holds its pin");
+    // Each rewrite frees the value's overflow run before it: the pages LMDB's OVPAGES gives a value of its size
+    let page = store.page_size() as u64;
+    let run = (16 - 1 + 100_000) / page + 1;
+    for n in 0..10 {
+        put(&store, "a", &vec![n as u8; 100_000]).unwrap();
+    }
+    let data = dir.path().join("data.mdb");
+    let mut file = std::fs::File::open(&data).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap();
+    let root = meta.roots()[0];
+    let kept_pages = reach::freed_from(&mut file, page as usize, root, pinned);
+    assert!(kept_pages >= 10 * run, "{kept_pages} pages kept, where ten rewrites freed {} pages of runs", 10 * run);
+    assert_eq!(reach::freed_from(&mut file, page as usize, root, meta.txnid + 1), 0, "a commit after the newest");
+    assert!(reach::freed_from(&mut file, page as usize, root, meta.txnid) < kept_pages, "the newest commit's alone");
+    store.close().unwrap();
+}
+
+#[test]
 fn an_open_that_finds_a_restore_beside_another_process_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), grouped()).unwrap();

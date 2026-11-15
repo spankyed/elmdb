@@ -122,16 +122,19 @@ fn beside(secs: u64) {
             n += 1;
         }
         db.close().unwrap();
-        file_bytes(dir)
+        (file_bytes(dir), n)
     };
     let alone = tempfile::tempdir().unwrap();
-    let alone_bytes = rewrite(alone.path());
+    let (alone_bytes, alone_commits) = rewrite(alone.path());
     let with = tempfile::tempdir().unwrap();
     open(with.path()).close().unwrap();
     let idle = second(with.path(), "idle");
-    let with_bytes = rewrite(with.path());
+    let (with_bytes, with_commits) = rewrite(with.path());
     end(idle);
-    println!("alone={alone_bytes} besideAnIdleProcess={with_bytes} secs={secs}");
+    println!(
+        "alone={alone_bytes} ({alone_commits} commits) besideAnIdleProcess={with_bytes} ({with_commits} commits) \
+         secs={secs}"
+    );
 }
 
 fn rewrite(notes: usize, secs: u64) {

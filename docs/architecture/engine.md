@@ -538,8 +538,9 @@ commit, in this boot too; an open that finds a restore to make beside another pr
 file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's `kern.bootsessionuuid`, and on Windows a
 random value the first process to ask writes in a volatile registry key under the current user, which a restart or a
 logoff takes away; where none can be read, a process's death costs the commits since its last sync, as a loss would. A
-sync is also due once the file's last page is past the pin's by 64 MiB or a quarter of the file, whichever is more,
-since the pages freed since the pin wait for the next record. The cost is a second sync after each, the record's: a
+sync is also due once the pages commits from the pin's on freed, which wait for the next record before any commit
+may take them, are more than 16 MiB or a quarter of the file, whichever is more, read from the free tree; and a write
+past that waits, before it begins, for the sync, so the file grows by the bound and no further. The cost is a second sync after each, the record's: a
 `durable` write waits for both. A database written by an elmdb from before the record keeps no pin and reads no
 record, and its file may be no commit's after a loss, as every grouped file was. A test replays the loss in both
 modes (`testing.md`, Power loss).
