@@ -237,6 +237,9 @@ fn describe(t: &ValueType) -> String {
         }
         ValueType::Ref { to } => format!("an id of {}", to.join(" or ")),
         ValueType::List { of } => format!("a list of {}", describe(of)),
+        // Nouns where the others are adjectives: "is bytes", "a list of anything"
+        ValueType::Bytes => "bytes".to_owned(),
+        ValueType::Any => "anything".to_owned(),
         other => other.named(),
     }
 }
@@ -389,6 +392,7 @@ mod tests {
         }
         assert!(ok(ValueType::Integer, Value::from(u64::MAX)).is_err());
         assert!(ok(ValueType::Object, Value::from(1)).unwrap_err().message.contains("an object"));
+        assert!(ok(ValueType::Bytes, "a".into()).unwrap_err().message.contains("is bytes:"));
         assert!(
             ok(ValueType::Enum { values: vec!["a".into()] }, "b".into())
                 .unwrap_err()
