@@ -105,31 +105,35 @@ waited on failed.
 
 ## Power loss
 
-`engine/tests/power_loss.rs` replays what a power loss can leave on the data file, without a disk: after each commit of a
-workload the file is copied, the pages that differ from one copy to the next are what that commit wrote, and the files a
-loss could leave are made from them. In the synced-each-commit mode LMDB writes a commit's pages, syncs, then writes the
-meta page that names them, so any part of the next commit's pages with the meta page not yet written leaves the commit
-before whole; every such file must open, pass `check()`, and hold the commit before, with any of the next commit's
-pages present. In the grouped mode nothing orders the pages written since the last sync, and the workload syncs
-every eighth commit: for a loss after each of the commits since a sync, and after the next sync's data, the files
-are the synced file with some of the pages written since and the record that sync wrote, opened as of another
-boot. Every one must restore the record's commit, pass `check()` and hold that commit's tasks. The same run with the
-pin turned off must leave a file that doesn't, the commits after the sync having written over its pages: the pin is
-what the replay holds. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
-disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
-itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
-such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
-they reach is past the end or has a page without its own number and a tree page's kind. A file whose missing pages no tree reaches is healthy, since
-LMDB may leave its free tail out of the file, and a writable open extends it to the pages its meta page names. Other
-processes may be committing as the file is opened: the walk reads one commit's trees under a read transaction at
-that commit, which keeps its pages from a later commit's reuse, and starts again from a later commit when two have
-landed and written over the meta page it took; the file is extended under the write lock, where no commit lands, and
-only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process).
-Another process may also grow the file past the map the open holds it in: every transaction the open begins takes
-the grown map and is begun again, which the same tests hold by growing the file before the open's first transaction
-and after its walk, for a read-only open and a writable one, and before the write transaction a short file is
-extended under. A
-torn file that is refused counts as a file that didn't survive.
+`engine/tests/power_loss.rs` replays what a power loss can leave on the data file, without a disk: after each commit of
+a workload the file is copied, the pages that differ from one copy to the next are what that commit wrote, and the files
+a loss could leave are made from them. In the synced-each-commit mode LMDB writes a commit's pages, syncs, then writes
+the meta page that names them, so any part of the next commit's pages with the meta page not yet written leaves the
+commit before whole; every such file must open, pass `check()`, and hold the commit before, with any of the next
+commit's pages present. In the grouped mode nothing orders the pages written since the last sync, and the workload syncs
+every eighth commit: for a loss after each of the commits since a sync, and after the next sync's data, the files are
+the synced file with some of the pages written since and the record that sync wrote, opened as of another boot. Every
+one must restore the record's commit, pass `check()` and hold that commit's tasks. The same run with the pin turned off
+must leave a file that doesn't, the commits after the sync having written over its pages: the pin is what the replay
+holds. The synced-each-commit replay keeps its record beside each file, and holds after a grouped writer that died with
+commits unsynced as well as alone: that open synced the file and wrote its own record, and the grouped one would take
+the file back to a commit the commits since wrote over. A database written with no sync is opened as it is, alone and
+after such a writer, and never restored; a backup over a directory whose record says `failed` opens as the backup; and
+`replaceWith` from a file a loss left takes the source's last synced commit. The replay is LMDB's order of writes as its
+source gives it, on a file: no test of a disk, a filesystem or a controller that acknowledges a sync it hasn't made.
+Some torn files would crash the reader itself: LMDB maps a file whose meta page names pages past its end, and touching
+one is a SIGBUS. `Store::open` reads such a file by seeks first (`store/reach.rs`): it walks the trees the meta page
+names, and refuses the file when a page they reach is past the end or has a page without its own number and a tree
+page's kind. A file whose missing pages no tree reaches is healthy, since LMDB may leave its free tail out of the file,
+and a writable open extends it to the pages its meta page names. Other processes may be committing as the file is
+opened: the walk reads one commit's trees under a read transaction at that commit, which keeps its pages from a later
+commit's reuse, and starts again from a later commit when two have landed and written over the meta page it took; the
+file is extended under the write lock, where no commit lands, and only ever made longer (`store/tests.rs` stops an open
+at each of the two points and commits from another process). Another process may also grow the file past the map the
+open holds it in: every transaction the open begins takes the grown map and is begun again, which the same tests hold by
+growing the file before the open's first transaction and after its walk, for a read-only open and a writable one, and
+before the write transaction a short file is extended under. A torn file that is refused counts as a file that didn't
+survive.
 
 A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
 aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files, kept by no pin, did

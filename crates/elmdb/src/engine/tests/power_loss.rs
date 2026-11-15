@@ -85,13 +85,6 @@ fn with(from: &[u8], to: &[u8], pages: &[usize], page: usize) -> Vec<u8> {
     image
 }
 
-/// What the database whose data file is `image` holds, when it opens and `check()` finds nothing: said otherwise
-fn held(image: &[u8], ids: usize) -> Result<Model, String> {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("data.mdb"), image).unwrap();
-    held_at(dir.path(), ids)
-}
-
 /// `held` of the database in `dir`, with whatever record is beside its data file
 fn held_at(dir: &Path, ids: usize) -> Result<Model, String> {
     let db = Database::open(dir, OpenOptions { syncs: false, ..Default::default() }).map_err(|e| e.to_string())?;
@@ -129,26 +122,9 @@ fn some_of(pages: &[usize]) -> Vec<Vec<usize>> {
 
 const COMMITS: usize = 40;
 
-/// The file after each commit of the workload, the first being the database as opened, with the model after each
-fn run(options: OpenOptions) -> (Vec<Vec<u8>>, Vec<Model>, usize) {
-    let dir = tempfile::tempdir().unwrap();
-    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema()), ..options }).unwrap();
-    let page = db.store().unwrap().page_size();
-    db.durable().unwrap().wait().unwrap();
-    let mut model = Model::new();
-    let (mut files, mut models) = (vec![file(dir.path())], vec![model.clone()]);
-    for n in 0..COMMITS {
-        commit(&db, &mut model, n);
-        files.push(file(dir.path()));
-        models.push(model.clone());
-    }
-    db.close().unwrap();
-    (files, models, page)
-}
-
-#[test]
-fn a_commit_synced_as_it_is_made_survives_a_power_loss_at_any_write_after_it() {
-    let (files, models, page) = run(OpenOptions { sync_each_commit: true, ..Default::default() });
+/// Every file a loss leaves of the commits of `files` in the mode that syncs each one, with `record` beside it as of
+/// another boot: the commit before with any of the next one's pages, or the next one whole. Answers how many were tried
+fn each_commit_survives(files: &[Vec<u8>], models: &[Model], record: &[u8], page: usize) -> usize {
     let mut tried = 0;
     for n in 1..files.len() {
         let (before, after) = (&files[n - 1], &files[n]);
@@ -159,18 +135,146 @@ fn a_commit_synced_as_it_is_made_survives_a_power_loss_at_any_write_after_it() {
         assert!(!data.is_empty(), "commit {n} writes pages of its own");
         // Lost before the meta page was written, with any of the commit's pages on disk: the commit before, whole
         for some in some_of(&data) {
-            let image = with(before, after, &some, page);
+            let dir = lost(&with(before, after, &some, page), record);
             assert_eq!(
-                held(&image, COMMITS).as_ref(),
+                held_at(dir.path(), COMMITS).as_ref(),
                 Ok(&models[n - 1]),
                 "commit {n}, with pages {some:?} of {data:?}"
             );
             tried += 1;
         }
         // And once the meta page is written the commit is whole
-        assert_eq!(held(after, COMMITS).as_ref(), Ok(&models[n]), "commit {n}");
+        assert_eq!(held_at(lost(after, record).path(), COMMITS).as_ref(), Ok(&models[n]), "commit {n}");
     }
+    tried
+}
+
+#[test]
+fn a_commit_synced_as_it_is_made_survives_a_power_loss_at_any_write_after_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = OpenOptions { sync_each_commit: true, ..Default::default() };
+    let (files, models, record, page) = run_in(dir.path(), options, Model::new(), 0, COMMITS);
+    let tried = each_commit_survives(&files, &models, &record, page);
     assert!(tried > 6 * COMMITS, "{tried} files tried");
+}
+
+/// The workload in `options` over the database at `dir`, its commits `from` on, `commits` of them, made over `model`:
+/// the data file as opened and after each commit, the models, the record the open wrote, and the page size. No commit
+/// writes the record: a mode that keeps no commit pays nothing for it after the open
+fn run_in(
+    dir: &Path,
+    options: OpenOptions,
+    mut model: Model,
+    from: usize,
+    commits: usize,
+) -> (Vec<Vec<u8>>, Vec<Model>, Vec<u8>, usize) {
+    let db = Database::open(dir, OpenOptions { schema: Some(schema()), ..options }).unwrap();
+    let page = db.store().unwrap().page_size();
+    let opened = record(dir);
+    let (mut files, mut models) = (vec![file(dir)], vec![model.clone()]);
+    for n in from..from + commits {
+        commit(&db, &mut model, n);
+        files.push(file(dir));
+        models.push(model.clone());
+    }
+    assert!(opened == record(dir), "a commit wrote the record");
+    db.close().unwrap();
+    (files, models, opened, page)
+}
+
+/// A grouped writer's database as its process died, synced at its `SYNC_EVERY`th commit and three made since: the data
+/// file and the record as the operating system held them, in a directory of their own, with the model and the next
+/// commit's number
+fn died_grouped() -> (tempfile::TempDir, Model, usize) {
+    let dir = tempfile::tempdir().unwrap();
+    let grouped = OpenOptions { sync_idle_ms: 600_000, sync_interval_ms: 600_000, ..Default::default() };
+    let db = Database::open(dir.path(), OpenOptions { schema: Some(schema()), ..grouped }).unwrap();
+    let mut model = Model::new();
+    for n in 0..SYNC_EVERY + 3 {
+        commit(&db, &mut model, n);
+        if n + 1 == SYNC_EVERY {
+            db.durable().unwrap().wait().unwrap();
+        }
+    }
+    let died = tempfile::tempdir().unwrap();
+    std::fs::write(died.path().join("data.mdb"), file(dir.path())).unwrap();
+    std::fs::write(died.path().join(crate::store::RECORD_FILE), record(dir.path())).unwrap();
+    db.close().unwrap();
+    (died, model, SYNC_EVERY + 3)
+}
+
+#[test]
+fn a_commit_synced_as_it_is_made_after_a_grouped_writer_died_survives_a_power_loss_at_any_write_after_it() {
+    // The open of this mode synced what the dead writer left and wrote its own record: a loss later restores nothing,
+    // where the grouped record would take the file back to a commit whose pages these commits wrote over
+    let (dir, model, from) = died_grouped();
+    let options = OpenOptions { sync_each_commit: true, ..Default::default() };
+    let (files, models, record, page) = run_in(dir.path(), options, model, from, 12);
+    let tried = each_commit_survives(&files, &models, &record, page);
+    assert!(tried > 6 * 12, "{tried} files tried");
+}
+
+#[test]
+fn a_database_written_with_no_sync_alone_or_after_a_grouped_writer_died_is_opened_as_it_is() {
+    for after_grouped in [false, true] {
+        let (dir, model, from) =
+            if after_grouped { died_grouped() } else { (tempfile::tempdir().unwrap(), Model::new(), 0) };
+        let options = OpenOptions { syncs: false, ..Default::default() };
+        let (files, _, written_at_open, page) = run_in(dir.path(), options, model, from, 8);
+        let (opened, last) = (&files[0], files.last().unwrap());
+        let pages = written(opened, last, page);
+        for some in tossed(&pages, 11) {
+            let dir = lost(&with(opened, last, &some, page), &written_at_open);
+            let before = record(dir.path());
+            // Nothing is known of what such a file holds, which may end its reader: it is opened as it is, and never
+            // taken back to the dead writer's last sync, which a restore would write the record for
+            let _ = held_apart_in(dir.path());
+            assert!(
+                before == record(dir.path()),
+                "after a grouped writer {after_grouped}: a restore was made, with pages {some:?} of {pages:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_backup_into_a_directory_whose_record_says_failed_opens_as_the_backup() {
+    // The directory held a database whose sync failed: its record says `failed`, under which a file it doesn't bear
+    // out is refused
+    let target = tempfile::tempdir().unwrap();
+    let old = Database::open(target.path(), OpenOptions { schema: Some(schema()), ..Default::default() }).unwrap();
+    commit(&old, &mut Model::new(), 0);
+    let store = old.store().unwrap();
+    let failing = crate::failpoints::fail_while_at(crate::failpoints::points::SYNC, store.path());
+    assert!(old.durable().unwrap().wait().is_err());
+    drop((failing, store));
+    let _ = old.close();
+    // A backup of another database put there: it opens, as the backup
+    let source = tempfile::tempdir().unwrap();
+    let db = Database::open(source.path(), OpenOptions { schema: Some(schema()), ..Default::default() }).unwrap();
+    let mut model = Model::new();
+    for n in 0..5 {
+        commit(&db, &mut model, n);
+    }
+    db.backup(target.path()).unwrap();
+    db.close().unwrap();
+    assert_eq!(held_at(target.path(), COMMITS).as_ref(), Ok(&model));
+}
+
+#[test]
+fn a_replacement_from_a_database_a_loss_left_takes_its_last_synced_commit() {
+    let (files, records, models, page) = grouped_run(false);
+    let ((synced, record), (next, _)) = (&records[1], &records[2]);
+    // Every commit since the sync on disk, and the record not yet the next's: what the source holds is its record's
+    // commit, restored, and not the commits written over its pages
+    let lost_at = next - 1;
+    let image = with(&files[*synced], &files[lost_at], &written(&files[*synced], &files[lost_at], page), page);
+    let source = lost(&image, record);
+    let target = tempfile::tempdir().unwrap();
+    let db = Database::open(target.path(), OpenOptions { schema: Some(schema()), ..Default::default() }).unwrap();
+    db.replace_with(source.path()).unwrap();
+    db.close().unwrap();
+    assert_eq!(held_at(target.path(), COMMITS).as_ref(), Ok(&models[*synced]));
 }
 
 /// What a child that reads a file a power loss left says of it: what it holds, or why it refused it
