@@ -550,6 +550,18 @@ mod tests {
     }
 
     #[test]
+    fn a_page_that_is_neither_branch_nor_leaf_names_nothing_freed() {
+        let psize = 512;
+        // The leaf's node and record, on a page whose flags say an overflow page, as a torn tree's may
+        let mut overflow = leaf_of_seven(psize);
+        overflow[10..12].copy_from_slice(&P_OVERFLOW.to_ne_bytes());
+        let (_dir, mut file) = file_of(&[vec![0u8; psize], vec![0u8; psize], overflow]);
+        assert_eq!(freed_from(&mut file, psize, 2, 0), 0);
+        let (_dir, mut file) = file_of(&[vec![0u8; psize], vec![0u8; psize], leaf_of_seven(psize)]);
+        assert_eq!(freed_from(&mut file, psize, 2, 0), 7, "the same page as a leaf");
+    }
+
+    #[test]
     fn a_branch_node_whose_head_runs_past_its_page_names_no_child() {
         let psize = 512;
         // Its pointer six bytes before the page's end, where its low word, within the page, names the leaf
