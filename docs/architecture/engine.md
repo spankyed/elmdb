@@ -404,11 +404,14 @@ what it answers); and `ms` the time spent in the stage's own code, not in the st
 the stages' times add up to at most the whole. A filter before the stage that reads a type start's filters together
 visits and keeps nothing of its own: that stage does its filtering. An `orderBy` stage that sorted, or walked its
 order testing the filters, for want of an index that reads it in order says which would have: `wants` names that
-index's fields, the equalities' and then its own, where the field is declared a number or a boolean or is a time the
-engine writes, whose order an index's entries have, and each equality is of a field the schema lets an index name.
-So does a `range` the `orderBy` after it reads between. A `search` stage says how many of its matches it `held` to
-rank them: every one, or those ranked past a page's cursor, and of either no more than it was asked for; none when it
-was asked for any one. A search that held every match before a `limit` further on is one a filter stands between.
+index's fields, the equalities' and then its own, where the field is declared a number, a boolean, a string, an enum
+or a `ref`, or is a time the engine writes, whose order an index has, and each equality is of a field the schema lets
+an index name. So does a `range` the `orderBy` after it reads between. One that sorted strings though a built index
+reads its order says why that order wasn't read: `sorted: "noRoom"` where the index's names and the equalities'
+values leave its order's keys no room, and `sorted: "building"` where its order isn't yet one this elmdb filed
+whole. A `search` stage says how many of its matches it `held` to rank them: every one, or those ranked past a
+page's cursor, and of either no more than it was asked for; none when it was asked for any one. A search that held
+every match before a `limit` further on is one a filter stands between.
 A stage that read lists of places, or walked a type's rows, says how many `places` it was handed, each one walked
 or sought; `set: "and"` when it read the places several lists hold in common; and a `search` that ran within its
 filters' places names their indexes as its `index` and says how many places it ran `within`.
@@ -632,7 +635,10 @@ unit is open.
 - `reset()`: every entry removed but the database's own (its format and schema), in one durable unit.
 - `stats()`: entities per type (live and trashed), each field's entities and bytes, relations per kind, entries per
   index, the database's entries, file and map sizes; `indexStatus()` says which value and rank indexes are built, the
-  built-in `shortCode` and `role` among them; it does not report text, trigram or vector indexes.
+  built-in `shortCode` and `role` among them, and of a value index that keeps an order of its strings whether a read
+  takes it (`ordered`) and the `room` the type's and the index's names leave a sort key in its keys, before a
+  compound index's leading values take theirs: 0 where they leave none, and its strings are sorted as they are
+  read; it does not report text, trigram or vector indexes.
 - `check()`: derives every derived key from primary data and compares it with what is stored (a built index's entries
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type

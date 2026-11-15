@@ -2712,10 +2712,12 @@ impl<R: Read> Query<'_, R> {
     }
 
     /// A type's entities that `equals` names, within `limits` when a range keeps them, as an index reads them in
-    /// `name`'s order: its entries for them, which hold no string. The index's order is then the step's: false, true
-    /// and the numbers, each value's entities in place order, then the entities without a value. A string's order is
-    /// the schema's collation's, which the order of an entry's bytes isn't, so entities holding one are sorted: one
-    /// the index has an entry for, or a long one it has none for. A range of numbers holds neither, and is read
+    /// `name`'s order. The index's order is then the step's: false, true, the numbers, the strings, each value's
+    /// entities in place order, then the entities without a value. A string's order is the schema's collation's,
+    /// which the order of an entry's bytes isn't, so where the index holds a string, of an entry or a long one it
+    /// has none for, the strings are read from its order of them: none when no read trusts that order, or the names
+    /// and the equalities' values leave its keys no room, and the set is then sorted. A range of numbers holds no
+    /// string, and is read from the entries
     fn ordered_under(
         &self,
         entity_type: &str,
@@ -3529,6 +3531,15 @@ impl<R: Read> Query<'_, R> {
         if in_order && !held && once && named {
             stages.wants(stage, fields.join(", "));
         }
+        // A built index that reads the order was passed over for its strings: the names and the equalities' values
+        // leave its order's keys no room, or no read of this elmdb trusts its order yet
+        if let Some((index, leading)) = self.order_index(entity_type, &equals, name)? {
+            if keys::order_room(entity_type, &index, &leading).is_none() {
+                stages.sorted(stage, "noRoom");
+            } else if super::order::readable(self.r, entity_type, &index)?.is_none() {
+                stages.sorted(stage, "building");
+            }
+        }
         Ok(())
     }
 
@@ -4132,6 +4143,8 @@ struct Stages {
     building: RefCell<Vec<bool>>,
     /// Per `orderBy` stage that sorted for want of one: the fields of the value index that would read its order
     wants: RefCell<Vec<Option<String>>>,
+    /// Per `orderBy` stage that sorted though an index reads its order: why that index's order wasn't read
+    sorted: RefCell<Vec<Option<&'static str>>>,
     /// Per `search` stage: how many of its matches it held at once to rank them
     held: RefCell<Vec<Option<u64>>>,
     /// Per stage that read lists of places: how many places it was handed, each walked or sought; whether it read
@@ -4180,6 +4193,7 @@ impl Stages {
             errors: RefCell::new(vec![None; n]),
             building: RefCell::new(vec![false; n]),
             wants: RefCell::new(vec![None; n]),
+            sorted: RefCell::new(vec![None; n]),
             held: RefCell::new(vec![None; n]),
             places: (0..n).map(|_| Cell::new(0)).collect(),
             common: RefCell::new(vec![false; n]),
@@ -4246,6 +4260,10 @@ impl Stages {
         self.wants.borrow_mut()[stage] = Some(fields);
     }
 
+    fn sorted(&self, stage: usize, why: &'static str) {
+        self.sorted.borrow_mut()[stage] = Some(why);
+    }
+
     /// How many matches the search running holds to rank
     fn held(&self, matches: usize) {
         self.held.borrow_mut()[self.running.get()] = Some(matches as u64);
@@ -4299,6 +4317,7 @@ impl Stages {
         let errors = self.errors.borrow();
         let building = self.building.borrow();
         let wants = self.wants.borrow();
+        let sorted = self.sorted.borrow();
         let held = self.held.borrow();
         let common = self.common.borrow();
         let within = self.within.borrow();
@@ -4322,6 +4341,7 @@ impl Stages {
                 + u32::from(errors[at].is_some())
                 + u32::from(building[at])
                 + u32::from(wants[at].is_some())
+                + u32::from(sorted[at].is_some())
                 + u32::from(held[at].is_some())
                 + u32::from(self.places[at].get() > 0)
                 + u32::from(common[at])
@@ -4364,6 +4384,10 @@ impl Stages {
             if let Some(fields) = &wants[at] {
                 w.str("wants");
                 w.str(fields);
+            }
+            if let Some(why) = sorted[at] {
+                w.str("sorted");
+                w.str(why);
             }
             if let Some(held) = held[at] {
                 w.str("held");
