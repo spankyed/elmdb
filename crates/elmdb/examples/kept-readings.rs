@@ -99,16 +99,23 @@ fn cost() {
     };
     let durable = timed(&|i| write(&db, vec![set(i % 1_000, i)], true));
     let commit = timed(&|i| write(&db, vec![set(i % 1_000, i)], false));
-    // Another process writing all the while; this one writes after a pause, so that the other has committed since
+    // Another process writing all the while; this one writes after a pause longer than the sync's idle time, so that
+    // its own sync has run and let its pin go, and the other has committed since: its write syncs and records first
     let other = second(dir.path(), "writer");
-    let beside = timed(&|i| {
-        std::thread::sleep(Duration::from_millis(20));
-        write(&db, vec![set(i % 1_000, i)], false);
-    });
+    let paused = Duration::from_millis(150);
+    let beside = median(
+        (0..200)
+            .map(|i| {
+                std::thread::sleep(paused);
+                let began = Instant::now();
+                write(&db, vec![set(i % 1_000, i)], false);
+                began.elapsed().as_secs_f64() * 1e6
+            })
+            .collect(),
+    );
     end(other);
     db.close().unwrap();
-    // The pause is the reading's, not the write's
-    println!("durableWrite={durable:.0}us commit={commit:.1}us firstWriteBesideAnother={:.0}us", beside - 20_000.0);
+    println!("durableWrite={durable:.0}us commit={commit:.1}us firstWriteBesideAnother={beside:.0}us");
 }
 
 fn beside(secs: u64) {
