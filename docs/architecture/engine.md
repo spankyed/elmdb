@@ -316,8 +316,8 @@ an answer:
   handed on is a seek for each; the entries of its strings are met by one walk of the index's entries the same way
   when they are 256 or more. Its strings are kept as the bytes of their parts of the order's keys, and sorted by
   them for that walk, which is their entries' order: only a run of keys the collator orders again is decoded, one
-  of a cut sort key or holding an entity filed by its place, and every run under a range. An order of fewer than one in eight of the type's live entities, which equalities or
-  a range keep, names each by its own seek, and one a `limit`, `first` or `exists` may stop is handed on an entity
+  of a cut sort key or holding an entity filed by its place, and every run under a range. An order of fewer than
+  one in eight of the type's live entities, which equalities or a range keep, names each by its own seek, and one a `limit`, `first` or `exists` may stop is handed on an entity
   at a time, so a page reads its own. It holds its places in memory, and a tracked read of a whole order is one a
   commit to any entity of the type writes into.
 - **A least and a greatest are an order's ends.** `least` and `greatest` of a field over a set an order of that
