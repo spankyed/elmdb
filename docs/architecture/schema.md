@@ -128,7 +128,7 @@ The engine's own names can't be declared: the fields `id`, `entityType`, `shortC
 | `type` | Holds | Options |
 |---|---|---|
 | `string` | text | |
-| `number` | a finite double | |
+| `number` | a finite double, or an integer kept as given; indexes, ranges and sums read it as a double | |
 | `integer` | a whole number within ±2^53 | |
 | `boolean` | `true` or `false` | |
 | `bytes` | binary | |

@@ -237,7 +237,7 @@ fn describe(t: &ValueType) -> String {
         }
         ValueType::Ref { to } => format!("an id of {}", to.join(" or ")),
         ValueType::List { of } => format!("a list of {}", describe(of)),
-        // Nouns where the others are adjectives: "is bytes", "a list of anything"
+        // Bytes and any take no article where a value is described: "is bytes", "a list of anything"
         ValueType::Bytes => "bytes".to_owned(),
         ValueType::Any => "anything".to_owned(),
         other => other.named(),
@@ -251,11 +251,19 @@ fn takes(t: &ValueType, v: &Value) -> std::result::Result<(), String> {
         ValueType::Any => true,
         ValueType::String => v.is_str(),
         ValueType::Number => as_number(v).is_some_and(f64::is_finite),
-        // Within ±2^53, compared exactly: an integer past it would round to the bound as a float
-        ValueType::Integer => match v {
-            Value::Integer(i) => i.as_i64().map(i64::unsigned_abs).or(i.as_u64()).is_some_and(|n| n <= 1 << 53),
-            _ => as_number(v).is_some_and(|n| n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0),
-        },
+        // Within ±2^53, compared exactly: 2^53 + 1 rounds to the bound as a float
+        ValueType::Integer => {
+            let within = match v {
+                Value::Integer(i) => i.as_i64().is_some_and(|n| n.unsigned_abs() <= 1 << 53),
+                _ => as_number(v).is_some_and(|n| n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0),
+            };
+            let whole =
+                matches!(v, Value::Integer(_)) || as_number(v).is_some_and(|n| n.is_finite() && n.fract() == 0.0);
+            if !within && whole {
+                return Err("it is past ±2^53".to_owned());
+            }
+            within
+        }
         ValueType::Boolean => v.is_bool(),
         ValueType::Bytes => matches!(v, Value::Binary(_)),
         ValueType::Object => v.is_map(),
@@ -388,11 +396,13 @@ mod tests {
         }
         for n in [(1i64 << 53) + 1, -(1i64 << 53) - 1, i64::MIN] {
             let refused = ok(ValueType::Integer, Value::from(n)).unwrap_err().message;
-            assert!(refused.contains("an integer"), "{n}: {refused}");
+            assert!(refused.contains("an integer") && refused.contains("past ±2^53"), "{n}: {refused}");
         }
         assert!(ok(ValueType::Integer, Value::from(u64::MAX)).is_err());
         assert!(ok(ValueType::Object, Value::from(1)).unwrap_err().message.contains("an object"));
         assert!(ok(ValueType::Bytes, "a".into()).unwrap_err().message.contains("is bytes:"));
+        let list_of_any = ValueType::List { of: Box::new(ValueType::Any) };
+        assert!(ok(list_of_any, "x".into()).unwrap_err().message.contains("a list of anything"));
         assert!(
             ok(ValueType::Enum { values: vec!["a".into()] }, "b".into())
                 .unwrap_err()
