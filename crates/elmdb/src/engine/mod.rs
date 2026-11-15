@@ -675,7 +675,8 @@ impl Database {
             return Err(Error::new(
                 held.code,
                 format!(
-                    "The index builds wait for what refused their work, and are left to go on once it passes: {}",
+                    "The index builds wait for what refused their last write, and go on once it passes: call this again \
+                     after a pause to wait on. What refused it: {}",
                     held.message
                 ),
             ));

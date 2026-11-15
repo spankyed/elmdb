@@ -16,7 +16,7 @@ const CAP: Duration = Duration::from_millis(1000);
 struct ManualSyncer {
     started: Sender<()>,
     outcomes: Mutex<Receiver<Result<()>>>,
-    /// Whether a failure is one short of a flush, which the next sync tries again
+    /// Whether a failure is one that wrote nothing to rely on, which the next sync tries again
     transient: bool,
 }
 
@@ -63,7 +63,7 @@ impl Harness {
         Self::with(false)
     }
 
-    /// A harness whose failures are short of a flush
+    /// A harness whose failures wrote nothing to rely on
     fn transient() -> Self {
         Self::with(true)
     }

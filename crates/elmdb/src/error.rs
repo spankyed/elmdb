@@ -104,8 +104,8 @@ pub enum ErrorCode {
     /// be on disk. Retrying the operation would apply it twice
     NotDurable,
     /// A write refused before it began: what the last synced commit keeps from reuse passed its bound, and the sync
-    /// that would let it go failed before it wrote anything, as a full reader table fails it. Nothing of the write was
-    /// made, and it may be tried again: it goes on once a sync succeeds
+    /// that would let it go failed having written nothing to rely on, as a full reader table fails it. Nothing of the
+    /// write was made, and it may be tried again: it goes on once a sync succeeds
     SyncBehind,
     /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
     /// locks

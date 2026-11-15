@@ -504,17 +504,18 @@ A batch is data, so the engine can retry it (after growing the map, `design.md`)
 A unit is visible when it commits and survives the process crashing once `write` returns. Surviving the machine failing
 is a sync: group commit syncs once writes pause for `syncIdleMs` (100 ms) and at most `syncIntervalMs` (1 s) after the
 first unsynced commit, on a background thread. `db.durable()` resolves once everything committed before it is on disk,
-and rejects if the sync it waits on fails. A sync that fails as it flushes is final until the database is reopened: an
-OS may mark the pages it couldn't write clean and drop them (PostgreSQL's "fsyncgate"), so a later sync that succeeds
-proves nothing about them, and every later commit is built on them; every wait after it rejects, naming it. One that
-fails short of a flush is not (below). A write or a commit passed `durable` commits with a sync, and throws
-`NOT_DURABLE` if that sync fails, the commit having been made and its change set delivered. Admin and schema mutations
-use the same finalization: they report `NOT_DURABLE` after notifying watches, with committed data and in-memory schema
-already installed. Empty-index markers are settled inside the schema/reset/replace transaction, not by a second commit.
-A caller must not retry the mutation as though it had been refused; the error names its sequence, and `db.sequence`
-gives the current commit without parsing the message. The failed call does not return its touched-token list: callers
-managing tracked tokens must conservatively invalidate all of them on `NOT_DURABLE`. Native watches have already been
-finalized. apack follows that invalidation rule. `close()` syncs what is owed, and reports a sync that failed.
+and rejects if the sync it waits on fails. A sync that fails as it reads or flushes the record, or flushes the data, is
+final until the database is reopened: an OS may mark the pages it couldn't write clean and drop them (PostgreSQL's
+"fsyncgate"), so a later sync that succeeds proves nothing about them, and every later commit is built on them; every
+wait after it rejects, naming it. One that wrote nothing to rely on is not (below). A write or a commit passed `durable`
+commits with a sync, and throws `NOT_DURABLE` if that sync fails, the commit having been made and its change set
+delivered. Admin and schema mutations use the same finalization: they report `NOT_DURABLE` after notifying watches, with
+committed data and in-memory schema already installed. Empty-index markers are settled inside the schema/reset/replace
+transaction, not by a second commit. A caller must not retry the mutation as though it had been refused; the error names
+its sequence, and `db.sequence` gives the current commit without parsing the message. The failed call does not return
+its touched-token list: callers managing tracked tokens must conservatively invalidate all of them on `NOT_DURABLE`.
+Native watches have already been finalized. apack follows that invalidation rule. `close()` syncs what is owed, and
+reports a sync that failed.
 
 `syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made, its
 pages before the meta page that names them, so a commit that returned survives the machine losing power, and no group

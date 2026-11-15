@@ -194,16 +194,16 @@ commit, as it refuses every wait today, and keeps its pin until it ends; a proce
 own sync does the same, as does one whose sync before a write fails so: only a restore writes over it. If the record
 can't be written either, the process refuses its commits all the same, and an open of the database in this boot opens at
 its newest commit, which the error says. A sync that fails as it reads or flushes the record is final too, and writes
-nothing. One that fails short of a flush, as its read transaction begins, which a full reader table fails, or as it
-reads the root pages after the data's flush, has written nothing to rely on: it fails the waits on it alone. The pin
-doesn't move until a sync succeeds, so while what it keeps is past the bound every write is refused before it begins,
-once a sync it asks for has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again
-after a pause, where a full reader table is the cause, until other processes, or threads of its own, end the read
-transactions they hold; the index builder waits it out, a second at a time, and runs its work again only once a write
-would go on, and `waitForIndexBuilds` meanwhile answers `SYNC_BEHIND` rather than waiting on it. A write that went on
-would grow the file past the bound, without end while the failure lasted. The next sync is tried at once by a `durable`
-wait or a write past the bound, and by the timer the sync interval after the failure, a second by default and 100 ms at
-the least, whether or not anything is committed since.
+nothing. One that fails as its read transaction begins, which a full reader table fails, or as it reads the root pages
+after the data's flush, has written nothing to rely on: it fails the waits on it alone. The pin doesn't move until a
+sync succeeds, so while what it keeps is past the bound every write is refused before it begins, once a sync it asks for
+has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again after a pause, where a full
+reader table is the cause, until other processes, or threads of its own, end the read transactions they hold; the index
+builder waits it out, a second at a time, and runs its work again only once a write would go on, and
+`waitForIndexBuilds` meanwhile answers `SYNC_BEHIND` rather than waiting on it. A write that went on would grow the file
+past the bound, without end while the failure lasted. The next sync is tried at once by a `durable` wait or a write past
+the bound, and by the timer the sync interval after the failure, a second by default and 100 ms at the least, whether or
+not anything is committed since.
 
 **What else writes the data file.** A backup made into a directory, and `replaceWith`, write the record for the data
 they put there or remove it. `replaceWith` opens its source as an open does, record and all.
@@ -218,24 +218,21 @@ first is the cost the format's rule accepts until a release has users (`../archi
 
 ## What it costs
 
-- **Nothing on the path of a write of the one process writing.** Of two processes writing in turn, the one that
-  begins while the other has commits unsynced pays a sync before its first.
-- **A sync of the record after each sync of the data**, on the thread that syncs: two syncs where there was one. A
-  `durable` write waits for both, about 8 ms where it was 4.0 on an Apple M1 Pro by `engine.md`'s reading of
-  2026-11-12, which is what `syncEachCommit` costs there.
-- **A reader's place in the lock file** for a process with commits unsynced.
-- **Pages freed since the pin wait for the next record before they are used again**, and a file's length doesn't
-  shrink: it grows by the bound above and by what is committed while a sync runs. The engine drops idle read
-  transactions after each commit so that none holds freed pages (`Store::committed`); the pin holds a bound's
-  worth by design.
-- **A sync where a map is resized**, when commits are unsynced or another process committed meanwhile.
-- **A sync and a record at each writable open** that finds a later commit than the record's, and a record at the
-  first open of a boot.
-- **An open after a power loss loses the commits after the last sync**, as the grouped mode says. So does a
-  process that died with commits unsynced where the machine then restarts before the database is opened again,
-  cleanly or not: today a clean restart keeps them.
-- **Two refusals that are new**: an open in another mode than a live writer's, and an open that finds a restore it
-  can't make.
+- **Nothing on the path of a write of the one process writing.** Of two processes writing in turn, the one that begins
+while the other has commits unsynced pays a sync before its first. - **A sync of the record after each sync of the
+data**, on the thread that syncs: two syncs where there was one. A `durable` write waits for both, about 8 ms where it
+was 4.0 on an Apple M1 Pro by `engine.md`'s reading of 2026-11-12, which is what `syncEachCommit` costs there. - **A
+reader's place in the lock file** for a process with commits unsynced. - **Pages freed since the pin wait for the next
+record before they are used again**, and a file's length doesn't shrink: it grows by the bound above, by an eighth of it
+more before the free tree is read again, by a single write larger than the bound, and by writes already past their check
+when it was crossed, a write past the bound waiting for the sync. The engine drops idle read transactions after each
+commit so that none holds freed pages (`Store::committed`); the pin holds a bound's worth by design. - **A sync where a
+map is resized**, when commits are unsynced or another process committed meanwhile. - **A sync and a record at each
+writable open** that finds a later commit than the record's, and a record at the first open of a boot. - **An open after
+a power loss loses the commits after the last sync**, as the grouped mode says. So does a process that died with commits
+unsynced where the machine then restarts before the database is opened again, cleanly or not: today a clean restart
+keeps them. - **Two refusals that are new**: an open in another mode than a live writer's, and an open that finds a
+restore it can't make.
 
 ## What was set aside
 

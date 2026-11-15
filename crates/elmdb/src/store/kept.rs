@@ -18,9 +18,10 @@
 //!   where the data's flush or the record's write failed the record says so.
 //! - No record is written once the process refuses its commits: a flush that succeeds after one that failed proves
 //!   nothing of the pages the OS may have dropped.
-//! - One that fails short of a flush, as a full reader table fails it, refuses nothing for good: while the pin is past
-//!   its bound, which it can't leave until a sync succeeds, a write is refused before it begins once a sync it asks for
-//!   has failed so too (`SYNC_BEHIND`, `Store::hold_to_the_bound`), since it would grow the file past the bound.
+//! - One that wrote nothing to rely on, as a full reader table fails it, refuses nothing for good: while the pin is
+//!   past its bound, which it can't leave until a sync succeeds, a write is refused before it begins once a sync it
+//!   asks for has failed so too (`SYNC_BEHIND`, `Store::hold_to_the_bound`), since it would grow the file past the
+//!   bound.
 //!
 //! Locks are taken in one order: the gate, held for reading from a read transaction's beginning until it is the pin,
 //! then the record's, then the data file's handle; the gate is read again within, which it lets a reader do whenever

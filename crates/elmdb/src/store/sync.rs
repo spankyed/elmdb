@@ -4,8 +4,9 @@
 //!
 //! A failed flush is final for the open database: an OS may mark the pages it couldn't write clean and drop them, so a
 //! later sync that succeeds proves nothing about them, and every later commit is built on them. Every wait after it
-//! fails with it, until the database is reopened. A sync that failed before it flushed anything, which its `Syncer`
-//! says, fails the waits on it alone, and the next is tried by the timer, whether or not anything is committed since.
+//! fails with it, until the database is reopened. A sync that failed having written nothing to rely on, which its
+//! `Syncer` says, fails the waits on it alone, and the next is tried by the timer, whether or not anything is committed
+//! since.
 //!
 //! When a sync is due is `Policy`'s, a pure function of the instants it is told; the clock and the flush are behind
 //! `Clock` and `Syncer`, so a test drives both.
@@ -79,10 +80,10 @@ impl Policy {
 pub trait Syncer: Send + Sync + 'static {
     fn sync(&self) -> Result<()>;
 
-    /// What every wait fails with from now on, where a failure `sync` answered is final: one of the flush, after which
-    /// the OS may have dropped what it couldn't write, so that no later sync proves anything of it. `None` for one that
-    /// failed before it flushed anything, which fails the waits on its own attempt, the next sync trying again. The
-    /// failure named may be another's than `failure`, as one a write met while this sync ran
+    /// What every wait fails with from now on, where a failure `sync` answered is final: one after which no later sync
+    /// proves anything, as a flush's is, the OS having perhaps dropped what it couldn't write. `None` for one that
+    /// wrote nothing to rely on, which fails the waits on its own attempt, the next sync trying again. The failure named
+    /// may be another's than `failure`, as one a write met while this sync ran
     fn final_failure(&self, failure: &Error) -> Option<Error>;
 }
 
