@@ -88,7 +88,7 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
         }
         Outcome::Unchanged => {
             if let (Some(file), Some(earlier)) = (file.as_mut().filter(|_| writable), record.as_ref()) {
-                let again = Record { boot, ..earlier.next(Mode::Grouped, State::Kept) };
+                let again = Record { boot, ..earlier.next(State::Kept) };
                 file.write(&again)?;
                 record = Some(again);
             }
@@ -106,10 +106,10 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
             };
             // Its notice first, the rest of the record as it was: an open after a restore stopped once the meta pages
             // are written finds nothing left to restore, and still says one was made
-            let intent = Record { restored: Some(earlier.commit), ..earlier.next(Mode::Grouped, earlier.state) };
+            let intent = Record { restored: Some(earlier.commit), ..earlier.next(earlier.state) };
             file.write(&intent)?;
             restore(dir, &mut data, &intent)?;
-            let again = Record { boot, ..intent.next(Mode::Grouped, State::Kept) };
+            let again = Record { boot, ..intent.next(State::Kept) };
             file.write(&again)?;
             restored = again.restored;
             record = Some(again);

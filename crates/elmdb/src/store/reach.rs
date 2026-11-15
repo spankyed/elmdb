@@ -365,3 +365,27 @@ fn u64_at_checked(bytes: &[u8], at: usize, path: &Path) -> Result<u64> {
         .map(|b| u64::from_ne_bytes(b.try_into().expect("eight bytes")))
         .ok_or_else(|| corrupt(path, "has a field past its page"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A page of the main tree with one node naming a database whose root is `root`, a leaf or a branch by `flags`
+    fn page_with_a_named_root(flags: u16, root: u64) -> Vec<u8> {
+        let mut page = vec![0u8; 4096];
+        page[10..12].copy_from_slice(&flags.to_ne_bytes());
+        // One node pointer, then the node: its sizes, its flags (a named database's), an empty key, its record
+        page[12..14].copy_from_slice(&((PAGE_HEADER + 2) as u16).to_ne_bytes());
+        let node = 100usize;
+        page[PAGE_HEADER..PAGE_HEADER + 2].copy_from_slice(&(node as u16).to_ne_bytes());
+        page[node + 4..node + 6].copy_from_slice(&F_SUBDATA.to_ne_bytes());
+        page[node + 8 + DB_ROOT..node + 8 + DB_ROOT + 8].copy_from_slice(&root.to_ne_bytes());
+        page
+    }
+
+    #[test]
+    fn a_leaf_of_the_main_tree_names_its_databases_roots_and_a_branch_names_none() {
+        assert_eq!(named_roots(&page_with_a_named_root(P_LEAF, 42)), vec![42]);
+        assert_eq!(named_roots(&page_with_a_named_root(P_BRANCH, 42)), Vec::<u64>::new());
+    }
+}

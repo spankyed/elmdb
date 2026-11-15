@@ -571,22 +571,26 @@ fn another_process_s_sync_after_a_failed_one_fails_and_refuses_its_next_commit()
 fn what_the_pin_holds_back_makes_a_sync_due_whatever_the_time() {
     // Values written over again and again, which free as much as they take: with no sync the pin keeps every page
     // they free, and the file grows by all of it. How far it grows with the bound is a reading's, not a test's:
-    // commits go on while a sync runs, so it turns on how fast the disk syncs beside how fast commits land
-    let syncs = |bound: u64| {
+    // commits go on while a sync runs, so it turns on how fast the disk syncs beside how fast commits land. Nor is how
+    // many syncs run by the time the writes end, which turns on how soon the sync thread wakes: no sync is due by the
+    // time for ten minutes, so one that runs at all is the bound's
+    let synced_within = |bound: u64, wait: Duration| {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path(), grouped()).unwrap();
         store.set_bound(bound);
         for n in 0..200 {
             put(&store, &format!("w-{}", n % 4), &vec![n as u8; 64 << 10]).unwrap();
         }
-        // A sync the bound made due may still be running: a durable wait ends after it, and runs one sync of its own
-        synced(&store);
-        let syncs = store.syncs();
+        let waited = std::time::Instant::now();
+        while store.syncs() == 0 && waited.elapsed() < wait {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let synced = store.syncs() > 0;
         store.close().unwrap();
-        syncs
+        synced
     };
-    assert_eq!(syncs(u64::MAX / 8), 1, "no sync was due by the time, and the wait ran its own");
-    assert!(syncs(1 << 20) > 1, "the bound made syncs due");
+    assert!(!synced_within(u64::MAX / 8, Duration::from_secs(1)), "a sync was due by the time");
+    assert!(synced_within(1 << 20, Duration::from_secs(20)), "the bound made no sync due");
 }
 
 #[test]
@@ -730,4 +734,257 @@ fn a_process_ended_at_each_step_of_a_restore_leaves_it_to_the_next_open() {
         assert!(store.restored().is_some(), "{point}");
         store.close().unwrap();
     }
+}
+
+/// The store, shared with what a run point runs on another thread
+fn shared(dir: &Path) -> std::sync::Arc<Store> {
+    std::sync::Arc::new(Store::open(dir, grouped()).unwrap())
+}
+
+fn kept(store: &Store) -> &Kept {
+    store.kept.as_ref().expect("a store of the grouped mode")
+}
+
+/// A commit another process would make, made through the environment and not the store: the store hears of nothing
+fn committed_elsewhere(store: &Store, key: &[u8]) {
+    let mut txn = store.env.write_txn().unwrap();
+    store.db.main.put(&mut txn, key, b"elsewhere").unwrap();
+    txn.commit().unwrap();
+}
+
+#[test]
+fn a_write_that_commits_nothing_leaves_no_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    synced(&store);
+    let refused = store.write(|_, _| -> Result<()> { Err(Error::new(ErrorCode::Io, "refused by the test")) }, false);
+    assert!(refused.is_err());
+    assert!(!kept(&store).pinned(), "a write that made no commit left its pin, which no sync would end");
+    store.close().unwrap();
+}
+
+#[test]
+fn a_growth_ends_the_pin_and_the_next_write_makes_sure_of_it_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert!(kept(&store).pinned());
+    store.grow().unwrap();
+    assert!(!kept(&store).pinned(), "the map was resized with the pin's transaction open");
+    put(&store, "b", b"2").unwrap();
+    assert!(kept(&store).pinned());
+    store.close().unwrap();
+}
+
+#[test]
+fn a_write_and_a_unit_whose_pin_a_growth_ended_before_their_transaction_make_sure_of_it_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = shared(dir.path());
+    put(&store, "a", b"1").unwrap();
+    // The map grown between a write's making sure of its pin and its transaction's beginning, which ends the pin
+    let grower = std::sync::Arc::clone(&store);
+    failpoints::run_once_here(points::WRITE_PINNED, move || grower.grow().unwrap());
+    put(&store, "b", b"2").unwrap();
+    assert!(!failpoints::is_armed_here(points::WRITE_PINNED), "the write reached the point");
+    let grower = std::sync::Arc::clone(&store);
+    failpoints::run_once_here(points::UNIT_PINNED, move || grower.grow().unwrap());
+    let (mut txn, gate, writer) = store.begin().unwrap();
+    store.db.main.put(&mut txn, b"c", b"3").unwrap();
+    let committed = store.commit_txn(txn);
+    drop((gate, writer));
+    store.end_unit();
+    committed.unwrap();
+    assert_eq!(get(&store, "b").as_deref(), Some(&b"2"[..]));
+}
+
+#[test]
+fn a_unit_open_across_a_failed_sync_is_refused_at_its_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let (mut txn, gate, writer) = store.begin().unwrap();
+    store.db.main.put(&mut txn, b"b", b"2").unwrap();
+    let failing = failpoints::fail_while_at(points::SYNC, &store.path);
+    assert!(store.durable().unwrap().wait().is_err());
+    drop(failing);
+    let refused = store.commit_txn(txn).unwrap_err();
+    drop((gate, writer));
+    store.end_unit();
+    assert!(refused.message.contains("An earlier sync failed"), "{refused}");
+    let _ = store.close();
+}
+
+#[test]
+fn another_process_s_later_record_is_not_written_back_and_a_sync_of_nothing_new_writes_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    synced(&store);
+    // A sync with nothing committed since the record: no record written
+    let count = record_in(dir.path()).unwrap().count;
+    kept(&store).sync(&|| kept(&store).adopt()).unwrap();
+    assert_eq!(record_in(dir.path()).unwrap().count, count, "a record of the commit the record names already");
+    // Another process's record of a later commit than this one has: kept, whatever this one syncs
+    let mut file = RecordFile::open(dir.path(), true).unwrap().unwrap();
+    let later = record::Record { count: count + 1, commit: newest(&store) + 100, ..record_in(dir.path()).unwrap() };
+    file.write(&later).unwrap();
+    put(&store, "b", b"2").unwrap();
+    synced(&store);
+    assert_eq!(record_in(dir.path()).unwrap().commit, later.commit, "the record went back");
+    store.close().unwrap();
+}
+
+#[test]
+fn a_record_this_process_synced_is_not_synced_again_and_another_s_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    let syncs = |run: &dyn Fn()| {
+        let before = store.record_syncs();
+        run();
+        store.record_syncs() - before
+    };
+    // The open wrote and synced the record: a sync writes the next, and syncs that alone
+    assert_eq!(
+        syncs(&|| {
+            put(&store, "a", b"1").unwrap();
+            synced(&store)
+        }),
+        1
+    );
+    // A record another process wrote, which it may have died before syncing: synced before its other slot is written
+    let on_disk = record_in(dir.path()).unwrap();
+    RecordFile::open(dir.path(), true).unwrap().unwrap().write(&on_disk.next(State::Kept)).unwrap();
+    assert_eq!(
+        syncs(&|| {
+            put(&store, "b", b"2").unwrap();
+            synced(&store)
+        }),
+        2
+    );
+    store.close().unwrap();
+}
+
+#[test]
+fn a_sync_beside_which_a_commit_lands_keeps_its_pin_for_that_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = shared(dir.path());
+    put(&store, "a", b"1").unwrap();
+    // A commit of this process once the sync has its commit's meta page and has synced the data: owed after the sync
+    let writer = std::sync::Arc::clone(&store);
+    failpoints::run_once_at(points::SYNC_DATA, &store.path, move || put(&writer, "b", b"2").unwrap());
+    synced(&store);
+    assert!(kept(&store).pinned(), "the sync ended the pin of a process with a commit after the record's");
+    synced(&store);
+    assert!(!kept(&store).pinned());
+}
+
+#[test]
+fn the_exit_s_sync_records_the_newest_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let last = newest(&store);
+    store.close_at_exit(Duration::from_secs(5)).unwrap();
+    assert_eq!(record_in(dir.path()).unwrap().commit, last);
+}
+
+#[test]
+fn a_failed_sync_marks_no_record_of_another_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    // A writer of another mode's record, which names no commit to restore
+    let on_disk = record_in(dir.path()).unwrap();
+    let other = record::of_mode(Some(&on_disk), Mode::Unsynced, boot::this_boot());
+    RecordFile::open(dir.path(), true).unwrap().unwrap().write(&other).unwrap();
+    let failing = failpoints::fail_while_at(points::SYNC, &store.path);
+    assert!(store.durable().unwrap().wait().is_err());
+    drop(failing);
+    let record = record_in(dir.path()).unwrap();
+    assert_eq!((record.mode, record.state), (Mode::Unsynced, State::Kept), "a record naming commit 0 marked failed");
+    let _ = store.close();
+}
+
+#[test]
+fn a_write_after_another_process_committed_syncs_and_records_before_it_begins() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    synced(&store);
+    committed_elsewhere(&store, b"elsewhere");
+    let theirs = newest(&store);
+    put(&store, "b", b"2").unwrap();
+    assert_eq!(record_in(dir.path()).unwrap().commit, theirs, "the write pinned a commit later than the record's");
+    store.close().unwrap();
+}
+
+#[test]
+fn adopting_a_grown_map_drops_the_idle_reads_and_the_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert!(get(&store, "a").is_some());
+    assert!(store.idle.len() > 0, "a read keeps its transaction for the next");
+    store.adopt_map_size().unwrap();
+    assert_eq!(store.idle.len(), 0, "the map was taken at another size with a read transaction open");
+    assert!(!kept(&store).pinned());
+    store.close().unwrap();
+}
+
+#[test]
+fn a_write_takes_the_map_another_process_grew_the_file_past() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(256 << 10), ..grouped() }).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir.path())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    put(&store, "b", b"2").unwrap();
+    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+    store.close().unwrap();
+}
+
+#[test]
+fn an_open_s_own_commit_is_made_under_the_pin() {
+    let dir = tempfile::tempdir().unwrap();
+    // A database with elmdb's own and no vector graphs, as one an earlier elmdb made: the open creates them, its own
+    // commit, which syncs and records the commit before it first
+    {
+        // SAFETY: this test's own directory, which no other handle has open
+        let env = unsafe { EnvOpenOptions::new().read_txn_without_tls().max_dbs(8).open(dir.path()) }.unwrap();
+        let txn = env.write_txn().unwrap();
+        env.create_databases_and_commit(txn, |opener, txn| -> Result<_> {
+            let db = opener.create_database::<Bytes, Bytes>(txn, Some(format::DB_NAME))?;
+            put_meta(txn, db, meta::KIND, format::KIND.as_bytes())?;
+            put_meta(txn, db, meta::FORMAT, &format::FORMAT_VERSION.to_be_bytes())?;
+            Ok(CommitOrAbort::<_, ()>::Commit(db))
+        })
+        .unwrap();
+    }
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    assert!(store.db.cosine.is_some(), "the open made the graphs' databases");
+    assert_eq!(record_in(dir.path()).unwrap().count, 2, "the commit before the open's, then the open's own");
+    store.close().unwrap();
+}
+
+#[test]
+fn a_meta_page_names_the_last_page_lmdb_does() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    for n in 0..20 {
+        put(&store, &format!("k-{n}"), &vec![n as u8; 30_000]).unwrap();
+    }
+    let data = dir.path().join("data.mdb");
+    let mut file = std::fs::File::open(&data).unwrap();
+    let page = page_size_of(&mut file, &data).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page).unwrap();
+    assert_eq!(meta.txnid, newest(&store));
+    assert_eq!(meta.last_page(), store.env.info().last_page_number as u64);
+    store.close().unwrap();
 }

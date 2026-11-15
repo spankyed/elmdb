@@ -129,6 +129,10 @@ pub(crate) mod points {
     pub const WATCH_READ: &str = "watch::read";
     /// Creating a derivation's scratch directory fails
     pub const SCRATCH: &str = "derive::scratch";
+    /// Runs in a write once it has made sure of its pin, before it takes the write transaction
+    pub const WRITE_PINNED: &str = "store::write_pinned";
+    /// Runs as a unit is begun once it has made sure of its pin, before it takes the write transaction
+    pub const UNIT_PINNED: &str = "store::unit_pinned";
     /// Runs in a sync of the grouped mode once it has begun the read transaction its pin moves to, before it reads
     /// that commit's meta page from the file
     pub const SYNC_PINNED: &str = "store::sync_pinned";
