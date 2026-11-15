@@ -565,6 +565,33 @@ fn by_tag(take: usize) -> Json {
     json!([{ "step": "orderBy", "field": "tag" }, { "step": "limit", "n": take }])
 }
 
+#[test]
+fn a_whole_order_whose_keys_and_entries_disagree_reads_as_one_handed_on_an_entity_at_a_time() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    // More strings than are each sought, each its own, so a whole order meets their entries by a walk
+    write(&db, (0..400).map(|i| item(&i.to_string(), json!({ "tag": format!("t{i:03}") }))).collect()).unwrap();
+    let build = stored(&db, "byTag").0.unwrap().build;
+    let running = order::running("root").unwrap();
+    let room = keys::order_room("Item", "byTag", &[]).unwrap();
+    let key = |string: &str| {
+        let sort_key = order::sort_key(&running.collator, string, room);
+        keys::order_string("Item", "byTag", build, &[], &sort_key, string)
+    };
+    // Keys of strings no entity holds, before the first entry, among the others and past the last, and none for two
+    // strings entities hold, the first and one among the others
+    unit(&db, |t| {
+        ["s", "t100x", "t250x", "u"].into_iter().try_for_each(|stale| t.put(&key(stale), &[]))?;
+        ["t000", "t300"].into_iter().try_for_each(|gone| t.del(&key(gone)))
+    });
+    let (whole, _) = read(&db, json!([{ "step": "orderBy", "field": "tag" }]), None);
+    let (limited, _) = read(&db, by_tag(10_000), None);
+    assert_eq!(whole, limited);
+    // Every entity whose string has a key, in the strings' order
+    let expected: Vec<String> = (1..400).filter(|i| *i != 300).map(|i| format!("Item-{i}")).collect();
+    assert_eq!(whole, expected);
+}
+
 fn ids(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| format!("Item-{name}")).collect()
 }

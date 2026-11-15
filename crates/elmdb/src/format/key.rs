@@ -187,6 +187,34 @@ pub fn last_number(key: &[u8]) -> Option<f64> {
     Some(f64::from_bits(bits))
 }
 
+/// The first part of a key's bytes as it is encoded, its tag first, and the bytes after it, borrowed and not decoded:
+/// what reads a part as bytes it compares or copies into another key. None for bytes that don't begin with a whole
+/// part
+pub fn split_part(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let end = match *bytes.first()? {
+        NULL | FALSE | TRUE => 1,
+        NUMBER => 9,
+        STRING | BYTES => {
+            // A zero byte ends the part unless an escape follows it, which makes it one of the part's own
+            let mut at = 1;
+            loop {
+                match *bytes.get(at)? {
+                    0 if bytes.get(at + 1) == Some(&ESCAPE) => at += 2,
+                    0 => break at + 1,
+                    _ => at += 1,
+                }
+            }
+        }
+        _ => return None,
+    };
+    (end <= bytes.len()).then(|| bytes.split_at(end))
+}
+
+/// Whether a part as `split_part` finds it is a string's
+pub fn is_string_part(part: &[u8]) -> bool {
+    part.first() == Some(&STRING)
+}
+
 /// A key of these parts
 pub fn encode(parts: &[Part]) -> Vec<u8> {
     let mut w = KeyWriter::new();
@@ -313,6 +341,28 @@ mod tests {
         }
 
         #[test]
+        fn a_key_splits_into_its_parts_encodings_and_a_cut_part_into_none(parts in prop::collection::vec(part(), 1..5)) {
+            let mut rest = encode(&parts);
+            let whole = rest.clone();
+            for part in &parts {
+                let (first, after) = split_part(&rest).unwrap();
+                let own = encode(std::slice::from_ref(part));
+                prop_assert_eq!(first, own.as_slice());
+                prop_assert_eq!(is_string_part(first), matches!(part, Part::String(_)));
+                rest = after.to_vec();
+            }
+            prop_assert!(rest.is_empty());
+            // A part cut short of its end is no part, or one of its own that ends where the cut does, as an escaped
+            // zero byte cut after the zero ends a part
+            let (first, _) = split_part(&whole).unwrap();
+            for cut in 0..first.len() {
+                if let Some((part, rest)) = split_part(&first[..cut]) {
+                    prop_assert!(rest.is_empty() && decode(part).is_ok(), "{:02x?}", &first[..cut]);
+                }
+            }
+        }
+
+        #[test]
         fn a_prefix_range_holds_exactly_the_keys_that_extend_the_prefix(
             prefix in prop::collection::vec(part(), 1..3),
             other in prop::collection::vec(part(), 0..4),
@@ -323,6 +373,17 @@ mod tests {
             let extends = other.len() > prefix.len() && other[..prefix.len()] == prefix[..];
             prop_assert_eq!(low.as_slice() <= key.as_slice() && key.as_slice() < high.as_slice(), extends);
         }
+    }
+
+    #[test]
+    fn bytes_beginning_with_no_tag_or_cut_short_split_into_no_part() {
+        for tag in [0x00, TAG_HIGH, ESCAPE] {
+            assert_eq!(split_part(&[tag, STRING, 0]), None);
+        }
+        // Nor do a string with no end and a number short of its eight bytes
+        assert_eq!(split_part(&[STRING, b'a', 0, ESCAPE]), None);
+        assert_eq!(split_part(&number_part(1.0)[..8]), None);
+        assert_eq!(split_part(&[]), None);
     }
 
     #[test]

@@ -2898,12 +2898,7 @@ impl<R: Read> Query<'_, R> {
         // An order read whole has its strings' entries met in one walk of them. A page's rest is not one: the
         // strings past a cursor are spread over the entries, whose order is their bytes'
         if self.whole.get() && after.is_none() {
-            let mut held = Vec::new();
-            self.strings_held(ordered, descending, after, &mut |string, place, past| {
-                held.push((string, place, past));
-                Ok(true)
-            })?;
-            return self.joined(ordered, held, each);
+            return self.whole_strings(ordered, descending, each);
         }
         self.strings_held(ordered, descending, after, &mut |string, place, past| match place {
             Some(place) => each(place),
@@ -2915,24 +2910,91 @@ impl<R: Read> Query<'_, R> {
         })
     }
 
-    /// Hands on the entities at the places of an order's strings, each string with the entity filed by its place
-    /// or none for one with an entry, and the place of its entry a page goes on past (`strings_held`): the entries
-    /// of the strings are met in one walk of the index's, in the order of their keys, where a seek for each would
-    /// find its way down from the root. Few strings, and those a range keeps, are sought as an order handed on an
-    /// entity at a time seeks them: a walk would pass over every entry between them
-    fn joined(&self, ordered: &Ordered, held: Vec<Held>, each: &mut Entry<'_>) -> Result<bool> {
-        let entry = |string: &str| {
-            let mut parts = ordered.leading.clone();
-            parts.push(Part::String(string.to_owned()));
-            keys::index_range(&ordered.entity_type, &ordered.index, &parts)
+    /// Hands on every entity holding a string under an ordered read's leading values, in the strings' order, for an
+    /// order read whole (`resolved`). The order's keys are walked as `strings_held` walks them, and each key's string
+    /// is kept as its part of the key, undecoded: a run of one whole sort key whose keys each hold a string is in the
+    /// strings' order already, and only another run is decoded and ordered (`reorder`). The strings' entries are then
+    /// met in one walk of the index's, in the order of their keys, which is their parts' order, where a seek for each
+    /// would find its way down from the root. Few strings, and those a range keeps, are sought as an order handed on
+    /// an entity at a time seeks them: a walk would pass over every entry between them
+    fn whole_strings(&self, ordered: &Ordered, descending: bool, each: &mut Entry<'_>) -> Result<bool> {
+        use crate::format::key::{KeyWriter, is_string_part, last_number, split_part};
+        let Some(build) = ordered.strings else { return Ok(true) };
+        let running = super::order::running(&self.r.schema().collation)?;
+        let (under, from, to) = self.order_bounds(ordered, build, &running, descending, None);
+        let corrupt = || Error::new(ErrorCode::Corrupted, "A key of an index's order doesn't read");
+        let (whole, cut) = (KeyWriter::new().bool(false).to_vec(), KeyWriter::new().bool(true).to_vec());
+        // The strings' parts of their entries' keys one after another, and what the walk found, in the order
+        let mut parts: Vec<u8> = Vec::new();
+        let mut found: Vec<Slot> = Vec::new();
+        // The run being read: its sort key's part, whether the key was cut, and where its keys begin in `found`
+        let (mut run, mut begun) = (None::<(Vec<u8>, bool)>, 0);
+        let ends = |parts: &mut Vec<u8>, found: &mut Vec<Slot>, begun: usize, cut: bool| {
+            let ordered_already =
+                !cut && ordered.within.is_none() && found[begun..].iter().all(|slot| matches!(slot, Slot::Entry(_)));
+            if ordered_already { Ok(()) } else { self.reorder(ordered, &running, descending, parts, found, begun) }
         };
-        // mutant-skip: replace (< with (==|>|<=)|\|\| with &&) in Query<'_, R>::joined
+        let mut step = |key: &[u8]| -> Result<()> {
+            let rest = key.get(under.len()..).ok_or_else(corrupt)?;
+            let (sort_key, rest) = split_part(rest).ok_or_else(corrupt)?;
+            let (was_cut, rest) = split_part(rest).ok_or_else(corrupt)?;
+            let (last, rest) = split_part(rest).ok_or_else(corrupt)?;
+            if !rest.is_empty() {
+                return Err(corrupt());
+            }
+            let was_cut = if was_cut == whole {
+                false
+            } else if was_cut == cut {
+                true
+            } else {
+                return Err(corrupt());
+            };
+            if run.as_ref().is_none_or(|(of, of_cut)| (of.as_slice(), *of_cut) != (sort_key, was_cut)) {
+                if let Some((_, of_cut)) = &run {
+                    ends(&mut parts, &mut found, begun, *of_cut)?;
+                }
+                run = Some((sort_key.to_vec(), was_cut));
+                begun = found.len();
+            }
+            found.push(if is_string_part(last) {
+                parts.extend_from_slice(last);
+                Slot::Entry(parts.len() - last.len()..parts.len())
+            } else {
+                // A key of an entity filed by its place ends with the place, a number
+                Slot::Place(last_number(last).ok_or_else(corrupt)? as u64)
+            });
+            Ok(())
+        };
+        let mut failed = None;
+        let mut visit = |key: &[u8], _: &[u8]| {
+            failed = step(key).err();
+            failed.is_none()
+        };
+        if descending {
+            self.r.visit_back_within(&from, &to, &mut visit)?;
+        } else {
+            self.r.visit_within(&from, &to, &mut visit)?;
+        }
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        // The last run, which no key after it ended
+        if let Some((_, cut)) = run {
+            ends(&mut parts, &mut found, begun, cut)?;
+        }
+        let prefix = keys::index_range(&ordered.entity_type, &ordered.index, &ordered.leading);
+        let part = |at: usize| match &found[at] {
+            Slot::Entry(range) => &parts[range.clone()],
+            Slot::Place(_) => &[],
+        };
+        let strings: Vec<usize> = (0..found.len()).filter(|at| matches!(found[*at], Slot::Entry(_))).collect();
+        // mutant-skip: replace (< with (==|>|<=)|\|\| with &&) in Query<'_, R>::whole_strings
         // Which strings are sought and which are met by a walk is what a read costs, and no part of its answer
-        if held.len() < JOINED_AT_ONCE || ordered.within.is_some() {
-            for (string, place, past) in held {
-                let more = match place {
-                    Some(place) => each(place)?,
-                    None => self.places_after(&entry(&string), past, each)?,
+        if strings.len() < JOINED_AT_ONCE || ordered.within.is_some() {
+            for (at, slot) in found.iter().enumerate() {
+                let more = match slot {
+                    Slot::Place(place) => each(*place)?,
+                    Slot::Entry(_) => self.places_after(&[prefix.as_slice(), part(at)].concat(), None, each)?,
                 };
                 if !more {
                     return Ok(false);
@@ -2940,41 +3002,101 @@ impl<R: Read> Query<'_, R> {
             }
             return Ok(true);
         }
-        // Each string's entry by its key, and the places the walk finds it holds
-        let wanted: HashMap<Vec<u8>, usize> = held
-            .iter()
-            .enumerate()
-            .filter(|(_, (_, place, _))| place.is_none())
-            .map(|(at, (string, _, _))| (entry(string), at))
-            .collect();
-        let mut places: Vec<Vec<u64>> = vec![Vec::new(); held.len()];
-        if let (Some(first), Some(last)) = (wanted.keys().min(), wanted.keys().max()) {
-            let mut failed = None;
-            self.r.visit_within(first, &past(last.clone()), |own, stored| {
-                if let Some(at) = wanted.get(own) {
-                    match super::places::held(self.r, own, stored) {
-                        Ok(found) => places[*at] = found.into_iter().collect(),
-                        Err(error) => failed = Some(error),
+        // The strings in the order of their parts' bytes, which is their entries' keys' order, each met with its entry
+        // by the walk: the places it holds are read into `places`, and the string's are at `spans`
+        let mut sorted = strings;
+        sorted.sort_unstable_by(|a, b| part(*a).cmp(part(*b)));
+        let mut places: Vec<u64> = Vec::with_capacity(sorted.len());
+        let mut spans: Vec<std::ops::Range<usize>> = vec![0..0; found.len()];
+        if let (Some(first), Some(last)) = (sorted.first(), sorted.last()) {
+            let (first, past_last) =
+                ([prefix.as_slice(), part(*first)].concat(), past([prefix.as_slice(), part(*last)].concat()));
+            let (mut sought, mut failed) = (sorted.iter().map(|at| (*at, part(*at))).peekable(), None);
+            // Whether strings are left to meet after this entry
+            let mut meet = |own: &[u8], stored: &[u8]| -> Result<bool> {
+                let string = own.get(prefix.len()..).unwrap_or_default();
+                // A string before this entry's has none: the order holds a string no entity does, which `check` finds
+                while sought.next_if(|(_, part)| *part < string).is_some() {}
+                // And an entry of no string sought is one the order has no key for
+                if let Some((at, _)) = sought.next_if(|(_, part)| *part == string) {
+                    let begin = places.len();
+                    // A key holding its own places, as most do, is read where it is
+                    if text::postings::each_own(stored, &mut |place| {
+                        places.push(place);
+                        Ok(true)
+                    })?
+                    .is_none()
+                    {
+                        places.extend(super::places::held(self.r, own, stored)?);
                     }
+                    spans[at] = begin..places.len();
                 }
-                failed.is_none()
+                Ok(sought.peek().is_some())
+            };
+            self.r.visit_within(&first, &past_last, |own, stored| match meet(own, stored) {
+                Ok(more) => more,
+                Err(error) => {
+                    failed = Some(error);
+                    false
+                }
             })?;
             if let Some(error) = failed {
                 return Err(error);
             }
         }
-        for (at, (_, place, _)) in held.iter().enumerate() {
-            let found = match place {
-                Some(place) => std::slice::from_ref(place),
-                None => places[at].as_slice(),
+        for (at, slot) in found.iter().enumerate() {
+            let held = match slot {
+                Slot::Place(place) => std::slice::from_ref(place),
+                Slot::Entry(_) => &places[spans[at].clone()],
             };
-            for place in found {
+            for place in held {
                 if !each(*place)? {
                     return Ok(false);
                 }
             }
         }
         Ok(true)
+    }
+
+    /// Orders the run of a whole order's keys that begins at `begun` in what `whole_strings` found, as `run` orders
+    /// one: its strings are decoded from their parts, ordered by the collator and then their bytes, the range kept,
+    /// and found again in that order
+    fn reorder(
+        &self,
+        ordered: &Ordered,
+        running: &super::order::Running,
+        descending: bool,
+        parts: &mut Vec<u8>,
+        found: &mut Vec<Slot>,
+        begun: usize,
+    ) -> Result<()> {
+        let corrupt = || Error::new(ErrorCode::Corrupted, "A key of an index's order holds no string or place");
+        // The run's strings are the last of the parts, after every earlier run's
+        let mut from = parts.len();
+        let mut held = Vec::with_capacity(found.len() - begun);
+        for slot in found.drain(begun..) {
+            held.push(match slot {
+                Slot::Entry(range) => {
+                    from = from.min(range.start);
+                    let Some(Part::String(string)) = decode_key(&parts[range])?.pop() else { return Err(corrupt()) };
+                    (Some(string), 0)
+                }
+                Slot::Place(place) => (None, place),
+            });
+        }
+        parts.truncate(from);
+        self.run(ordered, running, &mut held, descending, None, &mut |string, place, _| {
+            found.push(match place {
+                Some(place) => Slot::Place(place),
+                None => {
+                    let start = parts.len();
+                    parts.extend_from_slice(crate::format::key::KeyWriter::new().string(&string).as_bytes());
+                    Slot::Entry(start..parts.len())
+                }
+            });
+            Ok(true)
+        })?;
+        Ok(())
     }
 
     /// Whether every entity of the order the step before `upto` reads is taken: no `limit` among the steps after
@@ -3083,31 +3205,7 @@ impl<R: Read> Query<'_, R> {
     ) -> Result<bool> {
         let Some(build) = ordered.strings else { return Ok(true) };
         let running = super::order::running(&self.r.schema().collation)?;
-        let under = keys::order_range(&ordered.entity_type, &ordered.index, build, &ordered.leading);
-        let (mut from, mut to) = prefix_range(&under);
-        // The room is there: an order is read only under values that leave its keys one
-        let room = keys::order_room(&ordered.entity_type, &ordered.index, &ordered.leading).unwrap_or_default();
-        // Where the run of a string's keys begins and ends: every string at or after it in the collation's order is
-        // at or after the first, and every one at or before it is before the second
-        let run_of = |string: &str| {
-            let sort_key = super::order::sort_key(&running.collator, string, room);
-            let mut run = crate::format::key::KeyWriter::new();
-            run.bytes(&sort_key.bytes).bool(sort_key.cut);
-            prefix_range(&[under.as_slice(), &run.to_vec()].concat())
-        };
-        // A range's bounds are sought, and the strings of the runs at them tested against it (`run`)
-        if let Some(limits) = &ordered.within {
-            if let Some((low, _)) = &limits.low {
-                from = from.max(run_of(low).0);
-            }
-            if let Some((high, _)) = &limits.high {
-                to = to.min(run_of(high).1);
-            }
-        }
-        if let Some((string, _)) = after {
-            let (first, past) = run_of(string);
-            if descending { to = to.min(past) } else { from = from.max(first) }
-        }
+        let (under, from, to) = self.order_bounds(ordered, build, &running, descending, after);
         // The run being read: the bytes its keys share after what every key of the order begins with, whether its
         // sort key was cut, and what its keys hold
         let mut run: Option<(Vec<u8>, bool)> = None;
@@ -3156,6 +3254,44 @@ impl<R: Read> Query<'_, R> {
         }
         // The last run, which no key after it ended
         Ok(on && (run.is_none() || self.run(ordered, &running, &mut held, descending, cursor.take(), each)?))
+    }
+
+    /// What every key of an ordered read's order begins with under its leading values, and the keys from and up to
+    /// which a read walks them: all of them, or from the runs a range's bounds and a page's cursor are in, sought
+    fn order_bounds(
+        &self,
+        ordered: &Ordered,
+        build: u64,
+        running: &super::order::Running,
+        descending: bool,
+        after: Option<(&str, u64)>,
+    ) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let under = keys::order_range(&ordered.entity_type, &ordered.index, build, &ordered.leading);
+        let (mut from, mut to) = prefix_range(&under);
+        // The room is there: an order is read only under values that leave its keys one
+        let room = keys::order_room(&ordered.entity_type, &ordered.index, &ordered.leading).unwrap_or_default();
+        // Where the run of a string's keys begins and ends: every string at or after it in the collation's order is
+        // at or after the first, and every one at or before it is before the second
+        let run_of = |string: &str| {
+            let sort_key = super::order::sort_key(&running.collator, string, room);
+            let mut run = crate::format::key::KeyWriter::new();
+            run.bytes(&sort_key.bytes).bool(sort_key.cut);
+            prefix_range(&[under.as_slice(), &run.to_vec()].concat())
+        };
+        // A range's bounds are sought, and the strings of the runs at them tested against it (`run`)
+        if let Some(limits) = &ordered.within {
+            if let Some((low, _)) = &limits.low {
+                from = from.max(run_of(low).0);
+            }
+            if let Some((high, _)) = &limits.high {
+                to = to.min(run_of(high).1);
+            }
+        }
+        if let Some((string, _)) = after {
+            let (first, past) = run_of(string);
+            if descending { to = to.min(past) } else { from = from.max(first) }
+        }
+        (under, from, to)
     }
 
     /// Hands on the entities of one run of an order's keys, emptying `held`: each key's string, or the place of
@@ -4597,9 +4733,12 @@ const RANGE_ASKED: u64 = 16;
 /// read, where a seek finds its way down from the root
 const PASSED_OVER: u32 = 8;
 
-/// What a key of an index's order holds, as an ordered read hands it on (`Query::strings_held`): the string, the
-/// place of the entity holding it when the key is that entity's, and a page's cursor's place under its own string
-type Held = (String, Option<u64>, Option<u64>);
+/// What a whole order's walk of its keys finds of each (`Query::whole_strings`): a string, as its part of its entry's
+/// key at a range of the walk's parts, or the place of an entity filed by its place
+enum Slot {
+    Entry(std::ops::Range<usize>),
+    Place(u64),
+}
 
 /// How many strings of an order read whole have their entries met in one walk of the index's, where fewer are each
 /// sought: a walk reads every entry between the first and the last of them
