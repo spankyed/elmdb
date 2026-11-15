@@ -370,22 +370,24 @@ fn u64_at_checked(bytes: &[u8], at: usize, path: &Path) -> Result<u64> {
 mod tests {
     use super::*;
 
-    /// A page of the main tree with one node naming a database whose root is `root`, a leaf or a branch by `flags`
+    /// A page of the main tree, a leaf or a branch by `flags`, with two nodes: one naming a database whose root is
+    /// `root`, and one of a plain value whose bytes would read as the root 99
     fn page_with_a_named_root(flags: u16, root: u64) -> Vec<u8> {
         let mut page = vec![0u8; 4096];
         page[10..12].copy_from_slice(&flags.to_ne_bytes());
-        // One node pointer, then the node: its sizes, its flags (a named database's), an empty key, its record
-        page[12..14].copy_from_slice(&((PAGE_HEADER + 2) as u16).to_ne_bytes());
-        let node = 100usize;
-        page[PAGE_HEADER..PAGE_HEADER + 2].copy_from_slice(&(node as u16).to_ne_bytes());
-        page[node + 4..node + 6].copy_from_slice(&F_SUBDATA.to_ne_bytes());
-        page[node + 8 + DB_ROOT..node + 8 + DB_ROOT + 8].copy_from_slice(&root.to_ne_bytes());
+        // Two node pointers, then each node: its sizes, its flags, an empty key, and its data
+        page[12..14].copy_from_slice(&((PAGE_HEADER + 4) as u16).to_ne_bytes());
+        for (at, (node, node_flags, value)) in [(100usize, F_SUBDATA, root), (300, 0, 99)].into_iter().enumerate() {
+            page[PAGE_HEADER + 2 * at..PAGE_HEADER + 2 * at + 2].copy_from_slice(&(node as u16).to_ne_bytes());
+            page[node + 4..node + 6].copy_from_slice(&node_flags.to_ne_bytes());
+            page[node + 8 + DB_ROOT..node + 8 + DB_ROOT + 8].copy_from_slice(&value.to_ne_bytes());
+        }
         page
     }
 
     #[test]
     fn a_leaf_of_the_main_tree_names_its_databases_roots_and_a_branch_names_none() {
-        assert_eq!(named_roots(&page_with_a_named_root(P_LEAF, 42)), vec![42]);
+        assert_eq!(named_roots(&page_with_a_named_root(P_LEAF, 42)), vec![42], "a plain value is no database");
         assert_eq!(named_roots(&page_with_a_named_root(P_BRANCH, 42)), Vec::<u64>::new());
     }
 }
