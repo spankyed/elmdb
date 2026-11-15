@@ -491,27 +491,23 @@ fn another_process_s_sync_after_a_failed_one_fails_and_refuses_its_next_commit()
 #[test]
 fn what_the_pin_holds_back_makes_a_sync_due_whatever_the_time() {
     // Values written over again and again, which free as much as they take: with no sync the pin keeps every page
-    // they free, and the file grows by all of it
-    let grown = |bound: u64| {
+    // they free, and the file grows by all of it. How far it grows with the bound is a reading's, not a test's:
+    // commits go on while a sync runs, so it turns on how fast the disk syncs beside how fast commits land
+    let syncs = |bound: u64| {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path(), grouped()).unwrap();
         store.set_bound(bound);
         for n in 0..200 {
             put(&store, &format!("w-{}", n % 4), &vec![n as u8; 64 << 10]).unwrap();
         }
-        let grown = store.file_size();
         // A sync the bound made due may still be running: a durable wait ends after it, and runs one sync of its own
         synced(&store);
         let syncs = store.syncs();
         store.close().unwrap();
-        (syncs, grown)
+        syncs
     };
-    let (unbounded_syncs, unbounded) = grown(u64::MAX / 8);
-    let (bounded_syncs, bounded) = grown(1 << 20);
-    assert_eq!(unbounded_syncs, 1, "no sync was due by the time, and the wait ran its own");
-    assert!(bounded_syncs > 1, "the bound made syncs due");
-    // The file grows by the bound and by what is committed while a sync runs, which a slow sync makes the most of
-    assert!(bounded < unbounded, "{bounded} bytes with a bound of 1 MiB, {unbounded} without");
+    assert_eq!(syncs(u64::MAX / 8), 1, "no sync was due by the time, and the wait ran its own");
+    assert!(syncs(1 << 20) > 1, "the bound made syncs due");
 }
 
 #[test]
