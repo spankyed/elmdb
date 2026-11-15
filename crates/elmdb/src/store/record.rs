@@ -188,6 +188,8 @@ impl RecordFile {
                 Err(error) => Err(error.into()),
             };
         }
+        // mutant-skip: delete ! in RecordFile::open
+        // What it changes is whether the directory is synced as the file is made, which only a loss tells apart
         let made = !path.exists();
         let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)?;
         if made {
@@ -374,6 +376,34 @@ mod tests {
         let bytes = std::fs::read(dir.path().join(RECORD)).unwrap();
         assert_eq!(Record::decode(&bytes[..SLOT]), Some(record(2)));
         assert_eq!(Record::decode(&bytes[SLOT..]), Some(record(3)));
+    }
+
+    #[test]
+    fn every_mode_and_state_reads_back_as_written() {
+        for mode in [Mode::Grouped, Mode::Ordered, Mode::Unsynced] {
+            for state in [State::Kept, State::Failed] {
+                let written = Record { mode, state, ..record(1) };
+                assert_eq!(Record::decode(&written.encode()), Some(written));
+            }
+        }
+    }
+
+    #[test]
+    fn a_record_of_a_mode_follows_the_one_before_it_and_keeps_its_notice() {
+        let next = of_mode(Some(&record(5)), Mode::Ordered, Boot::none());
+        assert_eq!((next.count, next.mode, next.commit, next.restored), (6, Mode::Ordered, 0, Some(3)));
+        assert_eq!(of_mode(None, Mode::Unsynced, Boot::none()).count, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_only_open_finds_no_record_where_there_is_none_and_refuses_one_it_cannot_open() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(RecordFile::open(dir.path(), false).unwrap().is_none());
+        // A directory that is a file: the record's path can't be opened, and not because nothing is there
+        let not_a_directory = dir.path().join("a file");
+        std::fs::write(&not_a_directory, b"").unwrap();
+        assert!(RecordFile::open(&not_a_directory, false).is_err());
     }
 
     #[test]
