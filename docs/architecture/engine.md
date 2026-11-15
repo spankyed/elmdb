@@ -435,8 +435,14 @@ Active reads and open units keep their snapshots until they finish. The worker o
 the database itself alive, and is joined on normal close; process-exit cleanup detaches it with bounded locking.
 The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.read(reads)` runs on the calling thread. `db.readAsync(reads)` runs on a thread of the pool and resolves with the
 same answer, so a large read doesn't block the event loop. Its snapshot is the last commit as the read begins there,
-not as it is asked for, so a write made after the call may be in its answer: holding a snapshot from the call to the
-pool's thread would hold the store's gate across threads, and the gate is held by the thread that takes it.
+not as it is asked for, so a write made after the call may be in its answer. One taken at the call could be kept open
+until the pool runs the read, as an idle snapshot is, but it would cost too much for what it promised. Each read waiting
+in the pool's queue, which has no bound, would keep the pages freed since from reuse and hold one of LMDB's reader
+slots, 126 (LMDB's default, which elmdb doesn't change) shared by every process with the database open, so a burst of
+calls, a `Promise.all` over many reads, would run out of slots and be refused `READERS_FULL` at the call. And the
+snapshot would not always be the call's: a growth of the map, which can't run while any transaction of the process is
+open, would end a waiting snapshot as it ends an idle one, and a tracked read reads again on a newer snapshot when a
+commit lands before it is filed (`watch::read_tracked`). A caller who needs the snapshot of the call reads with `read`.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 
