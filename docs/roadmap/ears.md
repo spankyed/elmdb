@@ -28,9 +28,11 @@ costs rather than re-deciding it, and that section of `design.md` is rewritten i
   contract, 16 spec files under `tests/engine/`. They run in apack, in a macOS job, after an engine change has merged
   here and apack's pin has moved to it. The pin moved 85 times between 2026-10-25 and 2026-11-06 and not since
   (`git log --no-merges --since=2026-10-25 -- vendor/elmdb.rev` in apack). apack's CI runs commit `4b67670`, 252
-  commits behind `bf4b21b` (`git rev-list --count --no-merges 4b67670..bf4b21b`), and one of them (`6616fd3`,
-  2026-11-12) made the binding's `write` answer a promise. EARS calls `write` and reads its answer at once, so EARS
-  as it stands does not run on this repository's `main`, and nothing here says so.
+  commits behind `bf4b21b` (`git rev-list --count --no-merges 4b67670..bf4b21b`), and since the pin the binding's
+  names changed under it: `6616fd3` (2026-11-12) made `write` answer a promise, which EARS reads at once, and the
+  changes of 2026-11-15 made every read and write block again under the plain name, `readSync` becoming `read` and the
+  promise forms `…Async` (`../architecture/design.md`, principle 9). EARS calls `readSync`, which no longer exists,
+  so EARS as it stands does not run on this repository's `main`, and nothing here says so.
 - **A protocol change and the builder that uses it become one pull request**, tested together before either merges.
 
 Typing EARS' builders from the binding's generated types is not a reason to move: it can be done where EARS is now,
@@ -243,8 +245,8 @@ the error table is checked against the generated `ErrorCode`, so a new refusal i
 through; the port's members are held to the binding's, return type by return type.
 
 Not had, and not promised: a read's answers have no generated type. The engine writes each of its 19 kinds by hand
-(`grep -o 'w.kind("[a-z_]*")' crates/elmdb/src/engine/reads.rs | sort -u`, at `bf4b21b`), and a write's envelope
-(`results`, `changes`, `sequence`) is described only in a comment. Types for them are new work in the engine.
+(`grep -o 'w.kind("[a-z_]*")' crates/elmdb/src/engine/reads.rs | sort -u`, at `bf4b21b`). Types for them are new work
+in the engine. A write's answer (`results`, `changes`, `sequence`) is generated, as `Written`.
 
 Opened by having both halves in one repository, each to be decided on a reading, none part of the move:
 
@@ -264,12 +266,15 @@ Opened by having both halves in one repository, each to be decided on a reading,
 
 0. **In apack, before anything moves** (`spankyed/apack`; each step checked by apack's suites, and each worth having
    if the rest never follows).
-   - **The pin moves to this repository's `main`.** That is more than a rename. EARS calls `writeSync` where it
-     calls `write` (the host's `backup` already awaits its promise and stays). Between the pin and `main`: a change
-     set's `created` and `destroyed` mean something else for an id destroyed and made again, and `Changed.destroyed`
-     lists each id once, which the SDK's projections read; a relation change carries `movedFrom`; `bulkLoad`
-     refuses a value outside the value spec, which a restore of an old backup can hold; `PANICKED` is a new code;
-     text ranking was rebuilt, which moves hit order and scores; `check` and `rebuild` answer promises.
+   - **The pin moves to this repository's `main`.** That is more than a rename. EARS calls `read` where it calls
+     `readSync`, and `write` stays as it is, blocking; the host's `backup`, which awaits a promise, calls
+     `backupAsync`, and any `check` or `rebuild` apack awaits takes its `…Async` name. Between the pin and `main`: a
+     change set's `created` and `destroyed` mean something else for an id destroyed and made again, and
+     `Changed.destroyed` lists each id once, which the SDK's projections read; a relation change carries `movedFrom`;
+     `bulkLoad` refuses a value outside the value spec, which a restore of an old backup can hold; `PANICKED` is a
+     new code; text ranking was rebuilt, which moves hit order and scores; a rebuild holds the write lock, so a write
+     made during one waits for it; and the grouped mode keeps its last synced commit, restoring it at an open after a
+     power loss (#145).
    - **The ties above are cut.**
    - **The builders, the schema, the error table and the port are typed** as Decisions says, and the import guard's
      rule inside EARS is reworded to allow type imports from `elmdb/protocol`.
