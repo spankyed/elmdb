@@ -1033,3 +1033,94 @@ fn a_meta_page_names_the_last_page_lmdb_does() {
     assert_eq!(meta.last_page(), store.env.info().last_page_number as u64);
     store.close().unwrap();
 }
+
+/// The dirty pages a write transaction keeps in memory before LMDB writes some of them to the file, which its commit
+/// then writes over: `MDB_IDL_UM_MAX` (`midl.h`), 2^17 less one
+const DIRTY_ROOM: usize = (1 << 17) - 1;
+
+#[test]
+#[ignore = "a transaction past LMDB's dirty pages, some 2 GiB at 16 KiB pages and 512 MiB at 4 KiB: by hand, \
+            cargo nextest run -p elmdb --run-ignored only -E 'test(/spills_its_pages/)'"]
+fn a_write_that_spills_its_pages_before_its_commit_leaves_a_loss_the_record_s_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let page = {
+        let store = Store::open(dir.path(), grouped()).unwrap();
+        let page = store.page_size();
+        store.close().unwrap();
+        page
+    };
+    // A map the write fits in, so that it isn't run again: that a write run again after its map grew syncs and
+    // records before it begins is held apart (`a_write_run_again_after_its_map_grew_...`)
+    let map = (4 * DIRTY_ROOM * page).div_ceil(MAP_STEP) * MAP_STEP;
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(map), ..grouped() }).unwrap();
+    // A value of one overflow page each: every put is one dirty page of its own
+    let value = |byte: u8| vec![byte; page - 64];
+    let key = |name: &str, i: usize| crate::format::key::encode(&[format!("{name}-{i:08}").into()]);
+    let loaded = DIRTY_ROOM + DIRTY_ROOM / 5;
+    // The record's commit holds more pages than the write below keeps in memory
+    for from in (0..loaded).step_by(10_000) {
+        store
+            .write(
+                |txn, db| {
+                    for i in from..(from + 10_000).min(loaded) {
+                        db.put(txn, &key("load", i), &value(5))?;
+                    }
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+    }
+    put(&store, "a", &vec![1u8; 20_000]).unwrap();
+    synced(&store);
+    let recorded = newest(&store);
+    // Two commits after the record's: the first frees all its pages, which a third may take where no pin keeps them.
+    // LMDB gives a write the lowest free pages first and writes a write's highest dirty pages to the file once it
+    // keeps too many: given the record's pages, it writes over them before it commits
+    store
+        .write(
+            |txn, db| {
+                for i in 0..loaded {
+                    db.delete(txn, &key("load", i))?;
+                }
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    put(&store, "a", &vec![3u8; 20_000]).unwrap();
+    let before = std::fs::read(dir.path().join("data.mdb")).unwrap();
+    let mut lost = None;
+    let written = store.write(
+        |txn, db| {
+            for i in 0..DIRTY_ROOM + DIRTY_ROOM / 4 {
+                db.put(txn, &key("big", i), &value(9))?;
+            }
+            lost = Some(copied(dir.path(), true));
+            Err::<(), _>(Error::new(ErrorCode::Io, "the write is given up once its loss is taken"))
+        },
+        false,
+    );
+    let given_up = written.unwrap_err();
+    assert!(given_up.message.contains("given up"), "{given_up}");
+    let lost = lost.expect("the write took its loss");
+    let image = std::fs::read(lost.path().join("data.mdb")).unwrap();
+    assert!(image != before, "nothing was written to the file before the commit");
+    assert_eq!(record_in(lost.path()).unwrap().commit, recorded);
+    store.close().unwrap();
+    let opened = Store::open(lost.path(), grouped()).unwrap();
+    assert_eq!(newest(&opened), recorded, "the loss opened at the record's commit");
+    assert_eq!(get(&opened, "a").as_deref(), Some(&vec![1u8; 20_000][..]));
+    let held = opened
+        .read(|txn, db| {
+            let mut held = 0;
+            for i in 0..loaded {
+                held += usize::from(db.get(txn, &key("load", i))? == Some(&value(5)[..]));
+            }
+            Ok(held)
+        })
+        .unwrap();
+    assert_eq!(held, loaded, "the record's commit lost values to pages written before a later commit");
+    assert_eq!(get(&opened, "big-00000000"), None);
+    opened.close().unwrap();
+}

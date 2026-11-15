@@ -371,10 +371,37 @@ first is the cost the format's rule accepts until a release has users (`../archi
    sync after it, a sync made due by the bound, a `durable` write beside another process's sync that took an earlier
    commit's meta page, which the next loss keeps, an open beside another process's first sync before its write,
    which waits for the record, and a write run again after its map grew two commits past the record's, which syncs
-   before it and leaves a loss the record's commit. Not yet: values that spill, which take a transaction of more
-   dirty pages than LMDB keeps in memory (`MDB_IDL_UM_MAX` of them, `midl.h`), and with them the pages a write run
-   again after its map grew writes before its commit; the readings of the bound over a minute and the million-note
-   load; and the readings beside today's.
+   before it and leaves a loss the record's commit; and, by hand for its size, a write that spills its pages to the file
+   before its commit, given every page the record's commit freed, which a loss leaves at the record's commit whole
+   and which, with the pin turned off, writes over the record's root pages, so that the open refuses to restore.
+   LMDB spills a transaction past `MDB_IDL_UM_MAX` dirty pages (`midl.h`), some 2 GiB at Apple silicon's 16 KiB pages:
+   the test takes 17 s there and 5 GB of memory (2026-11-15). The run again after a growth and the spill are held
+   apart: the suite's own bound on a test's map, 1 GiB, keeps one test from doing both.
+
+   *The readings* (`cargo run --release -p elmdb --example kept-readings`, Apple M1 Pro, 10 cores, 2026-11-15, the
+   machine's load 17 to 55; main at `fad679b` with the same example copied in), medians of 200:
+
+   | Reading | This phase | main |
+   |---|---|---|
+   | A `durable` write | 9.8 to 10.0 ms | 5.3 to 5.4 ms |
+   | A commit of one process | 38.7 µs | 32 to 36 µs |
+   | A second process's first write, 150 ms after its last, while another writes (load 59 to 134) | 0.9 and 8.9 ms | 0.4 and 0.6 ms |
+   | The file after a minute of commits of 100 sets over 10,000 notes, alone | 290 MB | 7 MB |
+   | The same beside a process that wrote once and stays open | 342 MB | 7 MB |
+   | The largest file while a million notes have a tenth set each second for a minute | 667 MB | 655 MB |
+
+   The `durable` write pays its second sync, as What it costs says. The second process's first write after a pause
+   longer than the sync's idle time pays a sync and a record before it begins, as The design says, and swings with
+   what that sync has to flush: two runs at the load given, against main's write, which pays none. The gates on the bound read as
+   met, and say little: beside an idle process the file was 52 MB larger than alone, under the bound of 64 MiB, but
+   the two are separate runs of a minute each, which commit at different rates, and the idle process, having written
+   once and synced, holds no pin; the million notes' units left the file 12 MB larger than main's, under a quarter of
+   it. But the bound does not hold the file where commits outrun the disk: rewriting as fast as one
+   process commits, some 4,500 commits a second, the file was 268 MB after a second and 911 MB after eight, the pin
+   moving at each of 13 syncs. While the pin holds, every commit writes fresh pages, so a sync flushes all of them,
+   which takes long enough for as many again to be written: the file grows by what is committed while a sync runs,
+   and that has no bound. An 8 MiB bound made no difference (269 MB). What would bound it is a write that waits, once
+   the file is past the bound and a sync is running, for that sync: not built.
    Windows' boot, the volatile registry key, is built with this phase rather than the last: without it every death
    there read as a loss, and a write that returned was undone when its process was killed, which the engine promises
    it is not. The key is the current user's, which a process may make volatile without an administrator: a process
