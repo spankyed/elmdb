@@ -446,3 +446,21 @@ restore it can't make.
    stream, until `acknowledgeRestore()` or `elmdb acknowledge-restore`. The open that restores reads the sequence once
    LMDB has opened the file, before any write, and keeps it in the notice in place of the commit, as a third value of
    the notice's byte, which version 1 leaves room for.
+   The night's run is built (2026-11-15): `.github/workflows/lossy-filesystem.yml` mounts LazyFS, a filesystem that
+   keeps what a process writes in a cache of its own until it is synced and drops it on a command, at a pinned commit.
+   In each of eight rounds a writer in a child process dies in its third sync once the data is flushed and before the
+   record is written, or between its second sync and its third; what it didn't sync is dropped, with the kernel's copy,
+   and the database opened after, as of another boot, must hold what its last finished sync held and pass `check()`. The
+   same run with the writer's pin turned off must fail, so each night shows the test can. It drops what wasn't synced;
+   it tears no write, which LazyFS can be told to do as a later step.
+   What is left can only be done by hand, on a machine of each platform, by a person who can stop it hard. On each: open
+   a database in the grouped mode with a writer that commits, syncs (`await db.durable()`), and commits again without a
+   sync, and note the sequence `db.sequence` gave after the sync. Note the boot identity (Linux: `cat
+   /proc/sys/kernel/random/boot_id`; macOS: `sysctl kern.bootsessionuuid`; Windows: `reg query
+   HKCU\Software\elmdb-boot /v boot`). Cut the power, or hold the power button, while the writer runs. Start the
+   machine, note the identity again, which must differ (on Windows the key must be gone), and open the database:
+   `openReport.restored` must name the sequence noted after the sync, and `elmdb inspect DIR` must say the same. On
+   Windows, do it once more with fast startup on (Control Panel, Power Options, "Turn on fast startup") and the machine
+   shut down rather than restarted, a writer having been stopped hard first: write down whether the key survived the
+   shutdown and so whether that writer's unsynced commits were kept or restored, which is what this design can say of
+   fast startup. Each result goes in this section with its date, the machine and its OS version.
