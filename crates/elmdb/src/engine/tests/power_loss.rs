@@ -256,6 +256,11 @@ fn a_backup_into_a_directory_whose_record_says_failed_opens_as_the_backup() {
     for n in 0..5 {
         commit(&db, &mut model, n);
     }
+    // A backup that fails before its copy is put there leaves the old file guarded by its record still
+    let guarded = record(target.path());
+    crate::failpoints::fail_once_here(crate::failpoints::points::BACKUP_PUBLISH);
+    assert!(db.backup(target.path()).is_err());
+    assert!(record(target.path()) == guarded, "a backup that put nothing there took the record away");
     db.backup(target.path()).unwrap();
     db.close().unwrap();
     assert_eq!(held_at(target.path(), COMMITS).as_ref(), Ok(&model));

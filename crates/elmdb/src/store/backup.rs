@@ -43,18 +43,21 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
     }
     // Closing the handle before publication also permits replacement on Windows. TempPath owns cleanup on failure.
     let partial = partial.into_temp_path();
-    // A record beside a data file the directory held names that file, and none of the copy's: let go before the copy
-    // is put there, so no open takes the copy for a file the record doesn't bear out, refused where it says `failed`.
-    // Synced with the copy's publication below
-    for gone in [super::record::RECORD, super::record::RESTORED] {
-        match std::fs::remove_file(target.join(gone)) {
-            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
-        }
-    }
     run_point!(BACKUP_READY);
     failure_point!(BACKUP_PUBLISH, Error::new(ErrorCode::Io, "injected before publication"));
     publish(&partial, &target.join("data.mdb"))?;
+    // A record beside a data file the directory held names that file, and none of the copy's: let go once the copy is
+    // there, so no open takes the copy for a file the record doesn't bear out, refused where it says `failed`. Not
+    // before: a publication that failed leaves the old file, which its record still guards. Stopped between the two,
+    // the copy is opened as it is under a `kept` record and refused under a `failed` one, which a backup made again
+    // clears. Synced with the copy's publication below
+    for gone in [super::record::RECORD, super::record::RESTORED] {
+        if let Err(error) = std::fs::remove_file(target.join(gone))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
+    }
     let synced = (|| -> Result<()> {
         failure_point!(BACKUP_PUBLISHED, Error::new(ErrorCode::Io, "injected sync failure"));
         #[cfg(unix)]
