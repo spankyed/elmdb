@@ -59,6 +59,9 @@ pub(super) struct Kept {
     pub(super) unpinned: std::sync::atomic::AtomicBool,
     /// The fixed part of the bound, which a test makes small
     bound: std::sync::atomic::AtomicU64,
+    /// The syncs of the record file this process's syncs have made, which a test counts
+    #[cfg(test)]
+    pub(super) record_syncs: std::sync::atomic::AtomicU64,
 }
 
 struct Pinned {
@@ -93,6 +96,12 @@ impl Drop for Writing {
             state.pin = None;
         }
     }
+}
+
+/// Whether a file whose last page is `last`, of `page` bytes, is past a pin taken at `pinned` by more than the bound:
+/// the greater of `fixed` bytes and a fraction of the file
+fn beyond(last: u64, pinned: u64, page: u64, fixed: u64) -> bool {
+    last.saturating_sub(pinned) * page > fixed.max((last + 1) * page / BOUND_FRACTION)
 }
 
 /// What every commit after a failed sync is refused with
@@ -142,6 +151,8 @@ impl Kept {
             #[cfg(test)]
             unpinned: std::sync::atomic::AtomicBool::new(false),
             bound: std::sync::atomic::AtomicU64::new(BOUND_BYTES),
+            #[cfg(test)]
+            record_syncs: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -240,6 +251,7 @@ impl Kept {
             let count = on_disk.as_ref().map(|r| r.count);
             if count.is_some() && count != *synced {
                 file.sync().map_err(|error| self.fail(error))?;
+                self.synced_record();
                 *synced = count;
             }
             if let Some(failed) = on_disk.as_ref().filter(|r| r.mode == Mode::Grouped && r.state == State::Failed) {
@@ -273,6 +285,7 @@ impl Kept {
                 if let Err(error) = file.write(&written) {
                     return Err(self.failed_sync(file, on_disk.as_ref(), error));
                 }
+                self.synced_record();
                 *synced = Some(written.count);
                 commit
             } else {
@@ -310,6 +323,12 @@ impl Kept {
         self.sync(&|| Err(Error::new(ErrorCode::Io, "Another process grew the map as this one exited")))
     }
 
+    /// Counts a sync of the record file, for a test
+    fn synced_record(&self) {
+        #[cfg(test)]
+        self.record_syncs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Syncs the data file, under the gate: LMDB reads the meta pages through the map to know what to flush
     fn sync_data(&self) -> Result<()> {
         failure_point!(SYNC at &self.dir, Error::new(ErrorCode::Io, "Injected sync failure"));
@@ -321,7 +340,7 @@ impl Kept {
     /// commit of this process refused from now on
     fn failed_sync(&self, file: &mut RecordFile, on_disk: Option<&Record>, error: Error) -> Error {
         let written = match on_disk {
-            Some(record) if record.mode == Mode::Grouped => file.write(&record.next(Mode::Grouped, State::Failed)),
+            Some(record) if record.mode == Mode::Grouped => file.write(&record.next(State::Failed)),
             _ => Err(Error::new(ErrorCode::Io, "no record of the grouped mode to mark")),
         };
         let error = match written {
@@ -421,9 +440,7 @@ impl Kept {
             let _gate = self.gate.read();
             self.env.info().last_page_number as u64
         };
-        let page = self.page as u64;
-        let fixed = self.bound.load(std::sync::atomic::Ordering::Relaxed);
-        last.saturating_sub(pinned) * page > fixed.max((last + 1) * page / BOUND_FRACTION)
+        beyond(last, pinned, self.page as u64, self.bound.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Sets the fixed part of the bound, for a test of what it does at a size a test reaches
@@ -436,5 +453,23 @@ impl Kept {
     #[cfg(test)]
     pub(super) fn remembered(&self) -> Option<u64> {
         self.state.lock().remembered
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bound_is_the_greater_of_its_fixed_size_and_a_quarter_of_the_file() {
+        let page = 4096;
+        // A file of 1,000 pages: a quarter is 1,024,000 bytes, under a fixed 2 MiB, which is 512 pages of growth
+        assert!(!beyond(1000, 1000 - 512, page, 2 << 20), "at the bound");
+        assert!(beyond(1000, 1000 - 513, page, 2 << 20), "a page past it");
+        // A file whose last page is 9,999: a quarter of its 10,000 pages, 2,500 of them, is over the fixed MiB
+        assert!(!beyond(9_999, 9_999 - 2_500, page, 1 << 20), "at a quarter of the file");
+        assert!(beyond(9_999, 9_999 - 2_501, page, 1 << 20), "a page past it");
+        // A pin later than the file's last page, as a restore leaves it, is past nothing
+        assert!(!beyond(10, 20, page, 0));
     }
 }

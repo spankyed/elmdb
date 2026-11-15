@@ -150,9 +150,9 @@ impl Record {
         Some(Self { count, mode, state, commit, body, roots, boot, restored: noticed.then_some(restored) })
     }
 
-    /// This record written again as the next, in `mode` and `state`: what an open or a sync writes over it
-    pub(super) fn next(&self, mode: Mode, state: State) -> Self {
-        Self { count: self.count + 1, mode, state, ..self.clone() }
+    /// This record written again as the next, in `state`: what an open or a sync writes over it
+    pub(super) fn next(&self, state: State) -> Self {
+        Self { count: self.count + 1, state, ..self.clone() }
     }
 }
 

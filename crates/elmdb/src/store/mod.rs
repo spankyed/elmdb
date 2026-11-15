@@ -174,7 +174,10 @@ impl<'a> Opening<'a> {
                     drop(writing);
                     self.adopt()?;
                 }
-                // A pin ended as the map was taken at another size, between its making sure of it and here
+                // mutant-skip: replace match guard self.kept.is_some_and\(\|kept\| !kept.pinned\(\)\) with false in Opening<'a>::write
+                // A pin ended between its making sure of it and here, which at an open nothing does: no other thread
+                // holds the environment yet, and the open takes a grown map only once this write is refused, before
+                // it makes sure of its pin again. Held as every write is, and `commits` refuses a commit without it
                 Ok(txn) if self.kept.is_some_and(|kept| !kept.pinned()) => txn.abort(),
                 begun => return Ok((begun?, writing)),
             }
@@ -856,6 +859,7 @@ impl Store {
             run_point!(WRITE_RESERVATION);
             // Before the write lock, and before the transaction, which may write pages before it commits
             let writing = self.ensure_pin()?;
+            run_point!(WRITE_PINNED);
             // Claimed under the unit's lock: a unit that slipped between the earlier check and write_txn would leave
             // this caller waiting on the unit's writer while it holds a schema guard
             let claimed = self.unit.claim_writer(|| {
@@ -1193,6 +1197,7 @@ impl Store {
             run_point!(UNIT_RESERVED);
             loop {
                 let writing = self.ensure_pin()?;
+                run_point!(UNIT_PINNED);
                 let guard = self.gate.read_arc();
                 let writer = self.writers.hold()?.writing(writing);
                 match self.env.write_txn() {
@@ -1414,6 +1419,12 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn not_borne_out(&self) -> bool {
         self.not_borne_out
+    }
+
+    /// The syncs of the record file this process's syncs have made, for a test
+    #[cfg(test)]
+    pub(crate) fn record_syncs(&self) -> u64 {
+        self.kept.as_ref().map_or(0, |kept| kept.record_syncs.load(Ordering::Relaxed))
     }
 
     /// Turns the grouped mode's pin off, its transaction ended as soon as it is begun, to show what is lost without it

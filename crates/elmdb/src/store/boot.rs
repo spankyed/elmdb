@@ -156,6 +156,15 @@ mod tests {
         assert!(this_boot().same(&this_boot()), "the system names its boot");
     }
 
+    /// The system's name for a boot is a UUID, or on Windows the 16 random bytes the first process wrote: never one
+    /// or two bytes, which every boot could share
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    #[test]
+    fn a_boot_is_named_by_at_least_sixteen_bytes() {
+        let name = named().expect("the system names its boot");
+        assert!(name.len() >= 16, "{name:?}");
+    }
+
     #[test]
     fn no_boot_is_another_boot_than_any_itself_included() {
         assert!(!Boot::none().same(&Boot::none()));
