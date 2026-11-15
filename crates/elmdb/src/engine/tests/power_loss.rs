@@ -470,7 +470,8 @@ fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_
         assert_eq!(
             restored,
             round.is_multiple_of(2),
-            "round {round}: restored {restored}, so the filesystem kept what wasn't synced or lost what was"
+            "round {round}: restored {restored}: the filesystem kept what wasn't synced or lost what was, or the \
+             commits after the record's wrote over its pages, which the file then doesn't bear out"
         );
         assert_eq!(held_at(&path, COMMITS).as_ref(), Ok(&model_after(synced)), "round {round}, synced at {synced}");
     }
