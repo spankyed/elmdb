@@ -257,7 +257,7 @@ impl Validator<'_> {
                         None => self.problem(field_at, format!("no such field on {type_name}"), who),
                         Some(value) if !value.is_value_indexable() => self.problem(
                             field_at,
-                            format!("a value index can't hold a {} field (\"{field}\")", value.name()),
+                            format!("a value index can't hold {} field (\"{field}\")", value.named()),
                             who,
                         ),
                         Some(_) => {}

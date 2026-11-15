@@ -237,7 +237,7 @@ fn describe(t: &ValueType) -> String {
         }
         ValueType::Ref { to } => format!("an id of {}", to.join(" or ")),
         ValueType::List { of } => format!("a list of {}", describe(of)),
-        other => format!("a {}", other.name()),
+        other => other.named(),
     }
 }
 
@@ -248,7 +248,11 @@ fn takes(t: &ValueType, v: &Value) -> std::result::Result<(), String> {
         ValueType::Any => true,
         ValueType::String => v.is_str(),
         ValueType::Number => as_number(v).is_some_and(f64::is_finite),
-        ValueType::Integer => as_number(v).is_some_and(|n| n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0),
+        // Within ±2^53, compared exactly: an integer past it would round to the bound as a float
+        ValueType::Integer => match v {
+            Value::Integer(i) => i.as_i64().map(i64::unsigned_abs).or(i.as_u64()).is_some_and(|n| n <= 1 << 53),
+            _ => as_number(v).is_some_and(|n| n.fract() == 0.0 && n.abs() <= 9_007_199_254_740_992.0),
+        },
         ValueType::Boolean => v.is_bool(),
         ValueType::Bytes => matches!(v, Value::Binary(_)),
         ValueType::Object => v.is_map(),
@@ -375,6 +379,16 @@ mod tests {
         assert!(ok(ValueType::String, "a".into()).is_ok());
         assert!(ok(ValueType::Integer, Value::from(3.0)).is_ok(), "a float holding a whole number is an integer");
         assert!(ok(ValueType::Integer, Value::from(3.5)).is_err());
+        // ±2^53 is the bound, held exactly where a float would round the integer past it down to it
+        for n in [1i64 << 53, -(1i64 << 53)] {
+            assert!(ok(ValueType::Integer, Value::from(n)).is_ok(), "{n}");
+        }
+        for n in [(1i64 << 53) + 1, -(1i64 << 53) - 1, i64::MIN] {
+            let refused = ok(ValueType::Integer, Value::from(n)).unwrap_err().message;
+            assert!(refused.contains("an integer"), "{n}: {refused}");
+        }
+        assert!(ok(ValueType::Integer, Value::from(u64::MAX)).is_err());
+        assert!(ok(ValueType::Object, Value::from(1)).unwrap_err().message.contains("an object"));
         assert!(
             ok(ValueType::Enum { values: vec!["a".into()] }, "b".into())
                 .unwrap_err()

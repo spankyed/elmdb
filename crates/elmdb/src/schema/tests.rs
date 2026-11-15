@@ -236,7 +236,7 @@ fn checks_what_each_index_covers() {
         ),
         (
             json!({ "kind": "value", "fields": ["scratch"] }),
-            "types.Message.indexes.x.fields[0]: a value index can't hold a object field (\"scratch\") (declared by default-setup)",
+            "types.Message.indexes.x.fields[0]: a value index can't hold an object field (\"scratch\") (declared by default-setup)",
         ),
         (
             json!({ "kind": "value", "fields": ["text", "text"] }),
