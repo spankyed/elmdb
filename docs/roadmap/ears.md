@@ -1,7 +1,7 @@
 # EARS in elmdb's repository
 
-Status: planned, 2026-11-14; nothing is built. This is the third draft: two independent reads, each against both
-repositories, changed the two before it (What the reviews changed, at the end).
+Status: planned, 2026-11-14, revised 2026-11-15; nothing is built. This is the sixth draft: five independent reads,
+each against both repositories, changed the five before it (What the reviews changed, at the end).
 
 EARS, the entity-attribute-relation system, is the fluent TypeScript API over an elmdb database: what a program
 holds (`createEarsEngine({ database })`), its query and write builders, which compile to plans and batches, its
@@ -13,10 +13,10 @@ and says what apack keeps.
 In this document "the engine" is the Rust crate, as everywhere in this repository. apack calls EARS an engine too
 (`createEarsEngine`); that name is one of the decisions left for after the move.
 
-`../architecture/design.md` (The boundary with apack) decided the opposite on 2026-10-25, and named what would
-reverse it: "If the builders settle and another program wants them, they move into elmdb then." Neither condition is
-met. The move was decided by the repositories' owner on 2026-11-14 for the reasons below; this plan counts what it
-costs rather than re-deciding it, and that section of `design.md` is rewritten in phase 3.
+`../architecture/design.md` (The boundary with apack) decided the opposite in `badd720` (2026-10-24), and named
+what would reverse it: "If the builders settle and another program wants them, they move into elmdb then." Neither
+condition is met. The move was decided by the repositories' owner on 2026-11-14 for the reasons below; this plan
+counts what it costs rather than re-deciding it, and that section of `design.md` is rewritten in phase 3.
 
 ## Why move it
 
@@ -30,9 +30,10 @@ costs rather than re-deciding it, and that section of `design.md` is rewritten i
   (`git log --no-merges --since=2026-10-25 -- vendor/elmdb.rev` in apack). apack's CI runs commit `4b67670`, 252
   commits behind `bf4b21b` (`git rev-list --count --no-merges 4b67670..bf4b21b`), and since the pin the binding's
   names changed under it: `6616fd3` (2026-11-12) made `write` answer a promise, which EARS reads at once, and the
-  changes of 2026-11-15 made every read and write block again under the plain name, `readSync` becoming `read` and the
-  promise forms `…Async` (`../architecture/design.md`, principle 9). EARS calls `readSync`, which no longer exists,
-  so EARS as it stands does not run on this repository's `main`, and nothing here says so.
+  changes of 2026-11-15 made the plain name the blocking one: `write` blocks again, as at the pin, `readSync` becomes
+  `read`, and the promise forms are `…Async` (`../architecture/design.md`, principle 9 and Conventions). EARS calls
+  `readSync`, which no longer exists, so EARS as it stands does not run on this repository's `main`, and nothing here
+  says so.
 - **A protocol change and the builder that uses it become one pull request**, tested together before either merges.
 
 Typing EARS' builders from the binding's generated types is not a reason to move: it can be done where EARS is now,
@@ -220,9 +221,10 @@ matches the checkout now. apack's link script calls it and builds `dist` when it
 checkout's `node_modules/elmdb` is the workspace's link. One script in one repository, so the two can't disagree.
 
 **The pin names a tested pair in CI, not locally.** apack's CI checks out the pinned commit. A developer's link
-points at their checkout, on whatever branch is there, held only to having the pin in its history: apack's link at
-the time of writing points 123 commits past the pin, at a binding built before `6616fd3`. That stays as it is, with
-the warning the link already gives when the checkout differs from the pin, widened to `packages/ears`.
+points at their checkout, on whatever branch is there, held only to having the pin in its history: on 2026-11-14
+apack's link pointed 123 commits past the pin (`git -C vendor/elmdb rev-list --count 4b67670..HEAD` in apack), at a
+binding built before `6616fd3`. That stays as it is, with the warning the link already gives when the checkout
+differs from the pin, widened to `packages/ears`.
 
 **History comes with it.** `git subtree split -P packages/apack-ears` makes the package's history its own, which
 rewrites the commits and drops the empty merges (the package's log holds 225 commits, merges included, 213
@@ -266,24 +268,59 @@ Opened by having both halves in one repository, each to be decided on a reading,
 
 0. **In apack, before anything moves** (`spankyed/apack`; each step checked by apack's suites, and each worth having
    if the rest never follows).
-   - **The pin moves to this repository's `main`.** That is more than a rename. EARS calls `read` where it calls
-     `readSync`, and `write` stays as it is, blocking; the host's `backup`, which awaits a promise, calls
-     `backupAsync`, and any `check` or `rebuild` apack awaits takes its `…Async` name. Between the pin and `main`: a
-     change set's `created` and `destroyed` mean something else for an id destroyed and made again, and
-     `Changed.destroyed` lists each id once, which the SDK's projections read; a relation change carries `movedFrom`;
-     `bulkLoad` refuses a value outside the value spec, which a restore of an old backup can hold; `PANICKED` is a
-     new code; text ranking was rebuilt, which moves hit order and scores; a rebuild holds the write lock, so a write
-     made during one waits for it; and the grouped mode keeps its last synced commit, restoring it at an open after a
-     power loss (#145).
+   - **The pin moves to this repository's `main`.** That is more than a rename. The one rename apack makes is `readSync`
+     to `read`, in EARS' port and its call (`src/database.ts`) and in its benchmark; `write` stays as it is, blocking.
+     The host's `backup` stays as it is too: it blocks at the pin and on `main` alike, and moving it to `backupAsync` is
+     a decision of its own, with the rollback copy an import takes before it replaces a database in view (the host's
+     `backup/index.ts`). apack calls neither the binding's `check` nor its `rebuild` today. What else changed between
+     the pin and `main` at `2b2b7f6` (2026-11-15), read from the commits that touched the binding's declarations, its
+     protocol or `docs/architecture` (`git log --first-parent 4b67670..<the new pin> -- crates/elmdb-node/index.d.ts
+     crates/elmdb-node/protocol docs/architecture`, run again at the move):
+     - a change set's `created` and `destroyed` mean something else for an id destroyed and made again, and
+       `Changed.destroyed` lists each id once, which the SDK's projections read; `changedSince` answers incomplete to a
+       reader from before a `reset`, a `replaceWith` or a `renameType`, which the projections meet after the host's
+       import, since it replaces a database, and they branch on `complete`; a relation change carries `movedFrom`;
+     - `bulkLoad` refuses a value outside the value spec, which EARS' bulk loads (`bulkLoadAttr`) pass to it; a write to
+       an entity of a type the schema no longer declares is refused (`UNKNOWN_TYPE`), and so is a search of a text index
+       still being built (`INDEX_BUILDING`);
+     - text ranking was rebuilt, which moves hit order and scores, and strings the collation holds equal are ordered
+       by their bytes (#138), which moves ties;
+     - `PANICKED`, `RESTORE_PENDING` and `SYNC_BEHIND` are new codes;
+     - the grouped mode keeps its last synced commit, holding a read transaction at it so that no writer reuses its
+       pages, and writes that commit's meta page to a record beside the data file (`synced`), from which an open
+       restores the commit after a power loss (#145); a sync that fails flushing the data or the record refuses every
+       commit after it, and the next open restores the last synced commit; an open makes a restore it finds owed, a
+       read-only open included, which then writes the data file, and is refused with `RESTORE_PENDING` where it can't,
+       beside another process that has the database open after such a failure or where the data file can't be written.
+       apack's read-only opens meet both: the reads of its `db` command and its `db runs`, made beside the running app,
+       are refused after such a failure, and the backup of its `db` command and the host's settings read, made while no
+       app runs, make the restore and so write the data file. A `durable` write waits for two syncs, the data's and the
+       record's; and a database's directory holds `synced`, `synced.restored`, `open.lock` and `synced.lock` beside
+       `data.mdb`;
+     - what that read transaction keeps from reuse is bounded: a write past the bound waits for a sync, and is refused
+       with `SYNC_BEHIND` once that sync has failed, and `waitForIndexBuilds` throws `SYNC_BEHIND` or `READERS_FULL`
+       when the builder is held (#151).
+   - **apack's databases are rebuilt once on the new pin.** Format 1 was edited in place between the pin and `main`, in
+     derived data (`../architecture/format.md`, Versions): a value index's orders, ranges and pages (#95), a compound
+     index's order under equalities (#96), a term's places in blocks with lengths by place (#93), a list before a
+     compound index's last field (#98) and a value's places in blocks (#108), which an elmdb built after a change may
+     misread rather than refuse; and the order of a value index's strings (#139), which the builder builds again
+     wherever its marker isn't the builder's own, so it isn't misread. Each of apack's elmdb databases is rebuilt once
+     (opened by the new pin, `rebuild()` of everything) or reset, on each machine that holds one, by a step run by hand
+     at the move: nothing in a database says which elmdb wrote it, so no open can tell that the step is owed. From then
+     on no older elmdb may open it, since it would misread what the new pin wrote.
    - **The ties above are cut.**
-   - **The builders, the schema, the error table and the port are typed** as Decisions says, and the import guard's
-     rule inside EARS is reworded to allow type imports from `elmdb/protocol`.
+   - **The builders, the schema, the error table and the port are typed** as Decisions says, a write's answer decoded
+     as `Written` and a unit's write's as `BatchResult`, and the import guard's rule inside EARS is reworded to allow
+     type imports from `elmdb/protocol`.
    - **Packs and generated code import through the SDK.**
    - **The specs under "Written here, not moved" are written beside EARS.**
 
    Done when:
-   - EARS', the SDK's, the host's and default-setup's suites pass on the new pin, with EARS using no setup file
-     from another package;
+   - apack's gate with its end-to-end suite added, `npm run chain -- --e2e`, passes on the new pin, with EARS using no
+     setup file from another package;
+   - a database the old pin wrote, rebuilt as above, has no derived key missing, extra or differing in the new pin's
+     `check()`, and a copy of it not rebuilt is shown with some;
    - a backup taken by the old pin is restored by the new one;
    - scratch copies of this repository fail apack's `typecheck:ears`, one each for a renamed required field of
      `Op`, `Step`, `Terminal` and `Schema`, a code added to `ErrorCode`, and a port member turned into a promise;
@@ -314,8 +351,9 @@ Opened by having both halves in one repository, each to be decided on a reading,
 3. **The documents.** `design.md`'s boundary, Packages and Vocabulary; `engine.md`, `testing.md` and
    `background.md` where they name apack's package; `CLAUDE.md`'s Layout and Checks; `README.md`, which opens a
    database and runs a query through EARS; `../architecture/ears.md`, in this repository's vocabulary (a database,
-   never a store); and this plan, to `../archive/roadmap/`. Done when `git grep '@apackdev/ears'` here finds it only
-   under `archive/` and `evidence/`.
+   never a store); and this plan, to `../archive/roadmap/`, its entry in this directory's `README.md` moving to that
+   file's list of archived directions. Done when `git grep '@apackdev/ears'` here finds it only under `archive/` and
+   `evidence/`.
 
 Phases 1 and 2 are one move in two repositories, and the openings listed above start after 2, each on
 its own reading. From phase 1's merge until phase 2's, EARS is changed here only;
@@ -339,7 +377,8 @@ This plan is in no milestone of `../roadmap.md`, and is not ahead of one.
 
 ## What the reviews changed
 
-Two independent readers checked the drafts against both repositories. The third draft has had no outside read.
+Five independent readers checked the drafts against both repositories, each read changing the draft after it; the
+sixth draft has had no outside read.
 
 - **The first read** found that EARS doesn't run on this repository's `main`; that read answers have no generated
   type; that the type work needs no move; that the cost table's caption didn't match its counts, and recounted it to
@@ -364,7 +403,39 @@ Two independent readers checked the drafts against both repositories. The third 
     musl container runs `npm test`, so EARS gets a job of its own;
   - that an Unproven entry was answered by apack's own lockfile, so it is now a fact;
   - and that four figures lacked their commands, and one sentence counted spec files twice.
-- **Held through both**: the 21 codes, the cast, the two run-time ties and the test setup are as described; the SDK
-  export list covers every name packs and generated code use, and adding it brings no new module into a frontend
-  and no cycle; an npm workspace here leaves apack's link to the binding alone; the document uses no banned word
-  and means the Rust crate by "the engine".
+- **The third read** found:
+  - that the host's `backup` needs no change on the new pin and apack calls neither `check` nor `rebuild`, so the one
+    rename is `readSync`'s;
+  - that format 1 was edited in place since the pin, so apack's databases are rebuilt once at the move, and a check of
+    one the old pin wrote is in the done-when;
+  - that the list of what changed since the pin left out the durability changes and string ties, and named a
+    rebuild's lock, which no call of apack's meets, so the list is anchored at a commit and its command named;
+  - that phase 0 named suites by package where apack runs them by tier;
+  - and that a figure lacked its command, a date was a day late, and phase 3's check would find the roadmap index's
+    entry.
+- **The fourth read**, of the third's answers, found:
+  - that the read-only open named as meeting `RESTORE_PENDING` opens a backup, which holds only `data.mdb` and so no
+    record, so the opens named are now apack's read-only opens of live databases;
+  - that `SYNC_BEHIND` was missing from the new codes, and the list's command could not derive it, since #138 and the
+    durability changes are written in `engine.md` alone, so the command reads all of `docs/architecture`, and two
+    refusals it found (`UNKNOWN_TYPE` for a type no longer declared, `INDEX_BUILDING` for a search) are listed;
+  - that only a sync failing at the data's or the record's flush refuses the commits after it;
+  - that the order of strings is not misread but built again under its marker, and that nothing marks the open a
+    rebuild is owed at, so the rebuild is a step run by hand, and a copy not rebuilt is shown failing `check()`;
+  - that apack names its gate, `npm run chain`, rather than suites by tier;
+  - and that "the pin" meant both apack's pin and elmdb's read transaction, and "a build" read as an index build.
+- **The fifth read**, of the fourth's answers, found:
+  - that a restore of an old backup goes through `replaceWith`, which the value spec doesn't hold, so `bulkLoad`'s
+    refusal is apack's through EARS' bulk loads;
+  - that `changedSince` answering incomplete after a `replaceWith`, which the host's import makes, was missing;
+  - that apack's read-only opens include `apack db`'s and `apack db runs`, beside the running app, and the backup and
+    the settings read, made while no app runs, which make a restore themselves;
+  - that `writer.lock` is not new, the pin making it on macOS;
+  - that #95 and #96 also changed derived data in place, and the section of `format.md` is Versions;
+  - that "passes `check()`" said nothing of which report, so it now names derived keys;
+  - and that "the record" was not defined, the string order's sentence was hard to follow, a rule read as a fact,
+    and `waitForIndexBuilds` throws where the plan said it answers.
+- **Held through the first two**: the 21 codes, the cast, the two run-time ties and the test setup are as described;
+  the SDK export list covers every name packs and generated code use, and adding it brings no new module into a
+  frontend and no cycle; an npm workspace here leaves apack's link to the binding alone; the document uses no banned
+  word and means the Rust crate by "the engine".
