@@ -558,7 +558,14 @@ LMDB's newest is still that one, syncs the data, writes that commit's meta page 
 (`synced`, `format.md`) and syncs it, and only then lets the old pin go; a process that owes nothing then holds no pin.
 An open that finds the record written in another boot, a later commit on the file and no other process with the database
 open writes the record's meta page over the file's two, the two it wrote over saved once in `synced.restored`, and so
-opens at that commit, whatever the loss left of the pages after it. A process's death leaves its commits to the OS,
+opens at that commit, whatever the loss left of the pages after it. Every open after it reports the restore, with the
+sequence the database opened at, until a caller says it read it: the open's report's `restored`
+(`db.openReport.restored`, `{ sequence }`), cleared by `acknowledgeRestore()`, and the command's error stream, cleared
+by `elmdb acknowledge-restore`. The open that restores reads the sequence once LMDB has opened the file, before any
+write, and writes it into the record's notice, which held the commit until then; a read-only open on a filesystem it
+can't write leaves that to the next open, and reports the restore without it. The report's `notBorneOut` says the record
+named another file than this one, which was opened as it is.
+A process's death leaves its commits to the OS,
 which holds them: a database another process has open, or whose record is of this boot, opens at its newest commit. A
 sync that fails as it reads or flushes the record, or flushes the data, is final: the process refuses every commit after
 it, and where the data's flush or the record's write failed it marks the record `failed`, so that the next open restores

@@ -441,3 +441,8 @@ restore it can't make.
    identity is shown gone after a machine is stopped hard and started, and what a fast startup does to Windows' is
    written down, by hand on a machine of each; and the engine runs each night on Linux over a filesystem that
    drops or tears what was not synced, and opens at the record's commit.
+   The notice is built (2026-11-15): the open's report says `restored`, with the sequence the database opened at, and
+   `notBorneOut`, in the engine (`OpenReport`), the binding (`openReport`) and every command of the CLI, on its error
+   stream, until `acknowledgeRestore()` or `elmdb acknowledge-restore`. The open that restores reads the sequence once
+   LMDB has opened the file, before any write, and keeps it in the notice in place of the commit, as a third value of
+   the notice's byte, which version 1 leaves room for.
