@@ -293,9 +293,10 @@ Opened by having both halves in one repository, each to be decided on a reading,
        read-only open included, which then writes the data file, and is refused with `RESTORE_PENDING` where it can't,
        beside another process that has the database open after such a failure or where the data file can't be written.
        apack's read-only opens meet both: the reads of its `db` command and its `db runs`, made beside the running app,
-       are refused after such a failure, and the backup of its `db` command and the host's settings read, made while no
-       app runs, make the restore and so write the data file. A `durable` write waits for two syncs, the data's and the
-       record's; and a database's directory holds `synced`, `synced.restored`, `open.lock` and `synced.lock` beside
+       are refused after such a failure; made once the app has quit, they make a restore that is owed and so write the
+       data file, as the backup of its `db` command and the settings read of its pack commands
+       (`readSettingsOverrides`), made only while no app runs, do. A `durable` write waits for two syncs, the data's and
+       the record's; and a database's directory holds `synced`, `synced.restored`, `open.lock` and `synced.lock` beside
        `data.mdb`;
      - what that read transaction keeps from reuse is bounded: a write past the bound waits for a sync, and is refused
        with `SYNC_BEHIND` once that sync has failed, and `waitForIndexBuilds` throws `SYNC_BEHIND` or `READERS_FULL`
