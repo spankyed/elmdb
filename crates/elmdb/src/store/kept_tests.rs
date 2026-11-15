@@ -790,12 +790,15 @@ fn a_write_and_a_unit_whose_pin_a_growth_ended_before_their_transaction_make_sur
     let grower = std::sync::Arc::clone(&store);
     failpoints::run_once_here(points::UNIT_PINNED, move || grower.grow().unwrap());
     let (mut txn, gate, writer) = store.begin().unwrap();
+    assert!(!failpoints::is_armed_here(points::UNIT_PINNED), "the unit reached the point");
     store.db.main.put(&mut txn, b"c", b"3").unwrap();
     let committed = store.commit_txn(txn);
     drop((gate, writer));
     store.end_unit();
     committed.unwrap();
     assert_eq!(get(&store, "b").as_deref(), Some(&b"2"[..]));
+    let unit = store.read(|txn, db| Ok(db.main.get(txn, b"c")?.map(<[u8]>::to_vec))).unwrap();
+    assert_eq!(unit.as_deref(), Some(&b"3"[..]), "the unit's commit");
 }
 
 #[test]
