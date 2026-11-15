@@ -101,6 +101,8 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
             // The restore's records, which a read-only open that makes it writes too
             let mut own = None;
             let file = match file.as_mut() {
+                // mutant-skip: replace match guard writable with false in decide
+                // The file opened again is the same file: what is written through either handle is what both read
                 Some(file) if writable => file,
                 _ => own.insert(RecordFile::open(dir, true)?.expect("a record's file a writable open makes")),
             };
@@ -129,8 +131,12 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
         file.write(&written)?;
         record = Some(written);
     }
-    let remembered =
-        record.as_ref().filter(|record| record.mode == Mode::Grouped && record.state == State::Kept).map(|r| r.commit);
+    // mutant-skip: replace && with \|\| in decide
+    // What `||` adds is the commit of a record of another mode, always 0, which every file's newest commit is past once
+    // the open has made its databases, so a sync is owed all the same; and a failed record of the grouped mode, which
+    // never reaches here unrestored
+    let relied_on = |record: &&Record| record.mode == Mode::Grouped && record.state == State::Kept;
+    let remembered = record.as_ref().filter(relied_on).map(|record| record.commit);
     // Taken while the lock every open decides under is held, and after any restore: a process that started after a
     // loss and has not restored yet is then never taken for one that holds what was written
     if alone {

@@ -236,6 +236,8 @@ impl RecordFile {
     /// Syncs what the file holds: a record read is relied on only once it is synced, since its writer may have died
     /// before syncing it
     pub(super) fn sync(&mut self) -> Result<()> {
+        // mutant-skip: replace RecordFile::sync -> Result<\(\)> with Ok\(\(\)\)
+        // A record unsynced reads as one synced until the machine loses power, which no test here can make
         self.file.sync_all().map_err(|error| {
             Error::new(ErrorCode::Io, format!("Couldn't sync the record {}: {error}", self.path.display()))
         })
@@ -284,6 +286,8 @@ pub(super) fn exclusive(file: &File) -> Result<Locked<'_>> {
 /// Syncs a directory, so a file made in it is there after a loss. Windows syncs no directory, and its filesystem
 /// journals what a directory holds
 pub(super) fn sync_directory(dir: &Path) -> Result<()> {
+    // mutant-skip: replace sync_directory -> Result<\(\)> with Ok\(\(\)\)
+    // A file's name unsynced reads as one synced until the machine loses power, which no test here can make
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
     #[cfg(not(unix))]
@@ -404,6 +408,46 @@ mod tests {
         let not_a_directory = dir.path().join("a file");
         std::fs::write(&not_a_directory, b"").unwrap();
         assert!(RecordFile::open(&not_a_directory, false).is_err());
+    }
+
+    #[test]
+    fn a_slot_another_version_wrote_beside_a_torn_one_is_no_record_and_two_torn_slots_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = RecordFile::open(dir.path(), true).unwrap().unwrap();
+        // One slot of a later version, whose record this one can't read, and the other written but torn
+        let mut later = [7u8; SLOT];
+        later[..8].copy_from_slice(MAGIC);
+        later[8..12].copy_from_slice(&(VERSION + 1).to_le_bytes());
+        std::fs::write(dir.path().join(RECORD), [later, [9u8; SLOT]].concat()).unwrap();
+        assert_eq!(file.read().unwrap(), None);
+        // Both torn, and neither of another version: something else wrote it
+        std::fs::write(dir.path().join(RECORD), [[7u8; SLOT], [9u8; SLOT]].concat()).unwrap();
+        assert_eq!(file.read().unwrap_err().code, ErrorCode::Corrupted);
+    }
+
+    #[test]
+    fn a_lock_file_that_can_t_be_made_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing");
+        let refused = lock_file(&missing, PRESENCE).unwrap_err();
+        assert!(refused.message.starts_with("Cannot make the lock file"), "{refused}");
+    }
+
+    #[test]
+    fn a_root_past_the_file_s_end_reads_as_none_and_one_that_can_t_be_read_fails_the_checksum() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data");
+        std::fs::write(&path, [3u8; 512]).unwrap();
+        let mut file = File::open(&path).unwrap();
+        // The page past the end, beside an empty tree: as none, and not as the page that is there
+        let past = roots_checksum(&mut file, 512, [1, u64::MAX]).unwrap();
+        assert_ne!(past, roots_checksum(&mut file, 512, [0, u64::MAX]).unwrap());
+        #[cfg(unix)]
+        {
+            // A directory opens and fails every read
+            let mut directory = File::open(dir.path()).unwrap();
+            assert!(roots_checksum(&mut directory, 512, [0, u64::MAX]).is_err());
+        }
     }
 
     #[test]
