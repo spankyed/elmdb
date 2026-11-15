@@ -15,6 +15,7 @@ mod graph;
 mod lifecycle;
 mod maintenance;
 mod model;
+mod order;
 mod ordered;
 mod plans;
 mod power_loss;

@@ -119,6 +119,7 @@ jobs:
         run: python3 scripts/check-reader-recovery.py
       - run: cargo xtask check-generated
       - run: cargo xtask check-one-lmdb
+      - run: cargo xtask check-icu-exact
       - run: cargo xtask check-diagnostics-off
       - run: cargo xtask check-leiden-serial
       - run: cargo xtask check-sync
