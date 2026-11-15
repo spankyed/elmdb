@@ -344,8 +344,9 @@ fn child_of_the_kept_tests() {
             }
             drop(store);
         }
-        // Holds the database open; at each line it reads, pauses the step `ELMDB_KEPT_AT` names of the next sync,
-        // whichever thread reaches it, until a line more, and then commits (and with `sync`, waits for its sync)
+        // Holds the database open; at each line it reads commits (and with `sync`, waits for its sync), and at a line
+        // that begins `pause `, first pauses the step `ELMDB_KEPT_AT` names of its next sync, whichever thread reaches
+        // it, until a line more
         "pause" => {
             let store = Store::open(&path, grouped()).unwrap();
             println!("holding");
@@ -356,13 +357,17 @@ fn child_of_the_kept_tests() {
                 std::io::stdin().read_line(&mut line).ok().filter(|read| *read > 0).map(|_| line.trim().to_owned())
             };
             while let Some(asked) = line() {
-                failpoints::run_once_at(point, &store.path, move || {
-                    println!("paused");
-                    let _ = line();
-                });
-                let done = match asked.as_str() {
+                let (pause, asked) =
+                    asked.strip_prefix("pause ").map_or((false, asked.as_str()), |asked| (true, asked));
+                if pause {
+                    failpoints::run_once_at(point, &store.path, move || {
+                        println!("paused");
+                        let _ = line();
+                    });
+                }
+                let done = match asked {
                     "sync" => store.durable().unwrap().wait(),
-                    _ => put(&store, &asked, b"written"),
+                    _ => put(&store, asked, b"written"),
                 };
                 println!("synced {}", done.is_ok());
             }
@@ -442,7 +447,7 @@ impl Pauser {
 
     /// Asks for `what`, a sync or a key to write, and waits until the child is paused in it
     fn pause_in(&mut self, what: &str) {
-        self.say(what);
+        self.say(&format!("pause {what}"));
         self.until("paused");
     }
 
@@ -622,7 +627,7 @@ fn a_durable_write_beside_another_process_s_slower_sync_is_kept_by_the_next_loss
 }
 
 #[test]
-fn an_open_beside_another_process_s_sync_waits_for_its_record_and_opens_at_it() {
+fn an_open_beside_another_process_s_sync_waits_for_its_record() {
     let dir = tempfile::tempdir().unwrap();
     Store::open(dir.path(), grouped()).unwrap().close().unwrap();
     // A process open since before another's commit, unsynced, whose next write finds it and syncs before it begins:
@@ -643,7 +648,9 @@ fn an_open_beside_another_process_s_sync_waits_for_its_record_and_opens_at_it() 
     assert!(writer.go_on(), "the write after its sync");
     open.recv_timeout(Duration::from_secs(20)).expect("the open went on once the record was written");
     let store = opening.join().unwrap();
-    assert_eq!(get(&store, "b").as_deref(), Some(&b"2"[..]), "the holder's commit, which the writer's sync recorded");
+    // Beside other processes it opens as the file is, which a record names no part of: what it waited for was the
+    // record's lock, and it reads what is there
+    assert_eq!(get(&store, "b").as_deref(), Some(&b"2"[..]));
     store.close().unwrap();
     drop(writer);
     drop(holder);
