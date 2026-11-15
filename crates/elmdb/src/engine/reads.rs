@@ -2918,7 +2918,7 @@ impl<R: Read> Query<'_, R> {
     /// would find its way down from the root. Few strings, and those a range keeps, are sought as an order handed on
     /// an entity at a time seeks them: a walk would pass over every entry between them
     fn whole_strings(&self, ordered: &Ordered, descending: bool, each: &mut Entry<'_>) -> Result<bool> {
-        use crate::format::key::{KeyWriter, is_string_part, last_number, split_part};
+        use crate::format::key::{KeyWriter, is_bytes_part, is_number_part, is_string_part, last_number, split_part};
         let Some(build) = ordered.strings else { return Ok(true) };
         let running = super::order::running(&self.r.schema().collation)?;
         let (under, from, to) = self.order_bounds(ordered, build, &running, descending, None);
@@ -2936,7 +2936,7 @@ impl<R: Read> Query<'_, R> {
         };
         let mut step = |key: &[u8]| -> Result<()> {
             let rest = key.get(under.len()..).ok_or_else(corrupt)?;
-            let (sort_key, rest) = split_part(rest).ok_or_else(corrupt)?;
+            let (sort_key, rest) = split_part(rest).filter(|(part, _)| is_bytes_part(part)).ok_or_else(corrupt)?;
             let (was_cut, rest) = split_part(rest).ok_or_else(corrupt)?;
             let (last, rest) = split_part(rest).ok_or_else(corrupt)?;
             if !rest.is_empty() {
@@ -2956,12 +2956,14 @@ impl<R: Read> Query<'_, R> {
                 run = Some((sort_key.to_vec(), was_cut));
                 begun = found.len();
             }
+            // A string is kept as its part, and the key of an entity filed by its place ends with the place, a number
             found.push(if is_string_part(last) {
                 parts.extend_from_slice(last);
                 Slot::Entry(parts.len() - last.len()..parts.len())
-            } else {
-                // A key of an entity filed by its place ends with the place, a number
+            } else if is_number_part(last) {
                 Slot::Place(last_number(last).ok_or_else(corrupt)? as u64)
+            } else {
+                return Err(corrupt());
             });
             Ok(())
         };

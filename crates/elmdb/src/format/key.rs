@@ -215,6 +215,16 @@ pub fn is_string_part(part: &[u8]) -> bool {
     part.first() == Some(&STRING)
 }
 
+/// Whether a part as `split_part` finds it is a number's, which is then its tag and eight bytes
+pub fn is_number_part(part: &[u8]) -> bool {
+    part.first() == Some(&NUMBER)
+}
+
+/// Whether a part as `split_part` finds it is bytes'
+pub fn is_bytes_part(part: &[u8]) -> bool {
+    part.first() == Some(&BYTES)
+}
+
 /// A key of these parts
 pub fn encode(parts: &[Part]) -> Vec<u8> {
     let mut w = KeyWriter::new();
@@ -349,6 +359,8 @@ mod tests {
                 let own = encode(std::slice::from_ref(part));
                 prop_assert_eq!(first, own.as_slice());
                 prop_assert_eq!(is_string_part(first), matches!(part, Part::String(_)));
+                prop_assert_eq!(is_number_part(first), matches!(part, Part::Number(_)));
+                prop_assert_eq!(is_bytes_part(first), matches!(part, Part::Bytes(_)));
                 rest = after.to_vec();
             }
             prop_assert!(rest.is_empty());

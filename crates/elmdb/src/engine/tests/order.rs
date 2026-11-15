@@ -592,6 +592,33 @@ fn a_whole_order_whose_keys_and_entries_disagree_reads_as_one_handed_on_an_entit
     assert_eq!(whole, expected);
 }
 
+#[test]
+fn a_whole_order_with_a_key_of_no_sort_key_or_of_no_string_or_place_is_corrupt() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    write(&db, (0..3).map(|i| item(&i.to_string(), json!({ "tag": format!("t{i}") }))).collect()).unwrap();
+    let build = stored(&db, "byTag").0.unwrap().build;
+    let under = keys::order_range("Item", "byTag", build, &[]);
+    let whole = json!([{ "step": "orderBy", "field": "tag" }]);
+    let plan =
+        json!({ "start": { "from": "types", "types": ["Item"] }, "steps": whole, "terminal": { "answer": "ids" } });
+    let op = serde_json::from_value::<ReadOp>(json!({ "read": "query", "plan": plan })).unwrap();
+    // A string where the sort key's bytes are, and where the string or place is, bytes whose last nine are a number's
+    let bad = [
+        [Part::String("t".into()), Part::Bool(false), Part::String("t".into())],
+        [Part::Bytes(b"t".to_vec()), Part::Bool(false), Part::Bytes(vec![4, 1, 2, 3, 4, 5, 6, 7])],
+    ];
+    for parts in bad {
+        let key = [under.as_slice(), &crate::format::key::encode(&parts)].concat();
+        unit(&db, |t| t.put(&key, &[]));
+        let error = db.read(&Reads { reads: vec![op.clone()], track: None }).unwrap_err();
+        assert_eq!(error.code, crate::ErrorCode::Corrupted, "{parts:?}: {error}");
+        unit(&db, |t| t.del(&key));
+    }
+    // And without them the order reads
+    assert_eq!(read(&db, whole, None).0, ids(&["0", "1", "2"]));
+}
+
 fn ids(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| format!("Item-{name}")).collect()
 }
