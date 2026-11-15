@@ -1,0 +1,101 @@
+# The engine over a filesystem that loses what wasn't synced (docs/roadmap/synced-commit.md, phase 5): LazyFS keeps what
+# a process writes in a cache of its own until it is synced, and drops it on a command, as a power loss would. A writer
+# dies part way through its syncs, what it didn't sync is dropped, and the database opened after must hold what its last
+# finished sync held (engine/tests/power_loss.rs, a_filesystem_that_drops_what_was_not_synced_...). Run again with the
+# writer's pin turned off, the test must fail: so each run shows it can. Each night, on a dispatch, and on a pull request
+# that changes this job or the test it runs.
+name: lossy filesystem
+
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/lossy-filesystem.yml
+      - crates/elmdb/src/engine/tests/power_loss.rs
+
+permissions:
+  contents: read
+
+jobs:
+  lossy:
+    name: a filesystem that drops what wasn't synced (LazyFS)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # LazyFS at a commit read before it was pinned (2026-11-12)
+      LAZYFS_COMMIT: 3edad01aa936b81fed9bd64e47e725fc5ef6c977
+      TEST: engine::tests::power_loss::a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+
+      - name: LazyFS, built at its pinned commit
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++ cmake libfuse3-dev libfuse3-3 fuse3
+          echo user_allow_other | sudo tee -a /etc/fuse.conf
+          git clone https://github.com/dsrhaslab/lazyfs.git "$RUNNER_TEMP/lazyfs"
+          git -C "$RUNNER_TEMP/lazyfs" checkout --detach "$LAZYFS_COMMIT"
+          (cd "$RUNNER_TEMP/lazyfs/libs/libpcache" && ./build.sh)
+          (cd "$RUNNER_TEMP/lazyfs/lazyfs" && ./build.sh)
+
+      - name: The tests, built before the filesystem is mounted
+        run: cargo test -p elmdb --lib --no-run
+
+      - name: LazyFS mounted, and the script that drops what wasn't synced
+        run: |
+          fifo="$RUNNER_TEMP/faults.fifo"
+          done_fifo="$RUNNER_TEMP/faults-done.fifo"
+          cat > "$RUNNER_TEMP/lazyfs.toml" <<EOF
+          [faults]
+          fifo_path="$fifo"
+          fifo_path_completed="$done_fifo"
+          [cache]
+          apply_eviction=false
+          [cache.simple]
+          custom_size="2gb"
+          blocks_per_page=1
+          [filesystem]
+          log_all_operations=false
+          logfile=""
+          EOF
+          mkdir -p "$RUNNER_TEMP/lazyfs.mnt" "$RUNNER_TEMP/lazyfs.root"
+          cd "$RUNNER_TEMP/lazyfs/lazyfs"
+          nohup ./scripts/mount-lazyfs.sh -c "$RUNNER_TEMP/lazyfs.toml" -m "$RUNNER_TEMP/lazyfs.mnt" \
+            -r "$RUNNER_TEMP/lazyfs.root" -f > "$RUNNER_TEMP/lazyfs.log" 2>&1 &
+          for _ in $(seq 1 60); do mountpoint -q "$RUNNER_TEMP/lazyfs.mnt" && break; sleep 1; done
+          mountpoint "$RUNNER_TEMP/lazyfs.mnt"
+          # Drops what wasn't synced, waits for LazyFS to say it has, and drops the kernel's copy of what it read, so
+          # the next read is LazyFS's
+          cat > "$RUNNER_TEMP/lose.sh" <<EOF
+          echo "lazyfs::clear-cache" > "$fifo"
+          read -r said < "$done_fifo"
+          sudo sh -c 'echo 1 > /proc/sys/vm/drop_caches'
+          EOF
+
+      - name: Each database opens at its writer's last sync
+        env:
+          ELMDB_LOSSY_DIR: ${{ runner.temp }}/lazyfs.mnt/pinned
+          ELMDB_LOSSY_LOSE: ${{ runner.temp }}/lose.sh
+        run: |
+          mkdir -p "$ELMDB_LOSSY_DIR"
+          cargo test -p elmdb --lib -- --ignored --exact "$TEST" --nocapture --test-threads=1
+
+      - name: Without the pin it doesn't, so the test above can fail
+        env:
+          ELMDB_LOSSY_DIR: ${{ runner.temp }}/lazyfs.mnt/unpinned
+          ELMDB_LOSSY_LOSE: ${{ runner.temp }}/lose.sh
+          ELMDB_LOSSY_UNPINNED: "1"
+        run: |
+          mkdir -p "$ELMDB_LOSSY_DIR"
+          if cargo test -p elmdb --lib -- --ignored --exact "$TEST" --nocapture --test-threads=1; then
+            echo "::error::the test passed with the writer's pin turned off: it can't tell a torn database from a whole one"
+            exit 1
+          fi
+
+      - name: LazyFS's log
+        if: always()
+        run: tail -n 100 "$RUNNER_TEMP/lazyfs.log" || true

@@ -301,6 +301,13 @@ enum Claimed<'a, H> {
 /// How long a growth beside units tries for the gate before it looks again whether a unit has opened
 const GROWTH_GATE_TRY: Duration = Duration::from_millis(5);
 
+/// Takes every open of this process from now on for one of another boot than any record's, as after a restart: for a
+/// test whose writer was another process of this boot
+#[cfg(test)]
+pub(crate) fn forget_the_boot() {
+    boot::NO_BOOT.store(true, Ordering::Relaxed);
+}
+
 /// The record held by another thread for a test (`Store::hold_record`), let go as this drops
 #[cfg(test)]
 pub(crate) struct HeldRecord {

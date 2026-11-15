@@ -427,3 +427,84 @@ fn the_mode_asks_lmdb_for_each_commit_sync_and_the_grouped_mode_for_none() {
     let each = flags_of(OpenOptions { sync_each_commit: true, ..Default::default() });
     assert_eq!(each & (no_sync | meta_sync), 0, "each commit is synced as it is made");
 }
+
+/// Run by the nightly job over LazyFS (`.github/workflows/lossy-filesystem.yml`), a filesystem that keeps what a process
+/// writes in a cache of its own until it is synced and drops it on a command: a loss made by a filesystem, and not a
+/// replay of LMDB's order. In each round a writer in a child process commits the grouped workload, syncing at every
+/// `SYNC_EVERY`th commit, and dies in its third sync once the data is flushed and before the record is written (even
+/// rounds), or between its second sync and its third (odd rounds). The job's script, `ELMDB_LOSSY_LOSE`, then drops what
+/// wasn't synced and the kernel's copy of the files. The database opened after, as of another boot, must hold what the
+/// last sync the writer saw finish held, and pass `check()`. With `ELMDB_LOSSY_UNPINNED` the writer holds no pin, and
+/// the job requires this to fail
+#[test]
+#[ignore = "run by the lossy-filesystem job, which mounts the filesystem"]
+fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync() {
+    let dir = std::path::PathBuf::from(std::env::var("ELMDB_LOSSY_DIR").expect("the job names the directory"));
+    let lose = std::env::var("ELMDB_LOSSY_LOSE").expect("the job names the script that drops what wasn't synced");
+    // Every open here is of another boot than the writer's, as after a restart
+    crate::store::forget_the_boot();
+    for round in 0..8 {
+        let path = dir.join(format!("round-{round}"));
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "engine::tests::power_loss::child_writes_until_it_dies", "--nocapture"])
+            .env("ELMDB_LOSSY_DB", &path)
+            .env("ELMDB_LOSSY_ROUND", round.to_string())
+            .output()
+            .unwrap();
+        assert!(!child.status.success(), "round {round}: the writer lived");
+        let said = String::from_utf8_lossy(&child.stdout);
+        let synced = said
+            .lines()
+            .filter_map(|line| line.split("synced ").nth(1))
+            .filter_map(|count| count.trim().parse::<usize>().ok())
+            .next_back()
+            .unwrap_or_else(|| panic!("round {round}: no sync finished: {said}"));
+        let lost = std::process::Command::new("sh").arg(&lose).status().unwrap();
+        assert!(lost.success(), "round {round}: the script that drops what wasn't synced failed");
+        assert_eq!(held_at(&path, COMMITS).as_ref(), Ok(&model_after(synced)), "round {round}, synced at {synced}");
+    }
+}
+
+/// What the workload's model holds after its first `commits` commits, made on a database of its own
+fn model_after(commits: usize) -> Model {
+    let dir = tempfile::tempdir().unwrap();
+    let options = OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() };
+    let db = Database::open(dir.path(), options).unwrap();
+    let mut model = Model::new();
+    for n in 0..commits {
+        commit(&db, &mut model, n);
+    }
+    db.close().unwrap();
+    model
+}
+
+/// The writer of the test above, run as its child process: says each sync it saw finish, and dies as its round says
+#[test]
+#[ignore = "run only by the test above, as its child process"]
+fn child_writes_until_it_dies() {
+    let (Ok(path), Ok(round)) = (std::env::var("ELMDB_LOSSY_DB"), std::env::var("ELMDB_LOSSY_ROUND")) else { return };
+    let round: usize = round.parse().unwrap();
+    let grouped = OpenOptions { sync_idle_ms: 600_000, sync_interval_ms: 600_000, ..Default::default() };
+    let db = Database::open(&path, OpenOptions { schema: Some(schema()), ..grouped }).unwrap();
+    let store = db.store().unwrap();
+    if std::env::var("ELMDB_LOSSY_UNPINNED").is_ok() {
+        store.unpin();
+    }
+    let mut model = Model::new();
+    for n in 0..COMMITS {
+        commit(&db, &mut model, n);
+        if (n + 1) % SYNC_EVERY == 0 {
+            if (n + 1) / SYNC_EVERY == 3 && round.is_multiple_of(2) {
+                // Its data flushed, the record not yet written
+                crate::failpoints::run_once_at(crate::failpoints::points::SYNC_DATA, store.path(), || {
+                    std::process::abort()
+                });
+            }
+            db.durable().unwrap().wait().unwrap();
+            println!("synced {}", n + 1);
+        }
+        if !round.is_multiple_of(2) && n + 1 == 2 * SYNC_EVERY + 1 + round {
+            std::process::abort();
+        }
+    }
+}
