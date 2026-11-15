@@ -36,8 +36,11 @@ use crate::sync::PlainMutex;
 /// time and a write waits for it: the greater of this and a fraction of the file
 const BOUND_BYTES: u64 = 16 << 20;
 const BOUND_FRACTION: u64 = 4;
-/// What the pin keeps is read from the free tree once in this many asks, which reads a few of its pages
+/// What the pin keeps is read from the free tree once in this many asks, which reads a few of its pages, and whenever
+/// the file has grown by this fraction of the bound since it was last read, so a write of many pages is never let
+/// through on an answer from before it
 const WALK_EVERY: u32 = 16;
+const WALK_GROWTH: u64 = 8;
 
 /// The pin, the record and what this process knows of both
 pub(super) struct Kept {
@@ -61,9 +64,11 @@ pub(super) struct Kept {
     pub(super) unpinned: std::sync::atomic::AtomicBool,
     /// The fixed part of the bound, which a test makes small
     bound: std::sync::atomic::AtomicU64,
-    /// Whether the pin was past the bound when the free tree was last read, and the asks since
+    /// Whether the pin was past the bound when the free tree was last read, the asks since, and the file's last page
+    /// then
     past: std::sync::atomic::AtomicBool,
     asked: std::sync::atomic::AtomicU32,
+    walked_at: std::sync::atomic::AtomicU64,
     /// The syncs of the record file this process's syncs have made, which a test counts
     #[cfg(test)]
     pub(super) record_syncs: std::sync::atomic::AtomicU64,
@@ -158,6 +163,7 @@ impl Kept {
             bound: std::sync::atomic::AtomicU64::new(BOUND_BYTES),
             past: std::sync::atomic::AtomicBool::new(false),
             asked: std::sync::atomic::AtomicU32::new(0),
+            walked_at: std::sync::atomic::AtomicU64::new(0),
             #[cfg(test)]
             record_syncs: std::sync::atomic::AtomicU64::new(0),
         })
@@ -324,7 +330,8 @@ impl Kept {
     /// `sync` in a process that is exiting, whose other threads may be gone: one that ended while it held the record
     /// leaves the record as it was, and the data is synced all the same
     pub(super) fn sync_at_exit(&self) -> Result<()> {
-        if self.record.try_lock().is_none() {
+        // A thread that ended while it read the data file or the record holds its lock for good
+        if self.record.try_lock().is_none() || self.data.try_lock().is_none() {
             self.sync_data()?;
             return Err(Error::new(
                 ErrorCode::Io,
@@ -371,7 +378,7 @@ impl Kept {
     }
 
     /// Refuses every commit of this process from now on, keeping its pin until it ends
-    fn fail(&self, error: Error) -> Error {
+    pub(super) fn fail(&self, error: Error) -> Error {
         self.state.lock().failed.get_or_insert_with(|| error.clone());
         error
     }
@@ -451,12 +458,23 @@ impl Kept {
     pub(super) fn past_bound(&self) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         let Some(pinned) = self.state.lock().pin.as_ref().map(|pin| pin.commit) else { return false };
-        if !self.asked.fetch_add(1, Relaxed).is_multiple_of(WALK_EVERY) {
+        let last = {
+            let _gate = self.gate.read();
+            self.env.info().last_page_number as u64
+        };
+        let grown = last.saturating_sub(self.walked_at.load(Relaxed)).saturating_mul(self.page as u64);
+        let due = self.asked.fetch_add(1, Relaxed).is_multiple_of(WALK_EVERY)
+            || grown >= self.bound.load(Relaxed) / WALK_GROWTH;
+        if !due {
             return self.past.load(Relaxed);
         }
         let Some((kept, file)) = self.kept_from_reuse(pinned) else { return self.past.load(Relaxed) };
         let past = beyond(kept, file, self.bound.load(Relaxed));
-        self.past.store(past, Relaxed);
+        // An answer for a pin that has moved since is no answer: the new pin asks again
+        if self.state.lock().pin.as_ref().is_some_and(|pin| pin.commit == pinned) {
+            self.past.store(past, Relaxed);
+            self.walked_at.store(last, Relaxed);
+        }
         past
     }
 
@@ -466,12 +484,11 @@ impl Kept {
     fn kept_from_reuse(&self, pinned: u64) -> Option<(u64, u64)> {
         let _gate = self.gate.read();
         let txn = super::with_reader_recovery(&self.env, || self.env.clone().static_read_txn()).ok()?;
-        let commit = txn.id() as u64;
-        let mut data = self.data.lock();
-        let meta = reach::meta_page(&mut data, self.page, commit % 2).filter(|meta| meta.txnid == commit)?;
+        // Whole, as a sync takes it: the commit two after this one writes over its meta page field by field
+        let meta = self.take_meta(&txn).ok()??;
         let page = self.page as u64;
-        let kept = reach::freed_from(&mut data, self.page, meta.roots()[0], pinned) * page;
-        Some((kept, (meta.last_page() + 1) * page))
+        let kept = reach::freed_from(&mut self.data.lock(), self.page, meta.roots()[0], pinned).saturating_mul(page);
+        Some((kept, meta.last_page().saturating_add(1).saturating_mul(page)))
     }
 
     /// Sets the fixed part of the bound, for a test of what it does at a size a test reaches

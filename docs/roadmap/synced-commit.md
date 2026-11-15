@@ -108,7 +108,10 @@ and what was is whole.
   greater of a fixed size and a fraction of the file, whichever process's commits freed them. They are read from
   the newest commit's free tree, by seeks under a read transaction at it. A write past the bound waits, before it
   begins and outside every lock, for a sync of the commits made so far, which moves the pin. So a file grows by that
-  bound and no further. Only a process that holds a pin asks: one that holds none holds nothing back. The file's
+  bound, and by an eighth of it more before the free tree is read again (once in 16 asks, and whenever the file has
+  grown by that much since), and no further. What a process measures is its own pin's: another process's older pin,
+  or a read transaction a caller holds long, keeps more, until that process's own sync, which its timers make due
+  within a second. Only a process that holds a pin asks: one that holds none holds nothing back. The file's
   last page is not the measure: where commits rewrite what they change, the file grows only once the pages freed
   before the pin run out, so a sync due by its growth leaves the pin holding a cycle's pages and a bound more,
   each cycle more than the last (the readings below).

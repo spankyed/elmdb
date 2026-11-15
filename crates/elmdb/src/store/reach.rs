@@ -103,7 +103,7 @@ pub(super) fn pages_of(file: &mut File, psize: usize, roots: [u64; 2], path: &Pa
 /// list of the pages it freed, whose first word is their count, on an overflow page where the list is long. Read by
 /// seeks; a page that doesn't read as the tree's adds nothing
 pub(super) fn freed_from(file: &mut File, psize: usize, root: u64, from: u64) -> u64 {
-    let mut freed = 0;
+    let mut freed = 0u64;
     let mut stack = vec![root];
     // No tree holds more pages than the file: a cycle a torn page made ends there
     let mut budget = file.metadata().map_or(0, |m| m.len() / psize as u64);
@@ -112,11 +112,14 @@ pub(super) fn freed_from(file: &mut File, psize: usize, root: u64, from: u64) ->
             continue;
         }
         budget -= 1;
-        let Some(page) = read_at(file, pgno * psize as u64, psize) else { continue };
+        let Some(page) = pgno.checked_mul(psize as u64).and_then(|at| read_at(file, at, psize)) else { continue };
         let flags = u16_at(&page, 10);
         for node in nodes(&page).filter(|node| node + 8 <= page.len()) {
             let (lo, hi, node_flags) = (u16_at(&page, node), u16_at(&page, node + 2), u16_at(&page, node + 4));
             if flags & P_BRANCH != 0 {
+                // mutant-skip: replace << with >> in freed_from
+                // A branch node's flags hold its child's page number past 2^32 pages, 16 TiB at 4 KiB pages: no test
+                // file is so large, and below it the flags are 0 whichever way they are shifted
                 stack.push(lo as u64 | (hi as u64) << 16 | (node_flags as u64) << 32);
                 continue;
             }
@@ -124,11 +127,14 @@ pub(super) fn freed_from(file: &mut File, psize: usize, root: u64, from: u64) ->
                 continue;
             }
             let data = node + 8 + u16_at(&page, node + 6) as usize;
-            freed += if node_flags & F_BIGDATA != 0 {
-                read_at(file, u64_at(&page, data) * psize as u64 + PAGE_HEADER as u64, 8).map_or(0, |b| u64_at(&b, 0))
+            let count = if node_flags & F_BIGDATA != 0 {
+                let at =
+                    u64_at(&page, data).checked_mul(psize as u64).and_then(|at| at.checked_add(PAGE_HEADER as u64));
+                at.and_then(|at| read_at(file, at, 8)).map_or(0, |b| u64_at(&b, 0))
             } else {
                 u64_at(&page, data)
             };
+            freed = freed.saturating_add(count);
         }
     }
     freed
@@ -419,6 +425,75 @@ mod tests {
             page[node + 8 + DB_ROOT..node + 8 + DB_ROOT + 8].copy_from_slice(&value.to_ne_bytes());
         }
         page
+    }
+
+    /// A page of `psize` bytes numbered `pgno`, of `flags`, with one node at `node` of `node_flags`, `key` and `data`;
+    /// for a branch, `size` is the child's page number's low 32 bits, as LMDB keeps it in the node's size words
+    fn page_with_a_node(
+        psize: usize,
+        pgno: u64,
+        flags: u16,
+        size: u32,
+        node_flags: u16,
+        key: &[u8],
+        data: &[u8],
+    ) -> Vec<u8> {
+        let mut page = vec![0u8; psize];
+        page[..8].copy_from_slice(&pgno.to_ne_bytes());
+        page[10..12].copy_from_slice(&flags.to_ne_bytes());
+        page[12..14].copy_from_slice(&((PAGE_HEADER + 2) as u16).to_ne_bytes());
+        let node = 100usize;
+        page[PAGE_HEADER..PAGE_HEADER + 2].copy_from_slice(&(node as u16).to_ne_bytes());
+        page[node..node + 2].copy_from_slice(&(size as u16).to_ne_bytes());
+        page[node + 2..node + 4].copy_from_slice(&((size >> 16) as u16).to_ne_bytes());
+        page[node + 4..node + 6].copy_from_slice(&node_flags.to_ne_bytes());
+        page[node + 6..node + 8].copy_from_slice(&(key.len() as u16).to_ne_bytes());
+        page[node + 8..node + 8 + key.len()].copy_from_slice(key);
+        page[node + 8 + key.len()..node + 8 + key.len() + data.len()].copy_from_slice(data);
+        page
+    }
+
+    #[test]
+    fn the_free_tree_is_read_through_a_branch_to_a_far_page_and_a_list_on_a_page_of_its_own() {
+        let psize = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("free");
+        let mut file =
+            std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+        // Past 2^16 pages, so the child's number has bits in the node's high size word; sparse, so it costs nothing
+        let (leaf, list) = (65_537u64, 65_540u64);
+        file.set_len((list + 1) * psize as u64).unwrap();
+        let mut put = |pgno: u64, page: &[u8]| {
+            std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(pgno * psize as u64)).unwrap();
+            std::io::Write::write_all(&mut file, page).unwrap();
+        };
+        put(0, &page_with_a_node(psize, 0, P_BRANCH, leaf as u32, 0, &[], &[]));
+        // Two records: commit 5's list inline, seven pages, and commit 9's on its own page, forty-two
+        let mut leaf_page = page_with_a_node(
+            psize,
+            leaf,
+            P_LEAF,
+            16,
+            0,
+            &5u64.to_ne_bytes(),
+            &[7u64.to_ne_bytes(), 1u64.to_ne_bytes()].concat(),
+        );
+        let second = 300usize;
+        leaf_page[12..14].copy_from_slice(&((PAGE_HEADER + 4) as u16).to_ne_bytes());
+        leaf_page[PAGE_HEADER + 2..PAGE_HEADER + 4].copy_from_slice(&(second as u16).to_ne_bytes());
+        leaf_page[second..second + 2].copy_from_slice(&8u16.to_ne_bytes());
+        leaf_page[second + 4..second + 6].copy_from_slice(&F_BIGDATA.to_ne_bytes());
+        leaf_page[second + 6..second + 8].copy_from_slice(&8u16.to_ne_bytes());
+        leaf_page[second + 8..second + 16].copy_from_slice(&9u64.to_ne_bytes());
+        leaf_page[second + 16..second + 24].copy_from_slice(&list.to_ne_bytes());
+        put(leaf, &leaf_page);
+        let mut list_page = vec![0u8; psize];
+        list_page[..8].copy_from_slice(&list.to_ne_bytes());
+        list_page[PAGE_HEADER..PAGE_HEADER + 8].copy_from_slice(&42u64.to_ne_bytes());
+        put(list, &list_page);
+        assert_eq!(freed_from(&mut file, psize, 0, 0), 49);
+        assert_eq!(freed_from(&mut file, psize, 0, 6), 42, "from commit 6 on, the list on its own page alone");
+        assert_eq!(freed_from(&mut file, psize, 0, 10), 0);
     }
 
     #[test]

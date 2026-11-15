@@ -540,7 +540,10 @@ random value the first process to ask writes in a volatile registry key under th
 logoff takes away; where none can be read, a process's death costs the commits since its last sync, as a loss would. A
 sync is also due once the pages commits from the pin's on freed, which wait for the next record before any commit
 may take them, are more than 16 MiB or a quarter of the file, whichever is more, read from the free tree; and a write
-past that waits, before it begins, for the sync, so the file grows by the bound and no further. The cost is a second sync after each, the record's: a
+past that waits, before it begins, for the sync, so the file grows by the bound, and an eighth of it the free tree is
+read again after, and no further. A pin of another process older than this one's, or a read transaction held long, keeps
+more, until its own sync, which its timers make due within a second. The cost is a second
+sync after each, the record's: a
 `durable` write waits for both. A database written by an elmdb from before the record keeps no pin and reads no
 record, and its file may be no commit's after a loss, as every grouped file was. A test replays the loss in both
 modes (`testing.md`, Power loss).

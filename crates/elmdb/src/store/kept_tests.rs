@@ -575,10 +575,9 @@ fn another_process_s_sync_after_a_failed_one_fails_and_refuses_its_next_commit()
 #[test]
 fn what_the_pin_holds_back_makes_a_sync_due_whatever_the_time() {
     // Values written over again and again, which free as much as they take: with no sync the pin keeps every page
-    // they free, and the file grows by all of it. How far it grows with the bound is a reading's, not a test's:
-    // commits go on while a sync runs, so it turns on how fast the disk syncs beside how fast commits land. Nor is how
-    // many syncs run by the time the writes end, which turns on how soon the sync thread wakes: no sync is due by the
-    // time for ten minutes, so one that runs at all is the bound's
+    // they free. How many syncs run by the time the writes end turns on how soon the sync thread wakes: no sync is due
+    // by the time for ten minutes, so one that runs at all is the bound's. How far the file grows with the bound is
+    // held apart (`a_write_past_the_bound_waits_for_its_sync_...`)
     let synced_within = |bound: u64, wait: Duration| {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path(), grouped()).unwrap();
@@ -683,17 +682,31 @@ fn a_write_run_again_after_its_map_grew_syncs_before_it_and_a_loss_keeps_the_rec
 
 #[test]
 fn a_write_past_the_bound_waits_for_its_sync_and_the_file_grows_by_the_bound_alone() {
-    // Values written over again and again, which free as much as they take, as fast as one process commits: without
-    // the wait the file grows by all that is committed while each sync runs, some 15 MB here
+    // Values written over again and again, which free as much as they take, as fast as one process commits. The sync
+    // the bound makes due is held once its data is synced: a write past the bound waits for it, so the writer is held
+    // with it, where without the wait it would go on writing fresh pages as long as the sync took
     let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path(), grouped()).unwrap();
+    let store = shared(dir.path());
     store.set_bound(1 << 20);
-    for n in 0..200 {
-        put(&store, &format!("w-{}", n % 4), &vec![n as u8; 64 << 10]).unwrap();
-    }
-    let grown = store.file_size();
-    store.close().unwrap();
+    let (paused, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    failpoints::run_once_at(points::SYNC_DATA, &store.path, move || {
+        paused.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(30));
+    });
+    let writing = std::sync::Arc::clone(&store);
+    let writer = std::thread::spawn(move || {
+        for n in 0..200 {
+            put(&writing, &format!("w-{}", n % 4), &vec![n as u8; 64 << 10]).unwrap();
+        }
+    });
+    held.recv_timeout(Duration::from_secs(30)).expect("the bound made a sync due");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(!writer.is_finished(), "a write went on past the bound while its sync was held");
+    release.send(()).unwrap();
+    writer.join().unwrap();
     // What the four values hold, the bound past it, and a commit's own pages past that
+    let grown = store.file_size();
     assert!(grown < 6 << 20, "{grown} bytes, for four values of 64 KiB and a bound of 1 MiB");
 }
 
@@ -716,7 +729,41 @@ fn what_the_pin_keeps_from_reuse_is_what_commits_from_its_own_freed() {
     let kept_pages = reach::freed_from(&mut file, page as usize, root, pinned);
     assert!(kept_pages >= 10 * run, "{kept_pages} pages kept, where ten rewrites freed {} pages of runs", 10 * run);
     assert_eq!(reach::freed_from(&mut file, page as usize, root, meta.txnid + 1), 0, "a commit after the newest");
-    assert!(reach::freed_from(&mut file, page as usize, root, meta.txnid) < kept_pages, "the newest commit's alone");
+    let newest = reach::freed_from(&mut file, page as usize, root, meta.txnid);
+    assert!(newest >= run && newest < kept_pages, "the newest commit's alone, which freed a run: {newest}");
+    store.close().unwrap();
+}
+
+#[test]
+fn what_the_pin_keeps_is_read_from_a_list_of_its_own_and_from_a_tree_of_branches() {
+    let dir = tempfile::tempdir().unwrap();
+    // A map the writes fit in: a growth ends the pin, and the write after it pins a later commit
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(512 << 20), ..grouped() }).unwrap();
+    store.set_bound(u64::MAX / 8);
+    let page = store.page_size() as u64;
+    // A value so large that the pages one commit frees of it are listed on a page of their own, LMDB's for a list
+    // longer than a node holds: the commit after the pin's writes it, and the one after that frees its run
+    let big = vec![7u8; 20 << 20];
+    put(&store, "big", &big).unwrap();
+    let pinned = kept(&store).pinned_at().unwrap();
+    put(&store, "big", &big).unwrap();
+    // And commits enough that the free tree's records fill more than a leaf
+    for n in 0..1_000u32 {
+        put(&store, "small", &n.to_be_bytes()).unwrap();
+    }
+    assert_eq!(kept(&store).pinned_at(), Some(pinned), "the pin stayed where the test reads from");
+    let data = dir.path().join("data.mdb");
+    let mut file = std::fs::File::open(&data).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap();
+    let root = meta.roots()[0];
+    let run = (16 - 1 + big.len() as u64) / page + 1;
+    let kept_pages = reach::freed_from(&mut file, page as usize, root, pinned);
+    assert!(kept_pages >= run + 1_000, "{kept_pages} pages: the large value's run of {run} and a page a commit after");
+    // The record of the commit that freed the run alone: the run, read from its list's own page, and the few pages
+    // of the tree the commit wrote again
+    let record = reach::freed_from(&mut file, page as usize, root, pinned + 2)
+        - reach::freed_from(&mut file, page as usize, root, pinned + 3);
+    assert!(record >= run && record <= run + 16, "{record} pages freed by the commit that freed a run of {run}");
     store.close().unwrap();
 }
 
