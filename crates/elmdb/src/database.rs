@@ -413,7 +413,11 @@ impl Database {
                     // Dropped by the close that closes: one refused for an open unit, or given up on below, leaves the
                     // database open, and its listener is still to hear the builder's commits
                     self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
-                    let closed = if at_exit { store.close_at_exit(wait.unwrap_or_default()) } else { store.close() };
+                    // At exit, within what is left of the caller's wait, which the loop has spent part of
+                    let left = deadline.map_or(std::time::Duration::ZERO, |deadline| {
+                        deadline.saturating_duration_since(std::time::Instant::now())
+                    });
+                    let closed = if at_exit { store.close_at_exit(left) } else { store.close() };
                     return closed.map(|()| true);
                 }
                 Err(shared) => {
@@ -625,6 +629,41 @@ mod tests {
 
     fn quiet() -> OpenOptions {
         OpenOptions { syncs: false, ..Default::default() }
+    }
+
+    #[test]
+    fn an_exit_given_up_on_for_an_operation_s_store_tries_the_record_once_and_is_over_within_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
+        // An operation holds the store past the wait, and a sync of another thread the record
+        let store = db.store().unwrap();
+        let holder = store.hold_record(Duration::from_secs(5));
+        let began = std::time::Instant::now();
+        assert_eq!(db.close_at_exit(Duration::from_millis(100)).unwrap_err().code, ErrorCode::Io);
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(700), "{took:?}, for a wait of 100 ms");
+        drop(store);
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn an_exit_whose_store_comes_free_late_closes_within_what_is_left_of_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
+        // An operation lets the store go a second into a wait of two, and a sync of another thread holds the record
+        // past both
+        let store = db.store().unwrap();
+        let holder = store.hold_record(Duration::from_secs(8));
+        let operation = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            drop(store);
+        });
+        let began = std::time::Instant::now();
+        assert_eq!(db.close_at_exit(Duration::from_secs(2)).unwrap_err().code, ErrorCode::Io);
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(2600), "{took:?}, for a wait of 2 s");
+        operation.join().unwrap();
+        holder.join().unwrap();
     }
 
     #[test]

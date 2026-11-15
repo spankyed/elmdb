@@ -183,8 +183,11 @@ fn a_failed_sync_refuses_the_next_commit_and_the_next_open_restores_the_record_s
     assert_eq!((record.state, record.commit), (State::Failed, kept));
     // Final: a wait after it fails without another sync being tried
     let syncs = store.syncs();
-    assert!(store.durable().unwrap().wait().is_err());
+    let later = store.durable().unwrap().wait().unwrap_err();
     assert_eq!(store.syncs(), syncs, "a sync was tried again after the data's failed");
+    // Naming the failure once, as it was met
+    assert_eq!(later.message.matches("An earlier sync failed").count(), 1, "{later}");
+    assert!(later.message.ends_with("Injected sync failure"), "{later}");
     let refused = put(&store, "c", b"3").unwrap_err();
     assert!(refused.message.contains("An earlier sync failed"), "{refused}");
     drop(failing);
@@ -215,29 +218,6 @@ fn a_sync_that_fails_before_its_data_fails_its_own_waits_and_the_next_sync_goes_
         .unwrap();
     assert_eq!(record_in(dir.path()).unwrap().commit, newest(&store));
     store.close().unwrap();
-}
-
-#[test]
-fn syncs_that_fail_short_of_a_flush_too_many_times_in_a_row_refuse_the_process_s_commits() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::open(dir.path(), grouped()).unwrap();
-    let failing = failpoints::fail_while_at(points::SYNC_BEGIN, &store.path);
-    // One short of them, and a sync that doesn't fail: the count starts again
-    for _ in 1..super::kept::FAILURES_IN_A_ROW {
-        put(&store, "a", b"0").unwrap();
-        assert!(store.durable().unwrap().wait().is_err());
-    }
-    drop(failing);
-    store.durable().unwrap().wait().unwrap();
-    let failing = failpoints::fail_while_at(points::SYNC_BEGIN, &store.path);
-    for n in 1..=super::kept::FAILURES_IN_A_ROW {
-        put(&store, "a", &n.to_le_bytes()).unwrap();
-        assert!(store.durable().unwrap().wait().is_err());
-        assert_eq!(kept(&store).refused().is_some(), n == super::kept::FAILURES_IN_A_ROW, "after {n} failures");
-    }
-    assert!(put(&store, "b", b"1").is_err(), "a commit after them");
-    drop(failing);
-    assert!(store.close().is_err());
 }
 
 #[test]

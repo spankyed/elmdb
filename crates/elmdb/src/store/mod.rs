@@ -857,7 +857,7 @@ impl Store {
         let mut growths = 0;
         loop {
             run_point!(WRITE_RESERVATION);
-            self.hold_to_the_bound();
+            self.hold_to_the_bound()?;
             // Before the write lock, and before the transaction, which may write pages before it commits
             let writing = self.ensure_pin()?;
             run_point!(WRITE_PINNED);
@@ -915,16 +915,18 @@ impl Store {
     /// made so far has landed: the sync moves the pin, and the pages freed before it are used again. Where commits
     /// outrun the disk, every commit while the pin holds writes fresh pages, and without this the file grows by all
     /// that is committed while a sync runs, which a sync of more pages makes longer. Outside every lock, as the sync
-    /// takes them all. A sync that failed as it read or flushed the record or flushed the data refuses the process's
-    /// commits, and the write is then refused (`Kept::ensure_pin`); one that failed short of a flush wrote nothing to
-    /// rely on, fails this wait alone, and the write goes on, the next sync trying again, until too many in a row
-    /// refuse the commits too (`Kept::sync`)
-    fn hold_to_the_bound(&self) {
+    /// takes them all. The write is refused where the sync failed: one that failed as it read or flushed the record or
+    /// flushed the data refuses every commit after it (`Kept::ensure_pin`); one that failed short of a flush, as a full
+    /// reader table fails it, wrote nothing to rely on, and refuses this write alone, with its failure, which the
+    /// caller may try again. The pin doesn't move until a sync succeeds, so a write that went on would grow the file
+    /// past the bound, without end while the failure lasted
+    fn hold_to_the_bound(&self) -> Result<()> {
         if let (Some(kept), Some(commit)) = (&self.kept, &self.commit)
             && kept.past_bound()
         {
-            let _ = commit.durable().wait();
+            commit.durable().wait()?;
         }
+        Ok(())
     }
 
     /// Makes sure this process holds the grouped mode's pin, for a write about to begin its transaction
@@ -1211,7 +1213,7 @@ impl Store {
         }
         // Before the unit's place is reserved: while it waits, writes on other threads go on rather than being refused
         // as beside an open unit
-        self.hold_to_the_bound();
+        self.hold_to_the_bound()?;
         self.unit.reserve()?;
         // Let go when the unit doesn't begin, whether it is refused or what begins it panics
         let reserved = Reserved(self);
@@ -1461,6 +1463,20 @@ impl Store {
         }
     }
 
+    /// A thread that holds the grouped mode's record for `held`, as a sync of another thread does, once it holds it
+    #[cfg(test)]
+    pub(crate) fn hold_record(&self, held: Duration) -> std::thread::JoinHandle<()> {
+        let kept = Arc::clone(self.kept.as_ref().expect("a store of the grouped mode"));
+        let (taken, took) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let _record = kept.record_lock();
+            taken.send(()).expect("the test waits for the record to be held");
+            std::thread::sleep(held);
+        });
+        took.recv().expect("the record is held");
+        holder
+    }
+
     /// Sets the fixed part of the bound past which what the pin holds back makes a sync due, for a test
     #[cfg(test)]
     pub(crate) fn set_bound(&self, bytes: u64) {
@@ -1510,11 +1526,10 @@ impl Syncer for EnvSyncer {
     }
 
     /// Final where the process refuses its commits: the sync, or a write's, failed as it read or flushed the record or
-    /// flushed the data, or syncs failed short of that too many times in a row. What every wait then fails with is what
-    /// the commits are refused with, whichever sync met it. One that failed short of a flush, as a full reader table
-    /// fails it, wrote nothing to rely on, and the next sync tries again
+    /// flushed the data. Every wait then fails with that failure, whichever sync met it. One that failed short of a
+    /// flush, as a full reader table fails it, wrote nothing to rely on, and the next sync tries again
     fn final_failure(&self, _failure: &Error) -> Option<Error> {
-        self.kept.refused()
+        self.kept.failure()
     }
 }
 

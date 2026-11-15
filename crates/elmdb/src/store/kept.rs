@@ -11,11 +11,15 @@
 //!   ended (`sync`).
 //! - The record's commit never goes back, and a record read is relied on only once this process has synced it.
 //! - A process that owes nothing holds no pin, in one step with any write of it that is beginning (`Writing`).
+//!
+//! And these, of a sync that fails, which the model leaves out:
+//!
 //! - After a sync fails as it reads or flushes the record, or flushes the data, the process refuses every commit, and
-//!   where the data's flush or the record's write failed the record says so. One that fails short of a flush is tried
-//!   again, and only too many of those in a row refuse the commits.
+//!   where the data's flush or the record's write failed the record says so.
 //! - No record is written once the process refuses its commits: a flush that succeeds after one that failed proves
 //!   nothing of the pages the OS may have dropped.
+//! - One that fails short of a flush, as a full reader table fails it, refuses nothing after it but a write past the
+//!   bound, which it would have let grow the file (`Store::hold_to_the_bound`), and the next sync tries again.
 //!
 //! Locks are taken in one order: the gate, held for reading from a read transaction's beginning until it is the pin,
 //! then the record's, then the data file's handle; the gate is read again within, which it lets a reader do whenever
@@ -34,7 +38,10 @@ use super::idle_reads::Clear;
 use super::reach::{self, MetaPage};
 use super::record::{self, Mode, Record, RecordFile, State};
 use crate::error::{Error, ErrorCode, Result};
-use crate::sync::PlainMutex;
+use crate::sync::{PlainMutex, PlainMutexGuard};
+
+/// The record's file and the count of the record in it this process last synced, locked
+type RecordGuard<'a> = PlainMutexGuard<'a, (RecordFile, Option<u64>)>;
 
 /// How much the pin may keep from reuse, in the pages commits after its own freed, before a sync is due whatever the
 /// time and a write waits for it: the greater of this and a fraction of the file
@@ -45,9 +52,6 @@ const BOUND_FRACTION: u64 = 4;
 /// the whole of it, since it was last read, so a write of many pages is never let through on an answer from before it
 const WALK_EVERY: u32 = 16;
 const WALK_GROWTH: u64 = 8;
-/// Syncs that fail in a row short of a flush, as a reader table that stays full fails them, before the process
-/// refuses its commits: until then the pin doesn't move, the file grows, and a write past the bound waits on each
-pub(super) const FAILURES_IN_A_ROW: u32 = 8;
 
 /// The pin, the record and what this process knows of both
 pub(super) struct Kept {
@@ -76,8 +80,6 @@ pub(super) struct Kept {
     past: std::sync::atomic::AtomicBool,
     asked: std::sync::atomic::AtomicU32,
     walked_at: std::sync::atomic::AtomicU64,
-    /// The syncs that have failed since the last that didn't, short of a flush
-    failing: std::sync::atomic::AtomicU32,
     /// The syncs of the record file this process's syncs have made, which a test counts
     #[cfg(test)]
     pub(super) record_syncs: std::sync::atomic::AtomicU64,
@@ -140,8 +142,7 @@ fn refused(state: &Pinned) -> Option<Error> {
         Error::new(
             failed.code,
             format!(
-                "An earlier sync failed, so nothing is committed until the database is opened again, at the last \
-                 commit known to be on disk: {}",
+                "An earlier sync failed, so this process commits nothing more until the database is opened again: {}",
                 failed.message
             ),
         )
@@ -184,7 +185,6 @@ impl Kept {
             past: std::sync::atomic::AtomicBool::new(false),
             asked: std::sync::atomic::AtomicU32::new(0),
             walked_at: std::sync::atomic::AtomicU64::new(0),
-            failing: std::sync::atomic::AtomicU32::new(0),
             #[cfg(test)]
             record_syncs: std::sync::atomic::AtomicU64::new(0),
         })
@@ -244,30 +244,11 @@ impl Kept {
     /// A sync: the pin moved to the newest commit, which is on disk and named by the record when this returns. `adopt`
     /// takes a map another process grew, as a transaction's beginning may find it
     pub(super) fn sync(&self, adopt: &dyn Fn() -> Result<()>) -> Result<()> {
-        use std::sync::atomic::Ordering::Relaxed;
-        let synced = self.sync_once(adopt);
-        match &synced {
-            Ok(()) => self.failing.store(0, Relaxed),
-            // Short of a flush, which would have refused the process's commits already
-            Err(error) if self.refused().is_none() => {
-                if self.failing.fetch_add(1, Relaxed) + 1 >= FAILURES_IN_A_ROW {
-                    return Err(self.fail(Error::new(
-                        error.code,
-                        format!(
-                            "{FAILURES_IN_A_ROW} syncs in a row failed before they flushed anything, so this process \
-                             refuses its commits until the database is opened again. The last: {}",
-                            error.message
-                        ),
-                    )));
-                }
-            }
-            Err(_) => {}
-        }
-        synced
+        self.sync_holding(adopt, None)
     }
 
-    /// One attempt at `sync`
-    fn sync_once(&self, adopt: &dyn Fn() -> Result<()>) -> Result<()> {
+    /// `sync`, with the record's lock where the caller holds it already
+    fn sync_holding(&self, adopt: &dyn Fn() -> Result<()>, held: Option<RecordGuard<'_>>) -> Result<()> {
         failure_point!(SYNC_BEGIN at &self.dir, Error::new(ErrorCode::ReadersFull, "Injected full reader table"));
         loop {
             let (txn, _gate) = match self.begin() {
@@ -282,7 +263,7 @@ impl Kept {
             // A commit landed as the page was read: the newer one is taken instead
             let Some(meta) = self.take_meta(&txn)? else { continue };
             run_point!(SYNC_TAKEN at &self.dir);
-            return self.record_at(txn, &meta);
+            return self.record_at(txn, &meta, held);
         }
     }
 
@@ -302,10 +283,10 @@ impl Kept {
 
     /// The data synced and the record written for the commit `txn` holds, whose meta page is `meta`, and then the pin
     /// moved to it
-    fn record_at(&self, txn: RoTxn<'static, WithoutTls>, meta: &MetaPage) -> Result<()> {
+    fn record_at(&self, txn: RoTxn<'static, WithoutTls>, meta: &MetaPage, held: Option<RecordGuard<'_>>) -> Result<()> {
         let commit = txn.id() as u64;
         let named = {
-            let mut held = self.record.lock();
+            let mut held = held.unwrap_or_else(|| self.record.lock());
             // A failure refused the process's commits, which may be built on pages the OS dropped: no record may name
             // them, though a flush after it succeeds. Read under the record, which a sync that fails holds until then
             if let Some(refused) = self.refused() {
@@ -382,12 +363,16 @@ impl Kept {
     /// leaves the record as it was, and the data is synced all the same
     pub(super) fn sync_at_exit(&self, deadline: std::time::Instant) -> Result<()> {
         // A thread that ended while it held the record, the data file's handle or the pin's state holds it for good,
-        // where a live one holds it until its sync ends: each is waited for until the one deadline all three share, and
-        // past it the data is synced alone, as for a thread that ended
-        let free = self.record.try_lock_until(deadline).is_some()
+        // where a live one holds it a moment, or the record until its sync ends: each is waited for until the one
+        // deadline all three share, and past it the data is synced alone, as for a thread that ended. The record is
+        // kept from here, so that no live thread takes it and holds it through a sync of its own; the other two a live
+        // thread holds only while it reads a few pages or the pin, and one that ended can't take them again
+        let record = self.record.try_lock_until(deadline);
+        let free = record.is_some()
             && self.data.try_lock_until(deadline).is_some()
             && self.state.try_lock_until(deadline).is_some();
         if !free {
+            drop(record);
             self.sync_data()?;
             return Err(Error::new(
                 ErrorCode::Io,
@@ -395,7 +380,7 @@ impl Kept {
                  the record names an earlier commit than the last one synced",
             ));
         }
-        self.sync(&|| Err(Error::new(ErrorCode::Io, "Another process grew the map as this one exited")))
+        self.sync_holding(&|| Err(Error::new(ErrorCode::Io, "Another process grew the map as this one exited")), record)
     }
 
     /// Counts a sync of the record file, for a test
@@ -479,7 +464,7 @@ impl Kept {
             // LMDB's write lock, which leave the pin held for this write
             let Some(meta) = self.take_meta(&txn)? else { continue };
             run_point!(SYNC_TAKEN at &self.dir);
-            self.record_at(txn, &meta)?;
+            self.record_at(txn, &meta, None)?;
         }
     }
 
@@ -493,6 +478,17 @@ impl Kept {
     /// Why this process commits nothing, once a sync has failed
     pub(super) fn refused(&self) -> Option<Error> {
         refused(&self.state.lock())
+    }
+
+    /// The record's lock, which a test holds as a sync of another thread would
+    #[cfg(test)]
+    pub(super) fn record_lock(&self) -> RecordGuard<'_> {
+        self.record.lock()
+    }
+
+    /// The failure that refused this process's commits, as it was met
+    pub(super) fn failure(&self) -> Option<Error> {
+        self.state.lock().failed.clone()
     }
 
     /// Ends the pin, for a growth of the map, which the caller holds the gate for writing for
@@ -604,12 +600,36 @@ mod tests {
         // the record as it was. A flush after it that succeeds proves nothing of the pages the failed one dropped
         let kept = store.kept.as_ref().unwrap();
         kept.fail(Error::new(ErrorCode::Io, "Injected sync failure"));
-        // Each sync after it is refused with what refused the commits, however many: none is short of a flush
-        for _ in 0..FAILURES_IN_A_ROW {
-            assert_eq!(kept.sync(&|| Ok(())).unwrap_err().message, kept.refused().unwrap().message);
-        }
+        assert_eq!(kept.sync(&|| Ok(())).unwrap_err().message, kept.refused().unwrap().message);
         assert_eq!(record_commit(dir.path()), recorded, "the record names a commit built on what the sync dropped");
         assert!(store.close().is_err());
+    }
+
+    /// The pin taken as past the bound when the free tree was last read, and not read again before a walk is due
+    fn past_the_bound(store: &Store) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let kept = store.kept.as_ref().unwrap();
+        kept.past.store(true, Relaxed);
+        kept.asked.store(1, Relaxed);
+        kept.walked_at.store(store.env.info().last_page_number as u64, Relaxed);
+    }
+
+    #[test]
+    fn a_write_past_the_bound_whose_sync_failed_short_of_a_flush_is_refused_with_its_failure_and_the_next_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), grouped()).unwrap();
+        put(&store, "a");
+        past_the_bound(&store);
+        // As a reader table full for a moment fails it: the write, which would grow the file past the bound, is
+        // refused with that, which its caller may try again
+        let failing = failpoints::fail_while_at(points::SYNC_BEGIN, &store.path);
+        let key = crate::format::key::encode(&["b".into()]);
+        let refused = store.write(|txn, db| db.put(txn, &key, b"1").map_err(Into::into), false).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::ReadersFull);
+        assert!(store.kept.as_ref().unwrap().refused().is_none(), "the process refuses its commits");
+        drop(failing);
+        put(&store, "b");
+        store.close().unwrap();
     }
 
     #[test]
@@ -621,9 +641,7 @@ mod tests {
         let (txn, gate, writer) = store.begin().unwrap();
         // Past the bound, as last read: a write would wait for a sync, and one asked for would be held here
         let kept = store.kept.as_ref().unwrap();
-        kept.past.store(true, Relaxed);
-        kept.asked.store(1, Relaxed);
-        kept.walked_at.store(store.env.info().last_page_number as u64, Relaxed);
+        past_the_bound(&store);
         let (paused, held) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel::<()>();
         failpoints::run_once_at(points::SYNC_DATA, &store.path, move || {

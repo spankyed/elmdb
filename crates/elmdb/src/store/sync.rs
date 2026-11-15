@@ -370,8 +370,9 @@ fn run(shared: &Shared) {
                         break begin(&mut state, id);
                     }
                     // mutant-skip: replace > with >= in run
-                    // The worker's owed check: a sync is due only after a commit since the last sync began, so whenever
-                    // one is due the commits outnumber the synced
+                    // The worker's owed check: a sync is due only after a commit since the last sync began, or after a
+                    // failed one, which had commits owed and moved nothing, so whenever one is due the commits outnumber
+                    // the synced
                     let owed = state.committed > state.synced;
                     let due = state.policy.due_at();
                     if owed && due.is_some_and(|due| due <= shared.clock.now()) {
