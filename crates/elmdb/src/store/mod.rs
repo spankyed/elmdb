@@ -298,6 +298,10 @@ enum Claimed<'a, H> {
     Unpinned,
 }
 
+/// How long a process that is exiting waits for each lock the grouped mode's record takes, where no deadline is given:
+/// a live thread holds one for an instant, and one that ended holds it for good
+const EXIT_LOCK_WAIT: Duration = Duration::from_secs(1);
+
 /// How many times one write grows the map before giving up with `MAP_FULL`
 const MAX_GROWTHS: usize = 16;
 
@@ -916,7 +920,8 @@ impl Store {
     /// outrun the disk, every commit while the pin holds writes fresh pages, and without this the file grows by all
     /// that is committed while a sync runs, which a sync of more pages makes longer. Outside every lock, as the sync
     /// takes them all. A sync whose data or record failed marks the process failed, and the write is then refused
-    /// (`Kept::ensure_pin`); one that failed before them, as its read transaction began, lets the write go on
+    /// (`Kept::ensure_pin`); one that failed otherwise, before its data or as it read the root pages, wrote nothing to
+    /// rely on, fails this wait alone, and the write goes on, the next sync trying again
     fn hold_to_the_bound(&self) {
         if let (Some(kept), Some(commit)) = (&self.kept, &self.commit)
             && kept.past_bound()
@@ -1202,6 +1207,9 @@ impl Store {
         op: &Op,
     ) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         self.check_writable()?;
+        // Before the unit's place is reserved: while it waits, writes on other threads go on rather than being refused
+        // as beside an open unit
+        self.hold_to_the_bound();
         self.unit.reserve()?;
         // Let go when the unit doesn't begin, whether it is refused or what begins it panics
         let reserved = Reserved(self);
@@ -1210,7 +1218,6 @@ impl Store {
                 self.grow()?;
             }
             run_point!(UNIT_RESERVED);
-            self.hold_to_the_bound();
             loop {
                 let writing = self.ensure_pin()?;
                 run_point!(UNIT_PINNED);
@@ -1384,6 +1391,11 @@ impl Store {
     /// gate is tried and not waited for: a thread that held it for a growth may be gone with it, and a map being grown
     /// isn't one to read through
     pub fn sync_owed(&self) -> Result<()> {
+        self.sync_owed_until(Instant::now() + EXIT_LOCK_WAIT)
+    }
+
+    /// `sync_owed`, waiting for the locks the grouped mode's record takes no later than `deadline`
+    fn sync_owed_until(&self, deadline: Instant) -> Result<()> {
         match self.commit {
             Some(_) => {
                 failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
@@ -1394,7 +1406,7 @@ impl Store {
                     ));
                 };
                 match &self.kept {
-                    Some(kept) => kept.sync_at_exit(),
+                    Some(kept) => kept.sync_at_exit(deadline),
                     None => self.env.force_sync().map_err(Into::into),
                 }
             }
@@ -1407,7 +1419,7 @@ impl Store {
     /// to close, which a handle a gone thread held would keep open
     pub fn close_at_exit(mut self, wait: Duration) -> Result<()> {
         let deadline = Instant::now() + wait;
-        let synced = self.sync_owed();
+        let synced = self.sync_owed_until(deadline);
         if let Some(commit) = self.commit.take() {
             commit.stop_at_exit(deadline.saturating_duration_since(Instant::now()));
         }
@@ -1497,6 +1509,12 @@ struct EnvSyncer {
 impl Syncer for EnvSyncer {
     fn sync(&self) -> Result<()> {
         self.kept.sync(&|| self.kept.adopt())
+    }
+
+    /// Final where the sync marked the process failed: its data or its record failed. One that failed before its data,
+    /// or as it read the root pages after, wrote nothing to rely on, and the next sync tries again
+    fn is_final(&self, _failure: &Error) -> bool {
+        self.kept.refused().is_some()
     }
 }
 

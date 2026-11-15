@@ -59,6 +59,13 @@ impl Policy {
 /// What makes the environment's commits durable
 pub trait Syncer: Send + Sync + 'static {
     fn sync(&self) -> Result<()>;
+
+    /// Whether a failure `sync` answered is final: one of the flush, after which the OS may have dropped what it
+    /// couldn't write, so that no later sync proves anything of it. One that failed before it wrote anything fails the
+    /// waits on its own attempt, and the next sync tries again
+    fn is_final(&self, _failure: &Error) -> bool {
+        true
+    }
 }
 
 /// What the worker reads time from
@@ -371,9 +378,13 @@ fn run(shared: &Shared) {
                 };
             }
         };
-        let outcome = match &*shared.syncer.lock().expect("the syncer's lock is never poisoned") {
-            Some(syncer) => syncer.sync(),
-            None => Ok(()),
+        let (outcome, is_final) = match &*shared.syncer.lock().expect("the syncer's lock is never poisoned") {
+            Some(syncer) => {
+                let outcome = syncer.sync();
+                let is_final = outcome.as_ref().err().is_some_and(|failure| syncer.is_final(failure));
+                (outcome, is_final)
+            }
+            None => (Ok(()), false),
         };
         let mut state = shared.lock();
         state.running = None;
@@ -385,10 +396,11 @@ fn run(shared: &Shared) {
                 Ok(())
             }
             (Ok(()), Some(failed)) => Err(after_failure(failed)),
-            (Err(e), _) => {
+            (Err(e), _) if is_final => {
                 state.failed.get_or_insert_with(|| e.clone());
                 Err(e)
             }
+            (Err(e), _) => Err(e),
         };
         if let Some((_, slot)) = state.waiting.get_mut(&attempt.id) {
             *slot = Some(outcome);

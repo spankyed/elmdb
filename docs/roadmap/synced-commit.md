@@ -108,13 +108,13 @@ and what was is whole.
   greater of a fixed size and a fraction of the file, whichever process's commits freed them. They are read from
   the newest commit's free tree, by seeks under a read transaction at it. A write past the bound waits, before it
   begins and outside every lock, for a sync of the commits made so far, which moves the pin. So a file grows by that
-  bound, by an eighth of it more before the free tree is read again (once in 16 asks, and whenever the file has grown
-  by that much since), by a single write larger than the bound, and by writes already past their check when it was
-  crossed, and no further. What a process measures is its own pin's: another process's older pin,
-  or a read transaction a caller holds long, keeps more, until that process's own sync, which its timers make due
-  within a second. Only a process that holds a pin asks: one that holds none holds nothing back. The file's
-  last page is not the measure: where commits rewrite what they change, the file grows only once the pages freed
-  before the pin run out, so a sync due by its growth leaves the pin holding a cycle's pages and a bound more,
+  bound, by an eighth of it more before the free tree is read again (once in 16 asks, two to a write, and whenever the
+  file has grown by that much since), by a single write larger than the bound, and by writes already past their check
+  when it was crossed. What a process measures is its own pin's: another process's older pin keeps more, until that
+  process's own sync, which its timers make due within a second, and a read transaction a caller holds keeps more for as
+  long as it is held, as it does today. Only a process that holds a pin asks: one that holds none holds nothing back.
+  The file's last page is not the measure: where commits rewrite what they change, the file grows only once the pages
+  freed before the pin run out, so a sync due by its growth leaves the pin holding a cycle's pages and a bound more,
   each cycle more than the last (the readings below).
 - **A process relies only on a record it has synced itself.** A record read from the file may be one its writer
   wrote and died before syncing: an open syncs the record it reads before relying on it, and a sync syncs the
@@ -189,10 +189,12 @@ makes it again from the same record. LMDB then opens at the record's commit. The
 record's notice is written first, the rest of the record as it was: a restore stopped once the meta pages are written
 leaves the next open nothing to restore, and it still says one was made.
 
-**A sync that fails** writes the record `failed`. From then the process refuses every commit, as it refuses every
-wait today, and keeps its pin until it ends; a process that finds the record `failed` at its own sync does the same,
-as does one whose sync before a write fails: only a restore writes over it. If the record can't be written either,
-the database goes on as it does today, which the error says.
+**A sync whose data or record fails** writes the record `failed`. From then the process refuses every commit, as it
+refuses every wait today, and keeps its pin until it ends; a process that finds the record `failed` at its own sync does
+the same, as does one whose sync before a write fails: only a restore writes over it. If the record can't be written
+either, the database goes on as it does today, which the error says. A sync that fails before it syncs the data, as a
+full reader table fails it, or as it reads the root pages after, has written nothing to rely on: it fails the waits on
+it alone, and the next sync tries again.
 
 **What else writes the data file.** A backup made into a directory, and `replaceWith`, write the record for the data
 they put there or remove it. `replaceWith` opens its source as an open does, record and all.

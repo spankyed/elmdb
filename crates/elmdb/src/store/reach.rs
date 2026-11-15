@@ -117,10 +117,10 @@ pub(super) fn freed_from(file: &mut File, psize: usize, root: u64, from: u64) ->
         for node in nodes(&page).filter(|node| node + 8 <= page.len()) {
             let (lo, hi, node_flags) = (u16_at(&page, node), u16_at(&page, node + 2), u16_at(&page, node + 4));
             if flags & P_BRANCH != 0 {
-                // mutant-skip: replace << with >> in freed_from
-                // A branch node's flags hold its child's page number past 2^32 pages, 2 TiB at LMDB's smallest page:
-                // no test file is so large, and below it the flags are 0 whichever way they are shifted
+                // The child's page number: its low, middle and high 16-bit words, the last in the node's flags
                 let high = (node_flags as u64) << 32;
+                // mutant-skip: replace \| with \^ in freed_from
+                // The three words share no bit, so joined by `^` they make the same number
                 stack.push(lo as u64 | (hi as u64) << 16 | high);
                 continue;
             }
@@ -494,9 +494,15 @@ mod tests {
         list_page[..8].copy_from_slice(&list.to_ne_bytes());
         list_page[PAGE_HEADER..PAGE_HEADER + 8].copy_from_slice(&42u64.to_ne_bytes());
         put(list, &list_page);
+        // A branch whose child's number has its high word set, the leaf's low words below it: a page past the file,
+        // which holds nothing, and not the leaf
+        let mut far = page_with_a_node(psize, 1, P_BRANCH, leaf as u32, 0, &[], &[]);
+        far[100 + 4..100 + 6].copy_from_slice(&1u16.to_ne_bytes());
+        put(1, &far);
         assert_eq!(freed_from(&mut file, psize, 0, 0), 49);
         assert_eq!(freed_from(&mut file, psize, 0, 6), 42, "from commit 6 on, the list on its own page alone");
         assert_eq!(freed_from(&mut file, psize, 0, 10), 0);
+        assert_eq!(freed_from(&mut file, psize, 1, 0), 0, "the child past 2^32 pages, which the file doesn't hold");
     }
 
     #[test]

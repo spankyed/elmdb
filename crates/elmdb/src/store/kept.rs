@@ -36,9 +36,9 @@ use crate::sync::PlainMutex;
 /// time and a write waits for it: the greater of this and a fraction of the file
 const BOUND_BYTES: u64 = 16 << 20;
 const BOUND_FRACTION: u64 = 4;
-/// What the pin keeps is read from the free tree once in this many asks, which reads a few of its pages, and whenever
-/// the file has grown by this fraction of the bound since it was last read, so a write of many pages is never let
-/// through on an answer from before it
+/// What the pin keeps is read from the free tree once in this many asks, which reads a few of its pages (a write asks
+/// twice, before it begins and once it has committed), and whenever the file has grown by this fraction of the bound,
+/// the whole of it, since it was last read, so a write of many pages is never let through on an answer from before it
 const WALK_EVERY: u32 = 16;
 const WALK_GROWTH: u64 = 8;
 
@@ -111,7 +111,18 @@ impl Drop for Writing {
 /// Whether a pin that keeps `kept` bytes from reuse in a file of `file` bytes keeps more than the bound: the greater
 /// of `fixed` bytes and a fraction of the file
 fn beyond(kept: u64, file: u64, fixed: u64) -> bool {
-    kept > fixed.max(file / BOUND_FRACTION)
+    kept > bound_in(file, fixed)
+}
+
+/// The bound in a file of `file` bytes: the greater of `fixed` bytes and a fraction of the file
+fn bound_in(file: u64, fixed: u64) -> u64 {
+    fixed.max(file / BOUND_FRACTION)
+}
+
+/// Whether the free tree is read again at the `asked`th ask, the file of `file` bytes having grown by `grown` since it
+/// was last read: once in `WALK_EVERY` asks, and once the file has grown by a `WALK_GROWTH`th of the bound
+fn walk_due(asked: u32, grown: u64, file: u64, fixed: u64) -> bool {
+    asked.is_multiple_of(WALK_EVERY) || grown >= bound_in(file, fixed) / WALK_GROWTH
 }
 
 /// What every commit after a failed sync is refused with
@@ -223,6 +234,7 @@ impl Kept {
     /// A sync: the pin moved to the newest commit, which is on disk and named by the record when this returns. `adopt`
     /// takes a map another process grew, as a transaction's beginning may find it
     pub(super) fn sync(&self, adopt: &dyn Fn() -> Result<()>) -> Result<()> {
+        failure_point!(SYNC_BEGIN at &self.dir, Error::new(ErrorCode::ReadersFull, "Injected full reader table"));
         loop {
             let (txn, _gate) = match self.begin() {
                 Ok(begun) => begun,
@@ -329,9 +341,13 @@ impl Kept {
 
     /// `sync` in a process that is exiting, whose other threads may be gone: one that ended while it held the record
     /// leaves the record as it was, and the data is synced all the same
-    pub(super) fn sync_at_exit(&self) -> Result<()> {
-        // A thread that ended while it held the record, the data file's handle or the pin's state holds it for good
-        if self.record.try_lock().is_none() || self.data.try_lock().is_none() || self.state.try_lock().is_none() {
+    pub(super) fn sync_at_exit(&self, deadline: std::time::Instant) -> Result<()> {
+        // A thread that ended while it held the record, the data file's handle or the pin's state holds it for good,
+        // where a live one holds it for an instant: each is waited for, until the one deadline all three share
+        let free = self.record.try_lock_until(deadline).is_some()
+            && self.data.try_lock_until(deadline).is_some()
+            && self.state.try_lock_until(deadline).is_some();
+        if !free {
             self.sync_data()?;
             return Err(Error::new(
                 ErrorCode::Io,
@@ -462,10 +478,10 @@ impl Kept {
             let _gate = self.gate.read();
             self.env.info().last_page_number as u64
         };
-        let grown = last.saturating_sub(self.walked_at.load(Relaxed)).saturating_mul(self.page as u64);
-        let due = self.asked.fetch_add(1, Relaxed).is_multiple_of(WALK_EVERY)
-            || grown >= self.bound.load(Relaxed) / WALK_GROWTH;
-        if !due {
+        let page = self.page as u64;
+        let grown = last.saturating_sub(self.walked_at.load(Relaxed)).saturating_mul(page);
+        let file = last.saturating_add(1).saturating_mul(page);
+        if !walk_due(self.asked.fetch_add(1, Relaxed), grown, file, self.bound.load(Relaxed)) {
             return self.past.load(Relaxed);
         }
         let Some((kept, file)) = self.kept_from_reuse(pinned) else { return self.past.load(Relaxed) };
@@ -517,6 +533,35 @@ impl Kept {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{Store, StoreOptions};
+
+    #[test]
+    fn the_exit_s_sync_takes_no_lock_a_thread_holds_past_its_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), StoreOptions::default()).unwrap();
+        let kept = Arc::clone(store.kept.as_ref().unwrap());
+        // As a thread that ended holding it would: each of the locks the record takes, held in turn
+        for which in 0..3 {
+            // Each held until the end of its turn of the loop, after the exit has answered
+            let (_record, _data, _state);
+            match which {
+                0 => _record = kept.record.lock(),
+                1 => _data = kept.data.lock(),
+                _ => _state = kept.state.lock(),
+            }
+            let exiting = Arc::clone(&kept);
+            let (answered, answer) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+                let _ = answered.send(exiting.sync_at_exit(deadline));
+            });
+            let answer = answer.recv_timeout(std::time::Duration::from_secs(10));
+            let refused = answer.unwrap_or_else(|_| panic!("the exit waited on lock {which} past its deadline"));
+            assert_eq!(refused.unwrap_err().code, ErrorCode::Io, "lock {which}");
+        }
+        drop(kept);
+        store.close().unwrap();
+    }
 
     #[test]
     fn the_bound_is_the_greater_of_its_fixed_size_and_a_quarter_of_the_file() {
@@ -526,5 +571,16 @@ mod tests {
         // A file of 40 MiB: a quarter, 10 MiB, is over the fixed MiB
         assert!(!beyond(10 << 20, 40 << 20, 1 << 20), "at a quarter of the file");
         assert!(beyond((10 << 20) + 1, 40 << 20, 1 << 20), "a byte past it");
+    }
+
+    #[test]
+    fn the_free_tree_is_read_again_once_in_16_asks_and_once_the_file_grows_by_an_eighth_of_the_bound() {
+        let (file, fixed) = (40 << 20, 1 << 20);
+        assert!(walk_due(0, 0, file, fixed), "the first ask");
+        assert!(!walk_due(1, 0, file, fixed));
+        assert!(walk_due(16, 0, file, fixed), "the 16th after it");
+        // The bound is a quarter of the file, 10 MiB, not the fixed MiB: an eighth of it is 1.25 MiB
+        assert!(walk_due(1, (10 << 20) / 8, file, fixed), "grown by an eighth of the bound");
+        assert!(!walk_due(1, (10 << 20) / 8 - 1, file, fixed), "a byte short of it");
     }
 }

@@ -181,6 +181,10 @@ fn a_failed_sync_refuses_the_next_commit_and_the_next_open_restores_the_record_s
     assert!(store.durable().unwrap().wait().is_err());
     let record = record_in(dir.path()).unwrap();
     assert_eq!((record.state, record.commit), (State::Failed, kept));
+    // Final: a wait after it fails without another sync being tried
+    let syncs = store.syncs();
+    assert!(store.durable().unwrap().wait().is_err());
+    assert_eq!(store.syncs(), syncs, "a sync was tried again after the data's failed");
     let refused = put(&store, "c", b"3").unwrap_err();
     assert!(refused.message.contains("An earlier sync failed"), "{refused}");
     drop(failing);
@@ -192,6 +196,24 @@ fn a_failed_sync_refuses_the_next_commit_and_the_next_open_restores_the_record_s
     assert_eq!((get(&store, "a").as_deref(), get(&store, "b")), (Some(&b"1"[..]), None));
     put(&store, "c", b"3").unwrap();
     synced(&store);
+    store.close().unwrap();
+}
+
+#[test]
+fn a_sync_that_fails_before_its_data_fails_its_own_waits_and_the_next_sync_goes_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    // As a reader table that stays full fails it, before anything is written: no page may have been dropped
+    failpoints::fail_once_at(points::SYNC_BEGIN, &store.path);
+    assert!(store.durable().unwrap().wait().is_err());
+    assert!(kept(&store).refused().is_none(), "a failure before the data refused the process's commits");
+    // The next sync goes on, and a durable write after it is durable
+    store.durable().unwrap().wait().unwrap();
+    store
+        .write(|txn, db| db.put(txn, &crate::format::key::encode(&["b".into()]), b"2").map_err(Into::into), true)
+        .unwrap();
+    assert_eq!(record_in(dir.path()).unwrap().commit, newest(&store));
     store.close().unwrap();
 }
 

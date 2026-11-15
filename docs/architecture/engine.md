@@ -533,20 +533,23 @@ An open that finds the record written in another boot, a later commit on the fil
 open writes the record's meta page over the file's two, the two it wrote over saved once in `synced.restored`, and so
 opens at that commit, whatever the loss left of the pages after it. A process's death leaves its commits to the OS,
 which holds them: a database another process has open, or whose record is of this boot, opens at its newest commit. A
-sync that fails marks the record `failed`, the process refuses every commit after it, and the next open restores the
-record's commit, in this boot too; an open that finds a restore to make beside another process, or can't write the data
-file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's `kern.bootsessionuuid`, and on Windows a
+sync whose data or record fails marks the record `failed`, the process refuses every commit after it, and the next
+open restores the record's commit, in this boot too. One that fails before it syncs the data, as a full reader table
+fails it, or as it reads the root pages after, has written nothing to rely on: it fails the waits on it alone, and the
+next sync tries again. An open that finds a restore to make beside another process, or can't write the data file, is
+refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's `kern.bootsessionuuid`, and on Windows a
 random value the first process to ask writes in a volatile registry key under the current user, which a restart or a
 logoff takes away; where none can be read, a process's death costs the commits since its last sync, as a loss would. A
 sync is also due once the pages commits from the pin's on freed, which wait for the next record before any commit may
 take them, are more than 16 MiB or a quarter of the file, whichever is more, as read from the free tree; and a write
 past that waits, before it begins, for the sync. So the file grows by the bound, by what is written before the free tree
-is read again (once the file has grown by an eighth of the bound, or once in 16 writes), by a single write larger than
-the bound, and by writes already past their check when it was crossed. A pin of another process older than this one's,
-or a read transaction a caller holds long, keeps more, until that process's own sync, which its timers make due within
-`syncIntervalMs` (1 s). The cost is a second sync after each, the record's: a `durable` write waits for both. A database
-written by an elmdb from before the record keeps no pin and reads no record, and its file may be no commit's after a
-loss, as every grouped file was. A test replays the loss in both modes (`testing.md`, Power loss).
+is read again (once the file has grown by an eighth of the bound, or once in 16 asks, which a write makes two of), by a
+single write larger than the bound, and by writes already past their check when it was crossed. A pin of another process
+older than this one's keeps more, until that process's own sync, which its timers make due within `syncIntervalMs`
+(1 s); a read transaction a caller holds keeps more for as long as it is held, as it does today. The cost is a second
+sync after each, the record's: a `durable` write waits for both. A database written by an elmdb from before the record
+keeps no pin and reads no record, and its file may be no commit's after a loss, as every grouped file was. A test
+replays the loss in both modes (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
