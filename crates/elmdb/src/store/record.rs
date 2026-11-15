@@ -161,11 +161,12 @@ impl Record {
         let boot = Boot::from_bytes(take(32).try_into().expect("a boot's bytes"));
         let noticed = take(1)[0];
         let value = u64_of(take(8));
+        // A value this version doesn't know is a later one's notice, read as none, as a version that knows only 0 and 1
+        // reads 2
         let restored = match noticed {
-            0 => None,
             1 => Some(Restored::Commit(value)),
             2 => Some(Restored::Sequence(value)),
-            _ => return None,
+            _ => None,
         };
         Some(Self { count, mode, state, commit, body, roots, boot, restored })
     }
@@ -471,6 +472,16 @@ mod tests {
             let mut directory = File::open(dir.path()).unwrap();
             assert!(roots_checksum(&mut directory, 512, [0, u64::MAX]).is_err());
         }
+    }
+
+    #[test]
+    fn a_notice_of_a_kind_this_version_doesn_t_know_reads_as_none() {
+        let mut slot = Record { restored: Some(Restored::Sequence(9)), ..record(1) }.encode();
+        // The notice's byte, before its u64 at the fields' end, made a later version's, and the checksum made again
+        slot[FIELDS - 9] = 3;
+        let checksum = Sha256::digest(&slot[..FIELDS]);
+        slot[FIELDS..FIELDS + CHECKSUM].copy_from_slice(&checksum);
+        assert_eq!(Record::decode(&slot), Some(Record { restored: None, ..record(1) }));
     }
 
     #[test]

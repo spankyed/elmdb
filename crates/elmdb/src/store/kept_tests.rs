@@ -111,6 +111,34 @@ fn a_process_that_died_with_commits_unsynced_is_opened_at_its_newest_commit() {
     store.close().unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn a_read_only_open_that_can_t_write_the_notice_reports_the_restore_without_its_sequence() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), grouped()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    synced(&store);
+    let commit = newest(&store);
+    store.close().unwrap();
+    // A restore's open died before it read the sequence: the notice names the commit, the file's newest
+    let mut file = RecordFile::open(dir.path(), true).unwrap().unwrap();
+    let record = record_in(dir.path()).unwrap();
+    file.write(&record::Record { restored: Some(record::Restored::Commit(commit)), ..record.next(record.state) })
+        .unwrap();
+    // A record this open can't write
+    let path = dir.path().join(record::RECORD);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let reader = Store::open(dir.path(), StoreOptions { read_only: true, ..grouped() }).unwrap();
+    assert_eq!(reader.restored(), Some(crate::database::Restore { sequence: None }));
+    reader.close().unwrap();
+    // A writable open, once it can, writes the sequence in
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let writer = Store::open(dir.path(), grouped()).unwrap();
+    assert_eq!(writer.restored(), Some(crate::database::Restore { sequence: Some(writer.sequence()) }));
+    writer.close().unwrap();
+}
+
 #[test]
 fn a_loss_after_commits_unsynced_restores_the_record_s_commit_and_the_database_takes_writes_over_its_numbers() {
     let dir = tempfile::tempdir().unwrap();
@@ -226,7 +254,8 @@ fn a_failed_sync_refuses_the_next_commit_and_the_next_open_restores_the_record_s
     let _ = store.close();
     // Opened again in the same boot: what was committed after the failed sync's commit may not be on disk
     let store = Store::open(dir.path(), grouped()).unwrap();
-    assert_eq!((newest(&store), store.restored().is_some()), (kept, true));
+    let noticed = crate::database::Restore { sequence: Some(store.sequence()) };
+    assert_eq!((newest(&store), store.restored()), (kept, Some(noticed)));
     assert_eq!((get(&store, "a").as_deref(), get(&store, "b")), (Some(&b"1"[..]), None));
     put(&store, "c", b"3").unwrap();
     synced(&store);
@@ -898,7 +927,9 @@ fn a_process_ended_at_each_step_of_a_restore_leaves_it_to_the_next_open() {
         }
         let store = Store::open(lost.path(), grouped()).unwrap();
         assert_eq!((get(&store, "a").is_some(), get(&store, "b")), (true, None), "{point}");
-        assert!(store.restored().is_some(), "{point}");
+        // Whichever step it stopped at, the open after names the sequence the database opened at
+        let noticed = crate::database::Restore { sequence: Some(store.sequence()) };
+        assert_eq!(store.restored(), Some(noticed), "{point}");
         // The restore made again kept the save of the meta pages as they were before any restore
         assert_eq!(std::fs::read(&saved).unwrap(), before, "{point}: saved again over the first");
         store.close().unwrap();

@@ -243,8 +243,11 @@ pub(super) fn note(dir: &Path, commit: u64, sequence: u64) -> Result<Option<Rest
     let mut file = RecordFile::open(dir, true)?.expect("a record's file a writable open makes");
     let Some(record) = file.read()? else { return Ok(None) };
     if record.restored != Some(Restored::Commit(commit)) {
+        // Another open noted it, or acknowledged it, first
         return Ok(record.restored);
     }
+    // Relied on only once synced, before its other slot is written over: its writer may have died before syncing it
+    file.sync()?;
     let noted = Record { restored: Some(Restored::Sequence(sequence)), ..record.next(record.state) };
     file.write(&noted)?;
     Ok(noted.restored)
@@ -256,7 +259,17 @@ pub(super) fn acknowledge(dir: &Path) -> Result<()> {
     let _locked = record::exclusive(&lock)?;
     let mut file = RecordFile::open(dir, true)?.expect("a record's file a writable open makes");
     if let Some(record) = file.read()?.filter(|record| record.restored.is_some()) {
+        // Relied on only once synced, before its other slot is written over: its writer may have died before syncing it
+        file.sync()?;
         file.write(&Record { restored: None, ..record.next(record.state) })?;
     }
     Ok(())
+}
+
+/// The notice the record holds, read under the record's lock: none where there is no record, or it can't be read
+pub(super) fn notice(dir: &Path) -> Result<Option<Restored>> {
+    let lock = record::lock_file(dir, record::RECORD_LOCK)?;
+    let _locked = record::exclusive(&lock)?;
+    let Some(mut file) = RecordFile::open(dir, false)? else { return Ok(None) };
+    Ok(file.read()?.and_then(|record| record.restored))
 }
