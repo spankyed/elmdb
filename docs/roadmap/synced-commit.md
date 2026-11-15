@@ -372,7 +372,9 @@ first is the cost the format's rule accepts until a release has users (`../archi
    dirty pages than LMDB keeps in memory (`MDB_IDL_UM_MAX` of them, `midl.h`); the readings of the bound over a minute and the million-note
    load; the unit run again after its map grew, with a loss replayed over what it wrote before its commit; an open
    beside a write's first sync; a `durable` write beside a second process's sync; and the readings beside today's.
-   Until phase 4, a database is written in one mode at a time by its callers: a writable open of another mode than
+   Windows' boot, the volatile registry key, is built with this phase rather than the last: without it every death
+   there read as a loss, and a write that returned was undone when its process was killed, which the engine promises
+   it is not. Until phase 4, a database is written in one mode at a time by its callers: a writable open of another mode than
    the record's syncs the data and writes its mode's record, and nothing refuses two live writers of two modes.
 4. **The modes.** `syncEachCommit` and `syncs: false` alone and after a grouped writer that died with commits
    unsynced, a backup into a directory and `replaceWith`. Done when the replay holds each, an open in another mode

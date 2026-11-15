@@ -535,8 +535,9 @@ commit, whatever the loss left of the pages after it. A process's death leaves i
 them: a database another process has open, or whose record is of this boot, opens at its newest commit. A sync that
 fails marks the record `failed`, the process refuses every commit after it, and the next open restores the record's
 commit, in this boot too; an open that finds a restore to make beside another process, or can't write the data
-file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id` and Apple's `kern.bootsessionuuid`; where none can
-be read, Windows' among them for now, a process's death costs the commits since its last sync, as a loss would. A
+file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's `kern.bootsessionuuid`, and on Windows a
+random value the first process to ask writes in a volatile registry key under the current user, which a restart or a
+logoff takes away; where none can be read, a process's death costs the commits since its last sync, as a loss would. A
 sync is also due once the file's last page is past the pin's by 64 MiB or a quarter of the file, whichever is more,
 since the pages freed since the pin wait for the next record. The cost is a second sync after each, the record's: a
 `durable` write waits for both. A database written by an elmdb from before the record keeps no pin and reads no

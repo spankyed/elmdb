@@ -2,9 +2,11 @@
 //! (`docs/roadmap/synced-commit.md`, The design). A record of another boot than this one was written before the machine
 //! last stopped, so what was written after it and not synced may be gone.
 //!
-//! Linux names each boot in `/proc/sys/kernel/random/boot_id`, and Apple's systems in `kern.bootsessionuuid`. Where none
-//! can be had, on Windows until its own is built, the boot is none, which is another boot than any: a process's death
-//! there costs the commits after its last sync, as a loss would, and opens no torn file.
+//! Linux names each boot in `/proc/sys/kernel/random/boot_id`, and Apple's systems in `kern.bootsessionuuid`. Windows
+//! names none, so the first process to ask writes a random value in a registry key made volatile, which Windows keeps
+//! in memory only: gone when the machine stops, and at a logoff too, which then reads as another boot. Where none can
+//! be had the boot is none, which is another boot than any: a process's death there costs the commits after its last
+//! sync, as a loss would, and opens no torn file.
 
 use sha2::{Digest, Sha256};
 
@@ -74,7 +76,71 @@ fn named() -> Option<Vec<u8>> {
     (answered == 0 && !name.is_empty()).then(|| name.to_vec())
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(windows)]
+fn named() -> Option<Vec<u8>> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_BINARY, REG_CREATED_NEW_KEY, REG_OPTION_VOLATILE,
+        RegCloseKey, RegCreateKeyExW, RegQueryValueExW, RegSetValueExW,
+    };
+    let path: Vec<u16> = "Software\\elmdb-boot\0".encode_utf16().collect();
+    let name: Vec<u16> = "boot\0".encode_utf16().collect();
+    let mut key: HKEY = std::ptr::null_mut();
+    let mut disposition = 0u32;
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call, no class or security attributes are
+    // given, and `key` and `disposition` are written by the call alone
+    let created = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            path.as_ptr(),
+            0,
+            std::ptr::null(),
+            REG_OPTION_VOLATILE,
+            KEY_READ | KEY_WRITE,
+            std::ptr::null(),
+            &mut key,
+            &mut disposition,
+        )
+    };
+    if created != ERROR_SUCCESS {
+        return None;
+    }
+    let read = || {
+        let (mut bytes, mut len, mut kind) = ([0u8; 16], 16u32, 0u32);
+        // SAFETY: `key` is open, the name is NUL-terminated, and `bytes` holds the `len` bytes the call may write
+        let answered =
+            unsafe { RegQueryValueExW(key, name.as_ptr(), std::ptr::null(), &mut kind, bytes.as_mut_ptr(), &mut len) };
+        (answered == ERROR_SUCCESS && kind == REG_BINARY && len == 16).then_some(bytes)
+    };
+    let write = || {
+        let mut bytes = [0u8; 16];
+        getrandom::fill(&mut bytes).ok()?;
+        // SAFETY: `key` is open for writing, the name is NUL-terminated, and `bytes` holds the 16 bytes given
+        let written = unsafe { RegSetValueExW(key, name.as_ptr(), 0, REG_BINARY, bytes.as_ptr(), 16) };
+        (written == ERROR_SUCCESS).then_some(())
+    };
+    let named = if disposition == REG_CREATED_NEW_KEY {
+        // The one process to make the key this boot names the boot
+        write().and_then(|()| read())
+    } else {
+        // Another made it, and writes its value just after: waited for, and written here only where that process
+        // died between the two, the value read back being whichever was written last
+        let mut found = None;
+        for _ in 0..100 {
+            found = read();
+            if found.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        found.or_else(|| write().and_then(|()| read()))
+    };
+    // SAFETY: `key` was opened above and is closed once
+    unsafe { RegCloseKey(key) };
+    named.map(|bytes| bytes.to_vec())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 fn named() -> Option<Vec<u8>> {
     None
 }
@@ -86,7 +152,7 @@ mod tests {
     #[test]
     fn this_boot_is_named_the_same_each_time_it_is_read() {
         assert_eq!(this_boot(), this_boot());
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", windows))]
         assert!(this_boot().same(&this_boot()), "the system names its boot");
     }
 
