@@ -4,9 +4,12 @@
 //!
 //! Linux names each boot in `/proc/sys/kernel/random/boot_id`, and Apple's systems in `kern.bootsessionuuid`. Windows
 //! names none, so the first process to ask writes a random value in a registry key made volatile, which Windows keeps
-//! in memory only: gone when the machine stops, and at a logoff too, which then reads as another boot. Where none can
-//! be had the boot is none, which is another boot than any: a process's death there costs the commits after its last
-//! sync, as a loss would, and opens no torn file.
+//! in memory only: gone when the machine stops, and at a logoff too, which then reads as another boot. The key is the
+//! user's, under `HKEY_CURRENT_USER`, the one a process may make volatile without an administrator's rights: a process
+//! of another account, a service among them, reads another boot. Where none can be had the boot is none, which is
+//! another boot than any. Either way a boot read as another costs a process's death the commits after its last sync,
+//! when the next to open the database alone is a process that reads another boot, as a loss would; it opens no torn
+//! file.
 
 use sha2::{Digest, Sha256};
 
