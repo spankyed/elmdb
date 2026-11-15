@@ -154,8 +154,8 @@ is synced and drops it on a command. A writer in a child process dies in a sync 
 syncs; the job drops what wasn't synced and the kernel's copy of the files, and the database opened after, as of another
 boot, must hold what the writer's last finished sync held
 (`a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync`). The same run with the pin turned
-off must fail. The test runs on any directory with a script that drops nothing, where every reopen restores the last
-sync's commit all the same.
+off must fail. The test also asks whether anything was lost: a writer that died between syncs must leave a file that needs
+no restore, and one that died once a sync's data was flushed one that does.
 
 ## Failpoints
 

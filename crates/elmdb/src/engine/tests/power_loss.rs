@@ -443,7 +443,7 @@ fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_
     let lose = std::env::var("ELMDB_LOSSY_LOSE").expect("the job names the script that drops what wasn't synced");
     // Every open here is of another boot than the writer's, as after a restart
     crate::store::forget_the_boot();
-    for round in 0..8 {
+    for round in 0..8usize {
         let path = dir.join(format!("round-{round}"));
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", "engine::tests::power_loss::child_writes_until_it_dies", "--nocapture"])
@@ -461,6 +461,17 @@ fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_
             .unwrap_or_else(|| panic!("round {round}: no sync finished: {said}"));
         let lost = std::process::Command::new("sh").arg(&lose).status().unwrap();
         assert!(lost.success(), "round {round}: the script that drops what wasn't synced failed");
+        // That the filesystem lost something: a writer that died between syncs left the file at its last sync, which
+        // needs no restore, where the commits it made since, kept, would; one that died once a sync's data was
+        // flushed left later commits on disk than its record, which a restore takes back
+        let db = Database::open(&path, OpenOptions { syncs: false, ..Default::default() }).unwrap();
+        let restored = db.open_report().restored.is_some();
+        db.close().unwrap();
+        assert_eq!(
+            restored,
+            round.is_multiple_of(2),
+            "round {round}: restored {restored}, so the filesystem kept what wasn't synced or lost what was"
+        );
         assert_eq!(held_at(&path, COMMITS).as_ref(), Ok(&model_after(synced)), "round {round}, synced at {synced}");
     }
 }
