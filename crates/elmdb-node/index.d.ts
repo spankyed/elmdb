@@ -37,8 +37,8 @@ export declare class Database {
   /** Group commit's syncs so far */
   get syncs(): number
   /**
-   * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of
-   * `{ results: OpResult[], changes: ChangeSet, sequence: number }` once it has committed. `durable` commits it with
+   * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
+   * once it has committed. `durable` commits it with
    * a sync. Refused while a unit is open (`UNIT_OPEN`): writes go through the unit then
    */
   write(batch: Buffer, durable?: boolean | undefined | null): Buffer
@@ -144,7 +144,7 @@ export declare class Database {
 export declare class Unit {
   /**
    * Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
-   * bytes of `{ results: OpResult[] }`
+   * bytes of a `BatchResult`
    */
   write(batch: Buffer): Buffer
   /** Records `value` as the checkpoint `name`, committing with this unit or not at all */

@@ -273,8 +273,8 @@ impl Database {
         self.guarded("Database.syncs", || self.inner.syncs().map(|n| n as f64).map_err(to_js))
     }
 
-    /// Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of
-    /// `{ results: OpResult[], changes: ChangeSet, sequence: number }` once it has committed. `durable` commits it with
+    /// Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
+    /// once it has committed. `durable` commits it with
     /// a sync. Refused while a unit is open (`UNIT_OPEN`): writes go through the unit then
     #[napi]
     pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
@@ -714,7 +714,7 @@ impl Drop for Unit {
 #[napi]
 impl Unit {
     /// Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
-    /// bytes of `{ results: OpResult[] }`
+    /// bytes of a `BatchResult`
     #[napi]
     pub fn write<'env>(&mut self, env: &'env Env, batch: Buffer) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.write", |unit| answer(env, &unit.open()?.write_bytes(&batch).map_err(to_js)?))
