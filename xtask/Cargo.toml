@@ -15,5 +15,9 @@ serde_json.workspace = true
 ts-rs.workspace = true
 tempfile.workspace = true
 
+# The free space a run that builds is held to (`src/build_dir.rs`)
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [lints]
 workspace = true

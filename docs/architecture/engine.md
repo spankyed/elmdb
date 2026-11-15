@@ -281,9 +281,45 @@ an answer:
   in place order, then the entities without a value; `descending`, those first and the values from the greatest. Such
   an index accounts for every entity of its type (`schema.md`, Indexes), which is what lets the walk leave none out.
   Each entity is handed on as its entry is read, so a `limit`, `first` or `exists` after it reads no further than its
-  answer: the first ten of a million read ten. A field holding a string, whose order is the collation's and not its
-  entry's bytes', or a list or another value the index doesn't order, is sorted as before, as are several types, a
-  start of ids, and the trash alone.
+  answer: the first ten of a million read ten. A string is after every number and before the entities without a
+  value, and its order is the collation's, which its entry's bytes don't have: it is read from the order the index
+  keeps of its strings (the next point), where this elmdb filed that order and holds it whole; under any other
+  marker, and under names and values that leave its keys no room, the set is sorted as before. So are a field
+  holding a list or another value the index doesn't order, several types, a start of ids, and the trash alone. A
+  range of numbers holds no string, and is read from the index whatever strings the field holds.
+- **An order of strings is kept beside the index's entries** (`engine/order.rs`, `../roadmap/string-order.md`). A
+  value index a schema declares has, under each tuple of the values before its last field, a key for each string an
+  entry is for, where the collation orders it: the string's sort key as far as the key has room, whether it was cut,
+  and the string (`format.md`, `d/xo`). A write puts the key with the entry's first place and deletes it with its
+  last, so a write that repeats a string another entity holds files nothing. An entity holding a string with no
+  such key, one past 256 bytes or one whose zero bytes make it as long in a key, has a key of its own, by its place.
+  A read walks the keys, forwards or from the last, and reads each string's entities from its entry, in place
+  order. Keys of one sort key are a run: strings the collator holds equal, in the order of their bytes, are handed
+  on as they are walked, and a run whose sort key was cut, or that holds an entity filed by its place, is ordered
+  by the collator and then the bytes before any of it is, from the strings in its keys and the rows of the entities
+  filed by place. A sort key is the collator's output and is stale after any change to it, so an order has a marker
+  (`d/xob`): the stamp of the collator that filed it, a build, and whether the build is whole. A read trusts keys
+  under a whole build of its own stamp. A write that files a string or takes one out reads the marker: under its own
+  stamp it files under the marker's build, and under another's it deletes the marker and files nothing, which ends
+  that build, since what the other would have filed is its layout's. The builder builds the order of a built index
+  whose marker isn't its own and whole, from the index's entries and the rows of its long strings, beside the writes
+  that keep it, and deletes what is under any other build; `rebuild()` files an order whole under a build of its
+  own, and an index marked built with no entity has its order whole with it. A `range` with string bounds reads
+  the same keys, alone, counted, among a type's leading filters and before an order: it seeks the run of each
+  bound's sort key and walks between them, and tests each string it comes to against the bounds by the collator,
+  which is what a bound whose sort key was cut, and one the collator holds equal to a string of other bytes, ask. A build this builder began and finds
+  ended is begun again after a wait that doubles, so two elmdbs of different collators writing one database leave
+  its orders to the rows more of the time the longer both stay.
+- **An order taken whole is resolved in the order of its keys.** An order read from an index with no `limit` after
+  it, under a terminal that answers of every entity, reads the places first and names the entities at them by one
+  walk of the type's entities in place order, putting the ids back in the order's, where naming each as it is
+  handed on is a seek for each; the entries of its strings are met by one walk of the index's entries the same way
+  when they are 256 or more. Its strings are kept as the bytes of their parts of the order's keys, and sorted by
+  them for that walk, which is their entries' order: only a run of keys the collator orders again is decoded, one
+  of a cut sort key or holding an entity filed by its place, and every run under a range. An order of fewer than
+  one in eight of the type's live entities, which equalities or a range keep, names each by its own seek, and one a `limit`, `first` or `exists` may stop is handed on an entity
+  at a time, so a page reads its own. It holds its places in memory, and a tracked read of a whole order is one a
+  commit to any entity of the type writes into.
 - **A least and a greatest are an order's ends.** `least` and `greatest` of a field over a set an order of that
   field would be read from an index for (the points on either side of this one) answer the first entry under the index's least
   value or under its greatest, the first in place order of those holding it, passing over an entry of an entity the
@@ -296,7 +332,8 @@ an answer:
   `orderBy n`, then `limit 10` reads ten entries of an index on `[status, n]`, and a page after a cursor is sought
   in it as in any order read from an index. A list in an equality's field is under each of its elements
   (`schema.md`, Indexes), so `where tags = x`, then `orderBy updatedAt`, reads an index on `[tags, updatedAt]`.
-  The index is read while, under those values, it holds no entity it doesn't order and no entry of a string;
+  The index is read while, under those values, it holds no entity it doesn't order and no string, in an entry or
+  among the long ones;
   otherwise the equalities are filtered and their matches sorted. What an entity under other values holds leaves
   the read alone: one task with a list for its number has its own status sorted, and no other.
 - **With no such index, the order is walked while that is the cheaper way.** An `orderBy` straight before a `limit`,
@@ -369,11 +406,14 @@ what it answers); and `ms` the time spent in the stage's own code, not in the st
 the stages' times add up to at most the whole. A filter before the stage that reads a type start's filters together
 visits and keeps nothing of its own: that stage does its filtering. An `orderBy` stage that sorted, or walked its
 order testing the filters, for want of an index that reads it in order says which would have: `wants` names that
-index's fields, the equalities' and then its own, where the field is declared a number or a boolean or is a time the
-engine writes, whose order an index's entries have, and each equality is of a field the schema lets an index name.
-So does a `range` the `orderBy` after it reads between. A `search` stage says how many of its matches it `held` to
-rank them: every one, or those ranked past a page's cursor, and of either no more than it was asked for; none when it
-was asked for any one. A search that held every match before a `limit` further on is one a filter stands between.
+index's fields, the equalities' and then its own, where the field is declared a number, a boolean, a string, an enum
+or a `ref`, or is a time the engine writes, whose order an index has, and each equality is of a field the schema lets
+an index name. So does a `range` the `orderBy` after it reads between. One that sorted strings though a built index
+reads its order says why that order wasn't read: `sorted: "noRoom"` where the index's names and the equalities'
+values leave its order's keys no room, and `sorted: "building"` where its order isn't yet one this elmdb filed
+whole. A `search` stage says how many of its matches it `held` to rank them: every one, or those ranked past a
+page's cursor, and of either no more than it was asked for; none when it was asked for any one. A search that held
+every match before a `limit` further on is one a filter stands between.
 A stage that read lists of places, or walked a type's rows, says how many `places` it was handed, each one walked
 or sought; `set: "and"` when it read the places several lists hold in common; and a `search` that ran within its
 filters' places names their indexes as its `index` and says how many places it ran `within`.
@@ -510,8 +550,9 @@ Every commit produces a change set: the entities created, changed, trashed, rest
 fields and relation kinds touched, each relation with its ends as they are and, for one the commit moved, the ends it
 had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
-checkpoint does not raise it). A batch's result carries
-the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
+checkpoint does not raise it). A database's write answers each operation's result and the commit's change set, which
+holds its sequence, and across the binding the three cross as `Written` (generated as `protocol/Written.ts`); a unit's
+commit answers its change set, whose `sequence` is the commit's, and a unit's write its results alone (`BatchResult`). So a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
 in either order. `db.sequence` is the last commit's.
 
@@ -597,7 +638,10 @@ unit is open.
 - `reset()`: every entry removed but the database's own (its format and schema), in one durable unit.
 - `stats()`: entities per type (live and trashed), each field's entities and bytes, relations per kind, entries per
   index, the database's entries, file and map sizes; `indexStatus()` says which value and rank indexes are built, the
-  built-in `shortCode` and `role` among them; it does not report text, trigram or vector indexes.
+  built-in `shortCode` and `role` among them, and of a value index that keeps an order of its strings whether a read
+  takes it (`ordered`) and the `room` the type's and the index's names leave a sort key in its keys, before a
+  compound index's leading values take theirs: 0 where they leave none, and its strings are sorted as they are
+  read; it does not report text, trigram or vector indexes.
 - `check()`: derives every derived key from primary data and compares it with what is stored (a built index's entries
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type

@@ -22,7 +22,9 @@ failure. It checks what is committed, and refuses a tree with uncommitted change
 cargo xtask pre-push              # cheapest first; --base REF when the branch merges into another than origin/main
 ```
 
-What it can't run is CI's: the other platforms' builds and suites, and the Valgrind readings.
+It sweeps the build directories first and refuses to start below 20 GB free (`cargo xtask sweep`, `testing.md`, The
+build directory). What it can't run is CI's: the other platforms' builds and suites, and the Valgrind readings. A
+mutated or scratch copy of the tree builds with `CARGO_TARGET_DIR=$(cargo xtask scratch-target)`.
 
 While working, run what your change touches:
 
@@ -33,7 +35,9 @@ cargo nextest run --workspace  # each test in its own process, under .config/nex
 cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
+cargo xtask check-icu-exact      # every ICU crate required at exactly its locked version: stored sort keys are stamped with them
 cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
+cargo xtask check-commits        # a write transaction is committed in store/commits.rs and nowhere else in the engine
 cargo xtask check-mutant-exclusions  # every `// mutant-skip:` and exclude_re still names a mutant (needs cargo-mutants)
 npm run build && npm run typecheck && npm test   # the binding, from the root package's tooling
 cargo xtask check-diagnostics-off && cargo xtask check-leiden-serial  # what the dependency tree may hold

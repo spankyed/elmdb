@@ -64,15 +64,29 @@ mutant that keeps one growing fails its test instead of filling the disk.
 
 ## The build directory
 
-Cargo never removes an artifact from a build directory: a build of other code, or the same code with other features
-(`diagnostics` on and off), hashes a new one beside the last. So:
+Cargo never removes an artifact from a build directory: a build with other dependencies, features (`diagnostics` on
+and off), flags (the models' `--cfg`) or profile hashes a new one beside the last, where an edit of a crate's own code
+builds over its old one. Branches differ in just those, so a long-lived build directory grows with every branch built
+in it. So:
 
 - **A worktree builds into its own `target/`**, and removing the worktree frees it. Pointing several checkouts at one
   build directory with `CARGO_TARGET_DIR` saves a cold build per worktree, but removing a worktree then frees nothing,
   and the shared directory grows with every branch any of them built.
-- **A long-lived build directory is swept:** `cargo xtask sweep` removes what a toolchain no longer installed made,
-  what no build has used for 14 days, and then the oldest until it is under 15 GB, through `cargo-sweep` (`cargo
-  install cargo-sweep --version '=0.8.0' --locked`).
+- **Every build directory a checkout uses is swept, by `pre-push` before it builds anything:** the checkout's target,
+  the concurrency models' (`target/loom`, `target/shuttle`) and the scratch target. `cargo xtask sweep` removes, through
+  `cargo-sweep` (`cargo install cargo-sweep --version '=0.8.0' --locked`), what a toolchain no longer installed made,
+  what no build has used for 14 days, and then the oldest until the target and the scratch target are under 15 GB
+  each and a model's under 5 GB. It then removes the incremental compilation directories cargo-sweep leaves, one for
+  each variant of a crate ever built: those no build has written to for 14 days, and all but the two latest of a
+  crate's, leaving any a build wrote to in the last hour, which may be another checkout's running now
+  (`xtask/src/build_dir.rs`).
+- **A mutated or scratch copy of the tree builds into the scratch target**, `CARGO_TARGET_DIR=$(cargo xtask
+  scratch-target)`, beside the checkout's target and not in it: one directory for every such copy, whatever its path,
+  which the sweep bounds with the rest, where a target in a copy's own directory would be left behind with it.
+- **A run that builds is refused below 20 GB free:** `pre-push` once it has swept, and `scripts/mutants-in-diff.py`,
+  whose copies build from cold in the system's temporary directory. Started with less, a run fills the disk part way
+  through, and the builds and tests running beside it with it. A CI runner, whose disk is its run's alone and holds
+  less than that, isn't held to it (`CI` set).
 - **Dev and test builds carry line tables, not full debug info** (`[profile.dev]` in `Cargo.toml`, which has the
   reading): backtraces keep their files and lines, and `CARGO_PROFILE_DEV_DEBUG=full` gives one build a debugger's view
   of locals.
@@ -272,6 +286,23 @@ one too, over every entity and kind of edge its workload writes: after each step
 the index's nodes to the model's live entities and its scores within their bound of `rank`, and the bound itself within
 the tolerance, since every state of the index is within the bound it reports whether its drain ran or not.
 
+The order a value index keeps of its strings has its specs in `engine/tests/order.rs` and `engine/order.rs`
+(`../roadmap/string-order.md`). Of its keys: a sort key's bytes held to the collator's comparison over eleven
+collations, cut at any room, and every key to 511 bytes over random names, values and strings; a key there while
+its entry holds a place, through an entry that passes into blocks and back; the keys of entities filed by their
+place; a `rebuild()`, a builder's units of one key each and a build gone on with, each held to the same keys; and
+`check()` reporting a key removed, added and moved. Of its marker: a model
+(`no_read_trusts_a_build_lacking_a_key_whatever_order_the_units_of_two_elmdbs_come_in`) runs every order of four
+units, and three thousand of twelve, drawn from the writes of two elmdbs whose collations differ, a unit of each
+one's builder, a `rebuild()` and the index dropped, in one transaction it rolls back, and holds after each unit
+that under a whole marker of an elmdb's own stamp the keys are exactly those of the index's strings as that
+elmdb's collator files them, and that an unbuilt index has neither marker nor key. It fails on a copy in which a
+write files under another stamp's marker, and on one in which a build's number is used twice; a copy in which a
+build's units hold the marker to their build and not their stamp passes it, no two builds of a database sharing a
+number, so that check is held by no test. Of its reads: `engine/tests/ordered.rs` holds an order, a page, a range
+and a count of strings read from the index to the same plan over a field with no index, which is sorted and
+filtered from the rows, with what each visited.
+
 ## Tracked reads
 
 `engine/tracking/tests.rs` holds the interval index to a brute-force scan of every read set, through random adds,
@@ -294,6 +325,11 @@ through `crate::sync::model`, so one model runs under either.
 xtask's `UNMODELLED` with the reason (a lock no model provides, state no model covers yet, a test-only failure point),
 and fails on a listed file that no longer does. So new shared state is modelable by default, and the list says what
 isn't modelled yet: a model of one is how its file leaves the list.
+
+**Every write transaction is committed in one module.** `cargo xtask check-commits` fails when engine code outside
+`store/commits.rs` commits one: a unit's, a new environment's first, the vector graphs' databases' and the
+checkpoint's after a reset all pass through it. What must hold of every commit is then held in one place
+(`../roadmap/synced-commit.md`), and a commit can't be added that the place never hears of.
 
 `store/unit_slot.rs`'s model is whether a unit holds the environment's one write transaction. It holds that a
 plain write never goes on to take the writer while a unit is reserved, that of two units one reserves, and that a
@@ -534,6 +570,10 @@ binary. `read-allocations` counts each read's allocations with dhat. Readings: `
 `search-cost [NOTES [TIMES]]` prints what a search's best ten, its count and all its ids cost, for a word every note
 holds and one a twelfth hold, over 200,000 notes unless told otherwise; with TIMES it reads the first that many times
 and prints nothing, for a sampler.
+`profile-order FIELD [NOTES [ITERATIONS [DIR]]]` reads every note in the order of `name`, a string no other note
+holds, or of `n`, a number, over a million notes as `against-sqlite.mjs` loads them unless told otherwise; it checks
+the answer against a sort, then repeats the read, printing each one's milliseconds, and given DIR it loads the notes
+there once and reads them again on later runs.
 
 **The gates shown failing.** `scripts/check-maintenance-verification.py --output <new directory>` archives the source
 with current changes into a disposable directory, restores the export and value collectors that held whole collections,
@@ -574,10 +614,10 @@ commit at a twentieth of the notes and at all of them, for a note of three terms
 of wall time and as the process's CPU per commit; the best ten and the count for a word every note holds and one a
 twelfth hold, ten of the first word's matches past a cursor near the end of them, and whether it has a match; a
 misspelled word; the ten lowest and the ten highest of an indexed number, the ten lowest of the half of the notes a
-status keeps, the count of the last 500 of it, and a page of fifty near the end of creation order and one near the
-end of the number's order; of the names' order, its first ten, a page of fifty near the end of the loaded notes', the
-count by a range of the loaded notes' last (200 at a million notes), and every note in it, which is mostly the time
-to hand over that many ids; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
+status keeps, the count of the last 500 of it, a page of fifty near the end of creation order and one near the
+end of the number's order, and every note in the number's order; of the names' order, its first ten, a page of fifty
+near the end of the loaded notes', the count by a range of the loaded notes' last (200 at a million notes), and every
+note in it; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
 elsewhere in the order, and one that gives each the other status, neither stamping the notes as changed, which
 SQLite's table has no column for; a check, a rebuild and a compaction. For elmdb alone it also reads how many
 entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine, and the
