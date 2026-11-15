@@ -11,9 +11,13 @@
 //! unmapping the file and mapping it again. Each of those holds the gate for reading too.
 
 mod backup;
+mod boot;
 mod commits;
 mod idle_reads;
+mod kept;
 mod reach;
+mod record;
+mod restore;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;
 pub(crate) use backup::publish_new;
@@ -21,6 +25,8 @@ pub mod sync;
 mod unit_slot;
 pub(crate) mod wake;
 mod writers;
+#[cfg(test)]
+pub(crate) use record::{RECORD as RECORD_FILE, of_another_boot as record_of_another_boot};
 pub(crate) use writers::WriterLock;
 
 use std::collections::HashSet;
@@ -41,6 +47,8 @@ use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
 use crate::sync::PlainMutex;
 use idle_reads::IdleReads;
+use kept::Kept;
+use record::Mode;
 use sync::{Durable, GroupCommit, Policy, Syncer, SystemClock};
 use unit_slot::UnitSlot;
 
@@ -124,6 +132,8 @@ struct Opening<'a> {
     /// The database's directory
     dir: &'a Path,
     read_only: bool,
+    /// The grouped mode's pin and record, once the open has them: its own commits hold the pin as every write does
+    kept: Option<&'a Arc<Kept>>,
 }
 
 impl<'a> Opening<'a> {
@@ -132,15 +142,21 @@ impl<'a> Opening<'a> {
     fn begin<T>(&self, begin: impl Fn() -> heed::Result<T>) -> Result<T> {
         loop {
             match begin() {
-                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                    run_point!(OPEN_MAP_GROWN);
-                    // SAFETY: the transaction refused was the open's one, so none is open in this process, which
-                    // LMDB requires, and no other thread holds the environment yet: the open begins its last
-                    // transaction before it starts group commit's thread
-                    unsafe { adopt_grown_map(self.env, self.dir, self.read_only) }?;
-                }
+                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => self.adopt()?,
                 begun => return Ok(begun?),
             }
+        }
+    }
+
+    /// Takes the map size another process grew the file to, the pin ended first
+    fn adopt(&self) -> Result<()> {
+        run_point!(OPEN_MAP_GROWN);
+        match self.kept {
+            Some(kept) => kept.adopt(),
+            // SAFETY: the transaction refused was the open's one, so none is open in this process, which LMDB
+            // requires, and no other thread holds the environment yet: the open begins its last transaction before
+            // it starts group commit's thread
+            None => unsafe { adopt_grown_map(self.env, self.dir, self.read_only) },
         }
     }
 
@@ -149,9 +165,23 @@ impl<'a> Opening<'a> {
         self.begin(|| read_txn(env))
     }
 
-    fn write(&self) -> Result<heed::RwTxn<'a>> {
-        let env = self.env;
-        self.begin(|| env.write_txn())
+    /// A write transaction, begun once the pin is made sure of where the open keeps one
+    fn write(&self) -> Result<(heed::RwTxn<'a>, Option<kept::Writing>)> {
+        loop {
+            let writing = self.kept.map(|kept| kept.ensure_pin(&|| self.adopt())).transpose()?;
+            match self.env.write_txn() {
+                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                    drop(writing);
+                    self.adopt()?;
+                }
+                // mutant-skip: replace match guard self.kept.is_some_and\(\|kept\| !kept.pinned\(\)\) with false in Opening<'a>::write
+                // A pin ended between its making sure of it and here, which at an open nothing does: no other thread
+                // holds the environment yet, and the open takes a grown map only once this write is refused, before
+                // it makes sure of its pin again. Held as every write is, and `commits` refuses a commit without it
+                Ok(txn) if self.kept.is_some_and(|kept| !kept.pinned()) => txn.abort(),
+                begun => return Ok((begun?, writing)),
+            }
+        }
     }
 }
 
@@ -230,7 +260,8 @@ fn extend_to_its_pages(
 ) -> Result<()> {
     let env = opening.env;
     let _writer = writers.hold()?;
-    let txn = opening.write()?;
+    // No commit: the file made longer with zeros, before any pin is kept
+    let (txn, _) = opening.write()?;
     let needed = (env.info().last_page_number as u64 + 1) * page as u64;
     // mutant-skip: replace < with <= in extend_to_its_pages
     // A file of exactly those pages would be set to the length it has
@@ -256,6 +287,15 @@ impl Drop for Reserved<'_> {
     fn drop(&mut self) {
         self.0.end_unit();
     }
+}
+
+/// What a write's claim of the write transaction came to
+enum Claimed<'a, H> {
+    Held(RwTxn<'a>, H),
+    /// Another process grew the file past this process's map
+    MapResized,
+    /// The pin the write made sure of was ended, by a growth, before the transaction began
+    Unpinned,
 }
 
 /// How many times one write grows the map before giving up with `MAP_FULL`
@@ -350,6 +390,19 @@ pub struct Store {
     touched: PlainMutex<Option<crate::engine::changed::Touched>>,
     /// How far this handle has accounted for every commit, and whether one since it last answered was another's
     accounted: PlainMutex<Accounted>,
+    /// The grouped mode's pin and record (`kept`), in a writable store of that mode
+    kept: Option<Arc<Kept>>,
+    /// The commit a restore took the database back to at this open or an earlier one, which no caller has read: the
+    /// notice an open reports (`docs/roadmap/synced-commit.md`, The design), read so far by the tests alone
+    #[cfg_attr(not(test), allow(dead_code))]
+    restored: Option<u64>,
+    /// The record beside the data file named another file than this one, which was opened as it is; reported with
+    /// the notice
+    #[cfg_attr(not(test), allow(dead_code))]
+    not_borne_out: bool,
+    /// The lock that says this process has the database open, held shared until the environment has closed: an open
+    /// that finds it unheld may restore the file. Last, so it is let go after everything else a dropped store holds
+    presence: Option<std::fs::File>,
 }
 
 /// Every commit up to `through` is one this handle made or has noticed; `elsewhere` says another's was among them since
@@ -455,6 +508,17 @@ impl Store {
         }
         let mut registration = Registration(Some(canonical.clone()));
 
+        // Before LMDB opens the file: the record says whether it opens as it is or at the last synced commit, which a
+        // restore takes it to (`restore.rs`)
+        let mode = (!options.read_only).then_some(match (options.sync_each_commit, options.syncs) {
+            (true, _) => Mode::Ordered,
+            (false, true) => Mode::Grouped,
+            (false, false) => Mode::Unsynced,
+        });
+        let boot = boot::this_boot();
+        let restore::Decided { presence, record, remembered, restored, not_borne_out } =
+            restore::decide(&canonical, mode, boot)?;
+
         let file_bytes = std::fs::metadata(&data).map(|m| m.len()).unwrap_or(0);
         let open = |flags: EnvFlags| {
             let mut builder = EnvOpenOptions::new().read_txn_without_tls();
@@ -510,7 +574,7 @@ impl Store {
         let mut file = std::fs::OpenOptions::new().read(true).write(!options.read_only).open(&data)?;
         let page = page_size_of(&mut file, &data)?;
         run_point!(OPEN_ENV);
-        let opening = Opening { env: &env, dir: &canonical, read_only: options.read_only };
+        let opening = Opening { env: &env, dir: &canonical, read_only: options.read_only, kept: None };
         if options.read_only {
             // Before the walk, which holds a snapshot by a read transaction: one no lock table registers holds none
             registered(&env, &canonical, &opening.read()?)?;
@@ -521,7 +585,29 @@ impl Store {
         if short && !options.read_only {
             extend_to_its_pages(&opening, &writers, &file, page)?;
         }
+        let gate = Arc::new(RecursiveRwLock::new(()));
+        let idle = IdleReads::new()?;
+        let kept = match (mode, record) {
+            (Some(Mode::Grouped), Some(record)) => Some(Arc::new(Kept::new(
+                env.clone(),
+                Arc::clone(&gate),
+                idle.clearer(),
+                &canonical,
+                page,
+                boot,
+                record,
+                remembered,
+            )?)),
+            _ => None,
+        };
+        let opening = Opening { kept: kept.as_ref(), ..opening };
         let db = Self::open_db(&opening, &writers)?;
+        // The open's record: its newest commit synced and named before the first write of a unit
+        if let Some(kept) = &kept
+            && kept.settle(&|| opening.adopt())?
+        {
+            run_point!(OPEN_SYNCED);
+        }
         // Read before group commit's thread is started, the last of the open's transactions: none is begun, and no
         // map taken at a new size, once another thread holds the environment
         let sequence = {
@@ -533,15 +619,13 @@ impl Store {
             let txn = opening.read()?;
             stored_epoch(&txn, db)?
         };
-        let gate = Arc::new(RecursiveRwLock::new(()));
-        let commit = (!options.read_only && options.syncs && !options.sync_each_commit).then(|| {
+        let commit = kept.as_ref().map(|kept| {
             GroupCommit::start(
                 Policy::new(options.sync_idle, options.sync_interval),
-                Box::new(EnvSyncer { env: env.clone(), gate: Arc::clone(&gate), path: canonical.clone() }),
+                Box::new(EnvSyncer { kept: Arc::clone(kept) }),
                 Box::new(SystemClock),
             )
         });
-        let idle = IdleReads::new()?;
         registration.0 = None;
         let wake = wake::Wake::new(&canonical);
         let accounted = PlainMutex::<Accounted>::default();
@@ -572,13 +656,17 @@ impl Store {
             deposited: PlainMutex::default(),
             touched: PlainMutex::default(),
             accounted,
+            kept,
+            restored,
+            not_borne_out,
+            presence: Some(presence),
         })
     }
 
     /// The environment's elmdb database, checked to be in this version's format; a new environment's is created and
     /// stamped first
     fn open_db(opening: &Opening<'_>, writers: &writers::Writers) -> Result<Db> {
-        let Opening { env, dir: path, read_only } = *opening;
+        let Opening { env, dir: path, read_only, .. } = *opening;
         let rtxn = opening.read()?;
         let (db, main) = env
             .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
@@ -617,8 +705,9 @@ impl Store {
         }
         // A new environment: its database and stamp in one unit, synced, before anything else is written
         let writer = writers.hold()?;
-        let wtxn = opening.write()?;
-        let db = commits::create_databases(env, wtxn, |opener, wtxn| -> Result<_> {
+        let (wtxn, writing) = opening.write()?;
+        let kept = opening.kept.map(|kept| &**kept);
+        let db = commits::create_databases(env, wtxn, kept, |opener, wtxn| -> Result<_> {
             let db = opener.create_database::<Bytes, Bytes>(wtxn, Some(format::DB_NAME))?;
             // A test's stand-in for a disk that fills while a new environment is stamped
             failure_point!(STAMP at path, Error::new(ErrorCode::Io, "No space left on device"));
@@ -631,6 +720,7 @@ impl Store {
         })?
         .unwrap_commit();
         // Let go before the graphs' transaction, which takes it again
+        drop(writing);
         writer.release();
         opened_synced(env)?;
         Self::with_graphs(opening, db, writers)
@@ -656,17 +746,22 @@ impl Store {
             return Ok(Db { main, cosine, euclidean });
         }
         let writer = writers.hold()?;
-        let wtxn = opening.write()?;
-        let (cosine, euclidean) = commits::create_databases(env, wtxn, |opener, wtxn| -> heed::Result<_> {
+        let (wtxn, writing) = opening.write()?;
+        let kept = opening.kept.map(|kept| &**kept);
+        let (cosine, euclidean) = commits::create_databases(env, wtxn, kept, |opener, wtxn| -> Result<_> {
             let cosine = opener.create_database(wtxn, Some(format::COSINE_GRAPHS))?;
             let euclidean = opener.create_database(wtxn, Some(format::EUCLIDEAN_GRAPHS))?;
             Ok(CommitOrAbort::<_, ()>::Commit((cosine, euclidean)))
         })?
         .unwrap_commit();
         // The open's last commit, and synced as its first is: group commit, which syncs a unit's, isn't started yet
-        // and hears of neither, so left unsynced it would stay so until some unit's commit brought a sync
+        // and hears of neither, so left unsynced it would stay so until some unit's commit brought a sync. The grouped
+        // mode's open syncs it as it writes its record (`Kept::settle`)
+        drop(writing);
         writer.release();
-        opened_synced(env)?;
+        if opening.kept.is_none() {
+            opened_synced(env)?;
+        }
         Ok(Db { main, cosine: Some(cosine), euclidean: Some(euclidean) })
     }
 
@@ -762,20 +857,33 @@ impl Store {
         let mut growths = 0;
         loop {
             run_point!(WRITE_RESERVATION);
+            // Before the write lock, and before the transaction, which may write pages before it commits
+            let writing = self.ensure_pin()?;
+            run_point!(WRITE_PINNED);
             // Claimed under the unit's lock: a unit that slipped between the earlier check and write_txn would leave
             // this caller waiting on the unit's writer while it holds a schema guard
             let claimed = self.unit.claim_writer(|| {
                 let guard = self.gate();
                 let writer = self.writers.hold()?;
                 match self.env.write_txn() {
-                    Ok(txn) => Ok(Some((txn, (guard, writer)))),
-                    Err(heed::Error::Mdb(heed::MdbError::MapResized)) => Ok(None),
+                    Ok(txn) if !self.pinned() => {
+                        txn.abort();
+                        Ok(Claimed::Unpinned)
+                    }
+                    Ok(txn) => Ok(Claimed::Held(txn, (guard, writer))),
+                    Err(heed::Error::Mdb(heed::MdbError::MapResized)) => Ok(Claimed::MapResized),
                     Err(e) => Err(Error::from(e)),
                 }
             })??;
-            let Some((mut txn, guard)) = claimed else {
-                self.adopt_map_size()?;
-                continue;
+            let (mut txn, guard) = match claimed {
+                Claimed::Held(txn, guard) => (txn, guard),
+                Claimed::MapResized => {
+                    drop(writing);
+                    self.adopt_map_size()?;
+                    continue;
+                }
+                // A growth ended the pin between its making sure of it and the transaction's beginning
+                Claimed::Unpinned => continue,
             };
             op.record_elapsed(names::WAITED_US);
             // Only what this write hands over reaches its commit, not what an aborted one left: a replacement that failed
@@ -786,6 +894,7 @@ impl Store {
             run_point!(WRITE_HELD);
             let outcome = f(&mut txn, self.db).and_then(|t| self.commit_txn(txn).map(|sequence| (t, sequence)));
             drop(guard);
+            drop(writing);
             match outcome {
                 Ok((t, sequence)) => {
                     let synced = self.committed(durable);
@@ -799,6 +908,16 @@ impl Store {
                 Err(e) => return Err(e),
             }
         }
+    }
+
+    /// Makes sure this process holds the grouped mode's pin, for a write about to begin its transaction
+    fn ensure_pin(&self) -> Result<Option<kept::Writing>> {
+        self.kept.as_ref().map(|kept| kept.ensure_pin(&|| self.adopt_map_size())).transpose()
+    }
+
+    /// Whether the pin a write made sure of is held still, which it checks once its transaction has begun
+    fn pinned(&self) -> bool {
+        self.kept.as_ref().is_none_or(|kept| kept.pinned())
     }
 
     fn check_writable(&self) -> Result<()> {
@@ -841,7 +960,7 @@ impl Store {
         // Held from before the commit is visible until it is accounted for, so an answer never sees it half done
         let mut accounted = self.accounted.lock();
         let skipped = last > accounted.through;
-        commits::commit(txn)?;
+        commits::commit(txn, self.kept.as_deref())?;
         accounted.elsewhere |= skipped;
         accounted.through = next;
         drop(accounted);
@@ -987,6 +1106,10 @@ impl Store {
         self.drop_idle();
         if let Some(commit) = &self.commit {
             commit.on_commit();
+            // What the pin holds back makes a sync due as well as the time does
+            if self.kept.as_ref().is_some_and(|kept| kept.past_bound()) {
+                commit.due_now();
+            }
             if durable {
                 commit.durable().wait()?;
             }
@@ -1010,28 +1133,43 @@ impl Store {
         self.check_writable()?;
         // Claimed under the unit's lock, as a write claims its own: a unit that began between a check and the claim
         // would keep the writer's turn for as long as it is open, and this would wait for it with the gate held
-        let (txn, held) = self
-            .unit
-            .claim_writer(|| {
-                let guard = self.gate();
-                let writer = self.writers.hold()?;
-                run_point!(RESET_CLAIMING);
-                self.drop_idle();
-                Ok::<_, Error>((self.env.write_txn()?, (guard, writer)))
-            })
-            .map_err(|_| Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped"))??;
-        // Declared after its holds, so it ends before they are let go
-        let _held = held;
-        let mut txn = txn;
-        let key = meta_key(meta::SEQUENCE);
-        let value = self
-            .db
-            .get(&txn, &key)?
-            .ok_or_else(|| Error::new(ErrorCode::Corrupted, "Reset has no committed sequence"))?
-            .to_vec();
-        self.db.put(&mut txn, &key, &value)?;
-        failure_point!(RESET_CHECKPOINT, Error::new(ErrorCode::Io, "Injected reset checkpoint failure"));
-        commits::commit(txn)?;
+        {
+            let (txn, held) = loop {
+                let writing = self.ensure_pin()?;
+                let claimed = self
+                    .unit
+                    .claim_writer(|| {
+                        let guard = self.gate();
+                        let writer = self.writers.hold()?;
+                        run_point!(RESET_CLAIMING);
+                        self.drop_idle();
+                        Ok::<_, Error>((self.env.write_txn()?, (guard, writer)))
+                    })
+                    .map_err(|_| {
+                        Error::new(ErrorCode::UnitOpen, "A unit is open; reset page recycling is skipped")
+                    })??;
+                if self.pinned() {
+                    break (claimed.0, (claimed.1, writing));
+                }
+            };
+            // Declared after its holds, so it ends before they are let go
+            let _held = held;
+            let mut txn = txn;
+            let key = meta_key(meta::SEQUENCE);
+            let value = self
+                .db
+                .get(&txn, &key)?
+                .ok_or_else(|| Error::new(ErrorCode::Corrupted, "Reset has no committed sequence"))?
+                .to_vec();
+            self.db.put(&mut txn, &key, &value)?;
+            failure_point!(RESET_CHECKPOINT, Error::new(ErrorCode::Io, "Injected reset checkpoint failure"));
+            commits::commit(txn, self.kept.as_deref())?;
+        }
+        // Then the pin at the checkpoint's commit, the sync and the record, its holds let go: a load after the reset
+        // may use the pages the reset freed only once no pin is at a commit before it
+        if let Some(kept) = &self.kept {
+            kept.sync(&|| self.adopt_map_size())?;
+        }
         Ok(())
     }
 
@@ -1058,9 +1196,13 @@ impl Store {
             }
             run_point!(UNIT_RESERVED);
             loop {
+                let writing = self.ensure_pin()?;
+                run_point!(UNIT_PINNED);
                 let guard = self.gate.read_arc();
-                let writer = self.writers.hold()?;
+                let writer = self.writers.hold()?.writing(writing);
                 match self.env.write_txn() {
+                    // A growth ended the pin between its making sure of it and the transaction's beginning
+                    Ok(txn) if !self.pinned() => txn.abort(),
                     Ok(txn) => {
                         op.record_elapsed(names::WAITED_US);
                         // A unit's commit adds what it touched to whatever is deposited then, so what a refused or
@@ -1160,6 +1302,10 @@ impl Store {
         self.check_writable()?;
         let _gate = self.gate.write();
         self.drop_idle();
+        // A pin is a transaction too: the write that grows makes sure of it again before it runs again
+        if let Some(kept) = &self.kept {
+            kept.end_pin();
+        }
         let size = self.env.info().map_size;
         let grown = size.saturating_mul(2).div_ceil(MAP_STEP) * MAP_STEP;
         #[cfg(test)]
@@ -1175,6 +1321,9 @@ impl Store {
 
     /// Takes the map size another process grew the file to
     fn adopt_map_size(&self) -> Result<()> {
+        if let Some(kept) = &self.kept {
+            return kept.adopt();
+        }
         let _gate = self.gate.write();
         self.drop_idle();
         // SAFETY: as in `grow`
@@ -1205,11 +1354,13 @@ impl Store {
             None => Ok(()),
         };
         // LMDB closes the environment once its last handle goes, which dropping the store and its idle read
-        // transactions is
+        // transactions is. The lock that says it is open goes only once it has closed
         self.idle.close();
+        let presence = self.presence.take();
         let closed = self.env.clone().prepare_for_closing();
         drop(self);
         closed.wait();
+        drop(presence);
         synced
     }
 
@@ -1226,7 +1377,10 @@ impl Store {
                         "The map was being grown as the process exited, so what was owed wasn't synced",
                     ));
                 };
-                self.env.force_sync().map_err(Into::into)
+                match &self.kept {
+                    Some(kept) => kept.sync_at_exit(),
+                    None => self.env.force_sync().map_err(Into::into),
+                }
             }
             None => Ok(()),
         }
@@ -1255,6 +1409,46 @@ impl Store {
         backup::copy(self, target)
     }
 
+    /// The commit a restore took the database back to, at this open or an earlier one, until a caller says it read so
+    #[cfg(test)]
+    pub(crate) fn restored(&self) -> Option<u64> {
+        self.restored
+    }
+
+    /// Whether the record beside the data file named another file than this one, which was opened as it is
+    #[cfg(test)]
+    pub(crate) fn not_borne_out(&self) -> bool {
+        self.not_borne_out
+    }
+
+    /// The syncs of the record file this process's syncs have made, for a test
+    #[cfg(test)]
+    pub(crate) fn record_syncs(&self) -> u64 {
+        self.kept.as_ref().map_or(0, |kept| kept.record_syncs.load(Ordering::Relaxed))
+    }
+
+    /// Turns the grouped mode's pin off, its transaction ended as soon as it is begun, to show what is lost without it
+    #[cfg(test)]
+    pub(crate) fn unpin(&self) {
+        if let Some(kept) = &self.kept {
+            kept.unpinned.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Sets the fixed part of the bound past which what the pin holds back makes a sync due, for a test
+    #[cfg(test)]
+    pub(crate) fn set_bound(&self, bytes: u64) {
+        if let Some(kept) = &self.kept {
+            kept.set_bound(bytes);
+        }
+    }
+
+    /// The record's commit this process relies on, for a test
+    #[cfg(test)]
+    pub(crate) fn remembered(&self) -> Option<u64> {
+        self.kept.as_ref().and_then(|kept| kept.remembered())
+    }
+
     /// Bytes the data file holds on disk
     pub fn file_size(&self) -> u64 {
         std::fs::metadata(self.path.join("data.mdb")).map(|m| m.len()).unwrap_or(0)
@@ -1279,21 +1473,14 @@ impl Drop for Store {
     }
 }
 
+/// Group commit's sync: the grouped mode's, which moves the pin and writes the record after it syncs the data
 struct EnvSyncer {
-    env: Env<WithoutTls>,
-    /// The store's gate: a sync reads the map's meta pages to know how much to flush, on the worker's thread, so it
-    /// keeps a growth out as a transaction does
-    gate: Arc<RecursiveRwLock<()>>,
-    /// What a test arms the `SYNC` failpoint for
-    #[cfg_attr(not(test), allow(dead_code))]
-    path: PathBuf,
+    kept: Arc<Kept>,
 }
 
 impl Syncer for EnvSyncer {
     fn sync(&self) -> Result<()> {
-        failure_point!(SYNC at &self.path, Error::new(ErrorCode::Io, "Injected sync failure"));
-        let _gate = self.gate.read();
-        self.env.force_sync().map_err(Into::into)
+        self.kept.sync(&|| self.kept.adopt())
     }
 }
 
@@ -1344,6 +1531,8 @@ fn check_stamp(opening: &Opening<'_>, db: heed::Database<'_, Bytes, Bytes>) -> R
     }
 }
 
+#[cfg(test)]
+mod kept_tests;
 #[cfg(test)]
 mod retention_tests;
 #[cfg(test)]

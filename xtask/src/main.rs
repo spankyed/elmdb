@@ -101,6 +101,11 @@ const UNMODELLED: &[(&str, &str)] = &[
     ("failpoints.rs", "test-only failure points, armed per thread"),
     ("store/idle_reads.rs", "idle read snapshot release and its waiters: no model yet"),
     (
+        "store/kept.rs",
+        "the writer gate, a parking_lot RecursiveRwLock no model provides, held as the pin is moved and ended; the \
+         order of its steps between processes is modelled in store/synced_model.rs, and killed processes test it",
+    ),
+    (
         "store/mod.rs",
         "the writer gate, a parking_lot RecursiveRwLock no model provides, and the paths open in the process",
     ),

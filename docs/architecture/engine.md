@@ -528,20 +528,33 @@ then answer at once, since each commit was synced. The price is a
 sync for every commit: on an Apple M1 Pro at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three
 rounds, after the Apple full sync was added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs;
 4.0 ms for a durable write in the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped mode, where a commit that returned
-may be lost to a power loss until its sync, a moment later. More than the last commits can go with it: nothing orders
-the pages and meta pages written between two syncs, so a loss can leave a meta page on disk without all the pages it
-names, and LMDB opens a file by the newer of its two meta pages, whatever it names. The file is then no commit's, a
-`durable` commit's neither: its sync covered the file as it was, not what later commits wrote over. Such a file is
-refused at open (`CORRUPTED`) where its trees reach past its end (`store/reach.rs`). Torn within its length it may
-read wrongly or end the process that reads it: LMDB reads a page as it finds it, and where it is built with its
-assertions on, as a debug build is, aborts on one that is no page of the tree it is in. The remedy is a backup. A test
-replays the loss in both modes (`testing.md`, Power loss).
+may be lost to a power loss until its sync, a moment later, and nothing before it is: the last synced commit is kept
+(`../roadmap/synced-commit.md`). A process with commits not yet synced holds a read transaction, the pin, at a commit
+on disk, so LMDB gives no writer that commit's pages, and a write makes sure of the pin before its transaction
+begins. A sync begins a read transaction at the newest commit, takes its meta page while LMDB's newest is still that
+one, syncs the data, writes that commit's meta page to the record beside the data file (`synced`, `format.md`) and
+syncs it, and only then lets the old pin go; a process that owes nothing then holds no pin. An open that finds the
+record written in another boot, a later commit on the file and no other process with the database open writes the
+record's meta page over the file's two, the two it wrote over saved once in `synced.restored`, and so opens at that
+commit, whatever the loss left of the pages after it. A process's death leaves its commits to the OS, which holds
+them: a database another process has open, or whose record is of this boot, opens at its newest commit. A sync that
+fails marks the record `failed`, the process refuses every commit after it, and the next open restores the record's
+commit, in this boot too; an open that finds a restore to make beside another process, or can't write the data
+file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's `kern.bootsessionuuid`, and on Windows a
+random value the first process to ask writes in a volatile registry key under the current user, which a restart or a
+logoff takes away; where none can be read, a process's death costs the commits since its last sync, as a loss would. A
+sync is also due once the file's last page is past the pin's by 64 MiB or a quarter of the file, whichever is more,
+since the pages freed since the pin wait for the next record. The cost is a second sync after each, the record's: a
+`durable` write waits for both. A database written by an elmdb from before the record keeps no pin and reads no
+record, and its file may be no commit's after a loss, as every grouped file was. A test replays the loss in both
+modes (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
 bulk load reuse the reset's freed pages: LMDB protects the immediately preceding generation even with no readers.
-The checkpoint runs before reset's required sync. If it aborts, reset still syncs its committed mutation; only the
-space/performance benefit is lost. Active read snapshots retain LMDB's normal protection. Measured rationale and
+The checkpoint runs before reset's required sync, and in the grouped mode the sync moves the pin to the
+checkpoint's commit at once, since a pin before the reset would keep every page it freed from the load. If it aborts,
+reset still syncs its committed mutation; only the space/performance benefit is lost. Active read snapshots retain LMDB's normal protection. Measured rationale and
 failure/page-reuse regressions are recorded in [remediation evidence](../evidence/elmdb-remediation.md).
 
 ## Change sets and watch
