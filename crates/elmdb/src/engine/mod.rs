@@ -176,6 +176,11 @@ pub struct IndexStatus {
     /// filed, whose orders are sorted as they are read until this one's builder has built them. None for an index
     /// that keeps no order: a rank index, and a type's own indexes of short codes and roles
     pub ordered: Option<bool>,
+    /// The bytes of a string's sort key the order's keys hold under the type's and the index's names, before the
+    /// values of a compound index's leading fields take their share: a string whose sort key is longer is ordered
+    /// by the bytes it keeps, then by the collator among those keeping the same. 0 where the names leave none, and
+    /// the index's strings are then sorted when they are read. None for an index that keeps no order
+    pub room: Option<u32>,
 }
 
 /// Deletes the data of every index a schema change drops or rebuilds, with its marker, in the unit that stores the
@@ -703,9 +708,12 @@ impl Database {
                     let failure = failures.iter().find(|f| {
                         matches!(&f.work, Work::Index { entity_type: t, index: i } if t == entity_type && *i == index.name)
                     });
-                    let ordered = match index.accounts() {
-                        true => Some(order::readable(&s, entity_type, &index.name)?.is_some()),
-                        false => None,
+                    let (ordered, room) = match index.accounts() {
+                        true => {
+                            let room = keys::order_room(entity_type, &index.name, &[]).unwrap_or(0);
+                            (Some(order::readable(&s, entity_type, &index.name)?.is_some()), Some(room as u32))
+                        }
+                        false => (None, None),
                     };
                     out.push(IndexStatus {
                         entity_type: Some(entity_type.clone()),
@@ -713,6 +721,7 @@ impl Database {
                         built: derive::is_built(&s, entity_type, &index.name)?,
                         failure: failure.map(|f| f.message.clone()),
                         ordered,
+                        room,
                     });
                 }
             }
@@ -724,6 +733,7 @@ impl Database {
                     built: ranks::is_built(&s, name)?,
                     failure: failure.map(|f| f.message.clone()),
                     ordered: None,
+                    room: None,
                 });
             }
             Ok(out)

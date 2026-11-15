@@ -1,10 +1,12 @@
 # A string's order read from its index
 
-Status: designed, 2026-11-14, and not built. It is the part of roadmap change 5 still open (`../roadmap.md`): an
-`orderBy` on a string field reads every entity of the set, where one on a number reads ten entries for its first ten.
-It adds derived keys to format 1 and moves what one of its keys holds, so it is built before format 1 is frozen
-(change 8). This is the fifth draft: each before it was read against the code by a second reader, the fourth was
-priced by a reading of what its writes cost, and what each changed is under What was set aside.
+Status: built, 2026-11-15, phases 1 to 4; phase 4's gate is met for the number's order and not for the names'
+(`../evidence/million-notes.md`, An order taken whole, against phase 2's walk). It was the part of roadmap change 5
+still open (`../roadmap.md`): an `orderBy` on a string field read every entity of the set, where one on a number
+read ten entries for its first ten. It adds derived keys to format 1 and moves what one of its keys holds, so it is
+built before format 1 is frozen (change 8). This is the fifth draft: each before it was read against the code by a
+second reader, the fourth was priced by a reading of what its writes cost, and what each changed is under What was
+set aside.
 
 ## Where it stands
 
@@ -434,8 +436,10 @@ A read pays one seek for each distinct string it hands on.
 ## Risks
 
 - **The two arms must agree.** The sorted arm stays, for sets no index orders, and is what the model harness holds
-  the index's order to. The harness's strings are made of `a`, `b` and `c` today and its model sorts by the
-  collator alone: it can't see a tie of other bytes or a key past the room until phase 2 gives it both.
+  the index's order to. The harness's strings are words of `a`, `b` and `c`, some accented, small, capitalised or
+  in capitals, and an accent composed or after its letter, and its model sorts by the collator and then the bytes:
+  it sees the collation's order apart from the bytes' and a tie of two spellings the collator holds equal. Its
+  strings of 2,100 digits have sort keys past the room, and are ordered in cut runs.
 - **An invariant no one entity derives.** A `d/xo` key is there because of every entity holding its string, so a
   first or last place that goes unseen hides every holder of the string from the order, with no error, until the
   string empties and is held again, where a second place for every entity would have lost one. The two functions
@@ -526,4 +530,5 @@ A read pays one seek for each distinct string it hands on.
    hands each entity on, and the fifth reading read live entities only, by loops and not a plan: its recorded
    reads, the trash, and the size of limit at which it pays are designed when it is built. Done when every note of
    a million in the names' order, and in the number's, is read in under half the time phase 2 recorded, and the
-   model harness holds both to the rows.
+   model harness holds both to the rows. Read on 2026-11-15 beside phase 2's engine: the number's order in 0.17 and
+   0.27 of phase 2's time, the names' in 0.80 and 0.84, which is not yet under half.

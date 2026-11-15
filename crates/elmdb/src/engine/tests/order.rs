@@ -1004,3 +1004,55 @@ fn a_sweep_deletes_its_share_of_another_build_s_keys_a_unit() {
     assert_eq!(step(sweep), Step::Done);
     assert_eq!(strings(&db, "byTag"), ["a"]);
 }
+
+/// What the `orderBy` stage of a plan of Items says when explained: why it sorted, and the index it read
+fn explained_order(db: &Database, steps: Json) -> (Vec<String>, Json, Json) {
+    let plan =
+        json!({ "start": { "from": "types", "types": ["Item"] }, "steps": steps, "terminal": { "answer": "ids" } });
+    let op = serde_json::from_value::<ReadOp>(json!({ "read": "query", "explain": true, "plan": plan })).unwrap();
+    let bytes = db.read(&Reads { reads: vec![op], track: None }).unwrap();
+    let answers = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+    let ids = answers[0]["answer"]["ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap().to_owned());
+    let stages = answers[0]["stages"].as_array().unwrap();
+    let stage = stages.iter().find(|stage| stage["stage"] == "orderBy").unwrap();
+    (
+        ids.collect(),
+        stage.get("sorted").cloned().unwrap_or(Json::Null),
+        stage.get("index").cloned().unwrap_or(Json::Null),
+    )
+}
+
+#[test]
+fn explain_says_why_an_order_an_index_reads_was_sorted_and_index_status_says_what_room_its_names_leave() {
+    let (_dir, db) = open();
+    db.wait_for_index_builds().unwrap();
+    // A group of 240 bytes leaves the order's keys under it no room: its strings are sorted, though the index reads
+    // the order of a short group's
+    let long = "g".repeat(240);
+    assert_eq!(keys::order_room("Item", "byGroupTag", &[Part::String(long.clone())]), None);
+    let mut items = Vec::new();
+    for group in ["g", long.as_str()] {
+        for (id, tag) in [("b", "b"), ("a", "a"), ("c", "C")] {
+            items.push(item(&format!("{}{id}", group.len()), json!({ "group": group, "tag": tag })));
+        }
+    }
+    write(&db, items).unwrap();
+    let under = |group: &str| {
+        json!([{ "step": "where", "field": "group", "value": group }, { "step": "orderBy", "field": "tag" },
+            { "step": "limit", "n": 3 }])
+    };
+    assert_eq!(explained_order(&db, under("g")), (ids(&["1a", "1b", "1c"]), Json::Null, json!("byGroupTag")));
+    assert_eq!(explained_order(&db, under(&long)).0, ids(&["240a", "240b", "240c"]));
+    assert_eq!(explained_order(&db, under(&long)).1, "noRoom");
+    // An order no read trusts yet, its marker gone as another elmdb's write leaves it, is sorted until it is built
+    let by_tag = json!([{ "step": "orderBy", "field": "tag" }, { "step": "limit", "n": 2 }]);
+    assert_eq!(explained_order(&db, by_tag.clone()).1, Json::Null);
+    unit(&db, |t| t.del(&keys::order_marker("Item", "byTag")));
+    assert_eq!(explained_order(&db, by_tag.clone()), (ids(&["1a", "240a"]), json!("building"), Json::Null));
+    // An index of numbers is none an order of strings is wanted for
+    let by_n = json!([{ "step": "orderBy", "field": "n" }, { "step": "limit", "n": 2 }]);
+    assert_eq!(explained_order(&db, by_n).1, Json::Null);
+    // The room of a key under the names alone, of each index that keeps an order, and of none that doesn't
+    let room = |index: &str| db.index_status().unwrap().into_iter().find(|status| status.index == index).unwrap().room;
+    assert_eq!((room("byTag"), room("byGroupTag"), room("shortCode")), (Some(222), Some(217), None));
+}
