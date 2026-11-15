@@ -147,8 +147,7 @@ test('a rebuild of a handle nothing else holds is answered once the handle has b
   // The rebuild holds the last hold on the database once the handle is collected: letting the database go then would
   // close it under the rebuild. A rebuild of 20,000 notes outlasts the handle's collection: the child says `collected`
   // only where the handle's finalizer has run and the rebuild hasn't ended, and `late` or `kept` where this run showed
-  // nothing. With a durable write behind such a rebuild, the handle was collected 6 to 7 ms in and the rebuild ended
-  // 245 to 274 ms in, over three runs (Apple M1 Pro, 2026-11-13, the binding built in release)
+  // nothing
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const { Packr } = require(${JSON.stringify(createRequire(import.meta.url).resolve('msgpackr'))});`,
@@ -176,12 +175,19 @@ test('a rebuild of a handle nothing else holds is answered once the handle has b
   assert.equal(said, 'collectedanswered');
 });
 
-test('a handle that ran a check, a rebuild or a backup on the pool is collected once nothing holds it', (t) => {
-  // A job holds the database by a hold of its own, so nothing roots the handle's JavaScript object for it: a handle
-  // dropped after its job has answered is collected like one that never started one. Each child prints how many
-  // milliseconds the collection took, or `kept` after five seconds of collections that never found it
+test('a handle that ran a call answering a promise is collected once nothing holds it', (t) => {
+  // Each call that answers a promise holds the database by a hold of its own, so nothing roots the handle's
+  // JavaScript object for it: a handle dropped after the promise has settled is collected like one that never made the
+  // call. Each child prints `collected`, or `kept` after five seconds of collections that never found it. Returned as
+  // napi-rs's AsyncTask, every one of these was `kept`
   const said = {};
-  for (const what of ['check', 'rebuild', 'backup']) {
+  const calls = {
+    read: "db.read(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]))",
+    durable: 'db.durable()',
+    check: 'db.check()',
+    rebuild: 'db.rebuild()',
+  };
+  for (const what of ['read', 'durable', 'check', 'rebuild', 'backup']) {
     const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const child = [
@@ -191,7 +197,7 @@ test('a handle that ran a check, a rebuild or a backup on the pool is collected 
       'let collected = null;',
       'const registry = new FinalizationRegistry(() => { collected = Date.now() - began; });',
       'registry.register(db, 0);',
-      `const asked = ${what === 'backup' ? `db.backup(${JSON.stringify(join(dir, 'copy'))})` : `db.${what}()`};`,
+      `const asked = ${what === 'backup' ? `db.backup(${JSON.stringify(join(dir, 'copy'))})` : calls[what]};`,
       'db = undefined;',
       'asked.then(() => {',
       '  const until = Date.now() + 5000;',
@@ -204,7 +210,7 @@ test('a handle that ran a check, a rebuild or a backup on the pool is collected 
     ].join('\n');
     said[what] = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 60_000 });
   }
-  assert.deepEqual(said, { check: 'collected', rebuild: 'collected', backup: 'collected' });
+  assert.deepEqual(said, { read: 'collected', durable: 'collected', check: 'collected', rebuild: 'collected', backup: 'collected' });
 });
 
 test('a process that ends while V8 frees the answers it dropped ends cleanly', { timeout: 120_000 }, (t) => {

@@ -411,9 +411,10 @@ of 20,000 notes is on its way each land, in order, with the rebuild one commit a
 clean; a rebuild asked for in the turn the database is closed either runs or rejects as closed, and the database opened
 again is whole and checks clean. `exit.test.mjs` asks a rebuild of a child process that then calls `process.exit()`:
 the rebuild has committed and ran to its end; and of a child that drops its handle with a rebuild in flight, that the
-rebuild is answered after the handle is collected, the child saying it was; and of three children that each run a
-check, a rebuild or a backup and then drop the handle, that each handle is collected: napi-rs roots the object of a
-method that returns a task for the task's sake and never lets it go, so the pool's jobs are spawned instead. Each
+rebuild is answered after the handle is collected, the child saying it was; and of five children that each make a
+read, a durable wait, a check, a rebuild or a backup answering a promise and then drop the handle, that each handle
+is collected: napi-rs roots the object of a method that returns a task for the task's sake and never lets it go, so
+every promise the binding answers is spawned instead. Each
 `…Sync` form is the blocking one the rest of the suite calls.
 
 ## Platforms

@@ -130,6 +130,19 @@ fn end_unit(slot: &UnitSlot) {
     }
 }
 
+/// `task` on a thread of the pool, answering its promise. Spawned, never returned as an `AsyncTask`: napi-rs roots the
+/// JavaScript object of a method that returns one, for the task's sake, and a handle that had answered one was never
+/// collected after (`exit.test.mjs` drops a handle after each call that answers a promise and waits for its
+/// collection). Each task holds the database by a hold of its own (`Held`), so it needs no root
+fn spawned<'env, T>(env: &'env Env, task: T) -> Result<Unknown<'env>, Code>
+where
+    T: Task,
+    T::JsValue: 'env,
+{
+    let work = env.spawn(task).map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))?;
+    Ok(work.promise_object().to_unknown())
+}
+
 impl Database {
     /// Runs an export's work, refused once the handle has panicked. A panic in it ends the unit the handle has
     /// open: what the panic left in memory is not known, and the unit's transaction is part of it
@@ -149,9 +162,7 @@ impl Database {
     }
 
     /// A job on the database, on a thread of the pool, answering a promise of what `work` answers as `convert` makes
-    /// it. Spawned rather than returned as an `AsyncTask`: napi-rs roots the JavaScript object of a method that returns
-    /// one, for the task's sake, and that root outlives the task, so a handle that ever started one would never be
-    /// collected. The job holds the database itself, by its own hold (`Held`), and needs no root
+    /// it (`spawned`)
     fn job<'env, T, V>(
         &self,
         env: &'env Env,
@@ -163,9 +174,7 @@ impl Database {
         T: Send + 'static,
         V: ToNapiValue + TypeName + 'static,
     {
-        let job = Job::new(self.inner.again(), self.health.clone(), export, work, convert);
-        let spawned = env.spawn(job).map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))?;
-        Ok(spawned.promise_object().to_unknown())
+        spawned(env, Job::new(self.inner.again(), self.health.clone(), export, work, convert))
     }
 
     fn end_unit_once_panicked(&self) {
@@ -288,16 +297,11 @@ impl Database {
 
     /// `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop
     #[napi(ts_return_type = "Promise<Buffer>")]
-    pub fn read(&self, reads: Buffer) -> Result<AsyncTask<ReadTask>, Code> {
+    pub fn read<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.read", || {
-            Ok({
-                AsyncTask::new(ReadTask {
-                    db: self.inner.again(),
-                    health: self.health.clone(),
-                    reads: reads.to_vec(),
-                    failed: None,
-                })
-            })
+            let task =
+                ReadTask { db: self.inner.again(), health: self.health.clone(), reads: reads.to_vec(), failed: None };
+            spawned(env, task)
         })
     }
 
@@ -587,15 +591,13 @@ impl Database {
     /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
     /// the database is closed
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn durable(&self) -> Result<AsyncTask<DurableTask>, Code> {
+    pub fn durable<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.durable", || {
-            Ok({
-                let task = match self.inner.durable() {
-                    Ok(durable) => DurableTask { durable: Some(durable), health: self.health.clone(), failed: None },
-                    Err(error) => DurableTask { durable: None, health: self.health.clone(), failed: Some(error) },
-                };
-                AsyncTask::new(task)
-            })
+            let task = match self.inner.durable() {
+                Ok(durable) => DurableTask { durable: Some(durable), health: self.health.clone(), failed: None },
+                Err(error) => DurableTask { durable: None, health: self.health.clone(), failed: Some(error) },
+            };
+            spawned(env, task)
         })
     }
 
