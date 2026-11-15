@@ -69,9 +69,11 @@ pub struct Database {
     builder: Arc<Mutex<Option<crate::engine::Builder>>>,
     /// The tracked reads' read sets, and the database's watches
     pub(crate) tracks: crate::engine::watch::SharedTracks,
-    /// Held by a rebuild from before it makes room in the map until its unit has committed: rebuilds asked on several
-    /// threads at once run one after another, so the map grows for one of them and none redoes another's work beside it
-    pub(crate) rebuilding: crate::sync::PlainMutex<()>,
+    /// Held by a rebuild from before it makes room in the map until its commit has been delivered: rebuilds asked on
+    /// several threads at once run one after another, so the map grows for one of them and none redoes another's work
+    /// beside it. A watch's listener the rebuild's commit runs may rebuild in turn, on the thread that holds it: so the
+    /// lock lets that thread in again
+    pub(crate) rebuilding: parking_lot::ReentrantMutex<()>,
 }
 
 /// The schema of a database that has none: nothing declared
