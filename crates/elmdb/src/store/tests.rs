@@ -675,6 +675,21 @@ fn backup_reports_a_postpublication_sync_failure_without_losing_the_complete_cop
 }
 
 #[test]
+fn backup_reports_a_record_it_could_not_remove_as_after_its_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"complete").unwrap();
+    // A record's name that no file removal takes: a directory, with something in it
+    std::fs::create_dir(target.path().join(record::RECORD)).unwrap();
+    std::fs::write(target.path().join(record::RECORD).join("held"), b"").unwrap();
+    let error = store.copy_to(target.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("was published") && error.message.contains("retrying backup is safe"), "{error}");
+    assert!(target.path().join("data.mdb").is_file(), "the copy wasn't published");
+}
+
+#[test]
 fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
