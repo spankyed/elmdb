@@ -907,7 +907,9 @@ fn a_store_closing_at_exit_reports_a_sync_that_failed() {
 #[ignore = "run only by the tests that grow a database from another process, as their child process"]
 fn child_grower() {
     let Ok(path) = std::env::var("ELMDB_GROW_DB") else { return };
-    let store = Store::open(Path::new(&path), quiet()).unwrap();
+    // In the parent's mode: a writer of another is refused while the parent has the database open
+    let options = if std::env::var("ELMDB_GROW_GROUPED").is_ok() { StoreOptions::default() } else { quiet() };
+    let store = Store::open(Path::new(&path), options).unwrap();
     let value = vec![9u8; 64 << 10];
     store
         .write(

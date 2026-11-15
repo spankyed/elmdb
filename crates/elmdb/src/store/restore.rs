@@ -16,10 +16,18 @@ use super::reach;
 use super::record::{self, Mode, Record, RecordFile, State};
 use crate::error::{Error, ErrorCode, Result};
 
+/// The locks an open holds for as long as it is open
+pub(super) struct Presence {
+    /// That this process has the database open, held shared
+    _open: File,
+    /// That it writes the database in its mode, held shared by a writable open
+    _mode: Option<File>,
+}
+
 /// What the open decided, for the open to go on with
 pub(super) struct Decided {
-    /// The lock that says this process has the database open, held shared for as long as it does
-    pub presence: File,
+    /// The locks that say this process has the database open, and in which mode it writes
+    pub presence: Presence,
     /// The record's file, for a writable open
     pub record: Option<RecordFile>,
     /// The commit of the grouped mode's record, where the file bears it out: what the open's process may rely on
@@ -46,6 +54,8 @@ enum Outcome {
 pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decided> {
     let decide = record::lock_file(dir, record::RECORD_LOCK)?;
     let _deciding = record::exclusive(&decide)?;
+    // An open in another mode than a live writer's is refused before it reads or writes anything
+    let mode_held = mode.map(|mode| mode_lock(dir, mode)).transpose()?;
     let presence = record::lock_file(dir, record::PRESENCE)?;
     let alone = match presence.try_lock() {
         Ok(()) => true,
@@ -117,17 +127,18 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
             record = Some(again);
         }
     }
-    // An open of another mode than the record's: the data synced, since a writer of the record's mode may have died
-    // with commits unsynced, and then the record of this mode, before its first write
-    if let (Some(mode), Some(file), Some(earlier)) = (mode, file.as_mut(), record.as_ref())
+    // A writable open of a mode that keeps no commit, where the record is of another mode or there is none: the data
+    // synced, since a writer of the record's mode may have died with commits unsynced, and then the record of this
+    // mode, before its first write. The grouped mode's open syncs and writes its record as it settles (`Kept::settle`)
+    if let (Some(mode), Some(file)) = (mode, file.as_mut())
         && mode != Mode::Grouped
-        && earlier.mode != mode
+        && record.as_ref().is_none_or(|earlier| earlier.mode != mode)
     {
         // Opened to write, which Windows' flush asks of the handle; a file that is gone holds nothing to sync
         if data.exists() {
             std::fs::OpenOptions::new().write(true).open(&data)?.sync_all()?;
         }
-        let written = record::of_mode(Some(earlier), mode, boot);
+        let written = record::of_mode(record.as_ref(), mode, boot);
         file.write(&written)?;
         record = Some(written);
     }
@@ -144,12 +155,41 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
     }
     presence.lock_shared()?;
     Ok(Decided {
-        presence,
+        presence: Presence { _open: presence, _mode: mode_held },
         record: file.filter(|_| writable),
         remembered,
         restored,
         not_borne_out: outcome == Outcome::NotBorneOut,
     })
+}
+
+/// The lock of `mode`, taken shared for a writable open of it once no writable open of another mode holds its own:
+/// each is tried while the lock every open decides under is held, so two opens of two modes can't both pass
+fn mode_lock(dir: &Path, mode: Mode) -> Result<File> {
+    for other in Mode::ALL.into_iter().filter(|other| *other != mode) {
+        let held = record::lock_file(dir, record::mode_lock(other))?;
+        match held.try_lock() {
+            Ok(()) => held.unlock()?,
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(Error::new(
+                    ErrorCode::ModeMismatch,
+                    format!(
+                        "The database at {} is open for writing in the {} in another process, and this open asks for \
+                         the {}: one database is written in one mode at a time. Open it in the {}, or once the other \
+                         process has closed it",
+                        dir.display(),
+                        other.as_opened(),
+                        mode.as_opened(),
+                        other.as_opened()
+                    ),
+                ));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
+    let own = record::lock_file(dir, record::mode_lock(mode))?;
+    own.lock_shared()?;
+    Ok(own)
 }
 
 /// How an open that holds the database alone goes on, by a record of `data`

@@ -422,7 +422,7 @@ pub struct Store {
     not_borne_out: bool,
     /// The lock that says this process has the database open, held shared until the environment has closed: an open
     /// that finds it unheld may restore the file. Last, so it is let go after everything else a dropped store holds
-    presence: Option<std::fs::File>,
+    presence: Option<restore::Presence>,
 }
 
 /// Every commit up to `through` is one this handle made or has noticed; `elsewhere` says another's was among them since
