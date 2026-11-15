@@ -148,6 +148,7 @@ A database's directory holds LMDB's two files, `data.mdb` and `lock.mdb`, and el
 | `open.lock` | nothing: locked shared by every open for as long as it is open |
 | `synced.lock` | nothing: locked by the one reading or writing the record, and by an open as it decides what to open at |
 | `writer.lock` | nothing: on macOS, locked by the writer inside a write transaction (`store/writers.rs`) |
+| `grouped.lock`, `ordered.lock`, `unsynced.lock` | nothing: locked shared by each writable open of the grouped mode, `syncEachCommit` and `syncs: false`, for as long as it is open; a writable open of another mode is refused while one is held (`MODE_MISMATCH`) |
 
 A record of another version reads as no record. The record names an LMDB transaction and a meta page, so a file put
 in place of the data file that the record's commit and root pages don't match is opened as it is, a record that

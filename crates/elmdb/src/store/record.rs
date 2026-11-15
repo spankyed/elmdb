@@ -27,6 +27,15 @@ pub(super) const RESTORED: &str = "synced.restored";
 pub(super) const PRESENCE: &str = "open.lock";
 /// Locked by the one reading or writing the record, and by an open while it decides what to open at
 pub(super) const RECORD_LOCK: &str = "synced.lock";
+/// Locked shared by every writable open of the mode, for as long as it is open: a writable open of another mode is
+/// refused while one of these is held
+pub(super) const fn mode_lock(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Grouped => "grouped.lock",
+        Mode::Ordered => "ordered.lock",
+        Mode::Unsynced => "unsynced.lock",
+    }
+}
 
 /// The bytes of LMDB's `MDB_meta`, which follow a meta page's header: the magic, the version, the fixed address, the
 /// map's size, the free and main trees, the last page and the transaction that committed it
@@ -52,6 +61,19 @@ pub(super) enum Mode {
     Ordered,
     /// Never synced (`syncs: false`): nothing is known of what a loss leaves
     Unsynced,
+}
+
+impl Mode {
+    pub(super) const ALL: [Mode; 3] = [Mode::Grouped, Mode::Ordered, Mode::Unsynced];
+
+    /// The mode as a caller opens in it
+    pub(super) const fn as_opened(self) -> &'static str {
+        match self {
+            Mode::Grouped => "grouped mode (the default)",
+            Mode::Ordered => "`syncEachCommit` mode",
+            Mode::Unsynced => "`syncs: false` mode",
+        }
+    }
 }
 
 /// Whether the grouped mode's syncs have held

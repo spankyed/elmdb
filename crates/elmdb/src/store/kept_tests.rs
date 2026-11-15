@@ -586,6 +586,46 @@ impl Drop for Holder {
 }
 
 #[test]
+fn an_open_in_another_mode_than_a_live_writer_s_is_refused_and_one_after_it_has_gone_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path(), grouped()).unwrap().close().unwrap();
+    let holder = Holder::hold(dir.path());
+    let before = record_in(dir.path()).unwrap();
+    // Each other mode refused, naming both, and having read or written nothing
+    for (other, named) in [
+        (StoreOptions { sync_each_commit: true, ..grouped() }, "`syncEachCommit` mode"),
+        (StoreOptions { syncs: false, ..grouped() }, "`syncs: false` mode"),
+    ] {
+        let Err(refused) = Store::open(dir.path(), other) else { panic!("an open of the {named} beside a writer") };
+        assert_eq!(refused.code, ErrorCode::ModeMismatch, "{refused}");
+        assert!(refused.message.contains("grouped mode") && refused.message.contains(named), "{refused}");
+    }
+    assert_eq!(record_in(dir.path()).unwrap(), before, "a refused open wrote the record");
+    // Beside it, a writer of its own mode, and a reader of any
+    Store::open(dir.path(), grouped()).unwrap().close().unwrap();
+    Store::open(dir.path(), StoreOptions { read_only: true, ..grouped() }).unwrap().close().unwrap();
+    // Once it has gone, the other mode opens, and writes its record
+    drop(holder);
+    let store = Store::open(dir.path(), StoreOptions { sync_each_commit: true, ..grouped() }).unwrap();
+    assert_eq!(record_in(dir.path()).unwrap().mode, Mode::Ordered);
+    store.close().unwrap();
+}
+
+#[test]
+fn a_first_open_of_a_mode_that_keeps_no_commit_writes_its_record() {
+    for (options, mode) in [
+        (StoreOptions { sync_each_commit: true, ..grouped() }, Mode::Ordered),
+        (StoreOptions { syncs: false, ..grouped() }, Mode::Unsynced),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), options).unwrap();
+        let written = record_in(dir.path()).expect("the open wrote no record");
+        assert_eq!((written.mode, written.commit), (mode, 0));
+        store.close().unwrap();
+    }
+}
+
+#[test]
 fn a_pin_another_process_holds_keeps_its_commit_s_pages_from_this_process_s_writes() {
     let dir = tempfile::tempdir().unwrap();
     Store::open(dir.path(), grouped()).unwrap().close().unwrap();
@@ -1143,6 +1183,7 @@ fn a_write_takes_the_map_another_process_grew_the_file_past() {
     let status = Command::new(std::env::current_exe().unwrap())
         .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
         .env("ELMDB_GROW_DB", dir.path())
+        .env("ELMDB_GROW_GROUPED", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()

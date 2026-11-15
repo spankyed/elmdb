@@ -675,6 +675,21 @@ fn backup_reports_a_postpublication_sync_failure_without_losing_the_complete_cop
 }
 
 #[test]
+fn backup_reports_a_record_it_could_not_remove_as_after_its_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"complete").unwrap();
+    // A record's name that no file removal takes: a directory, with something in it
+    std::fs::create_dir(target.path().join(record::RECORD)).unwrap();
+    std::fs::write(target.path().join(record::RECORD).join("held"), b"").unwrap();
+    let error = store.copy_to(target.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("was published") && error.message.contains("retrying backup is safe"), "{error}");
+    assert!(target.path().join("data.mdb").is_file(), "the copy wasn't published");
+}
+
+#[test]
 fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -907,7 +922,9 @@ fn a_store_closing_at_exit_reports_a_sync_that_failed() {
 #[ignore = "run only by the tests that grow a database from another process, as their child process"]
 fn child_grower() {
     let Ok(path) = std::env::var("ELMDB_GROW_DB") else { return };
-    let store = Store::open(Path::new(&path), quiet()).unwrap();
+    // In the parent's mode: a writer of another is refused while the parent has the database open
+    let options = if std::env::var("ELMDB_GROW_GROUPED").is_ok() { StoreOptions::default() } else { quiet() };
+    let store = Store::open(Path::new(&path), options).unwrap();
     let value = vec![9u8; 64 << 10];
     store
         .write(

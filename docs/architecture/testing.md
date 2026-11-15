@@ -115,7 +115,13 @@ every eighth commit: for a loss after each of the commits since a sync, and afte
 are the synced file with some of the pages written since and the record that sync wrote, opened as of another
 boot. Every one must restore the record's commit, pass `check()` and hold that commit's tasks. The same run with the
 pin turned off must leave a file that doesn't, the commits after the sync having written over its pages: the pin is
-what the replay holds. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
+what the replay holds. The synced-each-commit replay keeps its record beside each file, and holds after a grouped writer
+that died with commits unsynced as well as alone: that open synced the file and wrote its own record, and the grouped
+one would take the file back to a commit the commits since wrote over. A database written with no sync is opened as it
+is, alone and after such a writer, and never restored; a backup over a directory whose record says `failed` opens as the
+backup, and one that fails before its copy is there leaves the record; and `replaceWith` from a file a loss left takes
+the source's last synced commit.
+The replay is LMDB's order of writes as its source gives it, on a file: no test of a
 disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
 itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
 such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page

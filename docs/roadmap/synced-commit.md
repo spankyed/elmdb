@@ -1,7 +1,7 @@
 # A power loss that tears no file
 
-Status: designed, 2026-11-14; phases 1 to 3 built (`store/commits.rs`, `store/synced_model.rs`, `store/kept.rs`,
-`store/record.rs`, `store/restore.rs`), 4 and 5 not. It is the answer to the one defect of the review of `ed20979` that was
+Status: designed, 2026-11-14; phases 1 to 4 built (`store/commits.rs`, `store/synced_model.rs`, `store/kept.rs`,
+`store/record.rs`, `store/restore.rs`), 5 not. It is the answer to the one defect of the review of `ed20979` that was
 left for a design (`../roadmap.md`, change 1): in the grouped mode a power loss can leave a file that is no commit's,
 which reads wrongly or ends the process that reads it. This is the fifth draft. One reader read the four before it
 against the store and LMDB's source: the first, a marker of commits not yet synced, did not hold; the others were
@@ -430,12 +430,24 @@ restore it can't make.
    it is not. The key is the current user's, which a process may make volatile without an administrator: a process
    of another account, or a service, reads another boot, and where it opens a database alone after a death it
    restores, losing what the dead process committed since its last sync, as a loss would. A boot all accounts share
-   is phase 5's. Until phase 4, a database is written in one mode at a time by its callers: a writable open of another mode than
-   the record's syncs the data and writes its mode's record, and nothing refuses two live writers of two modes.
+   is phase 5's. Phase 4 refuses two live writers of two modes.
 4. **The modes.** `syncEachCommit` and `syncs: false` alone and after a grouped writer that died with commits
    unsynced, a backup into a directory and `replaceWith`. Done when the replay holds each, an open in another mode
    than a live writer's is refused and one after it has gone is not, and a `syncEachCommit` writer is shown to
    sync no more than it does today.
+   Built (2026-11-15). Each writable open holds its mode's lock (`grouped.lock`, `ordered.lock`, `unsynced.lock`), taken
+   under the lock every open decides under once no writer of another mode holds its own, and refused otherwise with
+   `MODE_MISMATCH`, naming both modes. The first open of a mode that keeps no commit writes its record where there is
+   none as well as where the record is of another mode. A backup into a directory removes the record and the saved meta
+   pages a database there left, once its copy is there. `replaceWith` decides on its source as a read-only open does,
+   restoring it where its record asks, and holds it open while it reads it. The replay (`engine/tests/power_loss.rs`)
+   holds each: `syncEachCommit` alone and after a grouped writer that died, files a loss leaves of each commit with the
+   record beside them; `syncs: false` alone and after one, every file opened as it is and none restored; a backup over a
+   directory whose record says `failed`; and `replaceWith` from a file a loss left. A `syncEachCommit` writer syncs no
+   more per commit than it did: its commits leave the record as its open wrote it, and the environment's flags say LMDB
+   syncs each commit and nothing else. Per open it pays more: the first open in the mode syncs the data file, a full
+   flush on Apple, writes and syncs the record and syncs the directory, and each writable open after syncs the record it
+   reads; a database that was never grouped paid none of it before.
 5. **The boot on each platform, the notice, and a filesystem that loses what wasn't synced.** Done when an open
    after a loss says what it opened at in the binding and the CLI until it is told it was read; each platform's
    identity is shown gone after a machine is stopped hard and started, and what a fast startup does to Windows' is
