@@ -241,6 +241,47 @@ fn a_unique_index_is_enforced_while_it_is_still_being_built() {
 }
 
 #[test]
+fn rebuilds_asked_on_two_threads_run_one_after_the_other() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(with_schema(&dir, notes(base_fields(), json!({}))).unwrap());
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "kind": "a" } })]).unwrap();
+    // The first rebuild has made its room and stops there, before its unit begins
+    let (paused, is_paused) = mpsc::channel();
+    let (go_on, may_go_on) = mpsc::channel::<()>();
+    let first = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            crate::failpoints::run_once_here(crate::failpoints::points::REBUILD_ROOM_MADE, move || {
+                paused.send(()).unwrap();
+                may_go_on.recv().unwrap();
+            });
+            db.rebuild(None).unwrap();
+        })
+    };
+    is_paused.recv_timeout(Duration::from_secs(10)).expect("the first rebuild made its room");
+    // A second, on another thread, finds the write lock free and would run its whole rebuild now; it waits instead
+    let (done, is_done) = mpsc::channel();
+    let second = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            db.rebuild(None).unwrap();
+            done.send(()).unwrap();
+        })
+    };
+    assert!(
+        is_done.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the second rebuild ran while the first was under way"
+    );
+    go_on.send(()).unwrap();
+    first.join().unwrap();
+    is_done.recv_timeout(Duration::from_secs(10)).expect("the second rebuild ran once the first had committed");
+    second.join().unwrap();
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn rebuilding_one_index_refuses_one_the_schema_doesnt_declare() {
     let dir = tempfile::tempdir().unwrap();
     let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();

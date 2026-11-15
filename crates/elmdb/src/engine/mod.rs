@@ -512,9 +512,12 @@ impl Database {
     pub fn rebuild(&self, index: Option<(&str, &str)>) -> Result<()> {
         let op = Op::rebuild(index);
         let result = op.in_scope(|| {
+            // One rebuild at a time: two that each found the map short would each grow it
+            let _one_at_a_time = self.rebuilding.lock();
             if index.is_none() {
                 self.store()?.make_room(REBUILD_ROOM)?;
             }
+            run_point!(REBUILD_ROOM_MADE);
             self.admin_unit(|t| derive::rebuild(t, index))
         });
         op.ended(result, "durable")
