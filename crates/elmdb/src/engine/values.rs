@@ -173,6 +173,12 @@ pub fn holds(stored: &Value, probe: &Value) -> bool {
     strict_equal(stored, probe) || matches!(stored, Value::Array(items) if items.iter().any(|v| strict_equal(v, probe)))
 }
 
+/// Whether a string is longer than a value index has an entry for: more than `MAX_INDEXED_STRING` bytes. An index
+/// says which entities hold one (`entities::Other::Long`)
+pub fn long(string: &str) -> bool {
+    string.len() > MAX_INDEXED_STRING
+}
+
 /// The key part an index files a scalar under, or `None` for a value no index holds (a map, a list, bytes, a
 /// timestamp, a string of more than `MAX_INDEXED_STRING` bytes)
 pub fn index_part(value: &Value) -> Option<Part> {
@@ -347,6 +353,15 @@ pub fn as_time(value: &Value) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_string_is_long_past_the_bytes_an_index_has_an_entry_for() {
+        let (most, past) = ("a".repeat(super::MAX_INDEXED_STRING), "a".repeat(super::MAX_INDEXED_STRING + 1));
+        assert!(!super::long(&most) && super::long(&past));
+        assert!(
+            super::index_part(&most.as_str().into()).is_some() && super::index_part(&past.as_str().into()).is_none()
+        );
+    }
+
     use super::*;
     use crate::schema::FieldDef;
 

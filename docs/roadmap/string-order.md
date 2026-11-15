@@ -263,10 +263,13 @@ back restores it:
   key, whoever wrote and whatever the other's layout files: a layout that keeps something for each holder is
   ended by a write of this one that would have filed nothing. The rule is the format's, and the same for every
   layout there will be.
-- *Only the order's builder and `rebuild()` write a marker.* A unit that declares an index writes none, and what
-  fills its `d/x`, the value index's builder and the writes beside it, finds none and files no order. `rebuild()`
-  files a built index's `d/x` and its order whole under a new build, in its unit, and leaves an index it can't
-  build with neither marker nor key.
+- *Only the order's builder, `rebuild()` and the unit that marks an index built with no entity write a marker.* A
+  unit that declares an index over entities writes none, and what fills its `d/x`, the value index's builder and
+  the writes beside it, finds none and files no order. `rebuild()` files a built index's `d/x` and its order whole
+  under a new build, in its unit, and leaves an index it can't build with neither marker nor key. An index marked
+  built because its type holds no entity has an order of no key, whole in that unit under that unit's sequence:
+  it is built, so nothing can be filed into it that its order lacks, and a new database, a `reset()` and an index
+  declared on an empty type cost the builder no unit.
 - *The order's builder* builds the order of a built index whose marker isn't this stamp's and whole: one just
   built, one another stamp ended, one filed before an update of the collator or under another layout. It goes on
   with a build of its own stamp that isn't whole, and otherwise begins one: a marker of its stamp, its unit's
