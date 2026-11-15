@@ -131,7 +131,7 @@ semantic/failure cases for the candidate. Do not infer a product gain from remov
 **Question:** does disk-backed read latency hold up the app, and is elmdb's existing asynchronous read sufficient?
 
 **Source:** lmdb-js `read.js` (`getMany`, `prefetch`) and native prefetch code; elmdb
-[binding](../../crates/elmdb-node/src/lib.rs) (`read`, `read_sync`, `ReadTask`) and monorepo EARS call sites.
+[binding](../../crates/elmdb-node/src/lib.rs) (`read`, `read_async`, `ReadTask`) and monorepo EARS call sites.
 
 **Experiment:** compare warm and controlled cold-ish reads using isolated data larger than the selected memory budget
 or otherwise documented cache conditions. Use single rows, projected set reads and representative searches. Measure

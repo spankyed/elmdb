@@ -13,7 +13,7 @@
 //! finalizer a panic would unwind out of into Node.
 //!
 //! A test asks for a panic in an export by starting Node with `ELMDB_TEST_PANIC` set to its name, as its errors
-//! name it (`Database.readSync`): that export then panics the first time it is called
+//! name it (`Database.read`): that export then panics the first time it is called
 //! (`docs/architecture/testing.md`, The binding). Nothing else reads the variable, it is read once, and a value
 //! that names no export asks for nothing.
 
@@ -219,10 +219,10 @@ mod tests {
         assert_eq!(caught("a sum", || 1 + 1).unwrap(), 2);
         // A message of either kind of string, as `panic!` with and without arguments raises
         for raise in [|| panic!("plainly"), || panic!("{}ly", "plain")] as [fn(); 2] {
-            let error = caught("Database.writeSync", raise).unwrap_err();
+            let error = caught("Database.write", raise).unwrap_err();
             assert_eq!(error.code, elmdb::ErrorCode::Panicked);
             let (before, after) = error.message.split_once(": plainly. ").expect(&error.message);
-            assert!(before.starts_with("Database.writeSync panicked at ") && before.contains("panics.rs:"), "{before}");
+            assert!(before.starts_with("Database.write panicked at ") && before.contains("panics.rs:"), "{before}");
             assert_eq!(after, "This is a bug in elmdb: report it with this message");
         }
         // A payload that is no string says nothing, and one raised with no hook run has no place
@@ -253,17 +253,17 @@ mod tests {
     #[test]
     fn a_handle_that_panicked_refuses_what_it_is_asked_but_what_always_runs() {
         let health = Health::default();
-        assert_eq!(health.caught("Database.writeSync", || 3).unwrap(), 3);
-        assert!(!health.panicked() && health.refusal("Database.writeSync").is_none());
-        let first = health.caught("Database.writeSync", || panic!("once")).unwrap_err();
+        assert_eq!(health.caught("Database.write", || 3).unwrap(), 3);
+        assert!(!health.panicked() && health.refusal("Database.write").is_none());
+        let first = health.caught("Database.write", || panic!("once")).unwrap_err();
         assert!(first.message.ends_with("refuses calls until it is closed and opened again"), "{}", first.message);
         assert!(health.panicked());
         // Refused without running, by the first panic, which a later one doesn't replace
         let mut ran = false;
-        let refused = health.caught("Database.readSync", || ran = true).unwrap_err();
+        let refused = health.caught("Database.read", || ran = true).unwrap_err();
         assert!(!ran && refused.code == elmdb::ErrorCode::Panicked);
-        assert!(refused.message.starts_with("Database.readSync is refused: "), "{}", refused.message);
-        assert!(refused.message.contains("Database.writeSync panicked at ") && refused.message.contains(": once. "));
+        assert!(refused.message.starts_with("Database.read is refused: "), "{}", refused.message);
+        assert!(refused.message.contains("Database.write panicked at ") && refused.message.contains(": once. "));
         assert_eq!(health.always("Database.close", || 5).unwrap(), 5);
         health.always("Database.close", || panic!("twice")).unwrap_err();
         let still = health.clone().refusal("Unit.write").unwrap();

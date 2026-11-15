@@ -58,13 +58,13 @@ const endings = {
   'calls process.exit': (dir) => [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    `db.readSync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
+    `db.read(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
     'process.exit(0);',
   ].join('\n'),
   'runs out of work': (dir) => [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    `db.readSync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
+    `db.read(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
   ].join('\n'),
   'is a worker thread its parent terminates': (dir) => [
     `const { Worker } = require('node:worker_threads');`,
@@ -97,7 +97,7 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncIdleMs: 60000, syncIntervalMs: 60000 });`,
-    `db.writeSync(Buffer.from(${JSON.stringify(batch.toString('base64'))}, 'base64'));`,
+    `db.write(Buffer.from(${JSON.stringify(batch.toString('base64'))}, 'base64'));`,
     'process.stdout.write(String(db.sequence));',
     'process.exit(0);',
   ].join('\n');
@@ -123,15 +123,15 @@ test('a process that exits with a rebuild asked for and not yet answered ends wi
     'const packr = new Packr({ useRecords: false, mapsAsObjects: true });',
     "const batch = (ids) => packr.pack({ ops: ids.map((id) => ({ op: 'create', type: 'Note', id, fields: { title: 'of ' + id } })), now: 1000 });",
     `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncs: false });`,
-    "db.writeSync(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
+    "db.write(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
     "process.stdout.write(String(db.sequence));",
-    'db.rebuild();',
+    'db.rebuildAsync();',
     'process.exit(0);',
   ].join('\n');
   const before = Number(execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 60_000 }));
   const db = Database.open(dir, { syncs: false });
   const after = db.sequence;
-  const clean = db.checkSync().differences.length;
+  const clean = db.check().differences.length;
   db.close();
   assert.equal(after, before + 1, 'the rebuild committed');
   assert.equal(clean, 0, 'the rebuild ran to its end');
@@ -154,12 +154,12 @@ test('a rebuild of a handle nothing else holds is answered once the handle has b
     'const packr = new Packr({ useRecords: false, mapsAsObjects: true });',
     "const batch = (ids) => packr.pack({ ops: ids.map((id) => ({ op: 'create', type: 'Note', id, fields: { title: 'of ' + id } })), now: 1000 });",
     `let db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)} });`,
-    "db.writeSync(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
+    "db.write(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
     'let collected = false;',
     'let rebuilt = false;',
     'const registry = new FinalizationRegistry(() => { collected = true; });',
     'registry.register(db, 0);',
-    'const rebuilding = db.rebuild().then(() => { rebuilt = true; });',
+    'const rebuilding = db.rebuildAsync().then(() => { rebuilt = true; });',
     'db = undefined;',
     'const until = Date.now() + 20000;',
     // Two more turns once the registry has been told, for the binding's own finalizer, which Node defers as well
@@ -182,10 +182,10 @@ test('a handle that ran a call answering a promise is collected once nothing hol
   // napi-rs's AsyncTask, every one of these was `kept`
   const said = {};
   const calls = {
-    read: "db.read(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]))",
+    read: "db.readAsync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]))",
     durable: 'db.durable()',
-    check: 'db.check()',
-    rebuild: 'db.rebuild()',
+    check: 'db.checkAsync()',
+    rebuild: 'db.rebuildAsync()',
   };
   for (const what of ['read', 'durable', 'check', 'rebuild', 'backup']) {
     const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
@@ -197,7 +197,7 @@ test('a handle that ran a call answering a promise is collected once nothing hol
       'let collected = null;',
       'const registry = new FinalizationRegistry(() => { collected = Date.now() - began; });',
       'registry.register(db, 0);',
-      `const asked = ${what === 'backup' ? `db.backup(${JSON.stringify(join(dir, 'copy'))})` : calls[what]};`,
+      `const asked = ${what === 'backup' ? `db.backupAsync(${JSON.stringify(join(dir, 'copy'))})` : calls[what]};`,
       'db = undefined;',
       'asked.then(() => {',
       '  const until = Date.now() + 5000;',
@@ -225,7 +225,7 @@ test('a process that ends while V8 frees the answers it dropped ends cleanly', {
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
     'const reads = Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]);',
-    'for (let i = 0; i < 20000; i++) db.readSync(reads);',
+    'for (let i = 0; i < 20000; i++) db.read(reads);',
     'db.close();',
     `require('node:v8').setFlagsFromString('--expose-gc');`,
     `require('node:vm').runInNewContext('gc')({ type: 'minor' });`,

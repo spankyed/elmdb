@@ -91,7 +91,11 @@ fn main() -> ExitCode {
 /// listed here goes through it, so the models can run it on their own threads. A model of one of these is how it
 /// leaves the list
 const UNMODELLED: &[(&str, &str)] = &[
-    ("database.rs", "the open store, the schema and the index builder behind the handle: no model of opening yet"),
+    (
+        "database.rs",
+        "the open store, the schema and the index builder behind the handle, and the rebuild turn, a parking_lot \
+         ReentrantMutex no model provides: no model of opening yet",
+    ),
     ("diagnostics/collector.rs", "a collector an embedding program installs, outside the engine's own concurrency"),
     ("engine/derive/sorted.rs", "a test-only scratch budget per thread, no shared state"),
     ("engine/mod.rs", "the schema read lock, a parking_lot RwLock no model provides"),

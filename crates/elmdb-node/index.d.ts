@@ -37,18 +37,21 @@ export declare class Database {
   /** Group commit's syncs so far */
   get syncs(): number
   /**
-   * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of
-   * `{ results: OpResult[], changes: ChangeSet, sequence: number }` once it has committed. `durable` commits it with
-   * a sync. Refused while a unit is open (`UNIT_OPEN`): writes go through the unit then
+   * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
+   * once it has committed. `durable` commits it with a sync. Refused while a unit is open (`UNIT_OPEN`): writes go
+   * through the unit then
    */
-  writeSync(batch: Buffer, durable?: boolean | undefined | null): Buffer
+  write(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
    * Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
    * answer per read
    */
-  readSync(reads: Buffer): Buffer
-  /** `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop */
-  read(reads: Buffer): Promise<Buffer>
+  read(reads: Buffer): Buffer
+  /**
+   * `read` on a thread of the pool, so a large read doesn't hold up the event loop. Its snapshot is the last commit
+   * as the read begins there, not as it is asked for: a write made after the call may be in its answer
+   */
+  readAsync(reads: Buffer): Promise<Buffer>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
   untrack(token: number): void
   /**
@@ -81,18 +84,17 @@ export declare class Database {
    * outside it is refused (`UNIT_OPEN`), and writes go through the unit
    */
   begin(): Unit
-  /** Compares derived data with primary data and every row with the schema's rules, on a thread of the pool */
-  check(): Promise<CheckReport>
-  /** `check` on this thread */
-  checkSync(): CheckReport
+  /** Compares derived data with primary data and every row with the schema's rules */
+  check(): CheckReport
+  /** `check` on a thread of the pool, in a snapshot of its own: the database's writes go on beside it */
+  checkAsync(): Promise<CheckReport>
   /**
-   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
-   * thread of the pool, in one unit of its own: a write made on this thread while it runs waits for it to commit.
-   * Refused while a unit is open (`UNIT_OPEN`)
+   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's, in
+   * one unit of its own. Refused while a unit is open (`UNIT_OPEN`)
    */
-  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
-  /** `rebuild` on this thread */
-  rebuildSync(entityType?: string | undefined | null, index?: string | undefined | null): void
+  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
+  /** `rebuild` on a thread of the pool: a write made on this thread while it runs waits for it to commit */
+  rebuildAsync(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
   /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
   /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
@@ -111,13 +113,10 @@ export declare class Database {
   renameType(from: string, to: string): void
   renameField(entityType: string, from: string, to: string): void
   renameRelation(from: string, to: string): void
-  /**
-   * A compacted copy of one moment of the database into `target`, which opens as a database of its own, on a thread of
-   * the pool
-   */
-  backup(target: string): Promise<void>
-  /** `backup` on this thread */
-  backupSync(target: string): void
+  /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
+  backup(target: string): void
+  /** `backup` on a thread of the pool, copying a snapshot: the database's writes go on beside it */
+  backupAsync(target: string): Promise<void>
   /** Every entry replaced by another database's primary data, derived data rebuilt under this schema */
   replaceWith(source: string): void
   /** Every entry removed but the database's format and schema */
@@ -145,7 +144,7 @@ export declare class Database {
 export declare class Unit {
   /**
    * Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
-   * bytes of `{ results: OpResult[] }`
+   * bytes of a `BatchResult`
    */
   write(batch: Buffer): Buffer
   /** Records `value` as the checkpoint `name`, committing with this unit or not at all */

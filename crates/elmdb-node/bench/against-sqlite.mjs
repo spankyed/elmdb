@@ -164,14 +164,14 @@ function elmdb() {
   const create = ({ id, ...fields }) => ({ op: 'create', type: 'Note', id, fields });
   const query = (steps, terminal, extra = {}) => {
     const plan = { start: { from: 'types', types: ['Note'] }, steps, terminal };
-    return packr.unpack(db.readSync(packr.pack({ reads: [{ read: 'query', plan, ...extra }] })))[0];
+    return packr.unpack(db.read(packr.pack({ reads: [{ read: 'query', plan, ...extra }] })))[0];
   };
   const search = (text, fuzzy) => ({ step: 'search', query: text, ...(fuzzy ? {} : { options: { fuzzy: false } }) });
   const bestAfter = (text, cursor) => [search(text, false), { step: 'after', id: cursor }, { step: 'limit', n: 10 }];
   return {
     text: true,
-    load: (notes) => db.writeSync(packr.pack({ ops: notes.map(create) })),
-    create: (one) => db.writeSync(packr.pack({ ops: [create(one)] })),
+    load: (notes) => db.write(packr.pack({ ops: notes.map(create) })),
+    create: (one) => db.write(packr.pack({ ops: [create(one)] })),
     settle: () => db.waitForIndexBuilds(),
     best: (text, fuzzy = false) => query([search(text, fuzzy), { step: 'limit', n: 10 }], { answer: 'ids' }).ids,
     // How many entities the plan visited to answer the best ten
@@ -193,10 +193,10 @@ function elmdb() {
     allByName: () => query(BY_NAME, { answer: 'ids' }).ids,
     allByNumber: () => query(BY_NUMBER, { answer: 'ids' }).ids,
     // A unit that gives each of the notes another name, and one that gives each the other status
-    rename: (notes) => db.writeSync(packr.pack({
+    rename: (notes) => db.write(packr.pack({
       ops: notes.map((i) => ({ op: 'set', id: id(i), fields: { name: otherNameOf(i) }, touch: false })),
     })),
-    restatus: (notes) => db.writeSync(packr.pack({
+    restatus: (notes) => db.write(packr.pack({
       ops: notes.map((i) => ({ op: 'set', id: id(i), fields: { status: i % 2 ? 'done' : 'open' }, touch: false })),
     })),
     // The bytes of each value index's keys and their values
@@ -222,13 +222,13 @@ function elmdb() {
       };
     },
     check: () => {
-      const report = db.checkSync();
+      const report = db.check();
       assert.deepEqual([report.differences.length, report.violations.length], [0, 0], 'elmdb: check() found a difference');
     },
-    rebuild: () => db.rebuildSync(),
+    rebuild: () => db.rebuild(),
     bytes: () => statSync(join(dir, 'data.mdb')).size,
     compacted: () => {
-      db.backupSync(join(root, 'elmdb-compacted'));
+      db.backup(join(root, 'elmdb-compacted'));
       return statSync(join(root, 'elmdb-compacted', 'data.mdb')).size;
     },
     close: () => db.close(),

@@ -15,9 +15,10 @@ The map starts at twice the data file, 64 MiB at least (`mapSizeBytes` sets it).
 map doubled while the process has no transaction open, and the unit run again, up to 16 times: a unit is data, so the
 engine can run it again without the caller. A growth also keeps out whatever else reads through the map: a sync and
 each read of the environment's sizes wait for it as a transaction does. A growth waits for the reads, checks and
-backups running to end; one for a write or a rebuild that is no unit's is refused (`UNIT_OPEN`) once a unit opens on
-another thread, rather than waiting on it, and a unit's own beginning grows before it holds anything. A map another process grew is adopted by the
-first read to meet it, `committedElsewhere` included, and by an open that meets it as it opens, each of whose
+backups running to end. One for a write made outside an open unit, or for a rebuild, is refused (`UNIT_OPEN`) once a
+unit is open, rather than waiting on it; a unit's own beginning grows with its place already reserved, before it takes
+the gate or the writer's turn. A map another process grew is adopted by the first read to meet it,
+`committedElsewhere` included, and by an open that meets it as it opens, each of whose
 transactions takes the grown map and is begun again. Mapping capacity and physical file length are separate. On Windows,
 a read-only view covers the current physical file: its configured bound is capped to that length at open and when
 adopting external growth, so newly appended pages trigger remapping before access. Read-only handles cannot grow
@@ -431,8 +432,10 @@ the process makes no further database calls; expiration depends on the operating
 A commit here clears the cache, and an older read finishing after that clear cannot return its snapshot to it.
 Active reads and open units keep their snapshots until they finish. The worker owns only the cache, cannot keep
 the database itself alive, and is joined on normal close; process-exit cleanup detaches it with bounded locking.
-The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.readSync(reads)` runs on the calling thread. `db.read(reads)` runs on a thread of the pool, in a snapshot of its
-own, and resolves with the same answer, so a large read doesn't block the event loop.
+The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.read(reads)` runs on the calling thread. `db.readAsync(reads)` runs on a thread of the pool and resolves with the
+same answer, so a large read doesn't block the event loop. Its snapshot is the last commit as the read begins there,
+not as it is asked for, so a write made after the call may be in its answer: holding a snapshot from the call to the
+pool's thread would hold the store's gate across threads, and the gate is held by the thread that takes it.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 
@@ -443,7 +446,7 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 
 ## Writes: batches and units
 
-`db.writeSync(batch, durable?)` applies a batch as one unit, on the calling thread, and answers once it has committed,
+`db.write(batch, durable?)` applies a batch as one unit, on the calling thread, and answers once it has committed,
 or with `durable` once its sync has run. A write is never answered by a promise: what it answers, an entity's id and
 short code, and what it refuses are its caller's at the call, and a read made after it sees it. In the grouped mode a
 `set` committed alone took about 38 µs, one inside a unit about 11 µs and a `create` about 107 µs, through apack's
@@ -452,27 +455,27 @@ which `db.durable()` waits for without holding the event loop. A batch of thousa
 thread for as long as it runs.
 
 A check, a rebuild and a backup can take as long as the database is large, so each also runs on a thread of the pool,
-answering a promise: `db.check()`, `db.rebuild(type?, index?)` and `db.backup(target)`, each a job of its own
-(`elmdb-node/src/jobs.rs`); their `…Sync` forms run on the calling thread. A rebuild of 200,000 notes held the event
+answering a promise: `db.checkAsync()`, `db.rebuildAsync(type?, index?)` and `db.backupAsync(target)`, each a job
+of its own (`elmdb-node/src/jobs.rs`); `db.check()`, `db.rebuild()` and `db.backup()` run on the calling thread. A rebuild of 200,000 notes held the event
 loop for its whole 3.5 s in its blocking form and for at most 2.9 ms on the pool (`../evidence/million-notes.md`, Off
-the calling thread). A check and a backup read a snapshot, and the database's writes go on beside them, except a write that must grow
-the map, which waits for them to end. A rebuild
-writes, in one unit of its own: a write made on the calling thread while it runs waits for the database's write lock
+the calling thread). A check and a backup read a snapshot, and the database's writes go on beside them, except a
+write that must grow the map, or a `begin` on a map more than half used, which waits for them to end on the calling
+thread. A rebuild writes, in one unit of its own: a write made on the calling thread while it runs waits for the
+database's write lock
 until the rebuild commits, holding the event loop for that long, and one made before the rebuild has the lock commits
 first. Either order leaves derived data matching primary data, since a rebuild derives from what is committed when it
 begins. Every other call that takes the write lock waits for it the same way, holding the event loop: `begin`,
 `setSchema`, a purge, a rename, a load, `reset`, `replaceWith` and `close`. Rebuilds asked together run one after
 another. A rebuild is refused while a unit is open (`UNIT_OPEN`), as a write is: which of a unit begun and a
 rebuild asked for in the same turn takes the write lock first is the pool's timing, and the other waits or is
-refused. Call a rebuild with no unit open and await it before writing, or make the writes on another thread. A process
+refused. Call a rebuild with no unit open and await a `rebuildAsync` before writing, or make the writes on another thread. A process
 that exits by `process.exit()` runs the pool to its end first, so what was asked for
 is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that has panicked) throws at
 the call in every form; a call on a closed database throws in the blocking forms and rejects the promise in the
 others. A close waits for the operations running, which for a large rebuild or backup is the whole of it, so the event
 loop is held by a close made during one. An operation not yet begun when the close takes the database rejects with
-`CLOSED` and does nothing. Each holds one thread of the pool, a rebuild waiting for another's turn included, which
-Node shares with its file system work, for as long
-as it runs. A unit can also
+`CLOSED` and does nothing. Each holds one thread of the pool, which Node shares with its file system work, for as
+long as it runs; a rebuild waiting for another's turn holds its thread while it waits. A unit can also
 stay open across calls, as a caller's transaction running its own code between writes needs: `db.begin()` opens one,
 `unit.write(batch)` applies a batch in it, its writes read their own, and `unit.commit(durable?)` or `unit.abort()` ends
 it. One unit is open at a time, and while it is a write of the database refuses (`UNIT_OPEN`): its writes go through the

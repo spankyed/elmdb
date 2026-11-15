@@ -110,7 +110,7 @@ test('a write answers what its generated type declares, field for field', (t) =>
       types: { Note: { fields: { title: { type: 'string' } } } },
     },
   });
-  const answer = packr.unpack(db.writeSync(packr.pack({
+  const answer = packr.unpack(db.write(packr.pack({
     ops: [
       { op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } },
       { op: 'create', type: 'Note', id: 'Note-2', fields: { title: 'two' } },
