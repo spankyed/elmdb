@@ -18,7 +18,13 @@ const { Database } = require('../index.js');
 
 test('the canonical form a database answers is a Schema, every absent option null', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  /** @type {import('../index.js').Database | undefined} */
+  let db;
+  // Closed before its directory is removed, whether or not an assertion failed: Windows won't remove a mapped file
+  t.after(() => {
+    db?.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
   /** @type {Schema} */
   const given = {
     $schema: 'https://elmdb.dev/schema/1.json',
@@ -78,11 +84,10 @@ test('the canonical form a database answers is a Schema, every absent option nul
       },
     },
   };
-  const db = Database.open(join(dir, 'db'), { schema: given, syncs: false });
+  db = Database.open(join(dir, 'db'), { schema: given, syncs: false });
   assert.deepEqual(db.schema, canonical);
   // What a database answers, it takes back unchanged
   assert.deepEqual(db.setSchema(canonical), []);
-  db.close();
 });
 
 test('a write answers what its generated type declares, field for field', (t) => {
