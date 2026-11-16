@@ -68,7 +68,9 @@ This document is what every "should elmdb do X?" is checked against. The others:
 - **icu4x** (`icu_collator`) for collation, each of its crates pinned to an exact version (`Cargo.toml`;
   `cargo xtask check-exact`): a sort key is the collator's output, so an order of strings is filed under a stamp
   of the collator that made it (`engine.md`, An order of strings). charabia, rust-stemmers and hannoy are pinned the
-  same way, since a text index stores the tokenizer's and stemmer's output and a vector index hannoy's graph.
+  same way, since a text index stores the tokenizer's and stemmer's output and a vector index hannoy's graph, and so
+  are the crates charabia normalizes, detects a language and segments by (unicode-normalization, whatlang,
+  finl_unicode).
 - **rmp** for values in Rust, under the value spec in `format.md`; callers encode with any msgpack implementation that
   meets it (apack uses msgpackr).
 - **napi-rs** for the Node binding. N-API is ABI-stable, so an Electron or Node upgrade needs no rebuild.
