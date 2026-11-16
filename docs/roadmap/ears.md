@@ -273,7 +273,7 @@ Opened by having both halves in one repository, each to be decided on a reading,
      The host's `backup` stays as it is too: it blocks at the pin and on `main` alike, and moving it to `backupAsync` is
      a decision of its own, with the rollback copy an import takes before it replaces a database in view (the host's
      `backup/index.ts`). apack calls neither the binding's `check` nor its `rebuild` today. What else changed between
-     the pin and `main` at `2b2b7f6` (2026-11-15), read from the commits that touched the binding's declarations, its
+     the pin and `main` at `66af015` (2026-11-15), read from the commits that touched the binding's declarations, its
      protocol or `docs/architecture` (`git log --first-parent 4b67670..<the new pin> -- crates/elmdb-node/index.d.ts
      crates/elmdb-node/protocol docs/architecture`, run again at the move):
      - a change set's `created` and `destroyed` mean something else for an id destroyed and made again, and
@@ -285,7 +285,7 @@ Opened by having both halves in one repository, each to be decided on a reading,
        still being built (`INDEX_BUILDING`);
      - text ranking was rebuilt, which moves hit order and scores, and strings the collation holds equal are ordered
        by their bytes (#138), which moves ties;
-     - `PANICKED`, `RESTORE_PENDING` and `SYNC_BEHIND` are new codes;
+     - `PANICKED`, `RESTORE_PENDING`, `SYNC_BEHIND` and `MODE_MISMATCH` are new codes;
      - the grouped mode keeps its last synced commit, holding a read transaction at it so that no writer reuses its
        pages, and writes that commit's meta page to a record beside the data file (`synced`), from which an open
        restores the commit after a power loss (#145); a sync that fails flushing the data or the record refuses every
@@ -300,7 +300,18 @@ Opened by having both halves in one repository, each to be decided on a reading,
        `data.mdb`;
      - what that read transaction keeps from reuse is bounded: a write past the bound waits for a sync, and is refused
        with `SYNC_BEHIND` once that sync has failed, and `waitForIndexBuilds` throws `SYNC_BEHIND` or `READERS_FULL`
-       when the builder is held (#151).
+       when the builder is held (#151);
+     - a writable open in another mode than a live writer's is refused with `MODE_MISMATCH` (#156), which apack's specs
+       that open a database with `syncs: false` beside a child process opening it with the defaults meet (`apack-ears`'
+       `watch.spec.ts` and `writers-converge.spec.ts`, the SDK's `projections-converge.spec.ts`); each writable open
+       holds `grouped.lock`, `ordered.lock` or `unsynced.lock` beside `data.mdb`; under `syncEachCommit` or `syncs:
+       false`, which apack's temporary databases use, the first writable open syncs the data file and writes and syncs
+       the record, and each after it syncs the record it reads; a backup into a directory removes the record a database
+       there left, once the copy is published; and `replaceWith` opens its source as an open does, at its record's
+       commit where a loss left one to restore;
+     - an open after a restore reports it, `openReport.restored` with the sequence it opened at, and
+       `openReport.notBorneOut`, until a caller calls `acknowledgeRestore()`; the CLI says so on every command's error
+       stream until `elmdb acknowledge-restore`; and a writable open that can't write that notice is refused (#157).
    - **apack's databases are rebuilt once on the new pin.** Format 1 was edited in place between the pin and `main`, in
      derived data (`../architecture/format.md`, Versions): a value index's orders, ranges and pages (#95), a compound
      index's order under equalities (#96), a term's places in blocks with lengths by place (#93), a list before a
