@@ -4500,8 +4500,8 @@ impl Stages {
             // A stage visits what the stage before handed it, and what it read from the store itself
             let received = if at == 0 { 0 } else { self.kept[at - 1].get() };
             let graphed = graph[at];
-            // A stage's `edges` are its graph's, or the ones a `similar` read: one key, written once, so a stage that
-            // did both answers its graph's
+            // A stage's `edges` are its graph's (a `rank`, a `topological`) or the ones a `similar` read: one key,
+            // written once. No stage does both; one that did would answer its graph's
             let edges = graphed.map(|g| g.edges).or(compared[at].map(|(_, _, edges)| edges));
             let extra = match graphed {
                 None => 0,
