@@ -124,7 +124,8 @@ export declare class Database {
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /**
    * Blocks until every index waiting to be built is built or has failed, or answers what holds a build up while the
-   * builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again after a pause to wait on
+   * builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again after a pause to wait on. Refused with a unit
+   * open once the database has started its index builder (`UNIT_OPEN`): commit or abort it, then wait
    */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
@@ -155,7 +156,10 @@ export declare class Database {
    * the database is closed
    */
   durable(): Promise<void>
-  /** Syncs what is owed and releases the environment; closing a closed database does nothing */
+  /**
+   * Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a
+   * unit is open (`UNIT_OPEN`): commit or abort it, then close
+   */
   close(): void
 }
 
