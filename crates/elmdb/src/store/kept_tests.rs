@@ -1287,6 +1287,49 @@ fn a_write_takes_the_map_another_process_grew_the_file_past() {
 }
 
 #[test]
+fn a_sync_that_met_a_grown_map_as_a_unit_began_gives_way_to_the_unit_and_its_owner_s_wait_is_answered() {
+    // The sync meets the map another process grew and, before it takes the size, a unit begins: the unit takes the
+    // size itself and holds the gate for reading until it ends. The sync, finding the gate held, gives way and begins
+    // again at the size the unit took, so the unit's owner, waiting on it, has its answer while the unit is open
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(256 << 10), ..grouped() }).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir.path())
+        .env("ELMDB_GROW_GROUPED", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    let (paused, sync_paused) = std::sync::mpsc::channel();
+    let (opened, unit_open) = std::sync::mpsc::channel::<()>();
+    failpoints::run_once_at(points::SYNC_MAP_GROWN, &store.path, move || {
+        paused.send(()).unwrap();
+        let _ = unit_open.recv_timeout(Duration::from_secs(10));
+    });
+    // Asked before the unit, so the sync it waits on is the one held at the point
+    let waiting = store.durable().expect("the grouped mode syncs");
+    sync_paused.recv_timeout(Duration::from_secs(10)).expect("the sync met the grown map");
+    let (txn, gate, writer) = store.begin().unwrap();
+    opened.send(()).unwrap();
+    // Waited on a thread of its own, so a wait that never ends fails here rather than hanging the test; the unit is
+    // ended either way, which lets a sync waiting behind it go on
+    let (answered, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answered.send(waiting.wait());
+    });
+    let answer = answer.recv_timeout(Duration::from_secs(10));
+    txn.abort();
+    drop(gate);
+    writer.release();
+    store.end_unit();
+    answer.expect("the sync waited behind the unit, which its owner held as it waited").unwrap();
+    store.close().unwrap();
+}
+
+#[test]
 fn a_write_that_takes_the_map_another_process_grew_runs_a_read_waiting_on_its_own_snapshot_first() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(256 << 10), ..grouped() }).unwrap();
