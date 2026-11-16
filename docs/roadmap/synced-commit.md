@@ -471,8 +471,11 @@ restore it can't make.
    In each of eight rounds a writer in a child process dies in its third sync once the data is flushed and before the
    record is written, or between its second sync and its third; what it didn't sync is dropped, with the kernel's copy,
    and the database opened after, as of another boot, must hold what its last finished sync held and pass `check()`. The
-   same run with the writer's pin turned off must fail, so each night shows the test can. It drops what wasn't synced;
-   it tears no write, which LazyFS can be told to do as a later step.
+   same run with the writer's pin turned off must fail, so each night shows the test can. It drops what wasn't synced,
+   and in four more rounds tears a write to the data file, early in the workload and later: LazyFS is mounted again told
+   to split that write in three, persist the first part and the last, and crash, and once it is mounted again the
+   database must hold what the writer's last finished sync held, a writer that finished its workload having seen no
+   tear.
    What is left can only be done by hand, on a machine of each platform, by a person who can stop it hard. On each: open
    a database in the grouped mode with `syncIdleMs` and `syncIntervalMs` of 600000, so that group commit doesn't sync
    while the test runs, with a writer that commits, syncs (`await db.durable()`), and commits again without a sync, and
