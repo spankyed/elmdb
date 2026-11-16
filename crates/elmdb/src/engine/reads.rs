@@ -340,8 +340,12 @@ fn write_row(r: &impl Read, id: &str, fields: Option<&[String]>, w: &mut W<'_>) 
             }
         }
         Some(names) => {
-            let mut held = Vec::new();
-            for name in names.iter().filter(|n| *n != field::ID) {
+            let mut held: Vec<(&String, Vec<u8>)> = Vec::new();
+            // A field asked for twice is answered once: a map holds a key once
+            for (at, name) in names.iter().enumerate().filter(|(_, n)| *n != field::ID) {
+                if names[..at].contains(name) {
+                    continue;
+                }
                 if let Some(bytes) = get(r, id, name)? {
                     held.push((name, bytes));
                 }

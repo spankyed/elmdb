@@ -148,7 +148,7 @@ fn every_kind_of_answer_decodes_into_its_type() {
         query(json!([{ "step": "where", "field": "n", "value": 9 }]), json!({ "answer": "first" })),
         query(json!([]), json!({ "answer": "exists" })),
         query(json!([]), json!({ "answer": "rows" })),
-        query(json!([]), json!({ "answer": "rows", "fields": ["title", "entityType", "unheld"] })),
+        query(json!([]), json!({ "answer": "rows", "fields": ["title", "entityType", "unheld", "title", "id"] })),
         query(json!([]), json!({ "answer": "firstRow" })),
         query(json!([{ "step": "where", "field": "n", "value": 9 }]), json!({ "answer": "firstRow" })),
         query(json!([]), json!({ "answer": "edges", "kinds": ["refs", "weighs"], "direction": "both" })),
@@ -220,6 +220,10 @@ fn every_kind_of_answer_decodes_into_its_type() {
     assert!(hits.iter().all(|h| h.highlights.is_some() && h.row.is_some()), "{hits:?}");
     let Answer::Rows { rows, .. } = &answers[6] else { panic!("rows answered {:?}", answers[6]) };
     assert!(rows.iter().all(|r| r.fields.contains_key("entityType") && r.fields.contains_key("createdAt")));
+    // A field asked for twice is answered once, and a field the entity lacks not at all
+    let Answer::Rows { rows, .. } = &answers[7] else { panic!("rows answered {:?}", answers[7]) };
+    assert_eq!(rows[0].id, "Note-1");
+    assert_eq!(rows[0].fields.keys().collect::<Vec<_>>(), ["entityType", "title"]);
     let Answer::Pending { chunks, .. } = &answers[36] else { panic!("pending answered {:?}", answers[36]) };
     assert_eq!(chunks.len(), 1);
 }
