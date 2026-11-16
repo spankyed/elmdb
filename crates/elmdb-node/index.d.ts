@@ -122,7 +122,7 @@ export declare class Database {
   /**
    * Blocks until every index waiting to be built is built or has failed, or answers what holds a build up while the
    * builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again after a pause to wait on. Refused with a unit
-   * open while the builder runs (`UNIT_OPEN`), since a build waits for the unit to end: commit or abort it, then wait
+   * open once the database has started its index builder (`UNIT_OPEN`): commit or abort it, then wait
    */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
