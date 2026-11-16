@@ -107,9 +107,10 @@ fn a_read_asked_at_a_commit_with_none_held_runs_here_once_as_many_are_held_as_ma
     assert_eq!(reads.held(), (HELD, 1));
     let work: Work<Txn> = Box::new(|_| {});
     assert!(matches!(reads.ask(env.last(), || env.open(), work), Ok(Asked::Here(_))));
-    // A commit that holds one already is still shared
+    // A commit that holds one already is still shared, its one transaction in use or not: nothing more is opened
     let work: Work<Txn> = Box::new(|_| {});
-    assert!(matches!(reads.ask(env.last() - 1, || env.open(), work), Ok(Asked::Waiting(_))));
+    let Ok(Asked::Waiting(_shared)) = reads.ask(env.last() - 1, || env.open(), work) else { panic!("refused") };
+    assert_eq!(reads.held(), (HELD, 1));
     assert_eq!(env.open_now(), HELD);
 }
 
