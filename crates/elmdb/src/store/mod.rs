@@ -907,6 +907,7 @@ impl Store {
                 Ok(txn) => txn,
                 Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                     drop(guard);
+                    run_point!(READ_MAP_GROWN at &self.path);
                     self.adopt_map_size()?;
                     continue;
                 }
@@ -1841,3 +1842,5 @@ mod retention_tests;
 mod synced_model;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod wait_tests;

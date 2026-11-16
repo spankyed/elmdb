@@ -36,6 +36,7 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
             }
             Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                 drop(guard);
+                run_point!(BACKUP_MAP_GROWN at &store.path);
                 store.adopt_map_size()?;
             }
             Err(error) => return Err(error.into()),

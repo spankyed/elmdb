@@ -543,6 +543,42 @@ The operations:
 
 A batch is data, so the engine can retry it (after growing the map, `design.md`) without involving the caller.
 
+### What waits on what
+
+An open unit holds three things until it ends: the database's one write transaction, which every process takes to
+commit; this process's gate for reading, which a transaction of the process holds while it is used and which taking a
+grown map's size, or growing the map, needs for writing; and the unit's place, which refuses a second unit. Its owner
+is the thread it was begun on: in Node, the event loop. Whatever the owner waits on while the unit is open must need
+neither the write transaction, nor the gate for writing, nor the unit's place, or nothing ends. The gate for reading is
+shared: work on other threads takes it beside the unit.
+
+- **Refused while a unit is open, rather than waiting on it** (`UNIT_OPEN`): a write outside the unit, a schema change,
+  a growth for a write that is no unit's own, a second `begin`, a wait for the index builds, whose builder commits, and
+  a close, refused before it waits for a check running on another thread (Rust's `close_within` answers false). A
+  rebuild is refused too, once a rebuild already running, which it waits for whether or not a unit is open, has
+  committed.
+- **Answered while a unit is open:**
+  - `durable()`: it waits on group commit's sync, which takes the gate for reading, the data file and the record's
+    locks, and nothing the unit holds;
+  - a read on another thread, `checkAsync`'s among them;
+  - a backup;
+  - `readAsync`, whose snapshot is taken at its call, on the owner's thread, so the thread that answers it takes no
+    map's size;
+  - the engine's `unwatch` (the binding has no watch), which waits for a delivery running on another thread, a read
+    beside the unit;
+  - `acknowledgeRestore`, which takes the record's lock, which other processes' syncs share and no unit holds.
+
+  The first three may meet a map another process grew before the unit began. Taking the size waits at most 10 ms for
+  the gate and otherwise begins its transaction again, at the size the unit's own beginning took (above, Opening).
+  `store/wait_tests.rs` holds each at that point while a unit begins, and requires its answer while the unit is open.
+  A unit committed with `durable` lets go of the gate, the write transaction and its place before it waits for its
+  sync, so that wait is one made with no unit open.
+- **Waiting for the unit to end, which its owner never waits on:** the index builder, which goes on once the unit has
+  ended.
+
+A new wait made where a unit may be open belongs in one of these lists, with a test beside the others if it is
+answered.
+
 ## Durability
 
 A unit is visible when it commits and survives the process crashing once `write` returns. Surviving the machine failing

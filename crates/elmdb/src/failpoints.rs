@@ -143,6 +143,12 @@ pub(crate) mod points {
     /// Runs in a sync of the grouped mode once its read transaction was refused for a map another process grew, its
     /// hold on the gate let go, before it takes the map's new size
     pub const SYNC_MAP_GROWN: &str = "store::sync_map_grown";
+    /// Runs in a read once its transaction was refused for a map another process grew, its hold on the gate let go,
+    /// before it takes the map's new size
+    pub const READ_MAP_GROWN: &str = "store::read_map_grown";
+    /// Runs in a backup once its copy was refused for a map another process grew, its hold on the gate let go, before
+    /// it takes the map's new size
+    pub const BACKUP_MAP_GROWN: &str = "store::backup_map_grown";
     /// Runs in a sync of the grouped mode once it has begun the read transaction its pin moves to, before it reads
     /// that commit's meta page from the file
     pub const SYNC_PINNED: &str = "store::sync_pinned";
