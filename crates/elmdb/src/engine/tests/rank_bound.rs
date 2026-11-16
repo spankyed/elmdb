@@ -1,5 +1,5 @@
 //! A rank index's scores held to the bound it reports of `rank` over the same graph: the comparison the rank index's
-//! own specs (`rank_index.rs`) and the model harness (`model.rs`) both make
+//! own specs (`rank_index.rs`) and the model harness (`model/`) both make
 
 use serde_json::{Value as Json, json};
 

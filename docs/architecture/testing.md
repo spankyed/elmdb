@@ -10,20 +10,20 @@ this one, a read-only open beside another process's writer, and the process clai
 
 ## The model harness
 
-The acceptance suite is a model harness (`crates/elmdb/src/engine/tests/model.rs`), ported from apack's
-(`@apackdev/ears`, `tests/_harness/`): random workloads over a small pool of ids, so writes collide, refer to each
-other and are refused, checked after every operation against a plain reference model. The workload is a state machine
-(proptest-state-machine): each step is chosen from what the model holds — an id it has, an edge it has, a key holding a
-list — and one write in eight blind, so the engine is still checked to refuse what the model refuses. A failing case shrinks
-to its shortest, dropping a chosen step whose target an earlier deletion removed rather than keeping it as a refusal,
-and `generated_workloads_complete_every_kind_of_step_and_make_every_refusal` holds the generation to completing every
-kind of step and making every refusal. The engine must hold what the model holds, refuse what it refuses, and answer
-every derived read as the model does: a type's entities, count and trash, value index lookups and their first two, an
-order by a field and its first one or three, roles, each edge's far ends, and a text index's matches for a few words. A
-unit, a savepoint and a refused commit roll back with it. A workload also rebuilds every index or one now and then:
-`check()` derives what it compares with the code a rebuild writes with, so after a rebuild only the model's answers can
-show that code wrong. Ranking is checked separately, against fixed corpora (`engine/text/tests.rs`,
-`engine/vector/tests.rs`).
+The acceptance suite is a model harness (`crates/elmdb/src/engine/tests/model/`), ported from apack's (`@apackdev/ears`,
+`tests/_harness/`): random workloads over a small pool of ids, so writes collide, refer to each other and are refused,
+checked after every operation against a plain reference model. The workload is a state machine (proptest-state-machine):
+each step is chosen from what the model holds — an id it has, an edge it has, a key holding a list — and one write in
+eight blind, so the engine is still checked to refuse what the model refuses. A failing case shrinks to its shortest,
+dropping a chosen step whose target an earlier deletion removed rather than keeping it as a refusal, and
+`generated_workloads_complete_every_kind_of_step_and_make_every_refusal` holds the generation to completing every kind
+of step and making every refusal. The engine must hold what the model holds, refuse what it refuses, with the error code
+the model's reason for refusing names, and answer every derived read as the model does: a type's entities, count and
+trash, value index lookups and their first two, an order by a field and its first one or three, roles, each edge's far
+ends, and a text index's matches for a few words. A unit, a savepoint and a refused commit roll back with it. A workload
+also rebuilds every index or one now and then: `check()` derives what it compares with the code a rebuild writes with,
+so after a rebuild only the model's answers can show that code wrong. Ranking is checked separately, against fixed
+corpora (`engine/text/tests.rs`, `engine/vector/tests.rs`).
 
 Each commit's change set is checked too: the entities it made, destroyed, trashed or restored, the fields and roles it
 wrote (whether or not the value changed), and its relations: each link, unlink, rekey and move, by kind and ends, with a
@@ -55,8 +55,9 @@ act on passes whatever the engine does, so the workload aims its renames and its
 and the count of steps requires, beside each kind of step and each refusal, 20 purges that took something, 20 type
 renames with a `Note` to rename and 20 replacements by a backup that differs from what is there. The renames' one-way
 states, a type purge and a role purge are left to deterministic engine tests (`engine/tests/derived.rs`,
-`maintenance.rs`), which the model's fixed ids and per-type indexes would otherwise have to be rewritten for. Before its
-`check()` the harness declares the spare names again, since data a removed declaration kept is a violation.
+`maintenance.rs`), which the model's fixed ids and per-type indexes would otherwise have to be rewritten for. When a
+workload ends with them removed, `check()` must report each `Task` holding `spare`, a field its type doesn't declare,
+and nothing else; the harness then declares them again, and `check()` must be clean.
 
 It runs in two places:
 
@@ -107,15 +108,16 @@ in it. So:
 
 ## Crashes and failed syncs
 
-The crash harness (`engine/tests/model.rs`, `mod crash`): a child process, the test binary run again, applies a seeded
-workload with syncs on and acknowledges each step; the parent kills it with SIGKILL mid-workload, reopens the files and
-compares them with the model after the acknowledged steps, or one more. The child waits to be killed by reading its
-stdin, which the parent holds, so it ends with the parent however the parent ends, rather than outliving it. Its
-temporary directories are inside the parent's: a child killed in the middle of a rebuild leaves its scratch there, and
-the parent's cleanup removes it. The
-failed-sync harness (`store/sync/tests.rs`) runs random sequences of commits, `durable()` waits, failing syncs and clock
-advances, and checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it
-waited on failed.
+The crash harness (`engine/tests/model/crash.rs`): a child process, the test binary run again, applies a seeded workload
+with syncs on and acknowledges each step; the parent kills it with SIGKILL mid-workload, reopens the files and compares
+them with the model after the acknowledged steps, or one more. A child whose output ends before the kill and before its
+workload did ended on its own, and fails the test with what it wrote to stderr: an assertion a step makes, such as the
+type rename's, fails in the child. The child waits to be killed by reading its stdin, which the parent holds, so it ends
+with the parent however the parent ends, rather than outliving it. Its temporary directories are inside the parent's: a
+child killed in the middle of a rebuild leaves its scratch there, and the parent's cleanup removes it. The failed-sync
+harness (`store/sync/tests.rs`) runs random sequences of commits, `durable()` waits, failing syncs and clock advances,
+and checks that a wait resolves only once a sync covering its commit succeeded and rejects when the sync it waited on
+failed.
 
 ## Power loss
 
@@ -242,7 +244,7 @@ edit would excuse whatever the edit moved onto those lines, and report the mutan
 
 ```sh
 # Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle)
-cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::the_engine
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::machine::the_engine
 # Pass 2, only those pass 1 missed, against the whole suite
 cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
 # A branch's own changes, each crate against its own suite, survivors listed (what CI runs on a pull request)
@@ -259,7 +261,7 @@ diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --confi
 # The binding's process claim, against elmdb-node's suite rather than the engine's
 cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
 # Some mutants of a file again, after the specs that should kill them: a regex over their names
-cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::the_engine
+cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file F -F 'F:(LINE|LINE):' -- -- --skip model::machine::the_engine
 ```
 
 Run cargo-mutants without `CARGO_TARGET_DIR`: it builds each job's copy of the tree in a directory of its own, and one

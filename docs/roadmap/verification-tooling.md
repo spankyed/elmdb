@@ -145,7 +145,7 @@ Acceptance:
 - A mutation in shared derivation that `check()` cannot see (H04's case) fails the model.
 - Expanded to schema changes and units only once the first model has caught something or proven cheap to keep.
 
-The model harness (`engine/tests/model.rs`) is this model: every derived read answered by the model alone, units and
+The model harness (`engine/tests/model/`) is this model: every derived read answered by the model alone, units and
 savepoints included, and a workload that rebuilds every index or one, so derive.rs's reconstruction, which `check()`
 shares, is compared with the model; it compares an order by a field, whole and its first one or three, and a filter's
 first two. Its workload is a proptest-state-machine reference machine: each write chosen from what the model holds, one
