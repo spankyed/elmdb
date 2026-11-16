@@ -175,6 +175,10 @@ enum Step {
     PurgeField,
     /// The `tags` edges purged: refused while the schema declares the kind
     PurgeKind,
+    /// `Note` renamed to `Memo`, a type the harness declares as `Note` is, and back, in one commit: what the two renames
+    /// leave is what was there, and a reader of `Note` from before it is told the answer is incomplete, as after a
+    /// reset. One commit, so that a crash leaves the ids as they were or as they are again
+    RenameTypeAndBack,
 }
 
 /// The field renames the workload makes, both ways between `c` and the spare field
@@ -374,8 +378,10 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
                 prop_oneof![1 => prop::sample::select(all), 3 => prop::sample::select(moving)].boxed()
             }
         };
-        // Edges are few and short-lived, so one a rename could move onto the spare kind raises the renames' share too
+        // The data is short-lived, the writes replacing it, so what a rename could move onto a spare name raises the
+        // renames' share too
         let rename_share = if moving_kinds.is_empty() { 2 } else { 6 };
+        let field_rename_share = if moving_fields.is_empty() { 2 } else { 4 };
         let rename =
             renames(&RENAMES[..], moving_kinds).prop_map(|(from, to)| Step::RenameRelation { from, to }).boxed();
         let field_rename =
@@ -388,9 +394,10 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
             4 => aimed(aimed_unit(&state.model, true)),
             2 => blind(Just(Step::RefuseNext).boxed()),
             2 => blind(rebuild),
-            2 => blind(reset),
+            // A reset empties the model, which the steps of edges need some time to fill again, so it shares its slot
+            2 => blind(prop_oneof![reset, Just(Step::RenameTypeAndBack)].boxed()),
             rename_share => blind(rename),
-            2 => blind(field_rename),
+            field_rename_share => blind(field_rename),
             // A replacement completes only once a backup was taken, and a purge only while the spare names are removed
             2 => blind(prop_oneof![1 => backup, 2 => replace].boxed()),
             declaration_share => blind(declarations),
@@ -813,7 +820,8 @@ impl Model {
             | Step::ReplaceWith
             | Step::Redeclare
             | Step::PurgeField
-            | Step::PurgeKind => unreachable!("only at the top"),
+            | Step::PurgeKind
+            | Step::RenameTypeAndBack => unreachable!("only at the top"),
         }
         Ok(())
     }
@@ -841,6 +849,14 @@ impl Model {
                 return Err("the store refused the commit");
             }
             self.spares_removed = !self.spares_removed;
+            return Ok(());
+        }
+        if let Step::RenameTypeAndBack = step {
+            // Nothing that `Memo`'s declaration, `Note`'s own, could refuse: the renames commit, or the store refuses it
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.pending.clear();
             return Ok(());
         }
         if let Step::PurgeField = step {
@@ -1084,6 +1100,7 @@ fn op_of_plain(step: &Step) -> Json {
         | Step::Redeclare
         | Step::PurgeField
         | Step::PurgeKind
+        | Step::RenameTypeAndBack
         | Step::Rebuild { .. } => {
             unreachable!("not a write on its own")
         }
@@ -1131,6 +1148,21 @@ fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
             .purge(&crate::engine::admin::Purge::Field { entity_type: "Task".into(), field: "spare".into() })
             .map(|()| None),
         Step::PurgeKind => db.purge(&crate::engine::admin::Purge::RelationKind("tags".into())).map(|()| None),
+        Step::RenameTypeAndBack => {
+            // The two renames `Database::rename_type` makes one unit each, here in one, at the commit's sequence. A move
+            // both renames skipped would leave what was there, so between them `Memo` must hold what `Note` held
+            use crate::engine::admin::rename_type;
+            let store = db.store()?;
+            db.admin_unit(|t| {
+                let sequence = store.next_sequence(t.txn)?;
+                let before = by_number(t, "Note")?;
+                rename_type(t, "Note", "Memo", sequence)?;
+                assert_eq!(by_number(t, "Memo")?, before, "Memo holds what Note held, by the ids' numbers");
+                assert_eq!(by_number(t, "Note")?, ByNumber::default(), "Note holds nothing once renamed");
+                rename_type(t, "Memo", "Note", sequence)
+            })
+            .map(|()| None)
+        }
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -1786,13 +1818,49 @@ const RANKED: RankIndex<'static> =
 
 const TOLERANCE: f64 = 1e-9;
 
+/// What a type's entities hold with each id of the type named by its number alone: each entity's row and stored
+/// values, and the kind, ends and info of each relation with an end among them
+#[derive(Debug, Default, PartialEq)]
+struct ByNumber {
+    entities: BTreeMap<String, (Vec<u8>, StoredValues)>,
+    relations: BTreeSet<(String, String, String, String)>,
+}
+
+/// An entity's stored values, each field's name with its bytes
+type StoredValues = Vec<(String, Vec<u8>)>;
+
+fn by_number(t: &impl Read, entity_type: &str) -> crate::Result<ByNumber> {
+    let number = |id: &str| {
+        (crate::engine::ids::type_of(id) == entity_type).then(|| id.strip_prefix(entity_type).unwrap_or(id).to_owned())
+    };
+    let mut out = ByNumber::default();
+    for (key, record) in t.scan(&keys::all_entities())? {
+        if let Some(Part::String(id)) = decode_key(&key)?.pop()
+            && let Some(n) = number(&id)
+        {
+            out.entities.insert(n, (record, entities::fields_stored(t, &id)?));
+        }
+    }
+    for (_, bytes) in t.scan(&keys::all_relations())? {
+        let stored: relations::Stored = rmp_serde::from_slice(&bytes).expect("a relation row reads");
+        let (source, target) = (number(&stored.source), number(&stored.target));
+        if source.is_some() || target.is_some() {
+            let end = |n: Option<String>, id: String| n.map_or(id, |n| format!("#{n}"));
+            let info = format!("{:?}", stored.info);
+            out.relations.insert((stored.kind, end(source, stored.source), end(target, stored.target), info));
+        }
+    }
+    Ok(out)
+}
+
 /// The harness's schema: the engine tests' with `RANKED` declared and change order kept for `Task` and `Note`, which
 /// `changed_since` is asked of. With `spares`, it declares the names renames and purges move data to and from: `spare`, a
 /// second unindexed field of `Task`, and the relation kind `tags`, which the workload never links. Without them, both are
-/// names a removed declaration left, which a purge takes and a rename can't move to. Every database the model compares
-/// opens with it, the crash child's included
+/// names a removed declaration left, which a purge takes and a rename can't move to. It declares `Memo` as `Note` is,
+/// which `Note` is renamed to and back. Every database the model compares opens with it, the crash child's included
 fn harness_schema(spares: bool) -> Json {
     let mut schema = schema_json();
+    schema["types"]["Memo"] = schema["types"]["Note"].clone();
     for entity_type in ["Task", "Note"] {
         schema["types"][entity_type]["changeOrder"] = json!(true);
     }
@@ -2296,6 +2364,21 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
         assert_since(engine, step);
         return;
     }
+    if let (Step::RenameTypeAndBack, Ok(_)) = (step, got)
+        && engine.before.entities.keys().any(|id| crate::engine::ids::type_of(id) == "Note")
+    {
+        // Its commit takes `Note`'s entities away and brings them back with no stamp of their own, and a reader of the
+        // type from before it is told the answer is incomplete. A reader from it reads what changes after it
+        let sequence = quiet + 1;
+        assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+        engine.sequence = sequence;
+        engine.before = after;
+        engine.since = Since::default();
+        engine.replaced = true;
+        engine.replaced_at = Some(sequence);
+        assert_since(engine, step);
+        return;
+    }
     if let (Step::Reset | Step::ReplaceWith, Ok(_)) = (step, got) {
         // A reset or a replacement commits no change set, and a reader from before it is told the answer is incomplete:
         // the entities it removed have no tombstone. The tracking starts again from the database as it is
@@ -2788,7 +2871,7 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Every kind of step, as `kind_of` names it
-const STEP_KINDS: [&str; 32] = [
+const STEP_KINDS: [&str; 33] = [
     "Create",
     "Set",
     "Append",
@@ -2821,6 +2904,7 @@ const STEP_KINDS: [&str; 32] = [
     "Redeclare",
     "PurgeField",
     "PurgeKind",
+    "RenameTypeAndBack",
 ];
 
 fn kind_of(step: &Step) -> &'static str {
@@ -2857,6 +2941,7 @@ fn kind_of(step: &Step) -> &'static str {
         Step::Redeclare => "Redeclare",
         Step::PurgeField => "PurgeField",
         Step::PurgeKind => "PurgeKind",
+        Step::RenameTypeAndBack => "RenameTypeAndBack",
     }
 }
 

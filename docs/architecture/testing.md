@@ -40,9 +40,19 @@ then: its edges move, each end stamped with the rename's sequence. A rename onto
 ends is refused by the model and the engine alike. The random workload reaches that through `refs` and `blocks`, which
 it links between the same ends; a deterministic test pins the refusal through `tags`, which the workload never links,
 and the refusal's order against an armed refusal. It renames a `Task` field to a spare one, and back: the entities that
-held the field are stamped, and a rename onto a name the entity already holds is refused by both. `renameType` and `replaceWith` have no model step: each has deterministic engine tests (`engine/tests/derived.rs`,
-`maintenance.rs`). Purge has none in the model either; its types and fields have deterministic engine tests, its
-relation kinds and roles have none.
+held the field are stamped, and a rename onto a name the entity already holds is refused by both.
+
+The spare field and `tags` are declared and removed again now and then (`setSchema`, a commit that stamps nothing).
+While they are removed, the data under them stays, a rename onto them is refused, and a purge takes the data, stamping
+the entities that held the field or the ends of the edges; a purge of a declared name is refused before any commit. The
+workload aims its renames and its toggles at data under the spare names, and the count of steps requires purges that
+took something, as it requires each kind of step, since a purge that takes nothing passes whatever the engine does. It
+backs the database up and replaces it with the last backup, which acts as a reset to the backup's rows, and renames
+`Note` to `Memo`, a type declared as `Note` is, and back in one commit: what comes back must be what was there, and a
+reader of `Note` from before it is told the answer is incomplete. The renames' one-way states, a type purge and a role
+purge are left to deterministic engine tests (`engine/tests/derived.rs`, `maintenance.rs`), which the model's fixed ids
+and per-type indexes would otherwise have to be rewritten for. Before its `check()` the harness declares the spare names
+again, since data a removed declaration kept is a violation.
 
 It runs in two places:
 
