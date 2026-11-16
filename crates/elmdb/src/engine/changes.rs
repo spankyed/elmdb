@@ -103,8 +103,9 @@ pub struct RelationChange {
     pub linked: bool,
     pub unlinked: bool,
     pub changed: bool,
-    /// The ends the relation had as the commit began, when the commit moved it to others: the entities that lost the
-    /// edge, which `source` and `target`, the ends it has now, don't name
+    /// The ends the relation had before the commit first moved it to others: as the commit began, or, for one the commit
+    /// made, the ends it made it with. The entities that lost the edge, which `source` and `target`, the ends it has now,
+    /// don't name
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "codegen", ts(optional))]
     pub moved_from: Option<Ends>,

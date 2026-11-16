@@ -29,8 +29,9 @@ Each commit's change set is checked too: the entities it made, destroyed, trashe
 wrote (whether or not the value changed), and its relations: each link, unlink, rekey and move, by kind and ends, with a
 relation unlinked after the commit made it or rekeyed it one entry, as the engine reports it. A unit's members are
 replayed one at a time, so a write a later member reverts is still named, as the engine names it. After every step,
-`changedSince` from the start must name each entity still there with the sequence of its last change, the ends of a
-changed edge included, and the entities destroyed and not made again; a commit's sequence must increase.
+`changedSince` of each type, `Task` and `Note` asked alone, from the start must name each of its entities still there
+with the sequence of its last change, the ends of a changed edge included, and its entities destroyed and not made
+again; a commit's sequence must increase.
 
 The workload also resets the database now and then: `reset` keeps the schema and clears the rows, and commits no change
 set. After a reset the model checks that a reader from before it is told `changedSince` is incomplete, and that a reader
@@ -40,9 +41,22 @@ then: its edges move, each end stamped with the rename's sequence. A rename onto
 ends is refused by the model and the engine alike. The random workload reaches that through `refs` and `blocks`, which
 it links between the same ends; a deterministic test pins the refusal through `tags`, which the workload never links,
 and the refusal's order against an armed refusal. It renames a `Task` field to a spare one, and back: the entities that
-held the field are stamped, and a rename onto a name the entity already holds is refused by both. `renameType` and `replaceWith` have no model step: each has deterministic engine tests (`engine/tests/derived.rs`,
-`maintenance.rs`). Purge has none in the model either; its types and fields have deterministic engine tests, its
-relation kinds and roles have none.
+held the field are stamped, and a rename onto a name the entity already holds is refused by both.
+
+The spare field and `tags` are declared and removed again now and then (`setSchema`, a commit that stamps nothing).
+While they are removed, the data under them stays, a rename onto them is refused, and a purge takes the data, stamping
+the entities that held the field or the ends of the edges; a purge of a declared name is refused before any commit. It
+backs the database up and replaces it with the last backup, which acts as a reset to the backup's rows, and renames
+`Note` to `Memo`, a type declared with `Note`'s fields and indexes, and back in one commit. Between the two renames
+`Memo` must hold what `Note` held, and after them what comes back must be what was there. A reader of `Note` from before
+the rename is told the answer is incomplete, and one from it reads what changes after it; a reader of `Task` is told no
+more than that the ends of each relation the rename rewrote were stamped with its sequence. A step that has nothing to
+act on passes whatever the engine does, so the workload aims its renames and its toggles at data under the spare names,
+and the count of steps requires, beside each kind of step and each refusal, 20 purges that took something, 20 type
+renames with a `Note` to rename and 20 replacements by a backup that differs from what is there. The renames' one-way
+states, a type purge and a role purge are left to deterministic engine tests (`engine/tests/derived.rs`,
+`maintenance.rs`), which the model's fixed ids and per-type indexes would otherwise have to be rewritten for. Before its
+`check()` the harness declares the spare names again, since data a removed declaration kept is a violation.
 
 It runs in two places:
 

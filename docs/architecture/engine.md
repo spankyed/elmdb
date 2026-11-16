@@ -641,7 +641,8 @@ failure/page-reuse regressions are recorded in [remediation evidence](../evidenc
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
 fields and relation kinds touched, each relation with its ends as they are and, for one the commit moved, the ends it
-had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
+had before its first move (`movedFrom`: as the commit began, or the ends a relation the commit made was made with), and
+the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
 checkpoint does not raise it). A database's write answers each operation's result and the commit's change set, which
 holds its sequence, and across the binding the three cross as `Written` (generated as `protocol/Written.ts`); a unit's
@@ -772,7 +773,8 @@ unit is open.
   visits grow linearly at fixed chunk size; sorting costs O(chunk size × log(chunk size)) per chunk. Closing stops
   a build between chunks, and the next open finishes it.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
-  relations, a role. It refuses a name the schema still declares. It refuses one of the engine's own fields too
+  relations, a role, which goes from every entity holding it, a removed type's kept entities included. It refuses a name
+  the schema still declares. It refuses one of the engine's own fields too
   (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit. A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves. A `renameType` rewrites the ids its entities are named by in relations' ends, in `ref` fields and in a relation's info declared a `ref`. It is refused (`SCHEMA_CHANGE_REFUSED`), and nothing moves, when `check()` would report of what it leaves a rule it didn't report before: an entity the new type's fields don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the new type, a `ref` that doesn't name it, or that names a moved entity where it is declared for neither type. A rule a load left broken is left to `check()` when it names no moved entity; one that does is reported in other words after the rename, and is held to as the rename's own.
   `renameRelation` holds each edge it moves to the new kind's rules as a link of that kind is held: its info
