@@ -183,7 +183,7 @@ test('a read answers what its generated types declare, kind by kind', (t) => {
     now: 1000,
   }));
   db.waitForIndexBuilds();
-  /** @type {import('../protocol/Start.js').Start} */
+  /** @type {import('../index.js').Start} */
   const notes = { from: 'types', types: ['Note'] };
   /** @type {Reads} */
   const reads = {

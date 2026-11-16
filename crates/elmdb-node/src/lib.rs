@@ -299,8 +299,8 @@ impl Database {
         self.guarded("Database.read", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
     }
 
-    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
-    /// answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
+    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop: msgpack bytes of a `Reads`, and a
+    /// promise of msgpack bytes of its `Answers`, what `read` would have answered at the call. Its snapshot is the last commit as it is at the call, and a write made after the call is
     /// never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
     /// `hearBuilderCommits`, once its promise has settled, and is refused (`NO_LISTENER`) while there is none
     #[napi(ts_return_type = "Promise<Buffer>")]
