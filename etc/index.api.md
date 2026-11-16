@@ -246,6 +246,7 @@ export interface EarsAdmin {
 
 // @public
 export interface EarsDatabase {
+    acknowledgeRestore(): void;
     adoptReplacement(epoch: number): boolean;
     backup(target: string): void;
     // (undocumented)
@@ -266,12 +267,14 @@ export interface EarsDatabase {
     hearCommitsElsewhere(listener: () => void): void;
     // (undocumented)
     readonly isOpen: boolean;
+    readonly openReport: OpenReport;
     // (undocumented)
     readonly path: string;
     // (undocumented)
-    readonly readOnly: boolean;
+    read(reads: Uint8Array): Uint8Array;
     // (undocumented)
-    readSync(reads: Uint8Array): Uint8Array;
+    readonly readOnly: boolean;
+    rebuild(type?: string | null, index?: string | null): void;
     replacedElsewhere(): number | null;
     replaceWith(source: string): void;
     reset(): void;
@@ -538,6 +541,15 @@ export interface LinkOptions {
 
 // @public
 export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
+
+// @public
+export interface OpenReport {
+    notBorneOut: boolean;
+    restored: {
+        sequence: number | null;
+    } | null;
+    schemaChanges: SchemaChange[];
+}
 
 // @public
 export type OptionalField<S extends EntityShapes, E extends string> = [

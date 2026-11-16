@@ -190,12 +190,12 @@ describe('watches', () => {
   const TOKEN = 1;
   const page = requestOf((probe) => probe.query('Task').limit(50).pickAll(), TOKEN);
   bench('1,000 page reads', () => {
-    for (let i = 0; i < 1000; i++) database.readSync(page.plain);
+    for (let i = 0; i < 1000; i++) database.read(page.plain);
   }, { iterations: 10, time: 0 });
   bench('1,000 page reads, tracked as a watch runs them', () => {
     for (let i = 0; i < 1000; i++) {
       database.untrack(TOKEN);
-      database.readSync(page.tracked);
+      database.read(page.tracked);
     }
   }, { iterations: 10, time: 0, teardown: () => database.untrack(TOKEN) });
 });
@@ -208,7 +208,7 @@ function requestOf(read: (probe: typeof engine) => unknown, token: number): { pl
   let sent: Uint8Array | undefined;
   const capturing = new Proxy(database, {
     get(target, key) {
-      if (key === 'readSync') return (bytes: Uint8Array) => { sent = bytes; return target.readSync(bytes); };
+      if (key === 'read') return (bytes: Uint8Array) => { sent = bytes; return target.read(bytes); };
       const value: unknown = Reflect.get(target, key, target);
       return typeof value === 'function' ? value.bind(target) : value;
     },

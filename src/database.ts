@@ -45,6 +45,20 @@ export interface SchemaChange {
   effect: string;
 }
 
+/** What opening an elmdb database did */
+export interface OpenReport {
+  /** The schema's changes, each with what opening did about it */
+  schemaChanges: SchemaChange[];
+  /**
+   * A restore an open made: a power loss or a failed sync took the database back to its last synced commit, and the
+   * commits after it are gone. `sequence` is the one it opened at, null where a read-only open couldn't write it down.
+   * Every open reports it until `acknowledgeRestore()`
+   */
+  restored: { sequence: number | null } | null;
+  /** The record of the last sync, beside the data file, named another file than this one, which was opened as it is */
+  notBorneOut: boolean;
+}
+
 /** What the engine needs of an open elmdb database (`elmdb`'s `Database`, which `@apackdev/ears/lmdb` opens) */
 export interface EarsDatabase {
   readonly path: string;
@@ -52,14 +66,26 @@ export interface EarsDatabase {
   readonly isOpen: boolean;
   /** The schema the database holds, in elmdb's canonical JSON */
   readonly schema: unknown;
+  /** What opening it did */
+  readonly openReport: OpenReport;
+  /** Says the restore `openReport` names was read, so that no open reports it after; refused on a read-only database */
+  acknowledgeRestore(): void;
   write(batch: Uint8Array, durable?: boolean | null): Uint8Array;
-  readSync(reads: Uint8Array): Uint8Array;
+  read(reads: Uint8Array): Uint8Array;
   begin(): EarsUnit;
   setSchema(schema: object): SchemaChange[];
-  /** Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done */
+  /**
+   * Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done; throws
+   * `SYNC_BEHIND` or `READERS_FULL` when what holds a build up is a sync that failed or a reader table that is full
+   */
   waitForIndexBuilds(): void;
   /** Every entry removed but the database's format and schema */
   reset(): void;
+  /**
+   * Deletes derived data and writes what primary data derives, in one unit of its own: every index's, or with `type`
+   * and `index`, one's. Refused while a unit is open (`UNIT_OPEN`)
+   */
+  rebuild(type?: string | null, index?: string | null): void;
   /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
   backup(target: string): void;
   /** Tells `listener` of each commit another process makes, having queued any index work it left owed. One listener; a second is refused */
@@ -254,7 +280,7 @@ export interface ChangedEntities {
   ids: string[];
   /** The sequence of the commit that last changed each of `ids`, in the same order */
   sequences: number[];
-  /** The entities destroyed since */
+  /** The entities destroyed since and not made again, each once */
   destroyed: string[];
   /** Where to read from next */
   next: ChangedPosition;
@@ -543,7 +569,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
       return counting('read', reads.length, () => {
         const bytes = observation.request(pack(tracking === undefined ? { reads } : { reads, track: tracking }));
         const held = unit;
-        const answers = unpackAnswers(observation.response(crossing(() => (held ? held.read(bytes) : database.readSync(bytes)))));
+        const answers = unpackAnswers(observation.response(crossing(() => (held ? held.read(bytes) : database.read(bytes)))));
         return freeze ? answers.map(freezeValues) : answers;
       });
     },

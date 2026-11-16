@@ -218,7 +218,10 @@ export interface EarsAdmin {
    * registration changes nothing another pack declared. Answers the changes as `setSchema` does
    */
   declare(schema: EngineSchema): SchemaChange[];
-  /** Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done */
+  /**
+   * Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done; throws
+   * `SYNC_BEHIND` or `READERS_FULL` when what holds a build up is a sync that failed or a reader table that is full
+   */
   waitForIndexBuilds(): void;
   /** Resolves once no watch is waiting to run again: every commit before the call has been delivered */
   watchesSettled(): Promise<void>;
