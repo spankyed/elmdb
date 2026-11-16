@@ -30,8 +30,8 @@ test('least, greatest and sum answer what the set of a plan holds, through the b
   const answer = (terminal) => packr.unpack(db.read(packr.pack({
     reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Item'] }, terminal } }],
   })))[0];
-  assert.deepEqual(answer({ answer: 'least', field: 'price' }), { kind: 'least', id: 'Item-1', value: 2 });
-  assert.deepEqual(answer({ answer: 'greatest', field: 'price' }), { kind: 'greatest', id: 'Item-2', value: 9 });
+  assert.deepEqual(answer({ answer: 'least', field: 'price' }), { kind: 'least', id: 'Item-1', value: 2, plainObjects: true });
+  assert.deepEqual(answer({ answer: 'greatest', field: 'price' }), { kind: 'greatest', id: 'Item-2', value: 9, plainObjects: true });
   assert.deepEqual(answer({ answer: 'sum', field: 'price' }), { kind: 'sum', sum: 25.5, n: 5 });
   assert.deepEqual(answer({ answer: 'sum', field: 'qty' }), { kind: 'sum', sum: 6, n: 6 });
   assert.throws(() => answer({ answer: 'sum', field: 'name' }), { code: 'VALUE_INVALID' });

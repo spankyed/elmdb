@@ -309,7 +309,7 @@ an answer:
   marker, and under names and values that leave its keys no room, the set is sorted as before. So are a field
   holding a list or another value the index doesn't order, several types, a start of ids, and the trash alone. A
   range of numbers holds no string, and is read from the index whatever strings the field holds.
-- **An order of strings is kept beside the index's entries** (`engine/order.rs`, `../roadmap/string-order.md`). A
+- **An order of strings is kept beside the index's entries** (`engine/order.rs`, `../archive/roadmap/string-order.md`). A
   value index a schema declares has, under each tuple of the values before its last field, a key for each string an
   entry is for, where the collation orders it: the string's sort key as far as the key has room, whether it was cut,
   and the string (`format.md`, `d/xo`). A write puts the key with the entry's first place and deletes it with its
@@ -483,9 +483,15 @@ A caller's own function can't cross: a query builder over the protocol, such as 
 plan up to that step, and runs the rest itself.
 
 **Answers** are owned bytes: ids as strings, each row as a map of `id`, `entityType` and the fields' stored msgpack
-bytes spliced in unchanged, counts as numbers. An answer holding rows says whether any map in it may hold a key
-`__proto__` (`plainObjects`), so the caller can decode straight to objects when none does and keep the exact decode for
-the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
+bytes spliced in unchanged, counts as numbers. A call answers an array of an answer per read, each a map whose `kind`
+says which: `Answers` and `Answer` in `engine/answer.rs`, generated as `protocol/Answers.ts` and `protocol/Answer.ts`.
+`reads.rs` writes the bytes itself rather than serializing those types, so no stored value is decoded to be answered;
+`answer::conforms` holds the bytes to the types, every key and none more, on every read the crate's own tests make. A
+field a row is asked for twice is answered once. An answer holding stored values (rows, groups, hits, a field's value,
+a relation's `info`, a least or greatest value) says whether any map in them may hold a key `__proto__`
+(`plainObjects`), so the caller can decode straight to objects when none does and keep the exact decode, maps as
+`Map`s, for the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`). The generated types declare
+each map an object, as the first decode gives it; the exact decode gives a `Map` of the same keys.
 
 ## Writes: batches and units
 

@@ -1,6 +1,6 @@
 # Shuttle: the unit slot and watch delivery
 
-The evidence for [stage 8 of the verification tooling](../roadmap/verification-tooling.md#8-randomized-concurrency-testing).
+The evidence for [stage 8 of the verification tooling](../archive/roadmap/verification-tooling.md#8-randomized-concurrency-testing).
 2026-10-30, on `session/shuttle` from `session/loom`, on an Apple M1 Pro (macOS), Rust 1.99.1, Shuttle 0.9.7, random
 schedules, 100,000 per model unless stated.
 

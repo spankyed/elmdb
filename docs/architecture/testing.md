@@ -336,7 +336,7 @@ the index's nodes to the model's live entities and its scores within their bound
 the tolerance, since every state of the index is within the bound it reports whether its drain ran or not.
 
 The order a value index keeps of its strings has its specs in `engine/tests/order.rs` and `engine/order.rs`
-(`../roadmap/string-order.md`). Of its keys: a sort key's bytes held to the collator's comparison over eleven
+(`../archive/roadmap/string-order.md`). Of its keys: a sort key's bytes held to the collator's comparison over eleven
 collations, cut at any room, and every key to 511 bytes over random names, values and strings; a key there while
 its entry holds a place, through an entry that passes into blocks and back; the keys of entities filed by their
 place; a `rebuild()`, a builder's units of one key each and a build gone on with, each held to the same keys; and
@@ -440,6 +440,12 @@ msgpack as batches, reads and loads, flipped bytes, arguments of the wrong type,
 Each must apply or throw: an error carrying an elmdb code when the payload reached elmdb, and N-API's own for an
 argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
+`schema-types.test.mjs` decodes a write's answer and a read's and compares each with a literal the typecheck holds to
+its generated type (`Written`, `Answers`): a field renamed in the TypeScript fails the typecheck, one renamed on the
+wire the comparison. The Rust side is held whole: `answer::conforms` checks every read the crate's own tests make
+against the answer types (the integration tests under `crates/elmdb/tests` build it without them), and
+`engine/tests/answers.rs` makes a read of each kind. `client.test.mjs`, typechecked against `client.d.ts`, writes and
+reads through the thin client, in a database and in a unit, and reads an answer whose maps hold a key `__proto__`.
 
 A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
 factory, and the work five exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`

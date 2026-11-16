@@ -7,6 +7,7 @@
 
 pub mod admin;
 mod algorithms;
+pub mod answer;
 mod apply;
 pub mod batch;
 mod builder;

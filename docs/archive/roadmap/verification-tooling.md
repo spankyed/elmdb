@@ -1,17 +1,18 @@
 # Tooling for tests that can fail, faults by name, and measured bounds
 
-Status: all nine stages are built, each with what it leaves below. Stage 3's dhat assertions date from 2026-10-27 and were
+Status: built, all nine stages, each with what it leaves below; how each is run now is in
+`../../architecture/testing.md`. Stage 3's dhat assertions date from 2026-10-27 and were
 extended to full derivation and vector rebuilds; stages 1, 2 and 9 were built on 2026-10-28
-(`../archive/goals/goal-verification-tooling.md`, Outcome), and stages 4 to 8 since. The commands are in
-`../architecture/testing.md`: Repeatable maintenance measurements (instruction counts among them), Failpoints and
+(`../goals/goal-verification-tooling.md`, Outcome), and stages 4 to 8 since. The commands are in
+`../../architecture/testing.md`: Repeatable maintenance measurements (instruction counts among them), Failpoints and
 Mutation testing.
 
 ## Purpose and scope
 
-The [review](../reviews/elmdb-review-2026-10.md) and its follow-up reviews kept finding the same three things: tests
+The [review](../../reviews/elmdb-review-2026-10.md) and its follow-up reviews kept finding the same three things: tests
 that passed with their fix reverted, fault injection spread across test-only thread-locals, and resource bounds stated
 in prose that the code didn't meet. This plan names the tools that turn each into something a run checks. It sits
-beside [Libraries for safer implementation and easier development](development-libraries.md), which covers platform
+beside [Libraries for safer implementation and easier development](../../roadmap/development-libraries.md), which covers platform
 bindings, Criterion, rustix, Loom and tracing; nothing here repeats those stages, and where one overlaps it says so.
 
 The work is elmdb's alone. Developer tools (`cargo-mutants`, `cargo-nextest`, `samply`, and since `gungraun-runner`
@@ -49,15 +50,15 @@ Acceptance:
 - CI runs it on the files a change touches (`--in-diff`), reporting survivors rather than failing, until the
   surviving list for those files is empty.
 
-**Built, 2026-10-28:** `.cargo/mutants.toml` and the commands in `../architecture/testing.md`, Mutation testing — a
+**Built, 2026-10-28:** `.cargo/mutants.toml` and the commands in `../../architecture/testing.md`, Mutation testing — a
 first pass against the suite without the model harness, then `--iterate` against the whole suite — with a baseline
 over `engine/trigram.rs`, `reads.rs`, `text/search.rs`, `entities.rs`, `values.rs` and `schema/diff.rs` triaged
-(`../evidence/verification-tooling.md`): of 169 survivors, 144 killed (5 by the whole suite, the rest by new specs),
+(`../../evidence/verification-tooling.md`): of 169 survivors, 144 killed (5 by the whole suite, the rest by new specs),
 24 excluded as answering what the code answers, and one finding left, EXPLAIN's stage times, which no count shows; the
 triage also found a step limit whose plan needs more than a debug test thread's 2 MB stack. The mutation scripts that remain
 make changes cargo-mutants doesn't (an expression swapped for another, heap and timing regressions)
 and stay, each saying why in its header. The baseline over `store/`, `engine/watch.rs`, `engine/derive.rs` with
-`derive/`, and `elmdb-node/src/process.rs` followed (`../evidence/mutation-baseline.md`): of elmdb's 90 survivors, 47
+`derive/`, and `elmdb-node/src/process.rs` followed (`../../evidence/mutation-baseline.md`): of elmdb's 90 survivors, 47
 killed by new specs, 13 removed with the dead code they were in, 11 excluded, 2 a finding (`MAX_GROWTHS`, which a spec
 would need terabytes of map for) and 17 in `backup.rs`' publication code for other platforms: the Linux 3 caught in a
 Linux container, the Windows 14 read on Windows. `process.rs` runs against elmdb-node's suite, its Linux claim caught
@@ -68,7 +69,7 @@ catches; those and an acquisition error other than an occupied claim are the fin
 touches; it replaced `check-windows-backup-mutation.py`, which broke one line of the Windows publication by hand.
 Since then the job is a workflow of its own (`.github/workflows/mutants.yml`): a survivor fails it, the Linux mutants
 run in four shards and the Windows-only code on Windows, and its last job, `mutants-pass`, is a check a merge waits
-on (`../architecture/testing.md`, Mutation testing).
+on (`../../architecture/testing.md`, Mutation testing).
 
 ## 2. Named failpoints
 
@@ -88,7 +89,7 @@ Acceptance:
 time, so the tests don't run under `FailScenario` or one process each. A site's condition asks
 `crates/elmdb/src/failpoints.rs` whether the point is armed for it — once on the arming thread, once for a database's
 path, or for a path until a guard drops — and a spec shows a point armed on one thread doesn't fire on another
-(`../architecture/testing.md`, Failpoints). All fifteen hooks are failpoints; `fail`'s `failpoints` feature is a
+(`../../architecture/testing.md`, Failpoints). All fifteen hooks are failpoints; `fail`'s `failpoints` feature is a
 dev-dependency feature, and the release binding holds no point's name and no `fail` symbol.
 
 ## 3. Memory bounds as assertions
@@ -177,7 +178,7 @@ Acceptance:
 `[profile.profiling]` and `testing.md`'s command profile `examples/profile-reads`, one of the read benchmark's reads
 repeated. Its profile of a page of whole rows attributed 29% of the read to `values::unstored`, 12% to `ZSTD_freeDCtx`
 and 20% to the kernel's reclaim of freed blocks: a decompression context made for every value, which the
-[read allocation plan](../archive/roadmap/read-allocation-codec.md) then removed (`../evidence/read-allocation-codec.md`). The binding under
+[read allocation plan](read-allocation-codec.md) then removed (`../../evidence/read-allocation-codec.md`). The binding under
 Node isn't profiled yet: its release build has no line tables.
 
 ## 7. Instruction-count benchmarks
@@ -197,10 +198,10 @@ and CI's `instructions` job reports each one's count on a pull request against i
 (`scripts/instruction-counts.py`). Two runs of one commit counted the same for every operation but the text rebuild,
 which moves by 0.07% from the tokenizer's randomly seeded hash map; a disposable copy encoding each key twice doubled
 key encoding's counts and added 3.6% to the text rebuild, and moved nothing else
-(`../evidence/instruction-counts.md`). Since then a count gates one thing: the full tier's `diagnostics` job fails
+(`../../evidence/instruction-counts.md`). Since then a count gates one thing: the full tier's `diagnostics` job fails
 when a gated case's instructions grow past its declared bound with the `diagnostics` feature on
 (`scripts/instruction_gates.py`), and the `instruction determinism` workflow, dispatched, fails when runners disagree
-on a count (`../architecture/testing.md`, Repeatable maintenance measurements).
+on a count (`../../architecture/testing.md`, Repeatable maintenance measurements).
 
 ## 8. Randomized concurrency testing
 
@@ -216,10 +217,10 @@ Acceptance:
   slipping between the unit check and the writer) fails within the configured iterations.
 
 Built (2026-10-30): Shuttle runs the unit slot's model, watch delivery's (`engine/watch/model.rs`), the index builder's (`engine/builder/model.rs`) and, since 2026-11-15, that of the reads asked at a call (`store/call_reads/model.rs`) on the
-primitives Loom uses (`../architecture/testing.md`, Concurrency models). The write slipping between the unit check and
+primitives Loom uses (`../../architecture/testing.md`, Concurrency models). The write slipping between the unit check and
 the writer fails the slot's model. The listener dropped outside the callback guard isn't in the model: the guard is
 what `Database::close` consults, and the database is outside it; the mutations the model does catch are in
-[the record](../evidence/shuttle-watch.md). Its first run found `unwatch` returning while another thread's delivery
+[the record](../../evidence/shuttle-watch.md). Its first run found `unwatch` returning while another thread's delivery
 was about to call the listener, which it now waits for.
 
 ## 9. Library no-clobber publication

@@ -83,7 +83,7 @@ Acceptance:
 
 Built (2026-10-27): `crates/elmdb/benches/maintenance.rs`, and since `benches/reads.rs` for the reads. CI's `heap`
 job and `cargo xtask pre-push` run each as a smoke test, and no timing gates a merge. The same operations are counted
-in instructions too, which don't move with the machine's load (`verification-tooling.md`, stage 7).
+in instructions too, which don't move with the machine's load (`../archive/roadmap/verification-tooling.md`, stage 7).
 
 ## 3. Typed Unix filesystem operations
 
@@ -142,7 +142,7 @@ command, bounds and what the model leaves out are in `../architecture/testing.md
 historical race and a release that wakes no waiter each failed the model on a disposable copy, and the production change
 is one small type the store calls instead of a lock and a condition variable
 ([record](../evidence/loom-unit-reservation.md)). Watch teardown is modelled by stage 8 of
-[verification tooling](verification-tooling.md#8-randomized-concurrency-testing), on the same primitives. Close
+[verification tooling](../archive/roadmap/verification-tooling.md#8-randomized-concurrency-testing), on the same primitives. Close
 coordination is `database.rs`'s and has no model: `cargo xtask check-sync` lists the file as unmodelled, with why.
 
 ## 5. Structured operational diagnostics

@@ -1,18 +1,21 @@
 # A string's order read from its index
 
 Status: built, 2026-11-15, phases 1 to 4, and phase 4's gate met for the names' order and the number's
-(`../evidence/million-notes.md`, The names' whole order, its strings kept as their keys' bytes). It was the part of roadmap change 5
-still open (`../roadmap.md`): an `orderBy` on a string field read every entity of the set, where one on a number
+(`../../evidence/million-notes.md`, The names' whole order, its strings kept as their keys' bytes). It was the part of roadmap change 5
+still open (`../../roadmap.md`): an `orderBy` on a string field read every entity of the set, where one on a number
 read ten entries for its first ten. It adds derived keys to format 1 and moves what one of its keys holds, so it is
 built before format 1 is frozen (change 8). This is the fifth draft: each before it was read against the code by a
 second reader, the fourth was priced by a reading of what its writes cost, and what each changed is under What was
 set aside.
 
-## Where it stands
+## Where it started
 
-A value index files a string under its own bytes (`../architecture/format.md`, `d/x`), which is what an equality and
+What this section says held before the design below was built; how a string's order is read now is in
+`../../architecture/engine.md`, An order of strings.
+
+A value index files a string under its own bytes (`../../architecture/format.md`, `d/x`), which is what an equality and
 `unique` need. An `orderBy` and a `range` with string bounds order strings by the schema's collation, ICU's root or a
-locale's (`../architecture/schema.md`, `collation`), and the collation's order is not the bytes' order: `a` sorts
+locale's (`../../architecture/schema.md`, `collation`), and the collation's order is not the bytes' order: `a` sorts
 before `B`, and `é` beside `e`. So an order on a string field reads the field of every entity in the set and compares
 them with the collator (`engine/reads.rs`, the `orderBy` step's sorted arm), and a string `range` tests each entity it
 is given. With a `limit` straight after it the order keeps only that many as it goes (`first_ordered`), one pass and
@@ -22,7 +25,7 @@ An index holding any value it can't file (`d/xu`), a string past 256 bytes among
 for no order at all, of numbers either: one such value sends every order on the field to the sorted arm.
 
 A change of the schema's collation is applied at once and costs nothing, because no stored key depends on it
-(`../architecture/schema.md`, Changing a schema).
+(`../../architecture/schema.md`, Changing a schema).
 
 ## The measurements
 
@@ -62,7 +65,7 @@ The third, a key cut as it is made, by a sink that keeps the bytes up to a room 
 
 The fourth, of what a write pays for an index, by `cargo run --release -p elmdb --example change-cost -- 1000000`
 (Apple M1 Pro, 2026-11-14, built in release, two runs at loads of 24 to 25 and of 13.5 to 14.8; recorded in
-`../evidence/million-notes.md`, A string's order, before an index reads it). A type of a million entities, each
+`../../evidence/million-notes.md`, A string's order, before an index reads it). A type of a million entities, each
 unit setting one field of 1,000 of them spread over the type, CPU of the process for each entity, the median of five
 units; and a create in types as large of a title and one string:
 
@@ -467,7 +470,7 @@ A read pays one seek for each distinct string it hands on.
 
 ## Phases
 
-1. **The readings.** Taken on 2026-11-13 and 2026-11-14 and recorded in `../evidence/million-notes.md` (A string's
+1. **The readings.** Taken on 2026-11-13 and 2026-11-14 and recorded in `../../evidence/million-notes.md` (A string's
    order, before an index reads it): the four reads of the names' order as the sorted arm answers them, each
    index's bytes, the time of a unit that changes each, and the fourth reading above.
 2. **The keys, the stamp and the order.** The families in `format`'s table; the keys filed by the two functions
