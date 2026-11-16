@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
+import { pbkdf2 } from 'node:crypto';
 import { Packr } from 'msgpackr';
 
 const { Database } = createRequire(import.meta.url)('../index.js');
@@ -175,4 +176,65 @@ test('a rebuild asked for as a close takes the database runs before it or reject
   }
   assert.equal(held, 2000);
   assert.equal(differences, 0, `the rebuild ${settled.status}`);
+});
+
+// A readAsync reads the snapshot of the last commit as it is at its call, held until the pool runs it: whatever is
+// written meanwhile, it answers what read would have answered at the call
+const counting = (track) => packr.pack({
+  reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'count' } } }],
+  ...(track === undefined ? {} : { track }),
+});
+const counted = (bytes) => packr.unpack(bytes)[0].n;
+// Keeps every thread of libuv's pool busy for a while, so a read asked now waits in its queue behind the writes after it
+const occupied = () => Promise.all(Array.from({ length: Number(process.env.UV_THREADPOOL_SIZE) || 4 }, () =>
+  new Promise((resolve, reject) => pbkdf2('elmdb', 'salt', 300_000, 32, 'sha256', (error) => (error ? reject(error) : resolve())))));
+const note = (db, title) => packr.unpack(db.write(packr.pack({ ops: [{ op: 'create', type: 'Note', fields: { title } }], now: 1000 })));
+
+test('a readAsync answers what read would have answered at its call, whatever is written before the pool runs it', async (t) => {
+  const { db } = open(t);
+  const busy = occupied();
+  const pending = [];
+  for (let at = 0; at < 40; ++at) {
+    pending.push(db.readAsync(counting()));
+    note(db, `note ${at}`);
+  }
+  await busy;
+  assert.deepEqual((await Promise.all(pending)).map(counted), Array.from({ length: 40 }, (_, at) => at));
+  // A burst asked at one commit shares a few snapshots, rather than a reader slot each, so none is refused one
+  const burst = await Promise.all(Array.from({ length: 500 }, () => db.readAsync(counting())));
+  assert.ok(burst.every((bytes) => counted(bytes) === 40));
+});
+
+test('a tracked readAsync that a commit wrote into before it was filed is told to the builder listener once it has settled', async (t) => {
+  const { db } = open(t);
+  // The listener keeps no process alive, so this test holds its own wait open
+  const alive = setInterval(() => {}, 1000);
+  t.after(() => clearInterval(alive));
+  const order = [];
+  const heard = new Promise((resolve) => db.hearBuilderCommits((commit) => {
+    order.push('heard');
+    resolve(commit);
+  }));
+  const busy = occupied();
+  const answered = db.readAsync(counting(3)).then((bytes) => {
+    order.push('answered');
+    return counted(bytes);
+  });
+  const written = note(db, 'into what it read');
+  assert.deepEqual(written.changes.touched, [], 'not filed when the write committed');
+  await busy;
+  assert.equal(await answered, 0);
+  let timer;
+  const unheard = new Promise((resolve) => { timer = setTimeout(resolve, 10_000, 'not heard within 10 s'); });
+  t.after(() => clearTimeout(timer));
+  assert.deepEqual(await Promise.race([heard, unheard]), { sequence: written.changes.sequence, touched: [3] });
+  assert.deepEqual(order, ['answered', 'heard']);
+  // Filed now: the next write into it names it
+  assert.deepEqual(note(db, 'after').changes.touched, [3]);
+});
+
+test('a tracked readAsync is refused while nothing listens for the commits no write names', async (t) => {
+  const { db } = open(t);
+  await assert.rejects(db.readAsync(counting(3)), { code: 'NO_LISTENER' });
+  assert.equal(counted(await db.readAsync(counting())), 0);
 });

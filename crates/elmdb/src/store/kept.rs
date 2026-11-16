@@ -36,6 +36,7 @@ use heed::{Env, RoTxn, WithoutTls};
 use parking_lot::{RecursiveRwLock, RecursiveRwLockReadGuard};
 
 use super::boot::Boot;
+use super::call_reads::CallReads;
 use super::idle_reads::Clear;
 use super::reach::{self, MetaPage};
 use super::record::{self, Mode, Record, RecordFile, State};
@@ -62,6 +63,8 @@ pub(super) struct Kept {
     /// the environment's sizes
     gate: Arc<RecursiveRwLock<()>>,
     idle: Clear,
+    /// The reads waiting on transactions held from their calls, which a change of the map's size runs first
+    calls: Arc<CallReads<RoTxn<'static, WithoutTls>>>,
     dir: PathBuf,
     page: usize,
     boot: Boot,
@@ -164,6 +167,7 @@ impl Kept {
         env: Env<WithoutTls>,
         gate: Arc<RecursiveRwLock<()>>,
         idle: Clear,
+        calls: Arc<CallReads<RoTxn<'static, WithoutTls>>>,
         dir: &Path,
         page: usize,
         boot: Boot,
@@ -174,6 +178,7 @@ impl Kept {
             env,
             gate,
             idle,
+            calls,
             dir: dir.to_owned(),
             page,
             boot,
@@ -217,10 +222,12 @@ impl Kept {
     /// map's size only while the process has no transaction
     pub(super) fn adopt(&self) -> Result<()> {
         let _gate = self.gate.write();
+        self.calls.run_all();
         self.idle.clear();
         self.end_pin();
         // SAFETY: the gate held for writing keeps every transaction of this process from beginning or running, the
-        // idle ones are dropped and the pin, which holds no gate, is ended: no transaction is open, and nothing else
+        // reads asked at calls have run and their transactions are ended, the idle ones are dropped and the pin, which
+        // holds no gate, is ended: no transaction is open, and nothing else
         // reads through the map, since a sync and each read of the environment's sizes hold the gate for reading
         unsafe { super::adopt_grown_map(&self.env, &self.dir, false) }
     }

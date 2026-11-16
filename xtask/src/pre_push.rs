@@ -108,6 +108,7 @@ const THEN: &[Step] = &[
                 "--lib",
                 "--",
                 "store::unit_slot::model",
+                "store::call_reads::model",
                 "engine::watch::model",
                 "engine::builder::model",
             ],

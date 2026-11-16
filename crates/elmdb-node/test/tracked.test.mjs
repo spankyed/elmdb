@@ -56,6 +56,8 @@ test('pooled reads keep query results coherent while an index changes fields', a
   });
   const db = Database.open(dir, { syncs: false, schema: schema('a') });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  // A tracked readAsync needs a listener for the commits no write's result names
+  db.hearBuilderCommits(() => {});
   db.write(packr.pack({ ops: Array.from({ length: 1000 }, (_, i) => ({
     op: 'create', type: 'Task', id: `Task-${i}`,
     fields: { a: i === 0 ? 'match' : 'other', b: i === 1 ? 'match' : 'other' },
@@ -85,6 +87,7 @@ test('a child-process schema change refuses stale pooled and synchronous reads u
   });
   const db = Database.open(dir, { syncs: false, schema: schema('a') });
   t.after(() => { db.close(); rmSync(dir, { recursive: true, force: true }); });
+  db.hearBuilderCommits(() => {});
   db.write(packr.pack({ ops: [
     { op: 'create', type: 'Task', id: 'Task-0', fields: { a: 'match', b: 'other' } },
     { op: 'create', type: 'Task', id: 'Task-1', fields: { a: 'other', b: 'match' } },

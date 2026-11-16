@@ -35,9 +35,10 @@ mod vector;
 pub mod watch;
 
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use heed::RwTxn;
+use heed::{RoTxn, RwTxn, WithoutTls};
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLockRecursive, RwLock};
 
@@ -45,7 +46,8 @@ use crate::database::{Database, EngineSchema};
 use crate::diagnostics::Op;
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::Schema;
-use crate::store::{Commit, Store};
+use crate::store::{Commit, Db, Store};
+use crate::sync::PlainMutex;
 use batch::{Batch, BatchResult};
 use changes::ChangeSet;
 pub(crate) use reads::collator;
@@ -61,7 +63,11 @@ fn finish_commit(
     written: Option<&std::collections::HashSet<Vec<u8>>>,
     commit: Commit,
 ) -> Result<ChangeSet> {
-    let touched = tracks.lock().touched(written);
+    let touched = {
+        let mut held = tracks.lock();
+        held.note_commit(commit.sequence, written);
+        held.touched(written)
+    };
     changes.sequence = commit.sequence;
     changes.touched = touched.tokens;
     watch::deliver(tracks, store, schema, &touched.watches);
@@ -116,6 +122,42 @@ pub(crate) fn builder_commits(
         }
         Ok(done)
     })
+}
+
+/// A read asked with `Database::read_at_call`, which `Database::answer_call_read` answers on any thread
+pub struct CallRead {
+    /// The read as asked: waiting, or run at the call (`None`), or refused there
+    asked: Result<Option<crate::store::CallRead>>,
+    /// What the read answered, once it ran: here, at the call, or in a growth of the map that ran it
+    answered: Arc<PlainMutex<Option<std::thread::Result<Ran>>>>,
+    /// A tracked read's token, noted for until it is filed
+    tracked: Option<watch::Waiting>,
+}
+
+/// A read's answer, and, when it was tracked, what it read
+type Ran = (Result<Vec<u8>>, Option<tracking::ReadSet>);
+
+/// What `Database::answer_call_read` answers
+pub struct CallAnswer {
+    /// The reads' answer, as `read` gives it
+    pub answer: Result<Vec<u8>>,
+    /// For a tracked read, the last commit since its call that wrote into what it read, by its sequence, and the
+    /// read's token: no commit's result named the token, since the read wasn't filed when it committed
+    /// (`Database::tell_touched`)
+    pub touched: Option<(u64, u32)>,
+}
+
+/// Runs a read asked at a call on its snapshot, recording what it read when it is tracked
+fn run_at_call(txn: &RoTxn<'_, WithoutTls>, db: Db, schema: &EngineSchema, reads: &plan::Reads, tracking: bool) -> Ran {
+    if let Err(error) = schema.validate(txn, db) {
+        return (Err(error), tracking.then(tracking::ReadSet::everything));
+    }
+    let snapshot = unit::Snapshot { txn, db, schema };
+    if tracking {
+        let (answer, read) = watch::run_recorded(&snapshot, reads);
+        return (answer, Some(read));
+    }
+    (reads::run(&snapshot, &reads.reads), None)
 }
 
 /// Milliseconds since the epoch, the engine's clock when a batch brings no time
@@ -779,6 +821,98 @@ impl Database {
     /// `read` with the reads as msgpack bytes, as the binding takes them
     pub fn read_bytes(&self, reads: &[u8]) -> Result<Vec<u8>> {
         self.read(&decode_reads(reads)?)
+    }
+
+    /// `read`, answered by `answer_call_read` on whichever thread calls it, from the snapshot of the last commit as it
+    /// is at this call: a commit made before the answer, here or in another process, changes nothing it reads
+    /// (`docs/architecture/engine.md`, Reads). The snapshot is held until the read runs, unless as many are held for
+    /// such reads as may be, when the read runs here. A tracked one is refused (`NO_LISTENER`) while nothing listens for
+    /// the builder's commits (`hear_builder_commits`), which is where it is told of a commit that wrote into it before it
+    /// was filed
+    pub fn read_at_call(&self, reads: plan::Reads) -> CallRead {
+        let answered = Arc::default();
+        let store = match self.store() {
+            Ok(store) => store,
+            Err(error) => return CallRead { asked: Err(error), answered, tracked: None },
+        };
+        // A commit that writes into a tracked read before it is filed is told to the listener of the builder's commits
+        // alone, which lets it go only at a close: without one, its caller would keep an answer it took to be tracked
+        if reads.track.is_some() && self.tracks.lock().builder_commit_listener().is_none() {
+            let refused = Error::new(
+                ErrorCode::NoListener,
+                "A tracked read answered later is told of a commit that writes into it before it is filed only through \
+                 the listener of the builder's commits: register one (`hearBuilderCommits`), or track the read with \
+                 `read`",
+            );
+            return CallRead { asked: Err(refused), answered, tracked: None };
+        }
+        // Held until the snapshot is taken, so the schema read with it is the one it was written under
+        let schema = self.schema_guard();
+        // Noted for before the snapshot is taken, so that every commit it doesn't hold is noted
+        let tracked = reads.track.map(|token| watch::Waiting::new(&self.tracks, token));
+        let read = {
+            let answered = Arc::clone(&answered);
+            let schema = Arc::clone(&*schema);
+            let tracking = tracked.is_some();
+            move |txn: &RoTxn<'static, WithoutTls>, db: Db| {
+                let ran = catch_unwind(AssertUnwindSafe(|| run_at_call(txn, db, &schema, &reads, tracking)));
+                *answered.lock() = Some(ran);
+            }
+        };
+        let asked = store.ask(read);
+        drop(schema);
+        CallRead { asked, answered, tracked }
+    }
+
+    /// `read_at_call` with the reads as msgpack bytes, as the binding takes them
+    pub fn read_at_call_bytes(&self, reads: &[u8]) -> CallRead {
+        match decode_reads(reads) {
+            Ok(reads) => self.read_at_call(reads),
+            Err(error) => CallRead { asked: Err(error), answered: Arc::default(), tracked: None },
+        }
+    }
+
+    /// Answers a read asked with `read_at_call`, running it here unless it ran at the call or a growth of the map ran
+    /// it. Refused `CLOSED` when the database closed before it ran. A tracked read is filed here, as `read` files one,
+    /// and answered with the last commit since its call that wrote into what it read, for the caller to tell once it
+    /// has handed the answer over (`tell_touched`)
+    pub fn answer_call_read(&self, read: CallRead) -> CallAnswer {
+        let CallRead { asked, answered, tracked } = read;
+        let ran = asked.and_then(|asked| match asked {
+            Some(waiting) => self.store()?.run_asked(waiting),
+            None => Ok(()),
+        });
+        let taken = answered.lock().take();
+        let (answer, reads) = match (taken, ran) {
+            (Some(Ok(ran)), _) => ran,
+            (Some(Err(panic)), _) => std::panic::resume_unwind(panic),
+            // The database closed first: nothing was read, and nothing is filed
+            (None, Err(error)) if error.code == ErrorCode::Closed => {
+                return CallAnswer { answer: Err(error), touched: None };
+            }
+            // No snapshot could be taken: filed as `read` files a read that failed so, for everything
+            (None, Err(error)) => (Err(error), tracked.is_some().then(tracking::ReadSet::everything)),
+            (None, Ok(())) => unreachable!("a read that ran answered, catching its own panic"),
+        };
+        let touched = match (tracked, reads) {
+            (Some(tracked), Some(reads)) => tracked.file(reads),
+            _ => None,
+        };
+        CallAnswer { answer, touched }
+    }
+
+    /// Tells the listener of the builder's commits, if there is one, that the commit at `sequence` wrote into the reads
+    /// tracked under `token`: what `answer_call_read` found of a read filed after that commit. Told once the answer has
+    /// been handed over, so that the listener never hears of a change to an answer its caller hasn't got
+    pub fn tell_touched(&self, sequence: u64, token: u32) {
+        let listener = self.tracks.lock().builder_commit_listener();
+        let Some(listener) = listener else { return };
+        let heard =
+            watch::as_callback(&self.tracks, || catch_unwind(AssertUnwindSafe(|| listener(sequence, vec![token]))));
+        // One that panics is heard no more, as when it panics hearing a builder's commit
+        if heard.is_err() {
+            self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
+        }
     }
 
     /// Applies a batch as one unit, refusing all of it when any operation is refused. `durable` commits it with a sync

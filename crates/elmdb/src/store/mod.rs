@@ -12,6 +12,7 @@
 
 mod backup;
 mod boot;
+pub(crate) mod call_reads;
 mod commits;
 mod idle_reads;
 mod kept;
@@ -46,6 +47,7 @@ use crate::engine::mirror::{EdgeDelta, EdgeMirror};
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::{self, Prefix, meta};
 use crate::sync::PlainMutex;
+use call_reads::{AtCommit, CallReads};
 use idle_reads::IdleReads;
 use kept::Kept;
 use record::Mode;
@@ -387,6 +389,8 @@ pub struct Store {
     unit: UnitSlot,
     /// Read transactions a read finished with, for the next read to take while it is still current
     idle: IdleReads,
+    /// Read transactions held from a call until a read asked at it runs on another thread (`call_reads`)
+    calls: Arc<CallReads<RoTxn<'static, WithoutTls>>>,
     /// The last commit's sequence (`meta::SEQUENCE`), which every commit raises by one
     sequence: AtomicU64,
     /// The stored epoch this handle has seen. A commit under any other is refused, since what it read has been replaced
@@ -429,6 +433,15 @@ pub struct Store {
     /// until the environment has closed: an open that finds the first unheld may restore the file, and one of another
     /// mode is refused while the second is held. Last, so they are let go after everything else a dropped store holds
     presence: Option<restore::Presence>,
+}
+
+/// A read `Store::ask` keeps waiting, for `Store::run_asked` on any thread
+pub(crate) struct CallRead(call_reads::Ticket<RoTxn<'static, WithoutTls>>);
+
+impl AtCommit for RoTxn<'static, WithoutTls> {
+    fn read_at(&self) -> u64 {
+        self.id() as u64
+    }
 }
 
 /// Every commit up to `through` is one this handle made or has noticed; `elsewhere` says another's was among them since
@@ -620,11 +633,13 @@ impl Store {
         }
         let gate = Arc::new(RecursiveRwLock::new(()));
         let idle = IdleReads::new()?;
+        let calls = Arc::new(CallReads::default());
         let kept = match (mode, record) {
             (Some(Mode::Grouped), Some(record)) => Some(Arc::new(Kept::new(
                 env.clone(),
                 Arc::clone(&gate),
                 idle.clearer(),
+                Arc::clone(&calls),
                 &canonical,
                 page,
                 boot,
@@ -674,6 +689,7 @@ impl Store {
             commit,
             unit: UnitSlot::new(),
             idle,
+            calls,
             sequence: AtomicU64::new(sequence),
             epoch: AtomicU64::new(epoch),
             replacing: AtomicU64::new(0),
@@ -860,27 +876,106 @@ impl Store {
     /// snapshot — its id the environment's last committed one, which a commit in any process moves — and opening one
     /// is what a read saves. Completed snapshots expire after 100 ms idle even without further database calls.
     pub fn read<T>(&self, f: impl FnOnce(&RoTxn<'_, WithoutTls>, Db) -> Result<T>) -> Result<T> {
-        let mut f = Some(f);
+        self.read_on(|txn| f(txn, self.db))?
+    }
+
+    /// `read`'s snapshot, handed to `f` as the transaction it is
+    fn read_on<R>(&self, f: impl FnOnce(&RoTxn<'static, WithoutTls>) -> R) -> Result<R> {
         loop {
             let guard = self.gate();
-            let (cached, generation) = self.idle.take(&self.env);
-            let txn = match cached {
-                Some(txn) => txn,
-                None => match with_reader_recovery(&self.env, || self.env.clone().static_read_txn()) {
-                    Ok(txn) => txn,
-                    Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
-                        drop(guard);
-                        self.adopt_map_size()?;
-                        continue;
-                    }
-                    Err(e) => return Err(e.into()),
-                },
+            let txn = match self.snapshot() {
+                Ok(txn) => txn,
+                Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                    drop(guard);
+                    self.adopt_map_size()?;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
             };
-            let result = (f.take().expect("a read runs once"))(&txn, self.db);
+            let (txn, generation) = txn;
+            let result = f(&txn);
             self.idle.put(txn, generation);
             drop(guard);
-            return result;
+            return Ok(result);
         }
+    }
+
+    /// A read transaction at the last commit, idle or opened, with the idle cache's generation it belongs to; the
+    /// caller holds the gate
+    fn snapshot(&self) -> heed::Result<(RoTxn<'static, WithoutTls>, u64)> {
+        let (cached, generation) = self.idle.take(&self.env);
+        let txn = match cached {
+            Some(txn) => txn,
+            None => with_reader_recovery(&self.env, || self.env.clone().static_read_txn())?,
+        };
+        Ok((txn, generation))
+    }
+
+    /// Asks for `read` to run on the snapshot of the last commit as it is at this call, on whichever thread runs what
+    /// this answers, or here when as many transactions are held for such reads as may be (`call_reads`). `None` says
+    /// it has run
+    pub(crate) fn ask(
+        &self,
+        read: impl FnOnce(&RoTxn<'static, WithoutTls>, Db) + Send + 'static,
+    ) -> Result<Option<CallRead>> {
+        let db = self.db;
+        let mut work: call_reads::Work<RoTxn<'static, WithoutTls>> = Box::new(move |txn| read(txn, db));
+        loop {
+            let guard = self.gate();
+            let last = self.env.info().last_txn_id as u64;
+            // Another process grew the map: taken at its size, with the gate held for writing, and asked again
+            let resized = std::cell::Cell::new(false);
+            let open = || {
+                self.snapshot().map_err(|error| {
+                    resized.set(matches!(error, heed::Error::Mdb(heed::MdbError::MapResized)));
+                    Error::from(error)
+                })
+            };
+            match self.calls.ask(last, open, work) {
+                Ok(call_reads::Asked::Waiting(ticket)) => return Ok(Some(CallRead(ticket))),
+                Ok(call_reads::Asked::Here(here)) => {
+                    drop(guard);
+                    self.read_on(here)?;
+                    return Ok(None);
+                }
+                Err((_, back)) if resized.get() => {
+                    drop(guard);
+                    self.adopt_map_size()?;
+                    work = back;
+                }
+                Err((error, _)) => return Err(error),
+            }
+        }
+    }
+
+    /// Runs a read `ask` kept waiting, unless a growth of the map ran it first: one this store asked, a database's
+    /// store being the one its open made until it closes. Refused `CLOSED` when the store closed first
+    pub(crate) fn run_asked(&self, read: CallRead) -> Result<()> {
+        read.0.run(
+            || self.gate(),
+            |freed| {
+                for (txn, generation) in freed {
+                    self.idle.put(txn, generation);
+                }
+            },
+        )
+    }
+
+    /// How many transactions are held for reads asked at calls, and the most any one commit holds
+    #[cfg(test)]
+    pub(crate) fn held_for_calls(&self) -> (usize, usize) {
+        self.calls.held()
+    }
+
+    /// Read transactions holding every reader slot left, the idle ones let go of first, for a test of a full table
+    #[cfg(test)]
+    pub(crate) fn every_reader_slot(&self) -> Vec<RoTxn<'static, WithoutTls>> {
+        self.drop_idle();
+        let mut held = Vec::new();
+        while let Ok(txn) = self.env.clone().static_read_txn() {
+            held.push(txn);
+        }
+        held
     }
 
     /// Drops every idle read transaction: after a commit here, which makes them stale, and before the map is resized
@@ -1452,6 +1547,8 @@ impl Store {
 
     /// `grow`'s work, the gate held for writing
     fn grow_holding(&self, _gate: RecursiveRwLockWriteGuard<'_, ()>) -> Result<()> {
+        // Each read asked at a call is run on its own snapshot before its transaction is ended, never on a later one
+        self.calls.run_all();
         self.drop_idle();
         // A pin is a transaction too: the write that grows makes sure of it again before it runs again
         if let Some(kept) = &self.kept {
@@ -1463,8 +1560,9 @@ impl Store {
         if grown > TEST_MAP_LIMIT {
             return Err(Error::new(ErrorCode::MapFull, format!("A test's database grew past {TEST_MAP_LIMIT} bytes")));
         }
-        // SAFETY: the gate held for writing means no read or write runs in this process, and the idle read
-        // transactions are dropped: no transaction is open, which LMDB requires. Nor does anything else read through
+        // SAFETY: the gate held for writing means no read or write runs in this process, the reads asked at calls have
+        // run and their transactions are ended, and the idle read transactions are dropped: no transaction is open,
+        // which LMDB requires. Nor does anything else read through
         // the map it unmaps: a sync and each read of the environment's sizes hold the gate for reading
         unsafe { self.env.resize(grown) }?;
         Ok(())
@@ -1476,6 +1574,7 @@ impl Store {
             return kept.adopt();
         }
         let _gate = self.gate.write();
+        self.calls.run_all();
         self.drop_idle();
         // SAFETY: as in `grow`
         unsafe { adopt_grown_map(&self.env, &self.path, self.read_only) }?;
@@ -1505,7 +1604,8 @@ impl Store {
             None => Ok(()),
         };
         // LMDB closes the environment once its last handle goes, which dropping the store and its idle read
-        // transactions is. The lock that says it is open goes only once it has closed
+        // transactions is, with the ones held for reads asked at calls, which the drop ends. The lock that says it is
+        // open goes only once it has closed
         self.idle.close();
         let presence = self.presence.take();
         let closed = self.env.clone().prepare_for_closing();
@@ -1548,6 +1648,8 @@ impl Store {
             commit.stop_at_exit(deadline.saturating_duration_since(Instant::now()));
         }
         self.idle.stop_at_exit(deadline);
+        // Tried until the deadline, where the drop's close would wait for a thread gone holding the lock
+        self.calls.close_before(deadline);
         drop(self);
         synced
     }
@@ -1628,6 +1730,7 @@ impl Drop for Store {
         if let Some(mut commit) = self.commit.take() {
             let _ = commit.close();
         }
+        self.calls.close();
         self.idle.close();
         open_paths().lock().expect("the open-paths lock is never poisoned").remove(&self.path);
     }
