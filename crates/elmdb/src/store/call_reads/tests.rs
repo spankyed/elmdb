@@ -244,3 +244,28 @@ fn a_close_at_exit_waits_no_longer_than_its_deadline_for_the_lock_and_no_close_a
     growing.join().unwrap();
     returned.expect("the closes returned while the lock was held");
 }
+
+#[test]
+fn a_read_asked_at_a_commit_with_a_transaction_to_spare_takes_it_and_opens_none() {
+    let (env, reads, saw) = (Env::default(), Arc::new(CallReads::default()), Arc::default());
+    let (first, second) = (ask(&reads, &env, &saw), ask(&reads, &env, &saw));
+    second.run(|| (), drop).unwrap();
+    assert_eq!(reads.held(), (2, 2));
+    let third = ask(&reads, &env, &saw);
+    assert_eq!(reads.held(), (2, 2), "a transaction was opened where one was spare");
+    assert_eq!(env.open_now(), 2);
+    first.run(|| (), drop).unwrap();
+    third.run(|| (), drop).unwrap();
+    assert_eq!(env.open_now(), 0);
+}
+
+#[test]
+fn a_failure_to_open_other_than_a_full_table_refuses_a_read_whose_commit_holds_a_transaction() {
+    let (env, reads, saw) = (Env::default(), Arc::new(CallReads::default()), Arc::default());
+    let _first = ask(&reads, &env, &saw);
+    let failing = || Err(Error::new(ErrorCode::Io, "the map was grown elsewhere"));
+    let work: Work<Txn> = Box::new(|_| {});
+    let Err((refused, _)) = reads.ask(env.last(), failing, work) else { panic!("asked") };
+    assert_eq!(refused.code, ErrorCode::Io);
+    assert_eq!(reads.held(), (1, 1));
+}

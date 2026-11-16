@@ -948,12 +948,9 @@ impl Store {
         }
     }
 
-    /// Runs a read `ask` kept waiting, unless a growth of the map ran it first. Refused `CLOSED` when the store closed
-    /// first, or the read was asked of another store
+    /// Runs a read `ask` kept waiting, unless a growth of the map ran it first: one this store asked, a database's
+    /// store being the one its open made until it closes. Refused `CLOSED` when the store closed first
     pub(crate) fn run_asked(&self, read: CallRead) -> Result<()> {
-        if !read.0.of(&self.calls) {
-            return Err(Error::new(ErrorCode::Closed, "The database closed before a read asked of it ran"));
-        }
         read.0.run(
             || self.gate(),
             |freed| {
@@ -968,6 +965,17 @@ impl Store {
     #[cfg(test)]
     pub(crate) fn held_for_calls(&self) -> (usize, usize) {
         self.calls.held()
+    }
+
+    /// Read transactions holding every reader slot left, the idle ones let go of first, for a test of a full table
+    #[cfg(test)]
+    pub(crate) fn every_reader_slot(&self) -> Vec<RoTxn<'static, WithoutTls>> {
+        self.drop_idle();
+        let mut held = Vec::new();
+        while let Ok(txn) = self.env.clone().static_read_txn() {
+            held.push(txn);
+        }
+        held
     }
 
     /// Drops every idle read transaction: after a commit here, which makes them stale, and before the map is resized

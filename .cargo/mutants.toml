@@ -14,6 +14,7 @@ exclude_globs = [
     "crates/elmdb/src/sync/shuttle_primitives.rs",
     "crates/elmdb/src/engine/watch/model.rs",
     "crates/elmdb/src/engine/builder/model.rs",
+    "crates/elmdb/src/store/call_reads/model.rs",
     # The binding's exports and the conversions they make for JavaScript: only JavaScript reaches them, its suite
     # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so no mutant of this file
     # is ever caught here. The binding's other files, which their own Rust tests reach, keep their mutants

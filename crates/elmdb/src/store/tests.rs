@@ -440,14 +440,17 @@ fn a_read_asked_before_another_process_grew_the_map_runs_on_its_own_snapshot_whe
     let (asked, answer) = ask_for(&store, "grown");
     grow_elsewhere(dir.path());
     let before = store.map_size();
-    // The next transaction here is refused the map as it was, which is taken at its new size once the read waiting
-    // has run on its own snapshot
-    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+    // The next read asked here is refused the map as it was, which is taken at its new size once the read waiting has
+    // run on its own snapshot, and then asked again
+    let (after, answer_after) = ask_for(&store, "grown");
     assert!(store.map_size() > before, "the map was taken at the size the other process grew it to");
     assert_eq!(answer.try_recv().unwrap(), None, "the read ran on a later snapshot than its call's");
-    assert_eq!(store.held_for_calls(), (0, 0));
+    assert_eq!(store.held_for_calls(), (1, 1));
     store.run_asked(asked).unwrap();
     assert!(answer.try_recv().is_err(), "the read ran twice");
+    store.run_asked(after).unwrap();
+    assert_eq!(answer_after.try_recv().unwrap().as_deref(), Some(&b"yes"[..]));
+    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
 }
 
 #[test]

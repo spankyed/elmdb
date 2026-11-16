@@ -99,11 +99,31 @@ fn a_close_refuses_the_reads_still_waiting_and_closes_though_their_snapshots_wer
     let db = Arc::new(open(&dir));
     create(&db, "Task", "Task-1");
     let asked = db.read_at_call(count(None));
+    let tracked = db.read_at_call(count(Some(7)));
     let (closed, done) = std::sync::mpsc::channel();
     let closing = Arc::clone(&db);
     std::thread::spawn(move || closed.send(closing.close()).unwrap());
     done.recv_timeout(std::time::Duration::from_secs(10)).expect("the close returned").unwrap();
     assert_eq!(db.answer_call_read(asked).answer.unwrap_err().code, ErrorCode::Closed);
+    // A tracked read the close refused read nothing, and nothing of it is filed or kept waiting
+    assert_eq!(db.answer_call_read(tracked).answer.unwrap_err().code, ErrorCode::Closed);
+    assert_eq!(db.track_stats(), (0, 0, 0));
+    assert!(db.tracks.lock().is_empty());
+}
+
+#[test]
+fn a_tracked_read_refused_its_snapshot_at_its_call_is_filed_for_everything_as_a_read_that_failed_so_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    create(&db, "Task", "Task-1");
+    let store = db.store().unwrap();
+    let every = store.every_reader_slot();
+    let refused = db.answer_call_read(db.read_at_call(count(Some(9))));
+    assert_eq!(refused.answer.unwrap_err().code, ErrorCode::ReadersFull);
+    drop(every);
+    // Filed for everything: a commit of anything names it, so its caller hears when to read again
+    assert_eq!(create(&db, "Note", "Note-1").1, [9]);
+    assert_eq!(store.held_for_calls(), (0, 0));
 }
 
 #[test]
