@@ -1,10 +1,12 @@
 # Roadmap: where elmdb could go
 
 Directions past the planned work (`../roadmap.md`), each with the measurements it rests on and the reading that would
-trigger it (`../evidence/next-phase-10.md`); each file says how far it is built. Directions that were built are in
+trigger it (`../evidence/next-phase-10.md` for the first four below, `../evidence/million-notes.md` for the road's own
+three); each file says how far it is built. Directions that were built are in
 `../archive/roadmap/`: field types from apack's shapes (`typed-schema.md`), graph algorithms (`graph-algorithms.md`), their weights (`rank-weights.md`) and the rank index (`rank-index.md`),
 read allocations, copies and codecs (`read-allocation-codec.md`) and query work efficiency
-(`query-work-efficiency.md`), and the maintenance verification (`maintenance-verification.md`).
+(`query-work-efficiency.md`), one plan algebra (`plan-algebra.md`), and the maintenance verification
+(`maintenance-verification.md`).
 What graph query languages answer that a plan doesn't, and the order to add it, is in
 [`deferred/graph-traversal.md`](deferred/graph-traversal.md).
 
@@ -14,7 +16,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | Direction | What it would change |
 |---|---|
 | [Incremental views](incremental-views.md) | Designed: a plan's answer maintained from each commit's change set, not computed again |
-| [The change log as a product](change-log.md) | Designed: incremental backup from the fields changed since a sequence; sync and undo named, not designed |
+| [The change log as a product](change-log.md) | Designed: incremental backup from the fields changed since a sequence; sync and undo named, not designed. Built since, for entities: what changed since a position (`changedSince`) |
 | [The JavaScript boundary](javascript-boundary.md) | Designed: lazy rows that decode a field when read, and optimistic units that can span an `await` |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
 | [A string's order from its index](string-order.md) | Built, phases 1 to 4: every declared value index keeps a key for each distinct string it holds, under the collation's sort key, so an order, a page and a string range read keys and entries where they read every entity, and a write that repeats a string files nothing more; a marker of the collator's stamp and a build keep a stale sort key from being read |
@@ -32,4 +34,5 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
   benchmarks, concurrency models and diagnostics, each stage built or declined with its record.
 - [Tooling for tests that can fail, faults by name, and measured bounds](verification-tooling.md): mutation testing,
   failpoints, heap assertions, per-process tests, model-based properties, profiling; all built.
-- [Lessons from lmdb-js](lmdb-js-research.md): a planned survey of what lmdb-js does that elmdb might learn from.
+- [Lessons from lmdb-js](lmdb-js-research.md): a research plan of six workstreams; its status says which other work
+  has since closed, and which are not started.

@@ -3,8 +3,9 @@
 What proves elmdb correct, and where each proof lives. `cargo nextest run --workspace` runs the Rust suites, each test in
 its own process (`cargo test --workspace --doc` the doc tests); `npm test` runs the binding's. A test that hangs is
 killed at its deadline in `.config/nextest.toml`: ten seconds for a watch test, where a regression deadlocks a
-delivery, twenty for a graph walk, rank index, reader-saturation or idle-reader test, fifteen minutes for the model harness, which takes four to five on CI's Intel macOS runner, and four for any other;
-the rest run on. A filter that selects no test fails the run. A test still runs the test binary again where it needs
+delivery, and for the open of a file that lost its commit's meta page; twenty for a graph walk, rank index,
+reader-saturation or idle-reader test; forty for the rank index's random histories; sixty for the open that takes a
+map another process grows; fifteen minutes for the model harness; and four minutes for any other; the rest run on. A filter that selects no test fails the run. A test still runs the test binary again where it needs
 a second process: the crash harnesses' killed writers, another process's commit, schema change and map growth seen by
 this one, a read-only open beside another process's writer, and the process claim.
 
@@ -189,12 +190,12 @@ A fault a test injects — a commit refused as on a full disk, a failed sync, a 
 a panic in a watch's read — is a named `fail` failpoint (`crates/elmdb/src/failpoints.rs`, the names in its `points`).
 `fail`'s registry is the process's and the suite's tests run in parallel, so a site's condition asks `failpoints`
 whether the point is armed for it: once on the thread that armed it (`fail_once_here`, `run_once_here`), once for the
-database at a path (`fail_once_at`), or for a path until a guard drops (`fail_while_at`), for a fault that fires on
+database at a path (`fail_once_at`, `run_once_at`), or for a path until a guard drops (`fail_while_at`), for a fault that fires on
 another thread, a sync or a commit. A test arms a point only through these, never `fail::cfg`, which would arm it for
 every test running at the time; `failpoints`'s own spec shows a point armed on one thread doesn't fire on another.
 
-Only elmdb's tests enable `fail`'s `failpoints` feature (a dev-dependency feature, which resolver 2 keeps out of every
-other build), and without it a site is nothing: a release binding holds no point's name and no `fail` symbol
+Only elmdb's tests enable `fail`'s `failpoints` feature (a dev-dependency feature, which the workspace's resolver, 3,
+keeps out of every other build), and without it a site is nothing: a release binding holds no point's name and no `fail` symbol
 (`docs/evidence/verification-tooling.md`).
 
 ## Diagnostics
@@ -243,7 +244,7 @@ command derives it again, since it holds the lines the comments are above as it 
 edit would excuse whatever the edit moved onto those lines, and report the mutants it moved off them.
 
 ```sh
-# Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle)
+# Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle, 2026-10-28)
 cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::machine::the_engine
 # Pass 2, only those pass 1 missed, against the whole suite
 cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs --iterate
@@ -293,7 +294,7 @@ reported.
 the script runs each crate's files against that crate's suite.
 
 Each job builds a copy of the tree under the system's temporary directory, about 1.3 GB on the `mutants` profile (the
-test profile without debug info), so `-j` is set by the disk as much as the cores. `--iterate` reads what earlier runs
+test profile without debug info; 2026-10-28), so `-j` is set by the disk as much as the cores. `--iterate` reads what earlier runs
 caught from the output directory's `previously_caught.txt`, so a pass is resumed, and narrowed, by running it again into
 the same directory.
 
@@ -370,8 +371,10 @@ through `crate::sync::model`, so one model runs under either.
 
 **Every lock goes through `crate::sync`, or says why not.** `cargo xtask check-sync` fails when engine code outside
 `src/sync/` locks, waits or keeps per-thread state through `std` or parking_lot directly, unless its file is listed in
-xtask's `UNMODELLED` with the reason (a lock no model provides, state no model covers yet, a test-only failure point),
-and fails on a listed file that no longer does. So new shared state is modelable by default, and the list says what
+xtask's `UNMODELLED` with the reason (a lock no model provides, state no model covers yet, state one thread keeps
+for itself, a worker or a turn its own tests cover with a deterministic harness or real threads and killed processes,
+a collector the embedding program installs, a test-only failure point), and fails on a listed file that no longer
+does. So new shared state is modelable by default, and the list says what
 isn't modelled yet: a model of one is how its file leaves the list.
 
 **Every write transaction is committed in one module.** `cargo xtask check-commits` fails when engine code outside
@@ -423,7 +426,8 @@ Each has its own target directory, which keeps its flag from rebuilding the ever
 test would run on the model's primitives outside a model, so only the models are run. `LOOM_MAX_PREEMPTIONS=3` bounds
 how many times a thread is preempted in one interleaving; `ELMDB_SHUTTLE_ITERATIONS` sets Shuttle's schedules per
 model, 100,000 by default, and a failure prints its schedule for `shuttle::replay` and its seed for
-`SHUTTLE_RANDOM_SEED`. CI's `loom` and `shuttle` jobs run these commands on every pull request; `models.yml` runs them
+`SHUTTLE_RANDOM_SEED`. CI's `loom` and `shuttle` jobs run these commands on every push to `main` and every pull
+request, and `cargo xtask pre-push` runs them before a push; `models.yml` runs them
 on a dispatch, its nightly schedule commented out for now, with deeper bounds (`LOOM_MAX_PREEMPTIONS=4`, ten million Shuttle schedules a model). What mutations showed:
 [`../evidence/loom-unit-reservation.md`](../evidence/loom-unit-reservation.md),
 [`../evidence/shuttle-watch.md`](../evidence/shuttle-watch.md) and
@@ -460,7 +464,10 @@ V8 is still freeing answers they dropped, which only Windows can fail: with exte
 and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
 `windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
 
-`offthread.test.mjs` holds the three operations that run on the pool, `…Async`, beside their blocking forms: a check, a rebuild
+`offthread.test.mjs` holds the four operations that run on the pool, `…Async`, beside their blocking forms. A
+`readAsync` answers what `read` would have answered at its call, whatever is written before the pool runs it; a
+tracked one that a commit wrote into before it was filed is told to the listener of the builder's commits once it has
+settled, and one asked while nothing listens is refused (`NO_LISTENER`). A check, a rebuild
 and a backup answer what their blocking forms answer, a rebuild of 20,000 notes leaves timers turning until it
 answers, a failure rejects with its code, and a refusal made before the work throws. A rebuild asked for while a unit
 is open is refused with `UNIT_OPEN`, and runs once the unit has committed; twenty blocking writes made while a rebuild
@@ -477,6 +484,13 @@ suite calls.
 ## Platforms
 
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
+Its jobs there: `checks` (on Node 23: format, clippy with and without the `diagnostics` feature, the workspace's suite,
+the engine's with `diagnostics`, the doc tests); `heap` (the maintenance heap bound and the benchmarks' smoke runs);
+`repo` (on Node 23: `cargo xtask check-generated`, `check-one-lmdb`, `check-icu-exact`, `check-diagnostics-off`,
+`check-leiden-serial`, `check-sync`, `check-commits` and `check-mutant-exclusions`; the binding's build, typecheck and
+suite; the read profile; SQLite's comparison at 2,000 notes; the read-only mount, idle-reader, reader-recovery,
+process-claim and publication scripts under `scripts/`; and that the generated loader and declarations are
+committed); and `loom` and `shuttle` (Concurrency models).
 Every pull request, draft or ready for review, also runs the fast tier's platforms, macOS arm64 and Windows x64. A
 pull request ready for review runs the full tier as well (`.github/workflows/full.yml`), which completes the matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
@@ -510,6 +524,20 @@ Musl jobs retain their existing architecture coverage; this does not claim every
 These are required checks configured by the workflow, not a claim that a particular run has passed.
 
 Filesystem support requirements and the limits of this platform coverage are in [filesystems.md](filesystems.md).
+
+Four workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
+or its test, as no required check (Power loss). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
+`mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
+LMDB (`scripts/lmdb-upstream.py`). `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
+and so is `models.yml` (Concurrency models).
+
+Suites the sections above don't name: `store/wait_tests.rs` (what a unit's owner may wait on answers while the unit
+is open; `engine.md`, What waits on what), `engine/algorithms/tests.rs` (the graph algorithms against plain references
+over random graphs, and Zachary's karate club against networkx 3.4.2's `pagerank`), `tests/rank_default.rs` (a rank
+index at the default tolerance holds the top of a graph with hubs to exact PageRank), `tests/read_measurements.rs`
+(the read measurements refuse a wrong answer of the right size), `crates/elmdb-cli/tests/cli.rs` (the `elmdb` command
+run as a user runs it, on a database the library wrote), xtask's own tests of its checks, and
+`scripts/test-callgrind.py` (the Callgrind reading the instruction-count gate rests on, run by the full tier).
 
 ## Maintenance memory paths
 

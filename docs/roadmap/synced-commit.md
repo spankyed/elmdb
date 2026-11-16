@@ -9,7 +9,10 @@ this design, and what each reading changed is under What was set aside. The four
 and found ready once three of its steps were restated, which this draft does; the model then settled how a meta page
 is taken, which this draft states.
 
-## Where it stands
+## Where it started
+
+What this section says held at `ed20979`, before the design below was built. Now, a process with commits unsynced
+pins its last synced commit, and an open after a loss restores it (`../architecture/engine.md`, Durability).
 
 In the grouped mode LMDB is opened with `MDB_NOSYNC`, and a thread syncs once writes pause for 100 ms and at most 1 s
 after the first unsynced commit (`../architecture/engine.md`, Durability). Nothing orders the pages and the meta pages
@@ -46,7 +49,8 @@ How often a file is torn, and what the mode that can't be costs the program elmd
 
 What they say: `syncEachCommit` as the default needs no new code, and by the count as it now stands it may well
 serve apack: the fourth draft set it aside on the count of 181, which was out of date. Which of the two to build
-is open again, and is read in apack before more of this design is built. And a restore will run far more often
+was open again at this draft, and was settled by building this design (phases 1 to 4, 2026-11-15): the grouped mode
+stays the default and keeps its last synced commit, and `syncEachCommit` is the option. And a restore will run far more often
 than a tear happens, at every loss within a second of a commit: it is a path that runs, and must be right.
 
 ## What LMDB already promises
@@ -438,7 +442,7 @@ restore it can't make.
    it is not. The key is the current user's, which a process may make volatile without an administrator: a process
    of another account, or a service, reads another boot, and where it opens a database alone after a death it
    restores, losing what the dead process committed since its last sync, as a loss would. A boot all accounts share
-   is phase 5's. Phase 4 refuses two live writers of two modes.
+   is not built. Phase 4 refuses two live writers of two modes.
 4. **The modes.** `syncEachCommit` and `syncs: false` alone and after a grouped writer that died with commits
    unsynced, a backup into a directory and `replaceWith`. Done when the replay holds each, an open in another mode
    than a live writer's is refused and one after it has gone is not, and a `syncEachCommit` writer is shown to

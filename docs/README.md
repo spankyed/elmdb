@@ -9,6 +9,7 @@ What each directory is for, so you know how far to trust what you're reading.
 | [`evidence/`](evidence/) | measurements behind decisions | dated: true of the commit and machine it names |
 | [`archive/`](archive/) | closed goals, and designs since built | history: the code and `architecture/` win over it |
 | [`reviews/`](reviews/) | point-in-time assessments and proposals | dated: findings as of the review |
+| [`assets/`](assets/) | the banner and logo the README shows | images, no claim to check |
 
 ## Architecture
 

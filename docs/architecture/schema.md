@@ -84,7 +84,7 @@ What a database holds and the rules it keeps, declared as data. Built: `crates/e
 | Key | Holds |
 |---|---|
 | `$schema` | the URL of the published JSON Schema for this version of the schema language, which is also how an editor validates and completes it. A version elmdb doesn't know is refused |
-| `collation` | how strings sort: `root` (ICU's root collation) or a locale (`en`, `de`). One per database |
+| `collation` | how strings sort: `root` (ICU's root collation, the default) or a locale (`en`, `de`, `de-AT`): a language of two or three lowercase letters, then subtags of two to eight letters or digits, which ICU's collator must take. One per database |
 | `types` | entity types by name |
 | `relations` | relation kinds by name |
 | `roles` | role names, each an object kept for future options |
@@ -113,7 +113,8 @@ The engine's own names can't be declared: the fields `id`, `entityType`, `shortC
   "shortCode": { "prefix": "MSG" },
   "fields": { … },
   "additionalFields": "refuse",
-  "indexes": { … }
+  "indexes": { … },
+  "changeOrder": true
 }
 ```
 
@@ -122,6 +123,9 @@ The engine's own names can't be declared: the fields `id`, `entityType`, `shortC
 - `shortCode`: the engine numbers each created row `<prefix>-<n>` and never hands a number out twice.
 - `additionalFields`: `refuse` (the default) refuses a write to a field the type doesn't declare; `allow` stores it as
   `any`.
+- `changeOrder: true`: the engine keeps the type's entities in the order of the commits that last wrote them, which
+  is what `changedSince` reads for the type (`engine.md`, Changed since). Each write to one of its entities then moves
+  that entity's place in the order. `false` by default.
 
 ## Fields
 
@@ -202,7 +206,8 @@ when the type has more than one.
 - `fields`: one, or several for a compound index, which enforces `unique` over the fields together. The order of
   several is what a plan reads: equalities on every field but the last, then the last field's order or a range of
   it, so `["status", "n"]` reads the open tasks in `n`'s order and `["n", "status"]` does not (`engine.md`, Reads:
-  plans). An equality alone reads an index on its one field. A field of any type but `bytes`, `object` or a list of
+  plans). An equality alone reads an index on its one field. Besides the type's declared fields it may name
+  `createdAt` and `updatedAt`, the engine's own, and none twice. A field of any type but `bytes`, `object` or a list of
   those or of lists: of an `any` field the index holds the scalar values, and a lookup for another walks the type's
   rows.
 - `unique: true` refuses a write that would give two entities the same values (`UNIQUE`), from the moment it is
@@ -237,12 +242,13 @@ when the type has more than one.
 "text": { "kind": "text", "fields": { "title": { "weight": 3 }, "body": { "weight": 1 } }, "analyzer": "standard" }
 ```
 
-- `fields`: `string` fields, lists of strings, or `any` fields, each with a weight; an `any` field's value is text
-  when it is a string or a list of strings, and no text otherwise.
-- `analyzer`: `standard` (charabia's tokenizing, identifiers split on case and punctuation, case and accents folded) or
-  `exact` (whole values, case folded). Stemming is `standard`'s option `{ "analyzer": "standard", "stem": "en" }`.
+- `fields`: `string` fields, lists of strings, or `any` fields, each with a weight, a positive number, 1 when none is
+  given; an `any` field's value is text when it is a string or a list of strings, and no text otherwise.
+- `analyzer`: `standard` (the default: charabia's tokenizing, identifiers split on case and punctuation, case and
+  accents folded) or `exact` (whole values, case folded). Stemming is `standard`'s option
+  `{ "analyzer": "standard", "stem": "en" }`, in one of eighteen languages (`STEM_LANGUAGES`, `schema/model.rs`).
 
-**Trigram**: substrings and patterns, as they are written (`search.md`, Substrings and patterns).
+**Trigram**: substrings and patterns, as they are written (`search.md`, Substrings and patterns as built).
 
 ```json
 "grams": { "kind": "trigram", "fields": ["text"] }
@@ -262,10 +268,11 @@ when the type has more than one.
              "dims": 384, "metric": "cosine", "precision": "f32", "model": "bge-small-en-v1.5" }
 ```
 
-- `from`: the `string` fields, lists of strings or `any` fields the text to embed is made of. `chunk`: `whole`, `paragraph` or `heading` (Markdown
-  sections).
-- `dims`, `metric` (`cosine` or `l2`), `precision` (`f32`). hannoy's graphs measure cosine and euclidean distance over
-  f32 vectors; a normalized embedding ranks by dot product as it does by cosine.
+- `from`: the `string` fields, lists of strings or `any` fields the text to embed is made of. `chunk`: `whole` (the
+  default), `paragraph` or `heading` (Markdown sections).
+- `dims`, a whole number from 1 to 4096 (`MAX_DIMS`); `metric`, `cosine` (the default) or `l2`; `precision`, `f32`.
+  hannoy's graphs measure cosine and euclidean distance over f32 vectors; a normalized embedding ranks by dot product
+  as it does by cosine.
 - `model`: an opaque name the engine records with each vector. A changed model makes every vector pending again, and
   a vector written under another model is refused.
 
@@ -282,9 +289,10 @@ A rank index holds PageRank over a graph and keeps it current as commits change 
 rather than computing them (`engine.md`, Reads: plans). It spans types, so it is declared at the top of the schema,
 beside `types` and `relations`.
 
-- `types`: the types whose live entities are the graph's nodes; their order is the order ties keep. Each is declared.
-- `relations`: the kinds whose edges between two nodes are the graph's edges. Each is declared, and there is at least
-  one.
+- `types`: the types whose live entities are the graph's nodes; their order is the order ties keep. Each is declared
+  and named once, and there is at least one.
+- `relations`: the kinds whose edges between two nodes are the graph's edges. Each is declared and named once, and
+  there is at least one.
 - `direction`: `out` (the default), `in` or `both`, as `rank` takes it.
 - `weights`: whether an edge of a kind declared `weighted` counts by its weight, `true` by default.
 - `damping`: in (0, 1), `0.85` by default.
@@ -292,13 +300,16 @@ beside `types` and `relations`.
   its pushes are done. Tighten it where scores close together must come in their true order; loosen it where a change
   should cost less and the top's near ties may swap. Where nearly all scores are alike, a top list takes a tighter
   tolerance to match PageRank's, and at 100,000 documents none tried did (`docs/evidence/rank-index.md`).
-- The name is lowerCamelCase, and no type has an index of the same name.
+- The name is lowerCamelCase, and no type has an index of the same name. A rank index takes a `declaredBy`, as a type
+  does.
 
 ## Changing a schema
 
 A database stores its schema (`m/schema`) and its canonical hash. Opening with a schema compares the two, applies the
 change in one unit, and returns a report of what it did; reading without a schema (`readOnly`, or a tool) uses the
-stored one.
+stored one. `setSchema` makes the same change on an open database. A change the table below refuses refuses the whole
+schema and leaves the stored one (`SCHEMA_CHANGE_REFUSED`, naming each path), as does any change asked of a read-only
+database; `setSchema` while a unit is open is refused (`UNIT_OPEN`).
 
 | Change | What happens |
 |---|---|
@@ -311,21 +322,25 @@ stored one.
 | `weighted` changed on a relation kind a rank index reads with weights | the rank index rebuilt, its graph's weights having changed |
 | A field, type, relation kind or role removed | the declaration goes and the data stays: writes to it are refused, every write to an entity of a removed type among them (`UNKNOWN_TYPE`), a trash, a destroy and a link at either end included, but for one: a `destroy` of a declared entity removes its edges, one from a removed type's entity among them, since an edge can't outlast an end and refusing would leave the declared entity undeletable until the type is declared again or purged. An `unlink`, whose ends both stay, is refused. `stats()` counts the data that stays, and `purge` deletes it |
 | `weighted` added to or removed from a relation kind | applied, and nothing is rewritten: added, its edges without a weight weigh 1; removed, the weights stay in the rows, and nothing reads them until it is declared again |
-| A rule tightened (a field made required, a type narrowed, a cardinality, `acyclic` added, a field dropped from a relation's `key`) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built, and the report names them |
+| A rule tightened (a field made required or its type narrowed, `additionalFields` made `refuse`, a cardinality, `acyclic` added, a field dropped from a relation's `key`, a relation's `endpoints` or `info` narrowed, an index made `unique`) | enforced on every write from then on. `check()` reports existing rows that break it. A `unique` index whose rows hold duplicates isn't built: `indexStatus()` gives why in its `failure`, naming two entities that hold the same values, and `waitForIndexBuilds` is refused (`INDEX_BUILD_FAILED`) |
+| `changeOrder` set or unset on a type | applied in the commit that changes the schema, which builds the order from the entities the type holds, or drops it. The report has no line for it |
 | A short code prefix changed or removed, a type declared again with another prefix than its stored codes hold or with none, or a prefix another type's stored codes hold | refused: a code is an entity's identity, and a type that took another's prefix would number from 1 again |
 | Anything renamed | not inferred. `renameType`, `renameField` and `renameRelation` rename stored data in one unit, run from a migration |
 
 Rows that predate a tightened rule are reported, not rewritten: fixing them is a migration's job, which knows what the
 right value is.
 
-The hash is of the canonical form (keys sorted, every default written out), so two schemas that mean the same thing
-have the same hash and an unchanged schema costs one comparison at open.
+The hash is of the canonical form: keys sorted, every default written out but a `changeOrder` that is false, which
+is left out, and the lists whose order means nothing (a relation's endpoints, a `ref`'s types, an `enum`'s values)
+sorted with a repeat kept once. So two schemas that mean the same thing have the same hash and an unchanged schema
+costs one comparison at open.
 
 ## Errors
 
 `SCHEMA_INVALID` lists every problem with its path and, where `declaredBy` is set, who declared it. Problems of form
 (an unknown key, a missing or mistyped value) are all listed first; the names, references and index rules need the whole
-document to read, so they're checked, and every one of their problems listed, once nothing of form is wrong:
+document to read, so they're checked, and every one of their problems listed, once every value reads: an unknown key
+is listed and doesn't stop them, and a missing or mistyped value does:
 
 ```
 types.Message.indexes.text.fields.body: no such field on Message (declared by default-setup)
@@ -334,10 +349,13 @@ relations.parent_of.endpoints[1].target: no such type "Documnet"
 
 ## Generated from it
 
-elmdb's Rust schema types are the definition. From them the build generates:
+elmdb's Rust schema types are the definition. From them `cargo xtask generate` writes, into
+`crates/elmdb-node/protocol/`, which the binding's package holds:
 
-- the TypeScript types of the schema (`Schema`, `protocol/Schema.ts`), published in the `elmdb` package;
-- the JSON Schema at `$schema`'s URL, for editors and for validating a schema before opening a database.
+- the TypeScript types of the schema (`Schema`, `Schema.ts`);
+- the JSON Schema `$schema` names (`schema-1.json`), for an editor to complete and check a schema with. It is looser
+  than the parser: it takes a key it doesn't know, and the `dot` metric and the `f16` and `i8` precisions the
+  validator refuses, so a schema is valid once `open` or `setSchema` takes it, not once the JSON Schema does.
 
 ## apack's schema
 
