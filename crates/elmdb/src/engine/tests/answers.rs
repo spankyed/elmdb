@@ -196,9 +196,9 @@ fn every_kind_of_answer_decodes_into_its_type() {
     let pending = read(&db, json!({ "read": "pendingEmbeddings", "type": "Doc" }));
     answers.extend([&edges, &whole, &picked, &marked, &pending].map(Answer::clone));
     // A relation read of one that exists, by the id the walk answered
-    let Answer::Relations { relations } = &edges else { panic!("edges answered {edges:?}") };
+    let Answer::Relations { relations, .. } = &edges else { panic!("edges answered {edges:?}") };
     let found = read(&db, json!({ "read": "relation", "id": relations[0].id }));
-    assert!(matches!(&found, Answer::Relation { relation: Some(row) } if *row == relations[0]), "{found:?}");
+    assert!(matches!(&found, Answer::Relation { relation: Some(row), .. } if *row == relations[0]), "{found:?}");
     answers.push(found);
     let seen: BTreeSet<&str> = answers.iter().map(kind).collect();
 
@@ -228,6 +228,57 @@ fn every_kind_of_answer_decodes_into_its_type() {
     assert_eq!(rows[0].fields.keys().collect::<Vec<_>>(), ["entityType", "title"]);
     let Answer::Pending { chunks, .. } = &pending else { panic!("pending answered {pending:?}") };
     assert_eq!(chunks.len(), 1);
+}
+
+/// Whether an answer says no map in its stored values may hold a key `__proto__`, for each kind that holds them
+fn plain(answer: &Answer) -> bool {
+    match answer {
+        Answer::Rows { plain_objects, .. }
+        | Answer::Row { plain_objects, .. }
+        | Answer::Field { plain_objects, .. }
+        | Answer::Relation { plain_objects, .. }
+        | Answer::Relations { plain_objects, .. }
+        | Answer::Least { plain_objects, .. }
+        | Answer::Greatest { plain_objects, .. }
+        | Answer::Groups { plain_objects, .. }
+        | Answer::Hits { plain_objects, .. } => *plain_objects,
+        other => panic!("{other:?} holds no stored value"),
+    }
+}
+
+#[test]
+fn every_answer_holding_a_stored_value_says_whether_a_map_in_it_may_hold_proto() {
+    let (_dir, db) = open();
+    let reads = |relation: &str| {
+        [
+            json!({ "read": "field", "id": "Note-1", "field": "tags" }),
+            json!({ "read": "relation", "id": relation }),
+            json!({ "read": "findRelations", "source": "Note-1", "kind": "refs" }),
+            query(json!([]), json!({ "answer": "edges", "kinds": ["refs"] })),
+            query(json!([]), json!({ "answer": "least", "field": "tags" })),
+            query(json!([]), json!({ "answer": "greatest", "field": "tags" })),
+            query(json!([]), json!({ "answer": "rows" })),
+            query(json!([]), json!({ "answer": "groupBy", "field": "tags" })),
+        ]
+        .map(|r| read(&db, r))
+    };
+    let Answer::Relations { relations, .. } = read(&db, json!({ "read": "findRelations", "kind": "refs" })) else {
+        panic!("findRelations answered no relations")
+    };
+    let relation = &relations[0].id;
+    assert!(reads(relation).iter().all(plain), "{:?}", reads(relation));
+    // A stored map holding `__proto__`, as a field's value and as what a link carries
+    let proto = json!({ "__proto__": 1 });
+    write(
+        &db,
+        vec![
+            json!({ "op": "set", "id": "Note-1", "fields": { "tags": proto } }),
+            json!({ "op": "updateRelation", "relation": relation, "info": proto }),
+        ],
+    )
+    .unwrap();
+    let answers = reads(relation);
+    assert!(answers.iter().all(|a| !plain(a)), "{answers:?}");
 }
 
 #[test]

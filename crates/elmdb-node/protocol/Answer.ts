@@ -14,10 +14,12 @@ import type { Stage } from "./Stage.js";
  * One read's answer. A plan's terminal names its kind, and so does each direct read; `visits` and `explain` wrap a
  * plan's answer in `visited` and `explained`.
  *
- * In TypeScript each map is declared an object, which is what the answer decodes to with maps as objects (msgpackr's
- * `mapsAsObjects`). That decode is exact where the answer's `plainObjects` is true. Where it is false a stored map in
- * a row, a group or a hit may hold a key `__proto__`, which no object holds as its own: decode such an answer with
- * maps as `Map`s, and every map these types declare arrives as a `Map` of the same keys
+ * Every answer holding stored values (a row, a group, a hit, a field's value, a relation's `info`, a least or greatest
+ * value) says in `plainObjects` whether a map in them may hold a key `__proto__`. In TypeScript each map is declared
+ * an object, which is what the answer decodes to with maps as objects (msgpackr's `mapsAsObjects`). That decode is
+ * exact where `plainObjects` is true. Where it is false a stored map may hold a key `__proto__`, which no object holds
+ * as its own: decode such an answer with maps as `Map`s, and every map these types declare arrives as a `Map` of the
+ * same keys
  */
 export type Answer = { "kind": "ids", ids: Array<string>, } | { "kind": "count", n: number, } | { "kind": "bool", value: boolean, } | { "kind": "id", id: string | null, } | { "kind": "rows", rows: Array<Row>, 
 /**
@@ -27,7 +29,27 @@ plainObjects: boolean, } | { "kind": "row", row: Row | null,
 /**
  * No map in `row` may hold a key `__proto__`
  */
-plainObjects: boolean, } | { "kind": "field", present: boolean, value: unknown, } | { "kind": "relation", relation: RelationRow | null, } | { "kind": "relations", relations: Array<RelationRow>, } | { "kind": "degrees", degrees: Array<[string, number]>, } | { "kind": "weakComponents", weakComponents: Components, } | { "kind": "strongComponents", strongComponents: Components, } | { "kind": "communities", communities: Array<Array<string>>, } | { "kind": "least", id: string | null, value: unknown, } | { "kind": "greatest", id: string | null, value: unknown, } | { "kind": "sum", sum: number, n: number, } | { "kind": "groups", groups: Array<[unknown, Array<string>]> | Array<[unknown, number]>, 
+plainObjects: boolean, } | { "kind": "field", present: boolean, value: unknown, 
+/**
+ * No map in `value` may hold a key `__proto__`
+ */
+plainObjects: boolean, } | { "kind": "relation", relation: RelationRow | null, 
+/**
+ * No map in `relation` may hold a key `__proto__`
+ */
+plainObjects: boolean, } | { "kind": "relations", relations: Array<RelationRow>, 
+/**
+ * No map in `relations` may hold a key `__proto__`
+ */
+plainObjects: boolean, } | { "kind": "degrees", degrees: Array<[string, number]>, } | { "kind": "weakComponents", weakComponents: Components, } | { "kind": "strongComponents", strongComponents: Components, } | { "kind": "communities", communities: Array<Array<string>>, } | { "kind": "least", id: string | null, value: unknown, 
+/**
+ * No map in `value` may hold a key `__proto__`
+ */
+plainObjects: boolean, } | { "kind": "greatest", id: string | null, value: unknown, 
+/**
+ * No map in `value` may hold a key `__proto__`
+ */
+plainObjects: boolean, } | { "kind": "sum", sum: number, n: number, } | { "kind": "groups", groups: Array<[unknown, Array<string>]> | Array<[unknown, number]>, 
 /**
  * No map in `groups` may hold a key `__proto__`
  */

@@ -104,6 +104,14 @@ fn may_hold_proto(bytes: &[u8]) -> bool {
     bytes.windows(9).any(|w| w == b"__proto__")
 }
 
+/// Ends an answer holding stored values with its `plainObjects`: whether no map written since `start` may hold a key
+/// `__proto__`
+fn plain_objects(w: &mut W<'_>, start: usize) {
+    let plain = !may_hold_proto(&w.0[start..]);
+    w.str("plainObjects");
+    w.bool(plain);
+}
+
 fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited) -> Result<()> {
     match read {
         ReadOp::Query { plan, explain: true, .. } => {
@@ -139,40 +147,36 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             } else {
                 w.nil();
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
             Ok(())
         }
         ReadOp::Field { id, field: name } => {
             let mut w = W(out);
-            w.map(3);
+            w.map(4);
             w.kind("field");
-            match get(r, id, name)? {
-                Some(bytes) => {
-                    w.str("present");
-                    w.bool(true);
-                    w.str("value");
-                    w.raw(&bytes);
-                }
-                None => {
-                    w.str("present");
-                    w.bool(false);
-                    w.str("value");
-                    w.nil();
-                }
+            let held = get(r, id, name)?;
+            w.str("present");
+            w.bool(held.is_some());
+            w.str("value");
+            let start = w.0.len();
+            match held {
+                Some(bytes) => w.raw(&bytes),
+                None => w.nil(),
             }
+            plain_objects(&mut w, start);
             Ok(())
         }
         ReadOp::Relation { id } => {
             let mut w = W(out);
-            w.map(2);
+            w.map(3);
             w.kind("relation");
             w.str("relation");
+            let start = w.0.len();
             match relations::get(r, id)? {
                 Some(stored) => write_relation(r, id, &stored, &mut w),
                 None => w.nil(),
             }
+            plain_objects(&mut w, start);
             Ok(())
         }
         ReadOp::FindRelations { kind, source, target } => {
@@ -181,13 +185,15 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             }
             let found = find_relations(r, kind.as_deref(), source.as_deref(), target.as_deref())?;
             let mut w = W(out);
-            w.map(2);
+            w.map(3);
             w.kind("relations");
             w.str("relations");
+            let start = w.0.len();
             w.array(found.len() as u32);
             for (id, stored) in &found {
                 write_relation(r, id, stored, &mut w);
             }
+            plain_objects(&mut w, start);
             Ok(())
         }
         ReadOp::Suggest { entity_type, index, term, limit } => {
@@ -5248,9 +5254,7 @@ fn query_with(
             for id in &ids {
                 write_row(r, id, fields.as_deref(), &mut w)?;
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
         }
         Terminal::FirstRow { fields } => {
             q.asks(last, Ask::Best(1));
@@ -5267,9 +5271,7 @@ fn query_with(
                 Some(id) => write_row(r, id, asked(fields.as_deref()).as_deref(), &mut w)?,
                 None => w.nil(),
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
         }
         Terminal::Edges { kinds, direction, types } => {
             for kind in kinds {
@@ -5300,13 +5302,15 @@ fn query_with(
                     }
                 }
             }
-            w.map(2);
+            w.map(3);
             w.kind("relations");
             w.str("relations");
+            let start = w.0.len();
             w.array(rows.len() as u32);
             for (id, stored) in &rows {
                 write_relation(r, id, stored, &mut w);
             }
+            plain_objects(&mut w, start);
         }
         Terminal::Degrees { kinds, direction, types } => {
             for kind in kinds {
@@ -5389,7 +5393,7 @@ fn query_with(
                     best.map(|(_, id, value)| (id, value))
                 }
             };
-            w.map(3);
+            w.map(4);
             w.kind(if greatest { "greatest" } else { "least" });
             w.str("id");
             match &best {
@@ -5397,10 +5401,12 @@ fn query_with(
                 None => w.nil(),
             }
             w.str("value");
+            let start = w.0.len();
             match &best {
                 Some((_, value)) => w.raw(&values::encode(value)),
                 None => w.nil(),
             }
+            plain_objects(&mut w, start);
         }
         Terminal::Sum { field: name } => {
             let ids = q.collect(last)?;
@@ -5466,9 +5472,7 @@ fn query_with(
                     w.str(id);
                 }
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
         }
         Terminal::Hits { fields, highlights } => {
             let searches = |step: &Step| {
@@ -5558,9 +5562,7 @@ fn query_with(
                     write_row(r, id, Some(names), &mut w)?;
                 }
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
         }
     }
     visited.entities += q.visited.get();

@@ -21,10 +21,12 @@ pub struct Answers(pub Vec<Answer>);
 /// One read's answer. A plan's terminal names its kind, and so does each direct read; `visits` and `explain` wrap a
 /// plan's answer in `visited` and `explained`.
 ///
-/// In TypeScript each map is declared an object, which is what the answer decodes to with maps as objects (msgpackr's
-/// `mapsAsObjects`). That decode is exact where the answer's `plainObjects` is true. Where it is false a stored map in
-/// a row, a group or a hit may hold a key `__proto__`, which no object holds as its own: decode such an answer with
-/// maps as `Map`s, and every map these types declare arrives as a `Map` of the same keys
+/// Every answer holding stored values (a row, a group, a hit, a field's value, a relation's `info`, a least or greatest
+/// value) says in `plainObjects` whether a map in them may hold a key `__proto__`. In TypeScript each map is declared
+/// an object, which is what the answer decodes to with maps as objects (msgpackr's `mapsAsObjects`). That decode is
+/// exact where `plainObjects` is true. Where it is false a stored map may hold a key `__proto__`, which no object holds
+/// as its own: decode such an answer with maps as `Map`s, and every map these types declare arrives as a `Map` of the
+/// same keys
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -54,11 +56,21 @@ pub enum Answer {
         present: bool,
         #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
         value: Value,
+        /// No map in `value` may hold a key `__proto__`
+        plain_objects: bool,
     },
     /// A `relation` read: the relation's row, or `null`
-    Relation { relation: Option<RelationRow> },
+    Relation {
+        relation: Option<RelationRow>,
+        /// No map in `relation` may hold a key `__proto__`
+        plain_objects: bool,
+    },
     /// `edges`, and `findRelations`: the relations' rows
-    Relations { relations: Vec<RelationRow> },
+    Relations {
+        relations: Vec<RelationRow>,
+        /// No map in `relations` may hold a key `__proto__`
+        plain_objects: bool,
+    },
     /// `degrees`: each entity of the set with how many edges of the kinds it has
     Degrees { degrees: Vec<(String, u64)> },
     /// `weakComponents`: the groups, largest first
@@ -72,12 +84,16 @@ pub enum Answer {
         id: Option<String>,
         #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
         value: Value,
+        /// No map in `value` may hold a key `__proto__`
+        plain_objects: bool,
     },
     /// `greatest`: the entity whose field is greatest, and that value; both `null` when none holds one
     Greatest {
         id: Option<String>,
         #[cfg_attr(feature = "codegen", ts(type = "unknown"))]
         value: Value,
+        /// No map in `value` may hold a key `__proto__`
+        plain_objects: bool,
     },
     /// `sum`: the numbers the field holds over the set, summed, and how many entities hold one
     Sum { sum: f64, n: u64 },

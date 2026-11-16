@@ -470,10 +470,11 @@ bytes spliced in unchanged, counts as numbers. A call answers an array of an ans
 says which: `Answers` and `Answer` in `engine/answer.rs`, generated as `protocol/Answers.ts` and `protocol/Answer.ts`.
 `reads.rs` writes the bytes itself rather than serializing those types, so no stored value is decoded to be answered;
 `answer::conforms` holds the bytes to the types, every key and none more, on every read the crate's own tests make. A
-field a row is asked for twice is answered once. An answer holding rows says whether any map in it may hold a key
-`__proto__` (`plainObjects`), so the caller can decode straight to objects when none does and keep the exact decode,
-maps as `Map`s, for the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`). The generated types
-declare each map an object, as the first decode gives it; the exact decode gives a `Map` of the same keys.
+field a row is asked for twice is answered once. An answer holding stored values (rows, groups, hits, a field's value,
+a relation's `info`, a least or greatest value) says whether any map in them may hold a key `__proto__`
+(`plainObjects`), so the caller can decode straight to objects when none does and keep the exact decode, maps as
+`Map`s, for the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`). The generated types declare
+each map an object, as the first decode gives it; the exact decode gives a `Map` of the same keys.
 
 ## Writes: batches and units
 
