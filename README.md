@@ -72,13 +72,24 @@ db.close();
 [ 1 ]
 ```
 
-Reads and writes are plain data, sent as msgpack: a read is a plan, and a write is a batch. Their types are generated from the Rust: `crates/elmdb-node/protocol/`. `elmdb/client` takes and answers them as those types over your own msgpack codec:
+Reads and writes are plain data, sent as msgpack: a read is a plan, and a write is a batch. Their types are generated from the Rust: `crates/elmdb-node/protocol/`. `elmdb/client.js` takes and answers them as those types over your own msgpack codec, decoding exactly an answer whose stored maps may hold a key `__proto__`:
 
 ```js
-const { Client } = require('elmdb/client');
+import { Database } from 'elmdb';
+import { Client } from 'elmdb/client.js';
+import { Packr } from 'msgpackr';
+
+const objects = new Packr({ useRecords: false, mapsAsObjects: true, int64AsType: 'auto' });
 const maps = new Packr({ useRecords: false, mapsAsObjects: false, int64AsType: 'auto' });
-const client = new Client(db, { pack: (v) => msgpack.pack(v), unpack: (b) => msgpack.unpack(b), unpackMaps: (b) => maps.unpack(b) });
-const [count] = client.read({ reads: [{ read: 'query', plan: { start: notes, terminal: { answer: 'count' } } }] });
+const client = new Client(Database.open('./notes'), {
+  pack: (value) => objects.pack(value),
+  unpack: (bytes) => objects.unpack(bytes),
+  unpackMaps: (bytes) => maps.unpack(bytes),
+});
+
+const [count] = client.read({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'count' } } }] });
+console.log(count.n); // 3
+client.db.close();
 ```
 
 [apack](https://github.com/spankyed/apack), elmdb's first user, puts a typed query builder over it in `@apackdev/ears`.

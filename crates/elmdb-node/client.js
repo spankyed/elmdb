@@ -1,3 +1,4 @@
+// @ts-check
 // The thin client: the binding's reads and writes taking and answering the protocol's generated types (`client.d.ts`),
 // over the caller's own msgpack codec. Encoding and decoding values stays the caller's (`docs/architecture/design.md`,
 // The boundary with apack); the client only picks the decode an answer needs, from what the answer says of itself.

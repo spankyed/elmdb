@@ -80,6 +80,15 @@ test('an answer that may hold `__proto__` keeps it as a key, in objects with no 
   assert.deepEqual(Object.keys(held), ['__proto__', 'other']);
   assert.equal(held['__proto__'], 1);
   assert.equal(rows[0].title, 'one');
+  // A field's value says it as rows do, and an `explain` is decoded through the answer it wraps
+  const [field, explained] = client.read({ reads: [
+    { read: 'field', id: 'Note-1', field: 'meta' },
+    { read: 'query', explain: true, plan: { start: notes, terminal: { answer: 'firstRow', fields: ['meta'] } } },
+  ] });
+  assert.ok(field.kind === 'field' && explained.kind === 'explained' && explained.answer.kind === 'row');
+  assert.equal(field.plainObjects, false);
+  assert.deepEqual(Object.keys(/** @type {object} */ (field.value)), ['__proto__', 'other']);
+  assert.deepEqual(Object.keys(/** @type {object} */ (explained.answer.row?.meta)), ['__proto__', 'other']);
 });
 
 test('a unit writes, reads its own writes, and commits through the client', (t) => {
