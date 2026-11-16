@@ -2,8 +2,9 @@
 //! protocol, generated as TypeScript into the binding's `protocol/` (`Answers.ts`, `Answer.ts` and the types they name).
 //!
 //! `reads.rs` writes an answer's msgpack itself, splicing each field's stored bytes in unchanged, so no value is decoded
-//! to be answered; these types are what those bytes decode to. `conforms` holds the bytes to them, field for field: the
-//! engine's own tests run it on every read they make (`reads::run`), and `tests/answers.rs` reads each kind of answer.
+//! to be answered; these types are what those bytes decode to. `conforms` holds the bytes to them, field for field: this
+//! crate's own tests run it on every read they make (`reads::run`, `reads::run_counted`), and `tests/answers.rs` reads
+//! each kind of answer. The integration tests under `crates/elmdb/tests` build the crate without them.
 
 use std::collections::BTreeMap;
 
@@ -166,7 +167,8 @@ pub struct RelationRow {
     pub weight: Option<f64>,
 }
 
-/// A component answer's groups: each group's ids in the set's order, or with `counts` each group's size
+/// A component answer's groups: each group's ids in the set's order, or with `counts` each group's size. An empty
+/// answer decodes as `Members` whichever was asked: the bytes don't say
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(untagged)]
@@ -175,7 +177,8 @@ pub enum Components {
     Sizes(Vec<u32>),
 }
 
-/// A `groupBy`'s groups: each value with the ids holding it, or with `counts` how many hold it
+/// A `groupBy`'s groups: each value with the ids holding it, or with `counts` how many hold it. An empty answer decodes
+/// as `Members` whichever was asked: the bytes don't say
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Groups {
@@ -375,7 +378,8 @@ pub fn conforms(bytes: &[u8]) -> Result<Answers, String> {
     let declared = rmpv::decode::read_value(&mut &again[..]).map_err(|e| e.to_string())?;
     let (held, declared) = (normal(held), normal(declared));
     if held != declared {
-        return Err(format!("the answer's bytes hold {held}, and what they decode to is {declared}"));
+        // Debug, which tells an integer from a float where Display prints both as `3`
+        return Err(format!("the answer's bytes hold {held:?}, and what they decode to is {declared:?}"));
     }
     Ok(answers)
 }

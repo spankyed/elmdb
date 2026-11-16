@@ -43,7 +43,7 @@ pub fn run(r: &impl Read, reads: &[ReadOp]) -> Result<Vec<u8>> {
         answer(r, read, &mut out, &mut Visited::default())?;
         debug_assert!(out.len() > at);
     }
-    // Every read the engine's tests make is held to the types that declare its answer
+    // Every read this crate's own tests make is held to the types that declare its answer
     #[cfg(test)]
     if let Err(error) = super::answer::conforms(&out) {
         panic!("a read's answer isn't what `answer::Answers` declares: {error}");
@@ -57,6 +57,13 @@ pub fn run_counted(r: &impl Read, plan: &Plan) -> Result<(Vec<u8>, Visited)> {
     let mut out = Vec::new();
     let mut visited = Visited::default();
     answer(r, &ReadOp::Query { plan: plan.clone(), visits: false, explain: false }, &mut out, &mut visited)?;
+    // Held to the types as `run`'s answers are, as the one answer of a call
+    let mut call = Vec::new();
+    rmp::encode::write_array_len(&mut call, 1).expect("writing to a Vec doesn't fail");
+    call.extend_from_slice(&out);
+    if let Err(error) = super::answer::conforms(&call) {
+        panic!("a plan's answer isn't what `answer::Answer` declares: {error}");
+    }
     Ok((out, visited))
 }
 
