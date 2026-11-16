@@ -16,6 +16,8 @@
   "files": [
     "index.js",
     "index.d.ts",
+    "client.js",
+    "client.d.ts",
     "protocol/",
     "*.node"
   ],

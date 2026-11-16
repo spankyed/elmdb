@@ -438,7 +438,8 @@ from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck b
 its generated type (`Written`, `Answers`): a field renamed in the TypeScript fails the typecheck, one renamed on the
 wire the comparison. The Rust side is held whole: `answer::conforms` checks every read the crate's own tests make
 against the answer types (the integration tests under `crates/elmdb/tests` build it without them), and
-`engine/tests/answers.rs` makes a read of each kind.
+`engine/tests/answers.rs` makes a read of each kind. `client.test.mjs`, typechecked against `client.d.ts`, writes and
+reads through the thin client, in a database and in a unit, and reads an answer whose maps hold a key `__proto__`.
 
 A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
 factory, and the work five exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`

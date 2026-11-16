@@ -72,8 +72,16 @@ db.close();
 [ 1 ]
 ```
 
-Reads and writes are plain data, sent as msgpack: a read is a plan, and a write is a batch. Their types are generated from the Rust: `crates/elmdb-node/protocol/`. [apack](https://github.com/spankyed/apack),
-elmdb's first user, puts a typed query builder over it in `@apackdev/ears`.
+Reads and writes are plain data, sent as msgpack: a read is a plan, and a write is a batch. Their types are generated from the Rust: `crates/elmdb-node/protocol/`. `elmdb/client` takes and answers them as those types over your own msgpack codec:
+
+```js
+const { Client } = require('elmdb/client');
+const maps = new Packr({ useRecords: false, mapsAsObjects: false, int64AsType: 'auto' });
+const client = new Client(db, { pack: (v) => msgpack.pack(v), unpack: (b) => msgpack.unpack(b), unpackMaps: (b) => maps.unpack(b) });
+const [count] = client.read({ reads: [{ read: 'query', plan: { start: notes, terminal: { answer: 'count' } } }] });
+```
+
+[apack](https://github.com/spankyed/apack), elmdb's first user, puts a typed query builder over it in `@apackdev/ears`.
 
 ## Status
 

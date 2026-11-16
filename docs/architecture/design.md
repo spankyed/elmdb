@@ -132,7 +132,11 @@ elmdb's public API is its protocol: schemas, plans, batches, results, change set
 - value decoding, and the black-box, vocabulary and model specs, run against elmdb.
 
 The builders change with apack's vocabulary and the protocol changes far less, so each lives where it changes. If the
-builders settle and another program wants them, they move into elmdb then.
+builders settle and another program wants them, they move into elmdb then. What elmdb ships over the binding is the
+thin client (`elmdb/client`): the binding's reads and writes taking and answering the protocol's generated types, over
+a msgpack codec the caller passes in, so decoding values stays the caller's. It decides one thing itself, the decode an
+answer needs: an answer whose maps may hold a key `__proto__` (`plainObjects`, `engine.md`) is decoded with maps as
+`Map`s and made objects with no prototype, which hold that key as their own.
 
 ## Not in scope
 
