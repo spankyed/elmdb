@@ -466,7 +466,10 @@ growth of the asking database's map, answers as it ran, its answer that database
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 
 **Answers** are owned bytes: ids as strings, each row as a map of `id`, `entityType` and the fields' stored msgpack
-bytes spliced in unchanged, counts as numbers. An answer holding rows says whether any map in it may hold a key
+bytes spliced in unchanged, counts as numbers. A call answers an array of an answer per read, each a map whose `kind`
+says which: `Answers` and `Answer` in `engine/answer.rs`, generated as `protocol/Answers.ts` and `protocol/Answer.ts`.
+`reads.rs` writes the bytes itself rather than serializing those types, so no stored value is decoded to be answered;
+`answer::conforms` holds the bytes to the types, every key and none more, on every read the engine's tests make. An answer holding rows says whether any map in it may hold a key
 `__proto__` (`plainObjects`), so the caller can decode straight to objects when none does and keep the exact decode for
 the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 

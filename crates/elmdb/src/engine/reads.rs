@@ -43,6 +43,11 @@ pub fn run(r: &impl Read, reads: &[ReadOp]) -> Result<Vec<u8>> {
         answer(r, read, &mut out, &mut Visited::default())?;
         debug_assert!(out.len() > at);
     }
+    // Every read the engine's tests make is held to the types that declare its answer
+    #[cfg(test)]
+    if let Err(error) = super::answer::conforms(&out) {
+        panic!("a read's answer isn't what `answer::Answers` declares: {error}");
+    }
     Ok(out)
 }
 
