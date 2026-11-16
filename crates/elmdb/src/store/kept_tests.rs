@@ -943,7 +943,7 @@ fn what_the_pin_keeps_from_reuse_is_what_commits_from_its_own_freed() {
     }
     let data = dir.path().join("data.mdb");
     let mut file = std::fs::File::open(&data).unwrap();
-    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap().unwrap();
     let root = meta.roots()[0];
     let kept_pages = reach::freed_from(&mut file, page as usize, root, pinned);
     assert!(kept_pages >= 10 * run, "{kept_pages} pages kept, where ten rewrites freed {} pages of runs", 10 * run);
@@ -973,7 +973,7 @@ fn what_the_pin_keeps_is_read_from_a_list_of_its_own_and_from_a_tree_of_branches
     assert_eq!(kept(&store).pinned_at(), Some(pinned), "the pin stayed where the test reads from");
     let data = dir.path().join("data.mdb");
     let mut file = std::fs::File::open(&data).unwrap();
-    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap().unwrap();
     let root = meta.roots()[0];
     let run = (16 - 1 + big.len() as u64) / page + 1;
     let kept_pages = reach::freed_from(&mut file, page as usize, root, pinned);
@@ -1347,7 +1347,7 @@ fn a_meta_page_names_the_last_page_lmdb_does() {
     let data = dir.path().join("data.mdb");
     let mut file = std::fs::File::open(&data).unwrap();
     let page = page_size_of(&mut file, &data).unwrap();
-    let meta = reach::newer_meta_page(&mut file, page).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page).unwrap().unwrap();
     assert_eq!(meta.txnid, newest(&store));
     assert_eq!(meta.last_page(), store.env.info().last_page_number as u64);
     store.close().unwrap();
