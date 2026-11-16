@@ -169,7 +169,7 @@ to move aside (`store/record.rs`).
 ## LMDB
 
 elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch. Its files record LMDB's data version 1, and LMDB
-1.0's record 3; neither opens the other's. Format 1 is on this LMDB, and a move to 1.0 is format 2, crossed by a dump
+1.0's record 3; neither opens the other's. Format 1 is on this LMDB; a move to 1.0 would be crossed by a dump
 from the last build on 0.9 and a load into the first on 1.0 (`../roadmap/format-freeze.md`).
 
 | Patch | What | Upstream |

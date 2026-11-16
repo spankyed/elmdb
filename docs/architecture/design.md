@@ -62,8 +62,7 @@ This document is what every "should elmdb do X?" is checked against. The others:
 - **heed** (Meilisearch's Rust binding to LMDB). Its LMDB is upstream `mdb.master` plus one patch, ITS#10395 (several
   nested read transactions inside a write transaction), reported to OpenLDAP and listed in `format.md`. LMDB 1.0
   is released (1.0.1, 2026-08-06), and heed's `heed3` variant is the path to it, but hannoy below doesn't run on heed3
-  and heed3's LMDB is a copy from before the release. Format 1 stays on 0.9, and a move to 1.0 is format 2
-  (`../roadmap/format-freeze.md`).
+  and heed3's LMDB is a copy from before the release. Format 1 stays on 0.9 (`../roadmap/format-freeze.md`).
 - **roaring** bitmaps for sets of entities, as a search joins them and a trigram index keeps them, **charabia** for
   tokenizing, **rust-stemmers** for stems, **levenshtein_automata** for fuzzy terms, **regex** and **regex-syntax**
   for patterns and what a trigram index narrows them by, **hannoy** for approximate nearest neighbours on LMDB,

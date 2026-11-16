@@ -34,8 +34,9 @@ Read on 2026-11-16:
 The move now would mean forking hannoy onto heed3 and running an LMDB that isn't a release, for what no gate asks.
 Format 1 is on LMDB 0.9.
 
-**The move later is format 2.** No build can hold both LMDBs, so its upgrade isn't a function in one build, as
-`format.md` has an upgrade. It takes two builds: the last on 0.9 dumps, and the first on 1.0 loads. A dump holds no
+**If the move comes later.** Before the first release with users, it is one more in-place edit of format 1, crossed by
+a dump and a load as every edit is now. Only after that release would `format.md`'s rule make it a new format. Either
+way, no build can hold both LMDBs, so it takes two builds: the last on 0.9 dumps, and the first on 1.0 loads. A dump holds no
 key, no value's encoding and no LMDB page, so it crosses the change as it crosses every in-place edit today. The
 `synced` record beside the data file holds an LMDB 0.9 meta page, so it changes with the format.
 
@@ -47,14 +48,12 @@ The costs:
   before the load would be read against a new numbering. So before the lock, a dump carries the checkpoints and the
   last sequence. A load then numbers its commits past that sequence, and marks its last commit as one that replaced
   every type whole (`changed::replaced`, as a reset does), so a `changedSince` position from before it is answered
-  incomplete and starts over. That makes dump version 2.
+  incomplete and starts over. The dump stays version 1, edited in place as the format is while no release has users.
 - The move is of a database no one writes from the dump on. A position taken from the old database after the dump,
   were it written to, could be past the load's last sequence and answered complete from the new numbering. Nothing
   in a position names its database.
 
-**When to look again:** once hannoy runs on heed3, and heed3's LMDB is a 1.0 release. Before the first release with
-users, the move is one more in-place edit, crossed by a dump and a load as every edit is now. After it, the move is
-format 2.
+**When to look again:** once hannoy runs on heed3, and heed3's LMDB is a 1.0 release.
 
 ## What the freeze locks
 
@@ -67,7 +66,7 @@ From the first release with users, format 1 locks:
   them bumps the format, and its upgrade is a `rebuild()` on a copy;
 - each index's marker, its key and its encoding (below);
 - the files beside the data file: the `synced` record and the locks (`format.md`, Beside the data file);
-- the dump file, version 2;
+- the dump file, version 1;
 - LMDB's data version, 1.
 
 Index-derived data stays out of the lock, as principle 2 already allows: anything derived can be thrown away. Each
@@ -221,7 +220,7 @@ Milestone 0.3's gate asks the same of the protocol and the error codes. Those ar
      marked built.
    - An open queues a marker of its own layout left clearing or building, and the builder finishes it.
    - The xtask fails on a caret requirement of a crate the table names.
-3. **Dump version 2.** A load keeps the checkpoints, and a `changedSince` position from before the dump is told to
+3. **What a dump carries.** A load keeps the checkpoints, and a `changedSince` position from before the dump is told to
    start over, not answered from the new numbering.
 4. **The fixture and its test**, shown failing once on a mutated copy that changes a primary key's encoding.
 5. **The lock:** `format.md`'s Versions names the tag of the first release with users. The tag is the owner's.

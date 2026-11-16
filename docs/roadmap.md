@@ -16,7 +16,7 @@ waiting on a trigger below, which add to them and reorder nothing.
 | 5 | Ranges, ordered reads and a cursor that seeks | `orderBy` and `limit 10` on an indexed field visit about ten entities, and a page costs the same wherever its cursor is | built for booleans, numbers, the engine's times and strings: ten of a million notes read for their first ten, fifty for a page of fifty near either order's end, and a string's order read from the keys its index keeps in the collation's order (`roadmap/string-order.md`, phases 1 to 4; `evidence/million-notes.md`) |
 | 6 | Vector builds off the commit path | one embedding a commit costs within twice a batch's; a commit of one takes under 2 ms at 100,000 vectors | open |
 | 7 | Typed answers and a thin client | answers are generated as the rest of the protocol is, and a test decodes each into its type | open: a write's answer is generated (`Written`, `protocol/Written.ts`) and a test decodes it into its type; `read`'s answers aren't yet |
-| 8 | Format 1 frozen | databases and dumps of every tag open and pass `check()` in CI; the move to LMDB 1.0 is decided first | designed (`roadmap/format-freeze.md`): format 1 is on LMDB 0.9, and a move to 1.0 is format 2, crossed by a dump and a load; index-derived data stays out of the lock, each index recording its layout and one of another thrown away and built again. Not built |
+| 8 | Format 1 frozen | databases and dumps of every tag open and pass `check()` in CI; the move to LMDB 1.0 is decided first | designed (`roadmap/format-freeze.md`): format 1 stays on LMDB 0.9, edited in place with no bump; index-derived data stays out of the lock, each index recording its layout and one of another thrown away and built again. Not built |
 | 9 | Release and supply chain | prebuilt binaries for the seven targets; `cargo-deny` and an audit in CI; the `$schema` URL resolves | open |
 | 10 | A benchmark against SQLite, committed | bytes per note, search and rebuild at a million notes are read for each release | the benchmark is built (`architecture/testing.md`, Against SQLite) and read at a million notes on six days from 2026-11-10 to 2026-11-15 (`evidence/million-notes.md`); no release is tagged, so none is a release's reading |
 
@@ -103,7 +103,7 @@ for it:
 
 ## Later, each its own decision
 
-- LMDB 1.0 through `heed3`, as format 2, once hannoy runs on heed3 and heed3's LMDB is a 1.0 release: page checksums
+- LMDB 1.0 through `heed3`, crossed by a dump and a load, once hannoy runs on heed3 and heed3's LMDB is a 1.0 release: page checksums
   and encryption (`roadmap/format-freeze.md`).
 - Scratch files with a configured placement and quota, reclaimed after a hard exit (`elmdb-check-*` directories a SIGKILL
   leaves; `architecture/engine.md`, Recovery resources).
