@@ -633,3 +633,12 @@ pub(super) fn plans_from(m: &Model) -> BTreeMap<String, Json> {
     }
     out
 }
+
+/// A word the workload writes as the text index holds it: small, its accents dropped, composed or apart
+pub(super) fn folded(word: &str) -> String {
+    word.to_lowercase()
+        .chars()
+        .filter(|c| !ACCENTS.iter().any(|(.., mark)| c == mark))
+        .map(|c| ACCENTS.iter().find(|(small, ..)| c == *small).map_or(c, |(_, _, letter, _)| *letter))
+        .collect()
+}

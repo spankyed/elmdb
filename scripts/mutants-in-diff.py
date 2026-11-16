@@ -40,7 +40,7 @@ import sys
 TESTED = {0, 2, 3}
 # The engine's suite without the model harness, which caught none of the baseline's survivors
 # (`docs/evidence/mutation-baseline.md`) and is most of its time
-SUITE_ARGS = {"elmdb": ["--", "--", "--skip", "model::the_engine"]}
+SUITE_ARGS = {"elmdb": ["--", "--", "--skip", "model::machine::the_engine"]}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("base")

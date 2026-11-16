@@ -53,15 +53,6 @@ pub(super) fn spelled(word: &str, apart: bool) -> String {
     out
 }
 
-/// A word the workload writes as the text index holds it: small, its accents dropped, composed or apart
-pub(super) fn folded(word: &str) -> String {
-    word.to_lowercase()
-        .chars()
-        .filter(|c| !ACCENTS.iter().any(|(.., mark)| c == mark))
-        .map(|c| ACCENTS.iter().find(|(small, ..)| c == *small).map_or(c, |(_, _, letter, _)| *letter))
-        .collect()
-}
-
 pub(super) fn id() -> impl Strategy<Value = &'static str> {
     prop::sample::select(&IDS[..])
 }
@@ -467,7 +458,7 @@ pub(super) fn kind_of(step: &Step) -> &'static str {
 /// Generated workloads complete every kind of step many times, and still make each refusal the model has: a kind no
 /// workload completes is one the harness never tests, which choosing ids blind made of moving and removing a relation
 #[test]
-pub(super) fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
+fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
     use proptest_state_machine::ReferenceStateMachine;

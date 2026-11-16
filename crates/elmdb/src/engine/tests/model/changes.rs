@@ -3,21 +3,6 @@
 
 use super::*;
 
-/// The engine under the model: the prelude written, each step run and its answer compared, and after each the data, every
-/// derived key, every derived read and the change set the commit made compared with the model's; after the workload,
-/// `check()` finds nothing
-pub(super) struct Engine {
-    pub(super) db: Database,
-    pub(super) _dir: tempfile::TempDir,
-    /// The model as it was before the step being tracked, which the step's change is the difference from
-    pub(super) before: Model,
-    pub(super) since: Since,
-    /// The sequence of the last commit the engine reported
-    pub(super) sequence: u64,
-    /// A reader of `changed_since` for each type it is asked about, `Task` and `Note`, each type asked alone
-    pub(super) readers: BTreeMap<&'static str, Reader>,
-}
-
 /// What a reader of one type is told: whether one from the start is told the answer is incomplete, a reset or a
 /// replacement having taken the type's entities away with no tombstone, or a rename of the type; the position a reader
 /// from after the last of those starts at; and the position of the type's last rename, below which a reader is told so

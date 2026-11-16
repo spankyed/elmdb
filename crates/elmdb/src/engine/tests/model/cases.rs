@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-pub(super) fn a_unit_that_destroys_makes_and_destroys_an_entity_it_found_names_it_as_destroyed_alone() {
+fn a_unit_that_destroys_makes_and_destroys_an_entity_it_found_names_it_as_destroyed_alone() {
     // The engine names an entity the commit found and left destroyed as destroyed alone, though the commit made it again
     // on the way; the model's union of the members' changes must say so too
     let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
@@ -32,7 +32,7 @@ pub(super) fn a_unit_that_destroys_makes_and_destroys_an_entity_it_found_names_i
 }
 
 #[test]
-pub(super) fn a_unit_that_grants_then_destroys_an_entity_names_the_role_on_the_destroyed_entity() {
+fn a_unit_that_grants_then_destroys_an_entity_names_the_role_on_the_destroyed_entity() {
     // A grant made before the destroy in the commit is the destroyed entity's `role` field, as the engine names it
     let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
     let mut model = Model::default();
@@ -56,7 +56,7 @@ pub(super) fn a_unit_that_grants_then_destroys_an_entity_names_the_role_on_the_d
 }
 
 #[test]
-pub(super) fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wrote_before_it() {
+fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wrote_before_it() {
     // The engine names a destroyed-and-made entity with only what was done to the one made: the fields an enclosing unit
     // wrote before the nested unit's destroy are not among them
     let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) }];
@@ -88,7 +88,7 @@ pub(super) fn a_destroy_and_remake_in_a_nested_unit_drops_what_the_outer_unit_wr
 }
 
 #[test]
-pub(super) fn a_rename_is_tracked_at_its_own_commit_though_the_builder_has_committed_since() {
+fn a_rename_is_tracked_at_its_own_commit_though_the_builder_has_committed_since() {
     // A rename reports no sequence, and gives the rank index's builder work it commits by itself: by the time the
     // step is tracked the database's sequence may be the builder's, a commit past the one that stamped the ends
     let prelude = vec![
@@ -115,7 +115,7 @@ pub(super) fn a_rename_is_tracked_at_its_own_commit_though_the_builder_has_commi
 }
 
 #[test]
-pub(super) fn a_move_onto_the_target_a_relation_has_is_reported_as_a_change_and_as_no_move() {
+fn a_move_onto_the_target_a_relation_has_is_reported_as_a_change_and_as_no_move() {
     // The workload moves a relation onto any entity, the target it has among them: the engine reports the relation
     // changed and not moved. Alone, and after a link in the same commit, it names no ends it moved from; after a move
     // in the same commit, the ends that move took it from
@@ -161,7 +161,7 @@ pub(super) fn a_move_onto_the_target_a_relation_has_is_reported_as_a_change_and_
 }
 
 #[test]
-pub(super) fn two_moves_of_one_relation_in_one_commit_are_one_entry_with_its_first_ends() {
+fn two_moves_of_one_relation_in_one_commit_are_one_entry_with_its_first_ends() {
     // The engine names a relation moved twice in one commit once, changed, at its last ends and with the ends it began with
     let prelude = vec![
         Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!("x"))]) },
@@ -194,7 +194,7 @@ pub(super) fn two_moves_of_one_relation_in_one_commit_are_one_entry_with_its_fir
 }
 
 #[test]
-pub(super) fn a_rename_onto_an_edge_of_the_new_kind_with_the_same_ends_is_refused_by_both() {
+fn a_rename_onto_an_edge_of_the_new_kind_with_the_same_ends_is_refused_by_both() {
     // Renaming refs to tags, where tags already joins the same two entities, would leave two edges with one identity: the
     // engine refuses it, and the model must refuse it the same way, moving nothing
     let prelude = vec![
@@ -221,7 +221,7 @@ pub(super) fn a_rename_onto_an_edge_of_the_new_kind_with_the_same_ends_is_refuse
 }
 
 #[test]
-pub(super) fn a_refused_rename_leaves_an_armed_refusal_for_the_next_commit_as_the_engine_does() {
+fn a_refused_rename_leaves_an_armed_refusal_for_the_next_commit_as_the_engine_does() {
     // The engine refuses a rename onto an edge of the new kind before its commit, so the refusal armed for the next commit
     // stays armed: the create after the failed rename is the one refused, by both
     let prelude = vec![
@@ -254,7 +254,7 @@ pub(super) fn a_refused_rename_leaves_an_armed_refusal_for_the_next_commit_as_th
 }
 
 #[test]
-pub(super) fn a_field_rename_onto_a_name_the_task_holds_is_refused_by_both() {
+fn a_field_rename_onto_a_name_the_task_holds_is_refused_by_both() {
     // A Task holding both c and spare would have one value replaced: the engine refuses the rename and the model must too,
     // moving nothing
     let prelude = vec![Step::Create { id: "Task-1", fields: BTreeMap::from([("c", json!(1)), ("spare", json!(2))]) }];
@@ -276,7 +276,7 @@ pub(super) fn a_field_rename_onto_a_name_the_task_holds_is_refused_by_both() {
 }
 
 #[test]
-pub(super) fn a_rekey_in_a_nested_unit_is_the_same_relation_as_an_earlier_rekey_of_it_in_the_commit() {
+fn a_rekey_in_a_nested_unit_is_the_same_relation_as_an_earlier_rekey_of_it_in_the_commit() {
     // An outer unit rekeys an edge to the key it has, and a nested unit rekeys it again: one relation, one entry
     let prelude = vec![
         Step::Create { id: "Note-1", fields: BTreeMap::from([("a", json!("t"))]) },
