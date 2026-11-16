@@ -33,17 +33,6 @@ fn ids_of_type(t: &impl Read, entity_type: &str) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// Every entity's id, whatever its type, a type the schema no longer declares included
-fn all_entity_ids(t: &impl Read) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    for (key, _) in t.scan(&keys::all_entities())? {
-        if let Some(Part::String(id)) = decode_key(&key)?.pop() {
-            out.push(id);
-        }
-    }
-    Ok(out)
-}
-
 /// Every relation's id, with its kind
 fn all_relations(t: &impl Read) -> Result<Vec<(String, relations::Stored)>> {
     let mut out = Vec::new();
@@ -116,17 +105,26 @@ pub fn purge(t: &mut Txn<'_, '_>, what: &Purge) -> Result<()> {
                 return Err(still_declared(&format!("The role {role}")));
             }
             // Every holder, a removed type's entities included: the schema no longer names their type, and they keep
-            // their rows until it is purged
-            for id in all_entity_ids(t)? {
-                if let Some(Value::Array(roles)) = entities::get(t, &id, field::ROLE)?
+            // their rows until it is purged. The entities are visited one at a time, and only the holders are kept, with
+            // the roles each keeps
+            let mut holders: Vec<(String, Vec<Value>)> = Vec::new();
+            let read: &Txn<'_, '_> = t;
+            read.try_visit(&keys::all_entities(), |key, _| {
+                let Some(Part::String(id)) = decode_key(key)?.pop() else {
+                    return Err(Error::new(ErrorCode::Corrupted, "An entity's key doesn't read"));
+                };
+                if let Some(Value::Array(roles)) = entities::get(read, &id, field::ROLE)?
                     && roles.iter().any(|r| r.as_str() == Some(role))
                 {
-                    let rest: Vec<Value> = roles.into_iter().filter(|r| r.as_str() != Some(role)).collect();
-                    if rest.is_empty() {
-                        entities::delete_field(t, &id, field::ROLE)?;
-                    } else {
-                        entities::put_field(t, &id, field::ROLE, &Value::Array(rest))?;
-                    }
+                    holders.push((id, roles.into_iter().filter(|r| r.as_str() != Some(role)).collect()));
+                }
+                Ok(())
+            })?;
+            for (id, rest) in holders {
+                if rest.is_empty() {
+                    entities::delete_field(t, &id, field::ROLE)?;
+                } else {
+                    entities::put_field(t, &id, field::ROLE, &Value::Array(rest))?;
                 }
             }
         }
