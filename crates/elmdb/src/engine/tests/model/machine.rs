@@ -39,13 +39,16 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
         engine.db.wait_for_index_builds().expect("the builder's drain ends");
         let quiet = engine.db.sequence().expect("the sequence reads");
         let got = run(&engine.db, &transition.step);
-        assert_eq!(
-            got.is_ok(),
-            reference.outcome.is_ok(),
-            "{:?}: the engine said {got:?}, the model {:?}",
-            transition.step,
-            reference.outcome
-        );
+        match (&got, &reference.outcome) {
+            (Ok(_), Ok(())) => {}
+            (Err(error), Err(reason)) => assert_eq!(
+                error.code,
+                code_of(reason),
+                "{:?}: the engine refused with {error:?}, the model because {reason:?}",
+                transition.step
+            ),
+            _ => panic!("{:?}: the engine said {got:?}, the model {:?}", transition.step, reference.outcome),
+        }
         track(&mut engine, &transition.step, &got, reference.model.clone(), quiet);
         engine
     }

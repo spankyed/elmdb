@@ -41,6 +41,29 @@ pub(super) struct Saved {
 /// Why the model refused a step; the engine must refuse it too
 pub(super) type Refusal = &'static str;
 
+/// The code the engine refuses with for each reason the model refuses: a refusal for another reason than the model's
+/// is one the engine got wrong, though it refused
+pub(super) fn code_of(reason: Refusal) -> crate::ErrorCode {
+    use crate::ErrorCode as Code;
+    match reason {
+        "id in use" => Code::IdInUse,
+        "no such entity" | "link target missing at commit" => Code::NoSuchEntity,
+        "not a list" => Code::NotAList,
+        "self link" => Code::SelfLink,
+        "no such relation" => Code::NoSuchRelation,
+        "duplicate edge" | "an edge of the new kind joins the ends" => Code::DuplicateEdge,
+        // The harness's own throw, and the failure an armed refusal injects at the commit
+        "the unit threw" | "the store refused the commit" => Code::Io,
+        "a Task holds both names"
+        | "the spare field is declared"
+        | "the kind tags is declared"
+        | "the spare field isn't declared"
+        | "the kind tags isn't declared" => Code::SchemaChangeRefused,
+        "no backup to replace with" => Code::NoDatabase,
+        other => panic!("the model refuses with {other:?}, which names no code"),
+    }
+}
+
 impl Model {
     pub(super) fn exists(&self, id: &str) -> Result<(), Refusal> {
         if self.entities.contains_key(id) { Ok(()) } else { Err("no such entity") }
