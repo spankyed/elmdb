@@ -808,8 +808,16 @@ fn strings_the_collation_holds_equal_are_ordered_by_their_bytes() {
             plan["terminal"] = json!({ "answer": answer, "field": field });
             read(&db, json!({ "read": "query", "plan": plan })).unwrap()
         };
-        assert_eq!(extreme("least"), json!({ "kind": "least", "id": all[2], "value": combined }), "{field}");
-        assert_eq!(extreme("greatest"), json!({ "kind": "greatest", "id": all[0], "value": composed }), "{field}");
+        assert_eq!(
+            extreme("least"),
+            json!({ "kind": "least", "id": all[2], "value": combined, "plainObjects": true }),
+            "{field}"
+        );
+        assert_eq!(
+            extreme("greatest"),
+            json!({ "kind": "greatest", "id": all[0], "value": composed, "plainObjects": true }),
+            "{field}"
+        );
     }
 }
 

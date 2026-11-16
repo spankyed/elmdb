@@ -315,20 +315,20 @@ impl Database {
         })
     }
 
-    /// Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
-    /// answer per read
+    /// Answers reads (msgpack bytes of a `Reads`) from one snapshot, on this thread, as msgpack bytes of its `Answers`:
+    /// an `Answer` per read, in the order asked
     #[napi]
     pub fn read<'env>(&self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
         self.guarded("Database.read", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
     }
 
-    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
-    /// answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
-    /// never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
-    /// `hearBuilderCommits`, once its promise has settled. elmdb's refusals of the read reject the promise:
-    /// `NO_LISTENER` for a tracked read asked while there is no such listener, and `CLOSED` when the database closes
-    /// before it runs. Once sixteen snapshots are held for reads still waiting, a read asked at a commit that holds
-    /// none runs at the call, on this thread
+    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop: msgpack bytes of a `Reads`, and
+    /// a promise of msgpack bytes of its `Answers`, what `read` would have answered at the call. Its snapshot is the
+    /// last commit as it is at the call, and a write made after the call is never in its answer. A tracked read that a
+    /// commit wrote into before it was filed is told to the listener of `hearBuilderCommits`, once its promise has
+    /// settled. elmdb's refusals of the read reject the promise: `NO_LISTENER` for a tracked read asked while there is
+    /// no such listener, and `CLOSED` when the database closes before it runs. Once sixteen snapshots are held for
+    /// reads still waiting, a read asked at a commit that holds none runs at the call, on this thread
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn read_async<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.readAsync", || {
@@ -844,7 +844,8 @@ impl Unit {
         self.run("Unit.nextSequence", |unit| Ok(unit.open()?.next_sequence().map_err(to_js)? as f64))
     }
 
-    /// Answers reads from the unit's transaction, which sees the unit's own writes
+    /// Answers reads (msgpack bytes of a `Reads`) from the unit's transaction, which sees the unit's own writes, as
+    /// msgpack bytes of its `Answers`
     #[napi]
     pub fn read<'env>(&mut self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.read", |unit| answer(env, &unit.open()?.read_bytes(&reads).map_err(to_js)?))

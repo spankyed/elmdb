@@ -10,6 +10,18 @@ export type { Written } from './protocol/Written.js'
 export type { BatchResult } from './protocol/BatchResult.js'
 export type { OpResult } from './protocol/OpResult.js'
 export type { ChangeSet } from './protocol/ChangeSet.js'
+export type { Reads } from './protocol/Reads.js'
+export type { ReadOp } from './protocol/ReadOp.js'
+export type { Plan } from './protocol/Plan.js'
+export type { Start } from './protocol/Start.js'
+export type { Step } from './protocol/Step.js'
+export type { Terminal } from './protocol/Terminal.js'
+export type { Answers } from './protocol/Answers.js'
+export type { Answer } from './protocol/Answer.js'
+export type { Row } from './protocol/Row.js'
+export type { RelationRow } from './protocol/RelationRow.js'
+export type { Hit } from './protocol/Hit.js'
+export type { Stage } from './protocol/Stage.js'
 export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats, OpenReport, Restore }
 
 /**
@@ -63,18 +75,18 @@ export declare class Database {
    */
   write(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
-   * Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
-   * answer per read
+   * Answers reads (msgpack bytes of a `Reads`) from one snapshot, on this thread, as msgpack bytes of its `Answers`:
+   * an `Answer` per read, in the order asked
    */
   read(reads: Buffer): Buffer
   /**
-   * `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
-   * answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
-   * never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
-   * `hearBuilderCommits`, once its promise has settled. elmdb's refusals of the read reject the promise:
-   * `NO_LISTENER` for a tracked read asked while there is no such listener, and `CLOSED` when the database closes
-   * before it runs. Once sixteen snapshots are held for reads still waiting, a read asked at a commit that holds
-   * none runs at the call, on this thread
+   * `read` on a thread of the pool, so a large read doesn't hold up the event loop: msgpack bytes of a `Reads`, and
+   * a promise of msgpack bytes of its `Answers`, what `read` would have answered at the call. Its snapshot is the
+   * last commit as it is at the call, and a write made after the call is never in its answer. A tracked read that a
+   * commit wrote into before it was filed is told to the listener of `hearBuilderCommits`, once its promise has
+   * settled. elmdb's refusals of the read reject the promise: `NO_LISTENER` for a tracked read asked while there is
+   * no such listener, and `CLOSED` when the database closes before it runs. Once sixteen snapshots are held for
+   * reads still waiting, a read asked at a commit that holds none runs at the call, on this thread
    */
   readAsync(reads: Buffer): Promise<Buffer>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
@@ -217,7 +229,10 @@ export declare class Unit {
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /** The sequence this unit commits as, which what it writes is stamped with */
   nextSequence(): number
-  /** Answers reads from the unit's transaction, which sees the unit's own writes */
+  /**
+   * Answers reads (msgpack bytes of a `Reads`) from the unit's transaction, which sees the unit's own writes, as
+   * msgpack bytes of its `Answers`
+   */
   read(reads: Buffer): Buffer
   /** Opens a savepoint, answering its depth */
   savepoint(): number

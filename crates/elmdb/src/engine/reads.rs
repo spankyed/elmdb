@@ -43,6 +43,11 @@ pub fn run(r: &impl Read, reads: &[ReadOp]) -> Result<Vec<u8>> {
         answer(r, read, &mut out, &mut Visited::default())?;
         debug_assert!(out.len() > at);
     }
+    // Every read this crate's own tests make is held to the types that declare its answer
+    #[cfg(test)]
+    if let Err(error) = super::answer::conforms(&out) {
+        panic!("a read's answer isn't what `answer::Answers` declares: {error}");
+    }
     Ok(out)
 }
 
@@ -52,6 +57,13 @@ pub fn run_counted(r: &impl Read, plan: &Plan) -> Result<(Vec<u8>, Visited)> {
     let mut out = Vec::new();
     let mut visited = Visited::default();
     answer(r, &ReadOp::Query { plan: plan.clone(), visits: false, explain: false }, &mut out, &mut visited)?;
+    // Held to the types as `run`'s answers are, as the one answer of a call
+    let mut call = Vec::new();
+    rmp::encode::write_array_len(&mut call, 1).expect("writing to a Vec doesn't fail");
+    call.extend_from_slice(&out);
+    if let Err(error) = super::answer::conforms(&call) {
+        panic!("a plan's answer isn't what `answer::Answer` declares: {error}");
+    }
     Ok((out, visited))
 }
 
@@ -92,6 +104,14 @@ fn may_hold_proto(bytes: &[u8]) -> bool {
     bytes.windows(9).any(|w| w == b"__proto__")
 }
 
+/// Ends an answer holding stored values with its `plainObjects`: whether no map written since `start` may hold a key
+/// `__proto__`
+fn plain_objects(w: &mut W<'_>, start: usize) {
+    let plain = !may_hold_proto(&w.0[start..]);
+    w.str("plainObjects");
+    w.bool(plain);
+}
+
 fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited) -> Result<()> {
     match read {
         ReadOp::Query { plan, explain: true, .. } => {
@@ -127,40 +147,36 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             } else {
                 w.nil();
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
             Ok(())
         }
         ReadOp::Field { id, field: name } => {
             let mut w = W(out);
-            w.map(3);
+            w.map(4);
             w.kind("field");
-            match get(r, id, name)? {
-                Some(bytes) => {
-                    w.str("present");
-                    w.bool(true);
-                    w.str("value");
-                    w.raw(&bytes);
-                }
-                None => {
-                    w.str("present");
-                    w.bool(false);
-                    w.str("value");
-                    w.nil();
-                }
+            let held = get(r, id, name)?;
+            w.str("present");
+            w.bool(held.is_some());
+            w.str("value");
+            let start = w.0.len();
+            match held {
+                Some(bytes) => w.raw(&bytes),
+                None => w.nil(),
             }
+            plain_objects(&mut w, start);
             Ok(())
         }
         ReadOp::Relation { id } => {
             let mut w = W(out);
-            w.map(2);
+            w.map(3);
             w.kind("relation");
             w.str("relation");
+            let start = w.0.len();
             match relations::get(r, id)? {
                 Some(stored) => write_relation(r, id, &stored, &mut w),
                 None => w.nil(),
             }
+            plain_objects(&mut w, start);
             Ok(())
         }
         ReadOp::FindRelations { kind, source, target } => {
@@ -169,13 +185,15 @@ fn answer(r: &impl Read, read: &ReadOp, out: &mut Vec<u8>, visited: &mut Visited
             }
             let found = find_relations(r, kind.as_deref(), source.as_deref(), target.as_deref())?;
             let mut w = W(out);
-            w.map(2);
+            w.map(3);
             w.kind("relations");
             w.str("relations");
+            let start = w.0.len();
             w.array(found.len() as u32);
             for (id, stored) in &found {
                 write_relation(r, id, stored, &mut w);
             }
+            plain_objects(&mut w, start);
             Ok(())
         }
         ReadOp::Suggest { entity_type, index, term, limit } => {
@@ -319,8 +337,22 @@ fn get_value(r: &impl Read, id: &str, name: &str) -> Result<Option<Value>> {
     get(r, id, name)?.map(|b| values::decode(&b)).transpose()
 }
 
-/// An entity's row, `{ id, entityType, …fields }`, or with `fields`, `{ id, …those it holds }`
-fn write_row(r: &impl Read, id: &str, fields: Option<&[String]>, w: &mut W<'_>) -> Result<()> {
+/// The fields a read asks each row for, each once, and `id` not among them, the row answering it as its id: a map holds a
+/// key once. Read once for the read, not for each row
+fn asked(fields: Option<&[String]>) -> Option<Vec<&str>> {
+    fields.map(|names| {
+        let mut asked: Vec<&str> = Vec::with_capacity(names.len());
+        for name in names {
+            if name != field::ID && !asked.contains(&name.as_str()) {
+                asked.push(name);
+            }
+        }
+        asked
+    })
+}
+
+/// An entity's row, `{ id, entityType, …fields }`, or with `fields` (as `asked` answers them), `{ id, …those it holds }`
+fn write_row(r: &impl Read, id: &str, fields: Option<&[&str]>, w: &mut W<'_>) -> Result<()> {
     match fields {
         None => {
             let stored = entities::fields(r, id)?;
@@ -335,8 +367,8 @@ fn write_row(r: &impl Read, id: &str, fields: Option<&[String]>, w: &mut W<'_>) 
             }
         }
         Some(names) => {
-            let mut held = Vec::new();
-            for name in names.iter().filter(|n| *n != field::ID) {
+            let mut held: Vec<(&str, Vec<u8>)> = Vec::new();
+            for &name in names {
                 if let Some(bytes) = get(r, id, name)? {
                     held.push((name, bytes));
                 }
@@ -4468,14 +4500,18 @@ impl Stages {
             // A stage visits what the stage before handed it, and what it read from the store itself
             let received = if at == 0 { 0 } else { self.kept[at - 1].get() };
             let graphed = graph[at];
+            // A stage's `edges` are its graph's (a `rank`, a `topological`) or the ones a `similar` read: one key,
+            // written once. No stage does both; one that did would answer its graph's
+            let edges = graphed.map(|g| g.edges).or(compared[at].map(|(_, _, edges)| edges));
             let extra = match graphed {
                 None => 0,
                 Some(Graphed { weight, rounds, cycles, .. }) => {
-                    2 + u32::from(weight.is_some()) + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
+                    1 + u32::from(weight.is_some()) + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
                 }
             };
             let extra = extra
-                + if compared[at].is_some() { 3 } else { 0 }
+                + u32::from(edges.is_some())
+                + if compared[at].is_some() { 2 } else { 0 }
                 + u32::from(errors[at].is_some())
                 + u32::from(building[at])
                 + u32::from(wants[at].is_some())
@@ -4491,11 +4527,15 @@ impl Stages {
                 w.str("index");
                 w.str(index);
             }
-            if let Some(Graphed { nodes, edges, weight, rounds, cycles }) = graphed {
+            if let Some(Graphed { nodes, .. }) = graphed {
                 w.str("nodes");
                 w.uint(nodes as u64);
+            }
+            if let Some(edges) = edges {
                 w.str("edges");
                 w.uint(edges as u64);
+            }
+            if let Some(Graphed { weight, rounds, cycles, .. }) = graphed {
                 if let Some(weight) = weight {
                     w.str("weight");
                     rmp::encode::write_f64(w.0, weight).expect("a Vec");
@@ -4543,13 +4583,11 @@ impl Stages {
                 w.str("within");
                 w.uint(within);
             }
-            if let Some((neighbours, candidates, edges)) = compared[at] {
+            if let Some((neighbours, candidates, _)) = compared[at] {
                 w.str("neighbours");
                 w.uint(neighbours as u64);
                 w.str("candidates");
                 w.uint(candidates as u64);
-                w.str("edges");
-                w.uint(edges as u64);
             }
             w.str("visited");
             w.uint(received + self.read[at].get());
@@ -5212,12 +5250,11 @@ fn query_with(
             w.str("rows");
             let start = w.0.len();
             w.array(ids.len() as u32);
+            let fields = asked(fields.as_deref());
             for id in &ids {
                 write_row(r, id, fields.as_deref(), &mut w)?;
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
         }
         Terminal::FirstRow { fields } => {
             q.asks(last, Ask::Best(1));
@@ -5231,12 +5268,10 @@ fn query_with(
             w.str("row");
             let start = w.0.len();
             match &first {
-                Some(id) => write_row(r, id, fields.as_deref(), &mut w)?,
+                Some(id) => write_row(r, id, asked(fields.as_deref()).as_deref(), &mut w)?,
                 None => w.nil(),
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
         }
         Terminal::Edges { kinds, direction, types } => {
             for kind in kinds {
@@ -5267,13 +5302,15 @@ fn query_with(
                     }
                 }
             }
-            w.map(2);
+            w.map(3);
             w.kind("relations");
             w.str("relations");
+            let start = w.0.len();
             w.array(rows.len() as u32);
             for (id, stored) in &rows {
                 write_relation(r, id, stored, &mut w);
             }
+            plain_objects(&mut w, start);
         }
         Terminal::Degrees { kinds, direction, types } => {
             for kind in kinds {
@@ -5356,7 +5393,7 @@ fn query_with(
                     best.map(|(_, id, value)| (id, value))
                 }
             };
-            w.map(3);
+            w.map(4);
             w.kind(if greatest { "greatest" } else { "least" });
             w.str("id");
             match &best {
@@ -5364,10 +5401,12 @@ fn query_with(
                 None => w.nil(),
             }
             w.str("value");
+            let start = w.0.len();
             match &best {
                 Some((_, value)) => w.raw(&values::encode(value)),
                 None => w.nil(),
             }
+            plain_objects(&mut w, start);
         }
         Terminal::Sum { field: name } => {
             let ids = q.collect(last)?;
@@ -5433,9 +5472,7 @@ fn query_with(
                     w.str(id);
                 }
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
         }
         Terminal::Hits { fields, highlights } => {
             let searches = |step: &Step| {
@@ -5483,6 +5520,7 @@ fn query_with(
             w.str("hits");
             let start = w.0.len();
             w.array(ids.len() as u32);
+            let fields = asked(fields.as_deref());
             for id in &ids {
                 let hit = hits.get(id);
                 // A vector search matches no terms, so its hits have nothing to highlight
@@ -5519,14 +5557,12 @@ fn query_with(
                         }
                     }
                 }
-                if let Some(names) = fields {
+                if let Some(names) = &fields {
                     w.str("row");
                     write_row(r, id, Some(names), &mut w)?;
                 }
             }
-            let plain = !may_hold_proto(&w.0[start..]);
-            w.str("plainObjects");
-            w.bool(plain);
+            plain_objects(&mut w, start);
         }
     }
     visited.entities += q.visited.get();

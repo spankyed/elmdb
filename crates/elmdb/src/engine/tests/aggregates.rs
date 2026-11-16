@@ -69,12 +69,12 @@ fn least_and_greatest_answer_the_first_entity_at_the_extreme_value_in_the_plans_
     let db = open(&dir);
     stocked(&db);
     let least = read(&db, plan("live", json!([]), json!({ "answer": "least", "field": "price" }))).unwrap();
-    assert_eq!(least, json!({ "kind": "least", "id": "Item-7", "value": 0.5 }));
+    assert_eq!(least, json!({ "kind": "least", "id": "Item-7", "value": 0.5, "plainObjects": true }));
     let greatest = read(&db, plan("live", json!([]), json!({ "answer": "greatest", "field": "price" }))).unwrap();
-    assert_eq!(greatest, json!({ "kind": "greatest", "id": "Item-2", "value": 9.0 }));
+    assert_eq!(greatest, json!({ "kind": "greatest", "id": "Item-2", "value": 9.0, "plainObjects": true }));
     // Ties: the first of two 2s in the plan's order (Item-1, not Item-4), from the least and from the greatest alike
     let tied = read(&db, plan("live", json!([{ "step": "where", "field": "qty", "value": 1 }, { "step": "range", "field": "price", "atLeast": 2.0, "below": 3.0 }]), json!({ "answer": "least", "field": "price" }))).unwrap();
-    assert_eq!(tied, json!({ "kind": "least", "id": "Item-1", "value": 2.0 }));
+    assert_eq!(tied, json!({ "kind": "least", "id": "Item-1", "value": 2.0, "plainObjects": true }));
     let tied_greatest = read(
         &db,
         plan(
@@ -84,7 +84,7 @@ fn least_and_greatest_answer_the_first_entity_at_the_extreme_value_in_the_plans_
         ),
     )
     .unwrap();
-    assert_eq!(tied_greatest, json!({ "kind": "greatest", "id": "Item-1", "value": 2.0 }));
+    assert_eq!(tied_greatest, json!({ "kind": "greatest", "id": "Item-1", "value": 2.0, "plainObjects": true }));
 }
 
 #[test]
@@ -97,11 +97,11 @@ fn an_entity_without_the_field_is_no_least_or_greatest_and_none_holding_one_answ
         json!([{ "step": "range", "field": "qty", "atLeast": 2, "below": 3 }, { "step": "lacks", "field": "price" }]);
     assert_eq!(
         read(&db, plan("live", none.clone(), json!({ "answer": "least", "field": "price" }))).unwrap(),
-        json!({ "kind": "least", "id": null, "value": null })
+        json!({ "kind": "least", "id": null, "value": null, "plainObjects": true })
     );
     assert_eq!(
         read(&db, plan("live", none, json!({ "answer": "greatest", "field": "price" }))).unwrap(),
-        json!({ "kind": "greatest", "id": null, "value": null })
+        json!({ "kind": "greatest", "id": null, "value": null, "plainObjects": true })
     );
     // A set of no entities at all
     let nothing = json!([{ "step": "where", "field": "name", "value": "nobody" }]);
@@ -225,9 +225,9 @@ fn a_null_is_no_value_for_least_or_greatest_and_is_left_out_of_both() {
     .unwrap();
     // The null sorts past every number in orderBy, so a null that were a value would be the greatest
     let greatest = read(&db, plan("live", json!([]), json!({ "answer": "greatest", "field": "rank" }))).unwrap();
-    assert_eq!(greatest, json!({ "kind": "greatest", "id": "Item-1", "value": 4 }));
+    assert_eq!(greatest, json!({ "kind": "greatest", "id": "Item-1", "value": 4, "plainObjects": true }));
     let least = read(&db, plan("live", json!([]), json!({ "answer": "least", "field": "rank" }))).unwrap();
-    assert_eq!(least, json!({ "kind": "least", "id": "Item-3", "value": 2 }));
+    assert_eq!(least, json!({ "kind": "least", "id": "Item-3", "value": 2, "plainObjects": true }));
     // With nothing but nulls, none holds a value
     let nulls = json!([{ "step": "where", "field": "rank", "value": null }]);
     assert_eq!(
@@ -472,7 +472,7 @@ fn least_and_greatest_read_from_an_index_read_one_entry_and_those_of_entities_ou
     );
     assert_eq!(
         read(&db, plan("live", json!([]), json!({ "answer": "greatest", "field": "price" }))).unwrap(),
-        json!({ "kind": "greatest", "id": "Item-0", "value": 5.0 })
+        json!({ "kind": "greatest", "id": "Item-0", "value": 5.0, "plainObjects": true })
     );
     // None holding a value: nothing kept
     assert_eq!(

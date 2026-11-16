@@ -95,7 +95,7 @@ try {
     terminal,
   } }] });
   const workloads = [
-    ['field', { reads: [{ read: 'field', id: id(742), field: 'title' }] }, (a) => assert.deepEqual(a, { kind: 'field', present: true, value: 'message 742' })],
+    ['field', { reads: [{ read: 'field', id: id(742), field: 'title' }] }, (a) => assert.deepEqual(a, { kind: 'field', present: true, value: 'message 742', plainObjects: true })],
     ['page', page({ answer: 'rows' }), (a) => {
       assert.equal(a.kind, 'rows');
       assert.equal(a.rows.length, 50);
