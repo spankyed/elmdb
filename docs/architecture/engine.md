@@ -456,8 +456,9 @@ no commit's result could name a read that wasn't filed. So a tracked `readAsync`
 listener is registered, as nothing would tell its caller of such a commit. Another process's commits name no tracked
 read here, waiting or filed: when `committedElsewhere()` answers true, a tracked `readAsync` not yet settled is as
 stale as the reads already filed. In Rust the call is `Database::read_at_call` and the answer
-`Database::answer_call_read`; a read answered through another database than the one that asked it is refused
-`DATABASE_MISMATCH`, and its snapshot let go.
+`Database::answer_call_read`. A read still waiting when it is answered through another database than the one that
+asked it is refused `DATABASE_MISMATCH`, and its snapshot let go; one that has run already, at its call or in a
+growth of the asking database's map, answers as it ran, its answer that database's own.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 
