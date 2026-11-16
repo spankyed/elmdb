@@ -691,7 +691,8 @@ Neither mode writes the record again, so a commit pays nothing it didn't; an ope
 the data file, a full flush on Apple, writes and syncs the record and syncs the directory, and each writable open after
 syncs the record it reads. A backup into a directory removes the record a database there left, which names that file and
 not the copy, and `replaceWith` opens its source as an open does: at its record's commit where a loss left it to be
-restored, holding it open while it reads it. The replay holds each mode, alone and after a grouped writer that died with
+restored, holding it open while it reads it, and refusing a source open in this process, its own directory included
+(`ALREADY_OPEN`). The replay holds each mode, alone and after a grouped writer that died with
 commits unsynced, a backup and `replaceWith` (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
