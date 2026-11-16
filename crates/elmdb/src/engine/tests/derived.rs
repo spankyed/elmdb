@@ -466,6 +466,88 @@ fn a_removed_type_keeps_its_entities_until_purged() {
 }
 
 #[test]
+fn a_removed_relation_kind_keeps_its_edges_until_purged() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+                json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+                json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+                json!({ "op": "link", "source": "Task-1", "kind": "blocks", "target": "Task-2" }),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+    }
+    let mut schema = serde_json::to_value(super::schema()).unwrap();
+    schema["relations"].as_object_mut().unwrap().remove("refs");
+    let db = with_schema(&dir, schema).unwrap();
+    assert_eq!(super::edges(&db).len(), 2, "the removed kind's edge is kept");
+    db.purge(&Purge::RelationKind("refs".into())).unwrap();
+    let kept = super::edges(&db);
+    assert_eq!(kept.len(), 1, "only the purged kind's edges went: {kept:?}");
+    assert!(kept[0].contains("blocks"), "{kept:?}");
+    assert!(db.check().unwrap().is_clean());
+    assert_eq!(db.purge(&Purge::RelationKind("blocks".into())).unwrap_err().code, ErrorCode::SchemaChangeRefused);
+}
+
+#[test]
+fn a_removed_role_is_held_until_purged_and_the_purge_takes_it_from_every_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+                json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+                json!({ "op": "grant", "id": "Task-1", "role": "r1" }),
+                json!({ "op": "grant", "id": "Task-2", "role": "r1" }),
+                json!({ "op": "grant", "id": "Task-2", "role": "r2" }),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+    }
+    let mut schema = serde_json::to_value(super::schema()).unwrap();
+    schema["roles"].as_object_mut().unwrap().remove("r1");
+    let db = with_schema(&dir, schema).unwrap();
+    db.purge(&Purge::Role("r1".into())).unwrap();
+    assert_eq!(row(&db, "Task-1").unwrap().get("role"), None, "its only role went, and the field with it");
+    assert_eq!(row(&db, "Task-2").unwrap()["role"], json!(["r2"]), "the other role stays");
+    assert!(db.check().unwrap().is_clean());
+    assert_eq!(db.purge(&Purge::Role("r2".into())).unwrap_err().code, ErrorCode::SchemaChangeRefused);
+}
+
+#[test]
+fn purging_a_role_takes_it_from_an_entity_of_a_removed_type_too() {
+    // An entity of a removed type is kept until its type is purged; a role purged meanwhile goes from it as from any
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "title": "t" } }),
+                json!({ "op": "grant", "id": "Doc-1", "role": "r1" }),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+    }
+    let mut schema = serde_json::to_value(super::schema()).unwrap();
+    schema["types"].as_object_mut().unwrap().remove("Doc");
+    schema["roles"].as_object_mut().unwrap().remove("r1");
+    let db = with_schema(&dir, schema).unwrap();
+    db.purge(&Purge::Role("r1".into())).unwrap();
+    assert_eq!(row(&db, "Doc-1").unwrap().get("role"), None, "the kept entity holds the purged role no more");
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn every_write_to_an_entity_of_a_removed_type_is_refused_until_it_is_declared_again() {
     let dir = tempfile::tempdir().unwrap();
     let (from_doc, between_tasks) = {
