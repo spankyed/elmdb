@@ -5,4 +5,9 @@ import type { Violation } from "./Violation.js";
 /**
  * What `check()` found
  */
-export type CheckReport = { differences: Array<Difference>, violations: Array<Violation>, };
+export type CheckReport = { differences: Array<Difference>, violations: Array<Violation>, 
+/**
+ * What the check did not compare, and why: the order a value index keeps of its strings, where this elmdb
+ * did not file it or it is not whole. Nothing is wrong with what a note names; the report is clean with them
+ */
+notes: Array<string>, };

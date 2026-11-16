@@ -22,6 +22,12 @@ slow-timeout = { period = "10s", terminate-after = 1 }
 filter = "test(=store::tests::an_open_refuses_a_file_that_lost_its_commit_s_meta_page_to_no_commit)"
 slow-timeout = { period = "10s", terminate-after = 1 }
 
+# An open that never takes a map another process outgrew begins its transaction again without end: the test runs
+# another process four times, and takes a few seconds
+[[profile.default.overrides]]
+filter = "test(=store::tests::an_open_takes_the_map_another_process_grows_the_file_past_while_it_opens)"
+slow-timeout = { period = "30s", terminate-after = 2 }
+
 # Reader saturation children must reach their barrier or fail promptly, never hang a job.
 [[profile.default.overrides]]
 filter = "test(/^store::tests::(a_read_refuses_live_reader|a_read_only_open_recovers|reader_recovery_)/)"
@@ -31,6 +37,14 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 [[profile.default.overrides]]
 filter = "test(/^engine::tests::graph::/)"
 slow-timeout = { period = "10s", terminate-after = 2 }
+
+# The rank index's random histories: 48 histories of up to 30 steps, each step checked against PageRank and by
+# `check()`, which took 4.1 to 4.5 s on an Apple M1 Pro at a load of 13 to 16 (2026-11-16) and passed the 20 s the
+# rank tests below have at a load of 30. A drain that hangs still ends here at 40 s. Before the rank tests' own, since
+# the first override that names a test sets its deadline
+[[profile.default.overrides]]
+filter = "test(=engine::tests::rank_index::any_history_keeps_the_index_within_its_bound_of_rank)"
+slow-timeout = { period = "20s", terminate-after = 2 }
 
 # A rank index's drain that never reaches its bound never ends, and a test waiting for the index's build waits with it:
 # each of these tests takes about 2 s on an Apple-silicon laptop (2026-11-01), so a hang ends at 20 s rather than at

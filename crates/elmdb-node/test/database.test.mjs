@@ -52,9 +52,18 @@ test('a read-only open of an empty directory throws NO_DATABASE', (t) => {
 test('stores a schema, reports what opening did, and refuses an invalid one listing every problem', (t) => {
   const dir = tempDir(t);
   const db = Database.open(dir, { schema: noteSchema, syncs: false });
-  assert.deepEqual(db.openReport, { schemaChanges: [{ path: 'types.Note', change: 'added', effect: 'applied' }] });
+  assert.deepEqual(db.openReport, {
+    schemaChanges: [{ path: 'types.Note', change: 'added', effect: 'applied' }],
+    restored: null,
+    notBorneOut: false,
+  });
+  // No restore to acknowledge: nothing changes, and a read-only handle is refused
+  db.acknowledgeRestore();
   assert.equal(db.schema.types.Note.additionalFields, 'refuse', 'the canonical form, defaults written');
   db.close();
+  const reader = Database.open(dir, { readOnly: true });
+  assert.throws(() => reader.acknowledgeRestore(), { code: 'READ_ONLY' });
+  reader.close();
   const bad = structuredClone(noteSchema);
   bad.types.Note.fields.title.type = 'text';
   bad.types.Note.extra = true;
@@ -95,9 +104,9 @@ test('durable() resolves once what was committed is on disk', async (t) => {
 test('rebuild() takes a type and an index, or neither', (t) => {
   const db = Database.open(tempDir(t), { schema: noteSchema, syncs: false });
   for (const args of [['Note'], [null, 'byTitle'], [undefined, 'byTitle']]) {
-    assert.throws(() => db.rebuildSync(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
+    assert.throws(() => db.rebuild(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
   }
-  db.rebuildSync();
+  db.rebuild();
   db.close();
 });
 
@@ -142,7 +151,7 @@ test("committedElsewhere is never a handle's own commit, a unit reads its pendin
     const db = Database.open(join(dir, 'db'), { schema: {
       $schema: 'https://elmdb.dev/schema/1.json', roles: {}, relations: {}, types: { Task: { fields: {} } },
     } });
-    db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
+    db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
     assert.equal(db.committedElsewhere(), false);
 
     const unit = db.begin();

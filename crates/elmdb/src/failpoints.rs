@@ -35,12 +35,20 @@ macro_rules! failure_point {
     };
 }
 
-/// A point a test may arm to run code here, on its own thread, before the enclosing function goes on
+/// A point a test may arm to run code here before the enclosing function goes on: on the thread that armed it, or with
+/// `at`, on whichever thread reaches it for the database at a path
 macro_rules! run_point {
     ($name:ident) => {
         ::fail::fail_point!(
             $crate::failpoints::points::$name,
             $crate::failpoints::runs_here($crate::failpoints::points::$name),
+            |_| unreachable!("a run point always goes on")
+        )
+    };
+    ($name:ident at $path:expr) => {
+        ::fail::fail_point!(
+            $crate::failpoints::points::$name,
+            $crate::failpoints::runs_at($crate::failpoints::points::$name, $path),
             |_| unreachable!("a run point always goes on")
         )
     };
@@ -64,11 +72,19 @@ pub(crate) mod points {
     pub const RESET_CHECKPOINT: &str = "store::reset_checkpoint";
     /// Runs in a reset's checkpoint, once it has its turn to write and before it takes the write transaction
     pub const RESET_CLAIMING: &str = "store::reset_claiming";
+    /// Runs in an open once the environment is open, before the open begins a transaction in it
+    pub const OPEN_ENV: &str = "store::open_env";
     /// Runs in an open once it holds the snapshot the data file's trees are read at, before it reads that commit's
     /// meta page from the file
     pub const OPEN_SNAPSHOT: &str = "store::open_snapshot";
     /// Runs in an open once the data file's trees have been read, before a file found short is extended
     pub const OPEN_WALKED: &str = "store::open_walked";
+    /// Runs in an open each time it has synced a commit of its own: a new environment's stamp, and the graphs'
+    /// databases
+    pub const OPEN_SYNCED: &str = "store::open_synced";
+    /// Runs in an open that finds the map grown by another process as it begins a transaction, before it takes the
+    /// map's new size
+    pub const OPEN_MAP_GROWN: &str = "store::open_map_grown";
     /// Runs before a write transaction is reserved
     pub const WRITE_RESERVATION: &str = "store::before_write_reservation";
     /// Runs once a commit has landed and LMDB's write lock has gone with it, before the store hands the commit's
@@ -105,6 +121,11 @@ pub(crate) mod points {
     pub const LOAD_PUBLISHED: &str = "dump::after_load_publish";
     /// Runs before a read takes its snapshot
     pub const READ_SNAPSHOT: &str = "engine::before_read_snapshot";
+    /// A growth beside units has found no unit open and is about to try for the gate
+    pub const GROWTH_GATE: &str = "store::growth_gate";
+    /// A rebuild has its turn, has made the room a rebuild of everything needs unless a unit is open, and has not yet
+    /// begun its unit
+    pub const REBUILD_ROOM_MADE: &str = "engine::rebuild_room_made";
     /// Reading the indexes still to build fails
     pub const INDEX_REFRESH: &str = "engine::index_refresh";
     /// The builder's work on a rank index fails before it starts, leaving it owed
@@ -113,6 +134,41 @@ pub(crate) mod points {
     pub const WATCH_READ: &str = "watch::read";
     /// Creating a derivation's scratch directory fails
     pub const SCRATCH: &str = "derive::scratch";
+    /// Runs in a write once it has made sure of its pin, before it takes the write transaction
+    pub const WRITE_PINNED: &str = "store::write_pinned";
+    /// Runs as a unit is begun once it has made sure of its pin, before it takes the write transaction
+    pub const UNIT_PINNED: &str = "store::unit_pinned";
+    /// A sync of the grouped mode fails before it has written anything, as a reader table that stays full fails it
+    pub const SYNC_BEGIN: &str = "store::sync_begin";
+    /// Runs in a sync of the grouped mode once its read transaction was refused for a map another process grew, its
+    /// hold on the gate let go, before it takes the map's new size
+    pub const SYNC_MAP_GROWN: &str = "store::sync_map_grown";
+    /// Runs in a sync of the grouped mode once it has begun the read transaction its pin moves to, before it reads
+    /// that commit's meta page from the file
+    pub const SYNC_PINNED: &str = "store::sync_pinned";
+    /// A read of a commit's meta page from the data file fails, as a disk that answers EIO fails it, while it is armed:
+    /// a sync's, a write's that syncs before it begins, and the read of what the pin keeps from reuse
+    pub const META_READ: &str = "store::meta_read";
+    /// Runs in a sync of the grouped mode once it has taken its commit's meta page, before it takes the record's lock
+    pub const SYNC_TAKEN: &str = "store::sync_taken";
+    /// Runs in a sync of the grouped mode once the data file is synced, before the record is written
+    pub const SYNC_DATA: &str = "store::sync_data";
+    /// Runs in a sync of the grouped mode once the record is synced, before the pin is moved
+    pub const SYNC_RECORDED: &str = "store::sync_recorded";
+    /// Runs once a record's slot is written, before it is synced
+    pub const RECORD_WRITTEN: &str = "store::record_written";
+    /// Runs in a restore once the meta pages it writes over are saved, before they are written
+    pub const RESTORE_SAVED: &str = "store::restore_saved";
+    /// Runs in a restore once the first meta page is written, before the second
+    pub const RESTORE_HALF: &str = "store::restore_half";
+    /// Runs in a restore once both meta pages are written, before the data file is synced
+    pub const RESTORE_WRITTEN: &str = "store::restore_written";
+    /// Runs in a restore once the data file is synced, before the record is written
+    pub const RESTORE_SYNCED: &str = "store::restore_synced";
+    /// The open that restored fails as it writes the sequence it opened at into the record's notice
+    pub const RESTORE_NOTE: &str = "store::restore_note";
+    /// Runs in an open once LMDB has opened the file, before it reads the sequence a restore's notice is to name
+    pub const RESTORE_NOTING: &str = "store::restore_noting";
 }
 
 /// What a point is armed with on one thread
@@ -128,6 +184,10 @@ thread_local! {
 
 /// The points armed for a database at a path, on whatever thread reaches them, each once or until disarmed
 static AT: Mutex<Vec<At>> = Mutex::new(Vec::new());
+
+/// What runs once where a point is reached for the database at a path, on whatever thread reaches it
+type RunAt = (&'static str, PathBuf, Box<dyn FnOnce() + Send>);
+static RUN_AT: Mutex<Vec<RunAt>> = Mutex::new(Vec::new());
 
 #[cfg_attr(not(test), allow(dead_code))]
 struct At {
@@ -182,6 +242,20 @@ pub(crate) fn runs_here(name: &str) -> bool {
         })
         .ok()
         .flatten();
+    if let Some(run) = run {
+        run();
+    }
+    false
+}
+
+/// Runs what `name` is armed with for the database at `path`, disarming it, outside the arming's lock: what it runs
+/// may reach another point. Answers false, as `runs_here` does
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn runs_at(name: &str, path: &Path) -> bool {
+    let run = {
+        let mut armed = RUN_AT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        armed.iter().position(|(armed, at, _)| *armed == name && at == path).map(|at| armed.remove(at).2)
+    };
     if let Some(run) = run {
         run();
     }
@@ -244,6 +318,13 @@ pub(crate) fn run_once_here(name: &'static str, run: impl FnOnce() + 'static) {
     HERE.with_borrow_mut(|armed| armed.insert(name, Armed::Run(Box::new(run))));
 }
 
+/// Arms `name` to run `run` once for the database at `path`, on whichever thread reaches it
+#[cfg(test)]
+pub(crate) fn run_once_at(name: &'static str, path: &Path, run: impl FnOnce() + Send + 'static) {
+    registered(name);
+    RUN_AT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((name, path.to_owned(), Box::new(run)));
+}
+
 /// Whether `name` is still armed on this thread: a test's check that the point it armed was reached
 #[cfg(test)]
 pub(crate) fn is_armed_here(name: &'static str) -> bool {
@@ -292,6 +373,20 @@ mod tests {
         assert!(fails_at(points::SYNC, one) && fails_at(points::SYNC, one), "until disarmed");
         drop(held);
         assert!(!fails_at(points::SYNC, one));
+    }
+
+    #[test]
+    fn a_run_armed_for_a_path_runs_once_on_any_thread_for_that_path() {
+        let ran = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = ran.clone();
+        run_once_at(points::SYNC_DATA, Path::new("/one"), move || {
+            counted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        assert!(!runs_at(points::SYNC_DATA, Path::new("/other")));
+        assert_eq!(ran.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert!(!std::thread::spawn(|| runs_at(points::SYNC_DATA, Path::new("/one"))).join().unwrap());
+        assert!(!runs_at(points::SYNC_DATA, Path::new("/one")));
+        assert_eq!(ran.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]

@@ -19,6 +19,7 @@ mod keys;
 pub mod maintenance;
 pub(crate) mod mirror;
 mod numbering;
+mod order;
 mod places;
 pub mod plan;
 mod ranks;
@@ -34,9 +35,10 @@ mod vector;
 pub mod watch;
 
 use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use heed::RwTxn;
+use heed::{RoTxn, RwTxn, WithoutTls};
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLockRecursive, RwLock};
 
@@ -44,7 +46,8 @@ use crate::database::{Database, EngineSchema};
 use crate::diagnostics::Op;
 use crate::error::{Error, ErrorCode, Result};
 use crate::schema::Schema;
-use crate::store::{Commit, Store};
+use crate::store::{Commit, Db, Store};
+use crate::sync::PlainMutex;
 use batch::{Batch, BatchResult};
 use changes::ChangeSet;
 pub(crate) use reads::collator;
@@ -60,7 +63,11 @@ fn finish_commit(
     written: Option<&std::collections::HashSet<Vec<u8>>>,
     commit: Commit,
 ) -> Result<ChangeSet> {
-    let touched = tracks.lock().touched(written);
+    let touched = {
+        let mut held = tracks.lock();
+        held.note_commit(commit.sequence, written);
+        held.touched(written)
+    };
     changes.sequence = commit.sequence;
     changes.touched = touched.tokens;
     watch::deliver(tracks, store, schema, &touched.watches);
@@ -117,6 +124,42 @@ pub(crate) fn builder_commits(
     })
 }
 
+/// A read asked with `Database::read_at_call`, which `Database::answer_call_read` answers on any thread
+pub struct CallRead {
+    /// The read as asked: waiting, or run at the call (`None`), or refused there
+    asked: Result<Option<crate::store::CallRead>>,
+    /// What the read answered, once it ran: here, at the call, or in a growth of the map that ran it
+    answered: Arc<PlainMutex<Option<std::thread::Result<Ran>>>>,
+    /// A tracked read's token, noted for until it is filed
+    tracked: Option<watch::Waiting>,
+}
+
+/// A read's answer, and, when it was tracked, what it read
+type Ran = (Result<Vec<u8>>, Option<tracking::ReadSet>);
+
+/// What `Database::answer_call_read` answers
+pub struct CallAnswer {
+    /// The reads' answer, as `read` gives it
+    pub answer: Result<Vec<u8>>,
+    /// For a tracked read, the last commit since its call that wrote into what it read, by its sequence, and the
+    /// read's token: no commit's result named the token, since the read wasn't filed when it committed
+    /// (`Database::tell_touched`)
+    pub touched: Option<(u64, u32)>,
+}
+
+/// Runs a read asked at a call on its snapshot, recording what it read when it is tracked
+fn run_at_call(txn: &RoTxn<'_, WithoutTls>, db: Db, schema: &EngineSchema, reads: &plan::Reads, tracking: bool) -> Ran {
+    if let Err(error) = schema.validate(txn, db) {
+        return (Err(error), tracking.then(tracking::ReadSet::everything));
+    }
+    let snapshot = unit::Snapshot { txn, db, schema };
+    if tracking {
+        let (answer, read) = watch::run_recorded(&snapshot, reads);
+        return (answer, Some(read));
+    }
+    (reads::run(&snapshot, &reads.reads), None)
+}
+
 /// Milliseconds since the epoch, the engine's clock when a batch brings no time
 fn now_ms() -> f64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0)
@@ -170,6 +213,16 @@ pub struct IndexStatus {
     pub built: bool,
     /// Why its build failed, such as a unique index over rows holding the same values
     pub failure: Option<String>,
+    /// Whether the order a value index keeps of its strings is one a read of this database takes an `orderBy` or a
+    /// string `range` from: filed by this elmdb and whole. False while it is built, and for one another elmdb
+    /// filed, whose orders are sorted as they are read until this one's builder has built them. None for an index
+    /// that keeps no order: a rank index, and a type's own indexes of short codes and roles
+    pub ordered: Option<bool>,
+    /// The bytes of a string's sort key the order's keys hold under the type's and the index's names, before the
+    /// values of a compound index's leading fields take their share: a string whose sort key is longer is ordered
+    /// by the bytes it keeps, then by the collator among those keeping the same. 0 where the names leave none, and
+    /// the index's strings are then sorted when they are read. None for an index that keeps no order
+    pub room: Option<u32>,
 }
 
 /// Deletes the data of every index a schema change drops or rebuilds, with its marker, in the unit that stores the
@@ -252,6 +305,15 @@ pub(crate) fn drop_index_data(
                 }
                 db.delete(txn, &keys::vector_graph(entity_type, index))?;
             }
+            // A value index's order goes with it: its keys under every build, and its marker
+            let (low, high) = crate::format::key::prefix_range(&keys::order_of(entity_type, index));
+            let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Excluded(high.as_slice()));
+            let doomed: Vec<Vec<u8>> =
+                db.range(txn, &range)?.map(|e| e.map(|(k, _)| k.to_vec())).collect::<heed::Result<_>>()?;
+            for key in doomed {
+                db.delete(txn, &key)?;
+            }
+            db.delete(txn, &keys::order_marker(entity_type, index))?;
             db.delete(txn, &keys::index_built(entity_type, index))?;
         }
     }
@@ -317,6 +379,15 @@ pub(crate) fn held_in(
 
 type IndexList = Vec<Work>;
 
+/// What a unit leaves the builder as it commits: the rank indexes it left pushes for, and the orders of value
+/// indexes it found without a marker of this elmdb's as it wrote a string to them
+fn work_at_commit(t: &mut Txn<'_, '_>) -> Result<IndexList> {
+    let mut work: IndexList = ranks::push_at_commit(t)?.into_iter().map(|name| Work::Rank { name }).collect();
+    let owed = std::mem::take(&mut t.state.orders_owed);
+    work.extend(owed.into_iter().map(|(entity_type, index)| Work::Order { entity_type, index }));
+    Ok(work)
+}
+
 fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
     let mut empty = Vec::new();
     let mut unbuilt = Vec::new();
@@ -336,6 +407,22 @@ fn unbuilt_indexes(r: &impl unit::Read) -> Result<(IndexList, IndexList)> {
             if !derive::is_built(r, entity_type, &index)? {
                 let work = Work::Index { entity_type: entity_type.clone(), index };
                 if held { &mut unbuilt } else { &mut empty }.push(work);
+            }
+        }
+        // A built value index's order that no read of this elmdb's trusts is the builder's to build
+        for index in entities::value_indexes(r.schema(), entity_type).into_iter().filter(entities::ValueIndex::accounts)
+        {
+            // And so is one it does trust that holds keys under another build, which a build stopped before its
+            // last unit left
+            if !derive::is_built(r, entity_type, &index.name)? {
+                continue;
+            }
+            let owed = match order::readable(r, entity_type, &index.name)? {
+                Some(build) => order::stale(r, entity_type, &index.name, build)?,
+                None => true,
+            };
+            if owed {
+                unbuilt.push(Work::Order { entity_type: entity_type.clone(), index: index.name });
             }
         }
     }
@@ -359,8 +446,15 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     for work in empty {
         match work {
             Work::Index { entity_type, index } => {
-                t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?
+                t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?;
+                // Built with nothing in it, a value index's order is whole with it, of no key: the writes that
+                // fill the one keep the other from here
+                let declared = entities::value_indexes(t.schema, &entity_type).into_iter().find(|i| i.name == index);
+                if declared.is_some_and(|found| found.accounts()) {
+                    order::begin_whole(t, &entity_type, &index)?;
+                }
             }
+            Work::Order { .. } => {}
             Work::Rank { name } => ranks::rebuild(t, &name)?,
         }
     }
@@ -409,30 +503,16 @@ fn position(bytes: &[u8]) -> Result<changed::Position> {
         .map_err(|error| Error::new(ErrorCode::BatchInvalid, format!("A position to read what changed from: {error}")))
 }
 
-/// What a write's caller gets back across the binding: each operation's answer, and the commit's change set
+/// What a write's caller gets back across the binding: each operation's answer, the commit's change set and its
+/// sequence
 #[derive(Debug, Clone, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Written<'a> {
     pub results: &'a [batch::OpResult],
     pub changes: &'a ChangeSet,
     /// The commit's sequence, as its change set says
     pub sequence: u64,
-}
-
-/// A write that has committed and is owed a sync. Dropped without a wait, nothing says whether it became durable
-pub struct Unsynced {
-    sequence: u64,
-    store: Arc<Store>,
-}
-
-impl Unsynced {
-    /// Asks for a sync and waits for it, answering as a durable write does: `NOT_DURABLE` when it failed. The sync is
-    /// asked for here and not as the write commits, and covers every commit made before this call: of several writes
-    /// waited for after the last of them, the first wait's sync is the others' too
-    pub fn wait(self) -> Result<()> {
-        let synced = self.store.durable().map_or(Ok(()), crate::store::sync::Durable::wait);
-        Commit { sequence: self.sequence, synced }.finish()
-    }
 }
 
 impl Database {
@@ -446,20 +526,6 @@ impl Database {
             sequence: changes.sequence,
         })
         .expect("an answer serializes"))
-    }
-
-    /// `write_bytes`, answered once the commit has landed and before its sync, with the sync to wait for
-    /// (`Unsynced::wait`): a caller with several writes in hand makes them all and waits once, where each made
-    /// durable would wait for a sync of its own. Its watches and tracked reads are told as the commit lands, before
-    /// the sync, where a durable write tells them after it
-    pub fn write_bytes_unsynced(&self, batch: &[u8]) -> Result<(Vec<u8>, Unsynced)> {
-        let batch = decode_batch(batch)?;
-        // The store the write goes to, held until its sync is waited for: a close waits for it, as for a durable write
-        let store = self.store()?;
-        let (results, changes) = self.write(&batch, false)?;
-        let answer = Written { results: &results.results, changes: &changes, sequence: changes.sequence };
-        let answer = rmp_serde::to_vec_named(&answer).expect("an answer serializes");
-        Ok((answer, Unsynced { sequence: changes.sequence, store }))
     }
 
     /// Compares every derived key with what primary data derives, and every row with the schema's rules
@@ -490,9 +556,12 @@ impl Database {
     pub fn rebuild(&self, index: Option<(&str, &str)>) -> Result<()> {
         let op = Op::rebuild(index);
         let result = op.in_scope(|| {
+            // One rebuild at a time: two that each found the map short would each grow it
+            let _one_at_a_time = self.rebuilding.lock();
             if index.is_none() {
                 self.store()?.make_room(REBUILD_ROOM)?;
             }
+            run_point!(REBUILD_ROOM_MADE);
             self.admin_unit(|t| derive::rebuild(t, index))
         });
         op.ended(result, "durable")
@@ -547,7 +616,7 @@ impl Database {
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 f(&mut t)?;
                 vector::flush(&mut t)?;
-                let waiting = ranks::push_at_commit(&mut t)?;
+                let waiting = work_at_commit(&mut t)?;
                 store.deposit_touched(changed::Touched::of(&state.events, &schema));
                 Ok(waiting)
             },
@@ -563,7 +632,7 @@ impl Database {
         // As in `write`: queued before a failed sync is reported, the commit having landed
         let landed = self.finish_admin_commit(&store, commit);
         if let Some(builders) = builders {
-            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+            builders.queue(waiting);
         }
         landed
     }
@@ -623,7 +692,17 @@ impl Database {
                 "A unit is open, and an index build waits for it to end: commit or abort it, then wait for the builds",
             ));
         }
-        waiter.wait();
+        // Held up by what refused its work with nothing made, the builder waits it out: told so, the caller tries again
+        if let Some(held) = waiter.wait() {
+            return Err(Error::new(
+                held.code,
+                format!(
+                    "The index builds wait for what refused their last write, and go on once it passes: call this again \
+                     after a pause to wait on. What refused it: {}",
+                    held.message
+                ),
+            ));
+        }
         let failures = self.builder().as_ref().map(Builder::failures).unwrap_or_default();
         if failures.is_empty() {
             return Ok(());
@@ -632,6 +711,9 @@ impl Database {
             .iter()
             .map(|f| match &f.work {
                 Work::Index { entity_type, index } => format!("{entity_type}'s index {index}: {}", f.message),
+                Work::Order { entity_type, index } => {
+                    format!("the order of {entity_type}'s index {index}: {}", f.message)
+                }
                 Work::Rank { name } => format!("the rank index {name}: {}", f.message),
             })
             .collect();
@@ -653,11 +735,20 @@ impl Database {
                     let failure = failures.iter().find(|f| {
                         matches!(&f.work, Work::Index { entity_type: t, index: i } if t == entity_type && *i == index.name)
                     });
+                    let (ordered, room) = match index.accounts() {
+                        true => {
+                            let room = keys::order_room(entity_type, &index.name, &[]).unwrap_or(0);
+                            (Some(order::readable(&s, entity_type, &index.name)?.is_some()), Some(room as u32))
+                        }
+                        false => (None, None),
+                    };
                     out.push(IndexStatus {
                         entity_type: Some(entity_type.clone()),
                         index: index.name.clone(),
                         built: derive::is_built(&s, entity_type, &index.name)?,
                         failure: failure.map(|f| f.message.clone()),
+                        ordered,
+                        room,
                     });
                 }
             }
@@ -668,6 +759,8 @@ impl Database {
                     index: name.clone(),
                     built: ranks::is_built(&s, name)?,
                     failure: failure.map(|f| f.message.clone()),
+                    ordered: None,
+                    room: None,
                 });
             }
             Ok(out)
@@ -704,6 +797,12 @@ impl Database {
         Ok(self.store()?.sequence())
     }
 
+    /// Says the notice of a restore an open reported (`OpenReport::restored`) was read, so that no open reports it
+    /// after; refused on a read-only handle
+    pub fn acknowledge_restore(&self) -> Result<()> {
+        self.store()?.acknowledge_restore()
+    }
+
     /// Runs `reads` and hands `listener` the answer, then runs them again after each commit that writes into what they
     /// read, handing over each answer that differs from the one before. A listener is called after the commit, outside
     /// its transaction, on the thread that committed. A panicking listener is removed; an initial panic returns
@@ -724,6 +823,99 @@ impl Database {
         self.read(&decode_reads(reads)?)
     }
 
+    /// `read`, answered by `answer_call_read` on whichever thread calls it, from the snapshot of the last commit as it
+    /// is at this call: a commit made before the answer, here or in another process, changes nothing it reads
+    /// (`docs/architecture/engine.md`, Reads). The snapshot is held until the read runs, unless as many are held for
+    /// such reads as may be, when the read runs here. A tracked one is refused (`NO_LISTENER`) while nothing listens for
+    /// the builder's commits (`hear_builder_commits`), which is where it is told of a commit that wrote into it before it
+    /// was filed
+    pub fn read_at_call(&self, reads: plan::Reads) -> CallRead {
+        let answered = Arc::default();
+        let store = match self.store() {
+            Ok(store) => store,
+            Err(error) => return CallRead { asked: Err(error), answered, tracked: None },
+        };
+        // A commit that writes into a tracked read before it is filed is told to the listener of the builder's commits
+        // alone, which lets it go only at a close: without one, its caller would keep an answer it took to be tracked
+        if reads.track.is_some() && self.tracks.lock().builder_commit_listener().is_none() {
+            let refused = Error::new(
+                ErrorCode::NoListener,
+                "A tracked read answered later is told of a commit that writes into it before it is filed only through \
+                 the listener of the builder's commits: register one (`hearBuilderCommits`), or track the read with \
+                 `read`",
+            );
+            return CallRead { asked: Err(refused), answered, tracked: None };
+        }
+        // Held until the snapshot is taken, so the schema read with it is the one it was written under
+        let schema = self.schema_guard();
+        // Noted for before the snapshot is taken, so that every commit it doesn't hold is noted
+        let tracked = reads.track.map(|token| watch::Waiting::new(&self.tracks, token));
+        let read = {
+            let answered = Arc::clone(&answered);
+            let schema = Arc::clone(&*schema);
+            let tracking = tracked.is_some();
+            move |txn: &RoTxn<'static, WithoutTls>, db: Db| {
+                let ran = catch_unwind(AssertUnwindSafe(|| run_at_call(txn, db, &schema, &reads, tracking)));
+                *answered.lock() = Some(ran);
+            }
+        };
+        let asked = store.ask(read);
+        drop(schema);
+        CallRead { asked, answered, tracked }
+    }
+
+    /// `read_at_call` with the reads as msgpack bytes, as the binding takes them
+    pub fn read_at_call_bytes(&self, reads: &[u8]) -> CallRead {
+        match decode_reads(reads) {
+            Ok(reads) => self.read_at_call(reads),
+            Err(error) => CallRead { asked: Err(error), answered: Arc::default(), tracked: None },
+        }
+    }
+
+    /// Answers a read asked with `read_at_call`, running it here unless it ran at the call or a growth of the map ran
+    /// it. Refused `CLOSED` when the database closed before it ran, and `DATABASE_MISMATCH` when another database asked
+    /// it. A tracked read is filed here, as `read` files one,
+    /// and answered with the last commit since its call that wrote into what it read, for the caller to tell once it
+    /// has handed the answer over (`tell_touched`)
+    pub fn answer_call_read(&self, read: CallRead) -> CallAnswer {
+        let CallRead { asked, answered, tracked } = read;
+        let ran = asked.and_then(|asked| match asked {
+            Some(waiting) => self.store()?.run_asked(waiting),
+            None => Ok(()),
+        });
+        let taken = answered.lock().take();
+        let (answer, reads) = match (taken, ran) {
+            (Some(Ok(ran)), _) => ran,
+            (Some(Err(panic)), _) => std::panic::resume_unwind(panic),
+            // The database closed first, or the read was answered through another: nothing was read, and nothing is filed
+            (None, Err(error)) if matches!(error.code, ErrorCode::Closed | ErrorCode::DatabaseMismatch) => {
+                return CallAnswer { answer: Err(error), touched: None };
+            }
+            // No snapshot could be taken: filed as `read` files a read that failed so, for everything
+            (None, Err(error)) => (Err(error), tracked.is_some().then(tracking::ReadSet::everything)),
+            (None, Ok(())) => unreachable!("a read that ran answered, catching its own panic"),
+        };
+        let touched = match (tracked, reads) {
+            (Some(tracked), Some(reads)) => tracked.file(reads),
+            _ => None,
+        };
+        CallAnswer { answer, touched }
+    }
+
+    /// Tells the listener of the builder's commits, if there is one, that the commit at `sequence` wrote into the reads
+    /// tracked under `token`: what `answer_call_read` found of a read filed after that commit. Told once the answer has
+    /// been handed over, so that the listener never hears of a change to an answer its caller hasn't got
+    pub fn tell_touched(&self, sequence: u64, token: u32) {
+        let listener = self.tracks.lock().builder_commit_listener();
+        let Some(listener) = listener else { return };
+        let heard =
+            watch::as_callback(&self.tracks, || catch_unwind(AssertUnwindSafe(|| listener(sequence, vec![token]))));
+        // One that panics is heard no more, as when it panics hearing a builder's commit
+        if heard.is_err() {
+            self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
+        }
+    }
+
     /// Applies a batch as one unit, refusing all of it when any operation is refused. `durable` commits it with a sync
     pub fn write(&self, batch: &Batch, durable: bool) -> Result<(BatchResult, ChangeSet)> {
         let schema = self.schema_guard();
@@ -739,7 +931,7 @@ impl Database {
                 let results = apply_all(&mut t, batch)?;
                 run_checks(&t)?;
                 vector::flush(&mut t)?;
-                let waiting = ranks::push_at_commit(&mut t)?;
+                let waiting = work_at_commit(&mut t)?;
                 store.deposit(std::mem::take(&mut state.edges));
                 let changes = ChangeSet::of(&state.events);
                 store.deposit_touched(changed::Touched::of(&state.events, &schema));
@@ -751,7 +943,7 @@ impl Database {
         // The commit has landed whatever its sync answers, so its rank work is queued before a failed sync is reported
         let landed = finish_commit(&self.tracks, &store, &self.observing_schema(), changes, written.as_ref(), commit);
         if let Some(builders) = builders {
-            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+            builders.queue(waiting);
         }
         Ok((results, landed?))
     }
@@ -1009,7 +1201,7 @@ impl Unit {
         let checked = self.view(0.0).and_then(|mut t| {
             run_checks(&t)?;
             vector::flush(&mut t)?;
-            ranks::push_at_commit(&mut t)
+            work_at_commit(&mut t)
         });
         let waiting = match checked {
             Ok(waiting) => waiting,
@@ -1040,7 +1232,7 @@ impl Unit {
             Commit { sequence, synced },
         );
         if let Some(builders) = &self.builders {
-            builders.queue(waiting.into_iter().map(|name| Work::Rank { name }).collect());
+            builders.queue(waiting);
         }
         landed
     }

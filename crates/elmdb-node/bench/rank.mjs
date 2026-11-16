@@ -23,7 +23,7 @@ const schema = {
   types: { Doc: { fields: { body: { type: 'string' } } } },
   relations: { refs: { cardinality: 'many-to-many' } },
 };
-const read = (db, plan) => packr.unpack(db.readSync(packr.pack({ reads: [{ read: 'query', plan }] })))[0];
+const read = (db, plan) => packr.unpack(db.read(packr.pack({ reads: [{ read: 'query', plan }] })))[0];
 const median = (xs) => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)];
 const time = (runs, f) => {
   const ns = [];

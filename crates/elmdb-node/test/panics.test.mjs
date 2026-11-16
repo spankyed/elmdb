@@ -25,7 +25,7 @@ function seeded(t) {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-panics-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = Database.open(dir, { schema, syncs: false });
-  db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Note', id: 'Note-kept', fields: { title: 'kept' } }], now: 1000 }));
+  db.write(packr.pack({ ops: [{ op: 'create', type: 'Note', id: 'Note-kept', fields: { title: 'kept' } }], now: 1000 }));
   db.close();
   return dir;
 }
@@ -33,18 +33,17 @@ function seeded(t) {
 const run = (dir, name, asked) =>
   spawnSync(process.execPath, [child, dir, name], { env: { ...process.env, ELMDB_TEST_PANIC: asked }, encoding: 'utf8' });
 
-// Every member the two classes have, the factory, and the work six of them do on a thread of the pool
+// Every member the two classes have, the factory, and the work five of them do on a thread of the pool
 const members = (prototype) => Object.getOwnPropertyNames(prototype).filter((name) => name !== 'constructor');
 const exports = [
   'Database.open',
   ...members(Database.prototype).map((name) => `Database.${name}`),
   ...members(Unit.prototype).map((name) => `Unit.${name}`),
-  'Database.read, on a thread of the pool,',
+  'Database.readAsync, on a thread of the pool,',
   'Database.durable, on a thread of the pool,',
-  'Database.write, on a thread of the pool,',
-  'Database.check, on a thread of the pool,',
-  'Database.rebuild, on a thread of the pool,',
-  'Database.backup, on a thread of the pool,',
+  'Database.checkAsync, on a thread of the pool,',
+  'Database.rebuildAsync, on a thread of the pool,',
+  'Database.backupAsync, on a thread of the pool,',
 ];
 
 test('a panic in each export is an error with a code of its own, and the process lives', (t) => {

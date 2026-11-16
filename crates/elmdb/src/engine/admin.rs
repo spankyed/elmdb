@@ -104,18 +104,27 @@ pub fn purge(t: &mut Txn<'_, '_>, what: &Purge) -> Result<()> {
             if t.schema.roles.contains_key(role) {
                 return Err(still_declared(&format!("The role {role}")));
             }
-            for entity_type in t.schema.types.keys().cloned().collect::<Vec<_>>() {
-                for id in ids_of_type(t, &entity_type)? {
-                    if let Some(Value::Array(roles)) = entities::get(t, &id, field::ROLE)?
-                        && roles.iter().any(|r| r.as_str() == Some(role))
-                    {
-                        let rest: Vec<Value> = roles.into_iter().filter(|r| r.as_str() != Some(role)).collect();
-                        if rest.is_empty() {
-                            entities::delete_field(t, &id, field::ROLE)?;
-                        } else {
-                            entities::put_field(t, &id, field::ROLE, &Value::Array(rest))?;
-                        }
-                    }
+            // Every holder, a removed type's entities included: the schema no longer names their type, and they keep
+            // their rows until it is purged. The entities are visited one at a time, and only the holders are kept, with
+            // the roles each keeps
+            let mut holders: Vec<(String, Vec<Value>)> = Vec::new();
+            let read: &Txn<'_, '_> = t;
+            read.try_visit(&keys::all_entities(), |key, _| {
+                let Some(Part::String(id)) = decode_key(key)?.pop() else {
+                    return Err(Error::new(ErrorCode::Corrupted, "An entity's key doesn't read"));
+                };
+                if let Some(Value::Array(roles)) = entities::get(read, &id, field::ROLE)?
+                    && roles.iter().any(|r| r.as_str() == Some(role))
+                {
+                    holders.push((id, roles.into_iter().filter(|r| r.as_str() != Some(role)).collect()));
+                }
+                Ok(())
+            })?;
+            for (id, rest) in holders {
+                if rest.is_empty() {
+                    entities::delete_field(t, &id, field::ROLE)?;
+                } else {
+                    entities::put_field(t, &id, field::ROLE, &Value::Array(rest))?;
                 }
             }
         }

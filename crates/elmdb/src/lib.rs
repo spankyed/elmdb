@@ -12,10 +12,10 @@ pub mod schema;
 mod store;
 mod sync;
 
-pub use database::{Database, OpenOptions, OpenReport};
+pub use database::{Database, OpenOptions, OpenReport, Restore};
+pub use engine::Unit;
 pub use engine::batch::{Batch, BatchResult, Op, OpResult};
 pub use engine::changed::{After, Changed, Position};
 pub use engine::changes::ChangeSet;
-pub use engine::{Unit, Unsynced};
 pub use error::{Error, ErrorCode, Result};
 pub use store::sync::Durable;

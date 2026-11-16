@@ -241,6 +241,69 @@ fn a_unique_index_is_enforced_while_it_is_still_being_built() {
 }
 
 #[test]
+fn rebuilds_asked_on_two_threads_run_one_after_the_other() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(with_schema(&dir, notes(base_fields(), json!({}))).unwrap());
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "kind": "a" } })]).unwrap();
+    // The first rebuild has made its room and stops there, before its unit begins
+    let (paused, is_paused) = mpsc::channel();
+    let (go_on, may_go_on) = mpsc::channel::<()>();
+    let first = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            crate::failpoints::run_once_here(crate::failpoints::points::REBUILD_ROOM_MADE, move || {
+                paused.send(()).unwrap();
+                may_go_on.recv().unwrap();
+            });
+            db.rebuild(None).unwrap();
+        })
+    };
+    is_paused.recv_timeout(Duration::from_secs(10)).expect("the first rebuild made its room");
+    // A second, on another thread, finds the write lock free and would run its whole rebuild now; it waits instead
+    let (done, is_done) = mpsc::channel();
+    let second = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            db.rebuild(None).unwrap();
+            done.send(()).unwrap();
+        })
+    };
+    assert!(
+        is_done.recv_timeout(Duration::from_millis(300)).is_err(),
+        "the second rebuild ran while the first was under way"
+    );
+    go_on.send(()).unwrap();
+    first.join().unwrap();
+    is_done.recv_timeout(Duration::from_secs(10)).expect("the second rebuild ran once the first had committed");
+    second.join().unwrap();
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn the_thread_whose_rebuild_holds_its_turn_rebuilds_again_in_it() {
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(with_schema(&dir, notes(base_fields(), json!({}))).unwrap());
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-1", "fields": { "kind": "a" } })]).unwrap();
+    // A rebuild's commit is delivered to the watches with its turn held, and a listener whose answer the rebuild
+    // repaired may rebuild in turn, on that thread: holding the turn, the thread is let in again
+    let (done, is_done) = mpsc::channel();
+    let holder = {
+        let db = Arc::clone(&db);
+        std::thread::spawn(move || {
+            let _turn = db.rebuilding.lock();
+            done.send(db.rebuild(None)).unwrap();
+        })
+    };
+    is_done.recv_timeout(Duration::from_secs(10)).expect("a rebuild in its own turn answered").unwrap();
+    holder.join().unwrap();
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn rebuilding_one_index_refuses_one_the_schema_doesnt_declare() {
     let dir = tempfile::tempdir().unwrap();
     let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
@@ -400,6 +463,89 @@ fn a_removed_type_keeps_its_entities_until_purged() {
     assert!(row(&db, "Doc-1").is_none());
     assert_eq!(super::edges(&db), Vec::<String>::new(), "its relations went with it");
     assert_eq!(db.purge(&Purge::Type("Task".into())).unwrap_err().code, ErrorCode::SchemaChangeRefused);
+}
+
+#[test]
+fn a_removed_relation_kind_keeps_its_edges_until_purged() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+                json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+                json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+                json!({ "op": "link", "source": "Task-1", "kind": "blocks", "target": "Task-2" }),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+    }
+    let mut schema = serde_json::to_value(super::schema()).unwrap();
+    schema["relations"].as_object_mut().unwrap().remove("refs");
+    let db = with_schema(&dir, schema).unwrap();
+    assert_eq!(super::edges(&db).len(), 2, "the removed kind's edge is kept");
+    db.purge(&Purge::RelationKind("refs".into())).unwrap();
+    let kept = super::edges(&db);
+    assert_eq!(kept.len(), 1, "only the purged kind's edges went: {kept:?}");
+    assert!(kept[0].contains("blocks"), "{kept:?}");
+    assert!(db.check().unwrap().is_clean());
+    assert_eq!(db.purge(&Purge::RelationKind("blocks".into())).unwrap_err().code, ErrorCode::SchemaChangeRefused);
+}
+
+#[test]
+fn a_removed_role_is_held_until_purged_and_the_purge_takes_it_from_every_holder() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+                json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+                json!({ "op": "grant", "id": "Task-1", "role": "r1" }),
+                json!({ "op": "grant", "id": "Task-2", "role": "r1" }),
+                json!({ "op": "grant", "id": "Task-2", "role": "r2" }),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+    }
+    let mut schema = serde_json::to_value(super::schema()).unwrap();
+    schema["roles"].as_object_mut().unwrap().remove("r1");
+    let db = with_schema(&dir, schema).unwrap();
+    assert_eq!(row(&db, "Task-1").unwrap()["role"], json!(["r1"]), "a removed role is held until purged");
+    db.purge(&Purge::Role("r1".into())).unwrap();
+    assert_eq!(row(&db, "Task-1").unwrap().get("role"), None, "its only role went, and the field with it");
+    assert_eq!(row(&db, "Task-2").unwrap()["role"], json!(["r2"]), "the other role stays");
+    assert!(db.check().unwrap().is_clean());
+    assert_eq!(db.purge(&Purge::Role("r2".into())).unwrap_err().code, ErrorCode::SchemaChangeRefused);
+}
+
+#[test]
+fn purging_a_role_takes_it_from_an_entity_of_a_removed_type_too() {
+    // An entity of a removed type is kept until its type is purged; a role purged meanwhile goes from it as from any
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = open(&dir);
+        write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "title": "t" } }),
+                json!({ "op": "grant", "id": "Doc-1", "role": "r1" }),
+            ],
+        )
+        .unwrap();
+        db.close().unwrap();
+    }
+    let mut schema = serde_json::to_value(super::schema()).unwrap();
+    schema["types"].as_object_mut().unwrap().remove("Doc");
+    schema["roles"].as_object_mut().unwrap().remove("r1");
+    let db = with_schema(&dir, schema).unwrap();
+    db.purge(&Purge::Role("r1".into())).unwrap();
+    assert_eq!(row(&db, "Doc-1").unwrap().get("role"), None, "the kept entity holds the purged role no more");
+    assert!(db.check().unwrap().is_clean());
 }
 
 #[test]

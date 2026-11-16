@@ -16,6 +16,8 @@ const CAP: Duration = Duration::from_millis(1000);
 struct ManualSyncer {
     started: Sender<()>,
     outcomes: Mutex<Receiver<Result<()>>>,
+    /// Whether a failure is one that wrote nothing to rely on, which the next sync tries again
+    transient: bool,
 }
 
 impl Syncer for ManualSyncer {
@@ -25,6 +27,10 @@ impl Syncer for ManualSyncer {
             return Err(Error::new(ErrorCode::Io, "the test has gone"));
         }
         self.outcomes.lock().unwrap().recv().unwrap_or_else(|_| Err(Error::new(ErrorCode::Io, "the test has gone")))
+    }
+
+    fn final_failure(&self, failure: &Error) -> Option<Error> {
+        (!self.transient).then(|| failure.clone())
     }
 }
 
@@ -54,12 +60,21 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
+        Self::with(false)
+    }
+
+    /// A harness whose failures wrote nothing to rely on
+    fn transient() -> Self {
+        Self::with(true)
+    }
+
+    fn with(transient: bool) -> Self {
         let (started_tx, started) = channel();
         let (finish, outcomes) = channel();
         let elapsed = Arc::new(Mutex::new(Duration::ZERO));
         let commit = GroupCommit::start(
             Policy::new(IDLE, CAP),
-            Box::new(ManualSyncer { started: started_tx, outcomes: Mutex::new(outcomes) }),
+            Box::new(ManualSyncer { started: started_tx, outcomes: Mutex::new(outcomes), transient }),
             Box::new(ManualClock { base: Instant::now(), elapsed: Arc::clone(&elapsed) }),
         );
         Self { commit, started, finish, elapsed }
@@ -156,6 +171,50 @@ fn the_policy_is_due_after_the_idle_time_or_the_cap() {
     assert_eq!(p.due_at(), Some(t0 + CAP));
     p.on_sync_started();
     assert_eq!(p.due_at(), None);
+}
+
+#[test]
+fn a_sync_that_failed_short_of_a_flush_is_tried_again_at_the_cap_or_the_floor() {
+    let t0 = Instant::now();
+    let mut p = Policy::new(IDLE, CAP);
+    p.on_retry(t0);
+    assert_eq!(p.due_at(), Some(t0 + CAP), "with nothing committed since");
+    p.on_commit(t0);
+    assert_eq!(p.due_at(), Some(t0 + IDLE), "a commit's timer first");
+    p.on_sync_started();
+    assert_eq!(p.due_at(), None);
+    let mut p = Policy::new(IDLE, CAP);
+    p.on_commit(t0);
+    p.on_retry(t0 - CAP);
+    assert_eq!(p.due_at(), Some(t0), "the retry first");
+    // A cap shorter than the floor: a sync failing at once isn't tried again at once
+    let mut p = Policy::new(Duration::ZERO, Duration::ZERO);
+    p.on_retry(t0);
+    assert_eq!(p.due_at(), Some(t0 + RETRY_FLOOR));
+}
+
+#[test]
+fn a_sync_failing_short_of_a_flush_fails_its_own_waits_and_the_timer_syncs_what_it_owed() {
+    let h = Harness::transient();
+    h.commit.on_commit();
+    let asked = h.commit.durable();
+    assert!(h.sync_started());
+    h.finish(Err(eio()));
+    assert_eq!(outcome(&asked), "rejected");
+    // Nothing is committed after it: the timer tries again, at the cap
+    h.advance(CAP - Duration::from_millis(1));
+    h.no_sync_starts();
+    h.advance(Duration::from_millis(1));
+    assert!(h.sync_started(), "what the failed sync owed waited for the next commit");
+    h.finish(Ok(()));
+    h.settled();
+    assert_eq!(outcome(&h.commit.durable()), "resolved", "it was synced, and the failure before it isn't final");
+    h.commit.on_commit();
+    let later = h.commit.durable();
+    assert!(h.sync_started());
+    h.finish(Ok(()));
+    assert_eq!(outcome(&later), "resolved");
+    h.close();
 }
 
 #[test]

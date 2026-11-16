@@ -3,7 +3,8 @@ import type { Ends } from "./Ends.js";
 
 export type RelationChange = { kind: string, source: string, target: string, linked: boolean, unlinked: boolean, changed: boolean, 
 /**
- * The ends the relation had as the commit began, when the commit moved it to others: the entities that lost the
- * edge, which `source` and `target`, the ends it has now, don't name
+ * The ends the relation had before the commit first moved it to others: as the commit began, or, for one the commit
+ * made, the ends it made it with. The entities that lost the edge, which `source` and `target`, the ends it has now,
+ * don't name
  */
 movedFrom?: Ends, };

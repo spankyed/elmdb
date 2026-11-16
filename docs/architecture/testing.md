@@ -29,8 +29,9 @@ Each commit's change set is checked too: the entities it made, destroyed, trashe
 wrote (whether or not the value changed), and its relations: each link, unlink, rekey and move, by kind and ends, with a
 relation unlinked after the commit made it or rekeyed it one entry, as the engine reports it. A unit's members are
 replayed one at a time, so a write a later member reverts is still named, as the engine names it. After every step,
-`changedSince` from the start must name each entity still there with the sequence of its last change, the ends of a
-changed edge included, and the entities destroyed and not made again; a commit's sequence must increase.
+`changedSince` of each type, `Task` and `Note` asked alone, from the start must name each of its entities still there
+with the sequence of its last change, the ends of a changed edge included, and its entities destroyed and not made
+again; a commit's sequence must increase.
 
 The workload also resets the database now and then: `reset` keeps the schema and clears the rows, and commits no change
 set. After a reset the model checks that a reader from before it is told `changedSince` is incomplete, and that a reader
@@ -40,9 +41,22 @@ then: its edges move, each end stamped with the rename's sequence. A rename onto
 ends is refused by the model and the engine alike. The random workload reaches that through `refs` and `blocks`, which
 it links between the same ends; a deterministic test pins the refusal through `tags`, which the workload never links,
 and the refusal's order against an armed refusal. It renames a `Task` field to a spare one, and back: the entities that
-held the field are stamped, and a rename onto a name the entity already holds is refused by both. `renameType` and `replaceWith` have no model step: each has deterministic engine tests (`engine/tests/derived.rs`,
-`maintenance.rs`). Purge has none in the model either; its types and fields have deterministic engine tests, its
-relation kinds and roles have none.
+held the field are stamped, and a rename onto a name the entity already holds is refused by both.
+
+The spare field and `tags` are declared and removed again now and then (`setSchema`, a commit that stamps nothing).
+While they are removed, the data under them stays, a rename onto them is refused, and a purge takes the data, stamping
+the entities that held the field or the ends of the edges; a purge of a declared name is refused before any commit. It
+backs the database up and replaces it with the last backup, which acts as a reset to the backup's rows, and renames
+`Note` to `Memo`, a type declared with `Note`'s fields and indexes, and back in one commit. Between the two renames
+`Memo` must hold what `Note` held, and after them what comes back must be what was there. A reader of `Note` from before
+the rename is told the answer is incomplete, and one from it reads what changes after it; a reader of `Task` is told no
+more than that the ends of each relation the rename rewrote were stamped with its sequence. A step that has nothing to
+act on passes whatever the engine does, so the workload aims its renames and its toggles at data under the spare names,
+and the count of steps requires, beside each kind of step and each refusal, 20 purges that took something, 20 type
+renames with a `Note` to rename and 20 replacements by a backup that differs from what is there. The renames' one-way
+states, a type purge and a role purge are left to deterministic engine tests (`engine/tests/derived.rs`,
+`maintenance.rs`), which the model's fixed ids and per-type indexes would otherwise have to be rewritten for. Before its
+`check()` the harness declares the spare names again, since data a removed declaration kept is a violation.
 
 It runs in two places:
 
@@ -64,15 +78,29 @@ mutant that keeps one growing fails its test instead of filling the disk.
 
 ## The build directory
 
-Cargo never removes an artifact from a build directory: a build of other code, or the same code with other features
-(`diagnostics` on and off), hashes a new one beside the last. So:
+Cargo never removes an artifact from a build directory: a build with other dependencies, features (`diagnostics` on
+and off), flags (the models' `--cfg`) or profile hashes a new one beside the last, where an edit of a crate's own code
+builds over its old one. Branches differ in just those, so a long-lived build directory grows with every branch built
+in it. So:
 
 - **A worktree builds into its own `target/`**, and removing the worktree frees it. Pointing several checkouts at one
   build directory with `CARGO_TARGET_DIR` saves a cold build per worktree, but removing a worktree then frees nothing,
   and the shared directory grows with every branch any of them built.
-- **A long-lived build directory is swept:** `cargo xtask sweep` removes what a toolchain no longer installed made,
-  what no build has used for 14 days, and then the oldest until it is under 15 GB, through `cargo-sweep` (`cargo
-  install cargo-sweep --version '=0.8.0' --locked`).
+- **Every build directory a checkout uses is swept, by `pre-push` before it builds anything:** the checkout's target,
+  the concurrency models' (`target/loom`, `target/shuttle`) and the scratch target. `cargo xtask sweep` removes, through
+  `cargo-sweep` (`cargo install cargo-sweep --version '=0.8.0' --locked`), what a toolchain no longer installed made,
+  what no build has used for 14 days, and then the oldest until the target and the scratch target are under 15 GB
+  each and a model's under 5 GB. It then removes the incremental compilation directories cargo-sweep leaves, one for
+  each variant of a crate ever built: those no build has written to for 14 days, and all but the two latest of a
+  crate's, leaving any a build wrote to in the last hour, which may be another checkout's running now
+  (`xtask/src/build_dir.rs`).
+- **A mutated or scratch copy of the tree builds into the scratch target**, `CARGO_TARGET_DIR=$(cargo xtask
+  scratch-target)`, beside the checkout's target and not in it: one directory for every such copy, whatever its path,
+  which the sweep bounds with the rest, where a target in a copy's own directory would be left behind with it.
+- **A run that builds is refused below 20 GB free:** `pre-push` once it has swept, and `scripts/mutants-in-diff.py`,
+  whose copies build from cold in the system's temporary directory. Started with less, a run fills the disk part way
+  through, and the builds and tests running beside it with it. A CI runner, whose disk is its run's alone and holds
+  less than that, isn't held to it (`CI` set).
 - **Dev and test builds carry line tables, not full debug info** (`[profile.dev]` in `Cargo.toml`, which has the
   reading): backtraces keep their files and lines, and `CARGO_PROFILE_DEV_DEBUG=full` gives one build a debugger's view
   of locals.
@@ -96,9 +124,18 @@ workload the file is copied, the pages that differ from one copy to the next are
 loss could leave are made from them. In the synced-each-commit mode LMDB writes a commit's pages, syncs, then writes the
 meta page that names them, so any part of the next commit's pages with the meta page not yet written leaves the commit
 before whole; every such file must open, pass `check()`, and hold the commit before, with any of the next commit's
-pages present. In the grouped mode nothing orders the pages written since the last sync, so a file with a meta page and
-only some of the pages it names is not some commit's, and at least one such file must fail to hold a commit's state:
-that is the trade the mode states. The replay is LMDB's order of writes as its source gives it, on a file: no test of a
+pages present. In the grouped mode nothing orders the pages written since the last sync, and the workload syncs
+every eighth commit: for a loss after each of the commits since a sync, and after the next sync's data, the files
+are the synced file with some of the pages written since and the record that sync wrote, opened as of another
+boot. Every one must restore the record's commit, pass `check()` and hold that commit's tasks. The same run with the
+pin turned off must leave a file that doesn't, the commits after the sync having written over its pages: the pin is
+what the replay holds. The synced-each-commit replay keeps its record beside each file, and holds after a grouped writer
+that died with commits unsynced as well as alone: that open synced the file and wrote its own record, and the grouped
+one would take the file back to a commit the commits since wrote over. A database written with no sync is opened as it
+is, alone and after such a writer, and never restored; a backup over a directory whose record says `failed` opens as the
+backup, and one that fails before its copy is there leaves the record; and `replaceWith` from a file a loss left takes
+the source's last synced commit.
+The replay is LMDB's order of writes as its source gives it, on a file: no test of a
 disk, a filesystem or a controller that acknowledges a sync it hasn't made. Some torn files would crash the reader
 itself: LMDB maps a file whose meta page names pages past its end, and touching one is a SIGBUS. `Store::open` reads
 such a file by seeks first (`store/reach.rs`): it walks the trees the meta page names, and refuses the file when a page
@@ -107,15 +144,42 @@ LMDB may leave its free tail out of the file, and a writable open extends it to 
 processes may be committing as the file is opened: the walk reads one commit's trees under a read transaction at
 that commit, which keeps its pages from a later commit's reuse, and starts again from a later commit when two have
 landed and written over the meta page it took; the file is extended under the write lock, where no commit lands, and
-only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process). A
+only ever made longer (`store/tests.rs` stops an open at each of the two points and commits from another process).
+Another process may also grow the file past the map the open holds it in: every transaction the open begins takes
+the grown map and is begun again, which the same tests hold by growing the file before the open's first transaction
+and after its walk, for a read-only open and a writable one, and before the write transaction a short file is
+extended under. A
 torn file that is refused counts as a file that didn't survive.
 
 A file torn within its length can end its reader as well. The tests' build has LMDB's assertions on, and LMDB then
-aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files did on Linux (CI,
-2026-11-13, `SIGABRT`), and none on Apple silicon, whose pages are larger. A release build has them off, and reads
-such a page as it finds it. The replay counts a file whose reader aborted as one that didn't survive. It fails on a
-reader ended by the fault of a read past the file's end, which the open's check is there to stop and which a file cut
-to half its pages shows it stopping, and on a child that says nothing and ended any other way.
+aborts on a page that is no page of the tree it is in: one of the grouped mode's replayed files, kept by no pin, did
+on Linux (CI, 2026-11-13, `SIGABRT`), and none on Apple silicon, whose pages are larger. A release build has them off,
+and reads such a page as it finds it. The replay without the pin reads each file in a child, and counts a file whose
+reader aborted as one that didn't survive. It fails on a reader ended by the fault of a read past the file's end,
+which the open's check is there to stop and which a file cut to half its pages shows it stopping, and on a child that
+says nothing and ended any other way.
+
+`store/kept_tests.rs` holds the rest of what keeps the grouped mode's last synced commit. A child process is ended at
+each step of a sync and of a restore: a death after it opens at the newest commit, and a loss after it at the
+commit the record on disk names, as the model says (`store/synced_model.rs`). A commit forced between a sync's read
+transaction and its reading of that commit's meta page leaves the record naming the later commit. Another process's
+pin keeps every page its commit's trees reach as it was through this process's writes of values on overflow pages,
+and once ended lets them be written over. A failed sync refuses the next commit and is restored at the next open; an
+open beside another process that finds a restore to make is refused, and a read-only open beside a writer with
+commits unsynced opens where no boot can be read.
+
+Each night the engine also runs over a filesystem that loses what wasn't synced, rather than a replay of one:
+`.github/workflows/lossy-filesystem.yml` mounts LazyFS, which keeps what a process writes in a cache of its own until it
+is synced and drops it on a command. A writer in a child process dies in a sync after its data is flushed, or between
+syncs; the job drops what wasn't synced and the kernel's copy of the files, and the database opened after, as of another
+boot, must hold what the writer's last finished sync held
+(`a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync`). The same run with the pin turned
+off must fail. The test also asks whether anything was lost: a writer that died between syncs must leave a file that needs
+no restore, and one that died once a sync's data was flushed one that does. Then LazyFS tears a write, mounted again
+for each of four rounds told to split one write to the data file in three, persist the first part and the last, and
+crash; mounted again as it was, the database must hold what the writer's last finished sync held
+(`a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync`), and a writer that finished its workload saw no
+tear, which fails the round.
 
 ## Failpoints
 
@@ -268,6 +332,23 @@ one too, over every entity and kind of edge its workload writes: after each step
 the index's nodes to the model's live entities and its scores within their bound of `rank`, and the bound itself within
 the tolerance, since every state of the index is within the bound it reports whether its drain ran or not.
 
+The order a value index keeps of its strings has its specs in `engine/tests/order.rs` and `engine/order.rs`
+(`../roadmap/string-order.md`). Of its keys: a sort key's bytes held to the collator's comparison over eleven
+collations, cut at any room, and every key to 511 bytes over random names, values and strings; a key there while
+its entry holds a place, through an entry that passes into blocks and back; the keys of entities filed by their
+place; a `rebuild()`, a builder's units of one key each and a build gone on with, each held to the same keys; and
+`check()` reporting a key removed, added and moved. Of its marker: a model
+(`no_read_trusts_a_build_lacking_a_key_whatever_order_the_units_of_two_elmdbs_come_in`) runs every order of four
+units, and three thousand of twelve, drawn from the writes of two elmdbs whose collations differ, a unit of each
+one's builder, a `rebuild()` and the index dropped, in one transaction it rolls back, and holds after each unit
+that under a whole marker of an elmdb's own stamp the keys are exactly those of the index's strings as that
+elmdb's collator files them, and that an unbuilt index has neither marker nor key. It fails on a copy in which a
+write files under another stamp's marker, and on one in which a build's number is used twice; a copy in which a
+build's units hold the marker to their build and not their stamp passes it, no two builds of a database sharing a
+number, so that check is held by no test. Of its reads: `engine/tests/ordered.rs` holds an order, a page, a range
+and a count of strings read from the index to the same plan over a field with no index, which is sorted and
+filtered from the rows, with what each visited.
+
 ## Tracked reads
 
 `engine/tracking/tests.rs` holds the interval index to a brute-force scan of every read set, through random adds,
@@ -291,6 +372,11 @@ xtask's `UNMODELLED` with the reason (a lock no model provides, state no model c
 and fails on a listed file that no longer does. So new shared state is modelable by default, and the list says what
 isn't modelled yet: a model of one is how its file leaves the list.
 
+**Every write transaction is committed in one module.** `cargo xtask check-commits` fails when engine code outside
+`store/commits.rs` commits one: a unit's, a new environment's first, the vector graphs' databases' and the
+checkpoint's after a reset all pass through it. What must hold of every commit is then held in one place
+(`../roadmap/synced-commit.md`), and a commit can't be added that the place never hears of.
+
 `store/unit_slot.rs`'s model is whether a unit holds the environment's one write transaction. It holds that a
 plain write never goes on to take the writer while a unit is reserved, that of two units one reserves, and that a
 waiter returns when the unit ends or once woken after its stop is set. LMDB's writer lock is a Loom mutex in the model:
@@ -303,6 +389,14 @@ answer and never one twice; that once `unwatch` returns from another thread the 
 been dropped once; that listeners ending their own or each other's watch don't wait on a delivery; and that a commit
 racing a tracked read names its token unless the read already saw the write. The engine's reads, LMDB and the
 binding are outside it; `engine/tests/tracked.rs` covers them on real threads.
+
+`store/call_reads/model.rs` is the reads `readAsync` asks for at its call (`store/call_reads.rs`), under Shuttle: three
+reads asked while commits land, each run on a thread of its own while a growth runs every read still waiting, against
+a stand-in reader table of two slots, so reads share their commit's transaction, wait for it, and are refused once it
+is full. It holds that every read asked runs once, on a commit between the last before its call and the last after it,
+that a refused one never runs, and that no transaction outlives the reads. LMDB and the gate's recursion are outside
+it; `store/call_reads/tests.rs` covers the bounds, and `engine/tests/call_reads.rs` and `store/tests.rs` real
+databases, a growth in another process among them.
 
 `engine/builder/model.rs` is the index builder's scheduling, under Shuttle: its `Core` — the queue, a rank index's
 pause for commits to stop, stopping, failures and the waiters behind `waitForIndexBuilds` — with a stand-in for what a
@@ -319,7 +413,8 @@ builder on real threads.
 RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
   cargo test -p elmdb --release --lib store::unit_slot::model
 RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
-  cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model engine::builder::model
+  cargo test -p elmdb --release --lib -- store::unit_slot::model store::call_reads::model engine::watch::model \
+    engine::builder::model
 ```
 
 Each has its own target directory, which keeps its flag from rebuilding the everyday one. In those builds every other
@@ -341,7 +436,7 @@ argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
 
 A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
-factory, and the work six exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
+factory, and the work five exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`
 naming it, which has that export panic the first time it is called. The child calls it, by a table it fails
 without an entry of for the name, and expects `PANICKED` naming the export and the place; the handle then refuses
 a call, still answers its path and whether it is open, and closes; the unit it had open has ended, whether the
@@ -363,17 +458,19 @@ V8 is still freeing answers they dropped, which only Windows can fail: with exte
 and 19 of 200 runs of the Windows job's benchmark command died, and with copies none of either (Node 24.22.2 on
 `windows-latest`, 2026-11-11, [run 42989017095](https://github.com/spankyed/elmdb/actions/runs/42989017095)).
 
-`offthread.test.mjs` holds the four operations that run on the pool: a write, a check, a rebuild and a backup answer a
-promise, a rebuild of 20,000 notes leaves timers turning until it answers, a failure rejects with its code, and a
-refusal made before the work throws. Sixty writes asked for without an await commit in the order asked, each straight
-after the one before; and with a rebuild running and three times as many writes waiting behind it as the pool has
-threads, random bytes asked of the pool are answered before the rebuild ends. Forty durable writes asked for behind a
-rebuild are answered by one sync, ten awaited in turn by one each, and one with a rebuild behind it before the
-rebuild. Writes asked for in the turn a database is closed reject as closed, the ones behind none that landed.
-`exit.test.mjs` asks a rebuild and forty writes behind it of a child process that then calls `process.exit()`: all
-forty are there and the rebuild ran to its end; and of a child that drops its handle with a rebuild and a durable
-write in flight, that the write is answered after the handle is collected, the child saying it was. Each
-`…Sync` form is the blocking one the rest of the suite calls.
+`offthread.test.mjs` holds the three operations that run on the pool, `…Async`, beside their blocking forms: a check, a rebuild
+and a backup answer what their blocking forms answer, a rebuild of 20,000 notes leaves timers turning until it
+answers, a failure rejects with its code, and a refusal made before the work throws. A rebuild asked for while a unit
+is open is refused with `UNIT_OPEN`, and runs once the unit has committed; twenty blocking writes made while a rebuild
+of 20,000 notes is on its way each land, in order, with the rebuild one commit among them, and the database checks
+clean; a rebuild asked for in the turn the database is closed either runs or rejects as closed, and the database opened
+again is whole and checks clean. `exit.test.mjs` asks a rebuild of a child process that then calls `process.exit()`:
+the rebuild has committed and ran to its end; and of a child that drops its handle with a rebuild in flight, that the
+rebuild is answered after the handle is collected, the child saying it was; and of five children that each make a
+read, a durable wait, a check, a rebuild or a backup answering a promise and then drop the handle, that each handle
+is collected: napi-rs roots the object of a method that returns a task for the task's sake and never lets it go, so
+every promise the binding answers is spawned instead. Each blocking form, the plain name, is the one the rest of the
+suite calls.
 
 ## Platforms
 
@@ -530,6 +627,10 @@ binary. `read-allocations` counts each read's allocations with dhat. Readings: `
 `search-cost [NOTES [TIMES]]` prints what a search's best ten, its count and all its ids cost, for a word every note
 holds and one a twelfth hold, over 200,000 notes unless told otherwise; with TIMES it reads the first that many times
 and prints nothing, for a sampler.
+`profile-order FIELD [NOTES [ITERATIONS [DIR]]]` reads every note in the order of `name`, a string no other note
+holds, or of `n`, a number, over a million notes as `against-sqlite.mjs` loads them unless told otherwise; it checks
+the answer against a sort, then repeats the read, printing each one's milliseconds, and given DIR it loads the notes
+there once and reads them again on later runs.
 
 **The gates shown failing.** `scripts/check-maintenance-verification.py --output <new directory>` archives the source
 with current changes into a disposable directory, restores the export and value collectors that held whole collections,
@@ -570,10 +671,10 @@ commit at a twentieth of the notes and at all of them, for a note of three terms
 of wall time and as the process's CPU per commit; the best ten and the count for a word every note holds and one a
 twelfth hold, ten of the first word's matches past a cursor near the end of them, and whether it has a match; a
 misspelled word; the ten lowest and the ten highest of an indexed number, the ten lowest of the half of the notes a
-status keeps, the count of the last 500 of it, and a page of fifty near the end of creation order and one near the
-end of the number's order; of the names' order, its first ten, a page of fifty near the end of the loaded notes', the
-count by a range of the loaded notes' last (200 at a million notes), and every note in it, which is mostly the time
-to hand over that many ids; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
+status keeps, the count of the last 500 of it, a page of fifty near the end of creation order and one near the
+end of the number's order, and every note in the number's order; of the names' order, its first ten, a page of fifty
+near the end of the loaded notes', the count by a range of the loaded notes' last (200 at a million notes), and every
+note in it; a unit that gives each of a thousand notes (a twentieth of them, when fewer) a name
 elsewhere in the order, and one that gives each the other status, neither stamping the notes as changed, which
 SQLite's table has no column for; a check, a rebuild and a compaction. For elmdb alone it also reads how many
 entities each of those plans visited (`visits`, `explain`), which is a count and so the same on any machine, and the
@@ -615,7 +716,7 @@ peak heap. It reports whether debug assertions are enabled. Fixture creation and
 preexisting/native allocations, mappings and RSS are outside that measurement. Keep CPU timing apart
 from dhat instrumentation. Normalize totals by the recorded iterations rather than truncated text ratios.
 
-After building the binding, `node crates/elmdb-node/bench/reads.mjs --json` emits raw readSync and decode
+After building the binding, `node crates/elmdb-node/bench/reads.mjs --json` emits raw read and decode
 nanosecond samples, answer sizes/checksums, source commit/dirty state, actual loaded binary checksum,
 runtime and host information. The fixture version and cache/measurement policy travel with the samples.
 Use balanced separate baseline/candidate trials on one host; do not combine unlike manifests. Source

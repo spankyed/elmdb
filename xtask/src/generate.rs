@@ -21,8 +21,10 @@ pub fn write(dir: &Path) -> Result<(), String> {
     elmdb::ErrorCode::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::schema::Schema::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::schema::SchemaChange::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::OpenReport::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::Batch::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::BatchResult::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::engine::Written::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::ChangeSet::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::Changed::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::engine::plan::Reads::export_all(&config).map_err(|e| e.to_string())?;

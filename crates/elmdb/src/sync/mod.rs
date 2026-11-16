@@ -14,6 +14,11 @@ pub(crate) use shuttle::sync::{Condvar, Mutex, MutexGuard};
 /// A mutex whose lock is never poisoned: parking_lot's, which Loom doesn't model
 #[cfg(not(shuttle))]
 pub(crate) use parking_lot::Mutex as PlainMutex;
+/// What `PlainMutex::lock` gives
+#[cfg(not(shuttle))]
+pub(crate) use parking_lot::MutexGuard as PlainMutexGuard;
+#[cfg(shuttle)]
+pub(crate) use shuttle::sync::MutexGuard as PlainMutexGuard;
 
 // Shuttle's primitives and the models' threads, built only for a model, are files of their own, which cargo-mutants
 // leaves out (`.cargo/mutants.toml`): no suite it runs builds them
