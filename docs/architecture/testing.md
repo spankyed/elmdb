@@ -395,7 +395,8 @@ builder on real threads.
 RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
   cargo test -p elmdb --release --lib store::unit_slot::model
 RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
-  cargo test -p elmdb --release --lib -- store::unit_slot::model engine::watch::model engine::builder::model
+  cargo test -p elmdb --release --lib -- store::unit_slot::model store::call_reads::model engine::watch::model \
+    engine::builder::model
 ```
 
 Each has its own target directory, which keeps its flag from rebuilding the everyday one. In those builds every other
