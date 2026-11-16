@@ -533,7 +533,8 @@ impl Kept {
     /// Whether what the pin keeps from reuse is past the bound, which makes a sync due whatever the time and holds a
     /// write back until it lands. It is what commits from the pin's on freed, which no commit may take while the pin
     /// is there: where a commit rewrites what it changes, the file grows by all of it once the pages freed before the
-    /// pin run out. Read from the free tree once in `WALK_EVERY` asks, and asked again of it as the pin moves
+    /// pin run out. Read from the free tree once in `WALK_EVERY` asks, and asked again of it as the pin moves; past
+    /// where the newest commit's meta page, which names the tree, can't be read
     pub(super) fn past_bound(&self) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         let Some(pinned) = self.state.lock().pin.as_ref().map(|pin| pin.commit) else { return false };
@@ -547,8 +548,14 @@ impl Kept {
         if !walk_due(self.asked.fetch_add(1, Relaxed), grown, file, self.bound.load(Relaxed)) {
             return self.past.load(Relaxed);
         }
-        let Some((kept, file)) = self.kept_from_reuse(pinned) else { return self.past.load(Relaxed) };
-        let past = beyond(kept, file, self.bound.load(Relaxed));
+        let past = match self.kept_from_reuse(pinned) {
+            Ok(Some((kept, file))) => beyond(kept, file, self.bound.load(Relaxed)),
+            Ok(None) => return self.past.load(Relaxed),
+            // What the pin keeps can't be read, and no sync can take the meta page to move it either: taken as past
+            // the bound, so a write waits for a sync, and is refused if that fails too, rather than growing the file
+            // for as long as the read fails. A sync that succeeds moves the pin, and the new one asks again
+            Err(_) => true,
+        };
         // An answer for a pin that has moved since is no answer: the new pin asks again. Kept under the state, which
         // a new pin is made under, so none is made between the check and the stores
         let state = self.state.lock();
@@ -563,15 +570,18 @@ impl Kept {
 
     /// The bytes of the pages commits from `pinned` on freed, and of the file's pages, as the newest commit's free tree
     /// and meta page say: read under a read transaction at that commit, which keeps the tree's pages as they are. None
-    /// where a commit landed as its meta page was read
-    fn kept_from_reuse(&self, pinned: u64) -> Option<(u64, u64)> {
+    /// where no read transaction could begin, or a commit landed as its meta page was read; an error where the meta
+    /// page couldn't be taken otherwise, as where the file can't be read
+    fn kept_from_reuse(&self, pinned: u64) -> Result<Option<(u64, u64)>> {
         let _gate = self.gate.read();
-        let txn = super::with_reader_recovery(&self.env, || self.env.clone().static_read_txn()).ok()?;
+        let Ok(txn) = super::with_reader_recovery(&self.env, || self.env.clone().static_read_txn()) else {
+            return Ok(None);
+        };
         // Whole, as a sync takes it: the commit two after this one writes over its meta page field by field
-        let meta = self.take_meta(&txn).ok()??;
+        let Some(meta) = self.take_meta(&txn)? else { return Ok(None) };
         let page = self.page as u64;
         let kept = reach::freed_from(&mut self.data.lock(), self.page, meta.roots()[0], pinned).saturating_mul(page);
-        Some((kept, meta.last_page().saturating_add(1).saturating_mul(page)))
+        Ok(Some((kept, meta.last_page().saturating_add(1).saturating_mul(page))))
     }
 
     /// Sets the fixed part of the bound, for a test of what it does at a size a test reaches
@@ -672,6 +682,29 @@ mod tests {
         assert_eq!(refused.message, store.kept.as_ref().unwrap().refused().unwrap().message);
         drop(failing);
         assert!(store.close().is_err());
+    }
+
+    #[test]
+    fn a_write_while_the_meta_page_can_t_be_read_is_held_as_past_the_bound_and_refused_when_its_sync_fails() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), grouped()).unwrap();
+        // Owed, so the pin stays, and not past the bound when last read, the next ask reading it again
+        put(&store, "a");
+        let kept = store.kept.as_ref().unwrap();
+        assert!(kept.pinned_at().is_some() && !kept.past.load(Relaxed));
+        kept.asked.store(0, Relaxed);
+        // No sync can move the pin while the meta page can't be read: a write that went on would grow the file for as
+        // long as the read fails
+        let failing = failpoints::fail_while_at(points::META_READ, &store.path);
+        let key = crate::format::key::encode(&["b".into()]);
+        let refused = store.write(|txn, db| db.put(txn, &key, b"1").map_err(Into::into), false).unwrap_err();
+        assert_eq!(refused.code, ErrorCode::SyncBehind, "{refused}");
+        assert!(refused.message.contains("Injected meta page read failure"), "{refused}");
+        drop(failing);
+        // Once it reads, the write's sync moves the pin and the write goes on
+        put(&store, "b");
+        store.close().unwrap();
     }
 
     #[test]
