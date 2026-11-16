@@ -10,7 +10,7 @@ this one, a read-only open beside another process's writer, and the process clai
 
 ## The model harness
 
-The acceptance suite is a model harness (`crates/elmdb/src/engine/tests/model.rs`), ported from apack's
+The acceptance suite is a model harness (`crates/elmdb/src/engine/tests/model/`), ported from apack's
 (`@apackdev/ears`, `tests/_harness/`): random workloads over a small pool of ids, so writes collide, refer to each
 other and are refused, checked after every operation against a plain reference model. The workload is a state machine
 (proptest-state-machine): each step is chosen from what the model holds — an id it has, an edge it has, a key holding a
@@ -107,7 +107,7 @@ in it. So:
 
 ## Crashes and failed syncs
 
-The crash harness (`engine/tests/model.rs`, `mod crash`): a child process, the test binary run again, applies a seeded
+The crash harness (`engine/tests/model/crash.rs`): a child process, the test binary run again, applies a seeded
 workload with syncs on and acknowledges each step; the parent kills it with SIGKILL mid-workload, reopens the files and
 compares them with the model after the acknowledged steps, or one more. The child waits to be killed by reading its
 stdin, which the parent holds, so it ends with the parent however the parent ends, rather than outliving it. Its

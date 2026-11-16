@@ -9,7 +9,7 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 
 # The model harness: about a minute on an Apple-silicon laptop, and four to five on CI's Intel macOS runner
 [[profile.default.overrides]]
-filter = "test(=engine::tests::model::the_engine_holds_what_the_model_holds_after_every_step)"
+filter = "test(=engine::tests::model::machine::the_engine_holds_what_the_model_holds_after_every_step)"
 slow-timeout = { period = "60s", terminate-after = 15 }
 
 # A watch callback that closes, unwatches or delivers again from inside a delivery deadlocks when it regresses

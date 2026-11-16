@@ -1,6 +1,6 @@
 //! Text search: ranking against fixed corpora, the query's syntax, hits and their highlights, suggestions, fuzzy labels,
 //! and the index kept by every write, built for data that predates it, and checked and rebuilt like any derived data.
-//! What a text index matches after random writes is the model harness's (`engine/tests/model.rs`).
+//! What a text index matches after random writes is the model harness's (`engine/tests/model/`).
 
 use serde_json::{Value as Json, json};
 
