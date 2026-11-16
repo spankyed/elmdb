@@ -515,10 +515,10 @@ fn check_one_lmdb(root: &Path) -> Result<(), String> {
 }
 
 /// The crates besides ICU's whose output an index stores: charabia's tokens and rust-stemmers' stems in a text index's
-/// terms, and hannoy's graph in a vector index's databases. A version that splits, stems or lays out differently
-/// would leave a stored index that a query no longer matches and `check()` reports as differing, or a graph read as
-/// another layout
-const INDEXED: [&str; 3] = ["charabia", "hannoy", "rust-stemmers"];
+/// terms, with what charabia normalizes, detects a language and segments by, which it requires only as ranges, and
+/// hannoy's graph in a vector index's databases. A version that splits, stems or lays out differently would leave a
+/// stored index that a query no longer matches and `check()` reports as differing, or a graph read as another layout
+const INDEXED: [&str; 6] = ["charabia", "finl_unicode", "hannoy", "rust-stemmers", "unicode-normalization", "whatlang"];
 
 /// Every ICU crate the lockfile holds, and each of `INDEXED`, required by the workspace at exactly its locked version
 /// and named among `elmdb`'s dependencies. A sort key is the collator's output: one stored under the stamp of these
