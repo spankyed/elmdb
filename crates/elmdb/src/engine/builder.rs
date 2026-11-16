@@ -47,10 +47,20 @@ const STALE_RETRIES: u32 = 2;
 /// them again
 const DRAIN_PUSHES: usize = 20_000_000;
 
-/// What the thread does: build a type's index, or build or drain a rank index
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How long the second build this builder begins of one index's order waits, and twice as long each one after:
+/// a build is begun again when a write of another elmdb's ended the last, and two elmdbs that write one database in
+/// turn would otherwise each build its orders at every turn
+const ORDER_PUT_OFF: Duration = Duration::from_secs(1);
+
+/// The longest a build of an order is put off
+const ORDER_PUT_OFF_MOST: Duration = Duration::from_secs(600);
+
+/// What the thread does: build a type's index, build the order a value index keeps of its strings, or build or
+/// drain a rank index
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Work {
     Index { entity_type: String, index: String },
+    Order { entity_type: String, index: String },
     Rank { name: String },
 }
 
@@ -70,6 +80,14 @@ struct State {
     failures: Vec<IndexFailure>,
     /// When work was last queued for each rank index: the commit its drain waits to be the last of a burst
     queued_at: HashMap<String, Instant>,
+    /// Work put off, each piece with when it is due
+    later: Vec<(Instant, Work)>,
+    /// The orders this builder has begun a build of: how long the next build it begins of each is put off, and
+    /// whether that wait is over
+    begun: HashMap<Work, (Duration, bool)>,
+    /// What holds the builds up while the builder waits it out, nothing of its work made: a sync behind
+    /// (`SYNC_BEHIND`) or a full reader table, which a wait for the builds answers with rather than waiting on
+    held: Option<crate::Error>,
 }
 
 /// What the thread decides, apart from what doing a piece of work means: its queue, the pause a rank index's drain
@@ -112,12 +130,20 @@ impl Core {
         self.lock().stopping
     }
 
-    /// Blocks until every queued index is built or has failed, or the builder stops
-    fn wait(&self) {
+    /// Blocks until every queued index is built or has failed, or the builder stops, or is held up by what it waits
+    /// out, which this answers
+    fn wait(&self) -> Option<crate::Error> {
         let mut state = self.lock();
-        while (!state.queue.is_empty() || state.busy) && !state.stopping {
+        while (!state.queue.is_empty() || state.busy) && !state.stopping && state.held.is_none() {
             state = self.changed.wait(state).expect("the builder's lock is never poisoned");
         }
+        state.held.clone()
+    }
+
+    /// What holds the builds up, or that nothing does
+    fn hold(&self, held: Option<crate::Error>) {
+        self.lock().held = held;
+        self.changed.notify_all();
     }
 
     /// Takes the queue's work one piece at a time until stopped, `build` doing each, given whether to stop
@@ -129,6 +155,18 @@ impl Core {
                     if state.stopping {
                         return;
                     }
+                    // What was put off until now is work again, and may begin
+                    let now = self.clock.now();
+                    let (due, later) = std::mem::take(&mut state.later).into_iter().partition(|(at, _)| *at <= now);
+                    state.later = later;
+                    for (_, work) in due as Vec<(Instant, Work)> {
+                        if let Some((_, over)) = state.begun.get_mut(&work) {
+                            *over = true;
+                        }
+                        if !state.queue.contains(&work) {
+                            state.queue.push_back(work);
+                        }
+                    }
                     if let Some(next) = state.queue.pop_front() {
                         state.busy = true;
                         state.active = Some(next.clone());
@@ -136,7 +174,15 @@ impl Core {
                     }
                     state.busy = false;
                     self.changed.notify_all();
-                    state = self.changed.wait(state).expect("the builder's lock is never poisoned");
+                    // Asleep until work is queued, or until the first of what was put off is due
+                    let first = state.later.iter().map(|(at, _)| *at).min().filter(|_| !self.clock.is_manual());
+                    state = match first {
+                        Some(at) => {
+                            let wait = at.saturating_duration_since(now);
+                            self.changed.wait_timeout(state, wait).expect("the builder's lock is never poisoned").0
+                        }
+                        None => self.changed.wait(state).expect("the builder's lock is never poisoned"),
+                    };
                 }
             };
             if let Work::Rank { name } = &work {
@@ -156,6 +202,32 @@ impl Core {
             state.busy = !state.queue.is_empty();
             self.changed.notify_all();
         }
+    }
+
+    /// Whether a build of an order may begin now: the first this builder begins of it, or one whose wait is over
+    fn may_begin(&self, work: &Work) -> bool {
+        self.lock().begun.get(work).is_none_or(|(_, over)| *over)
+    }
+
+    /// That a build of an order began: the next this builder begins of it waits, twice as long as the last did
+    fn began(&self, work: &Work) {
+        let mut state = self.lock();
+        let next = match state.begun.get(work) {
+            Some((wait, _)) => (*wait * 2).min(ORDER_PUT_OFF_MOST),
+            None => ORDER_PUT_OFF,
+        };
+        state.begun.insert(work.clone(), (next, false));
+    }
+
+    /// Puts a build of an order off for as long as its next is to wait
+    fn put_off(&self, work: &Work) {
+        let mut state = self.lock();
+        let wait = state.begun.get(work).map_or(ORDER_PUT_OFF, |(wait, _)| *wait);
+        let due = self.clock.now() + wait;
+        if !state.later.iter().any(|(_, put_off)| put_off == work) {
+            state.later.push((due, work.clone()));
+        }
+        self.changed.notify_all();
     }
 
     /// Waits until no commit has left a rank index pushes for `QUIET`, at most `PATIENCE`, or the builder stops. On a
@@ -195,18 +267,29 @@ pub struct Builder {
 impl Builder {
     pub fn start(store: Arc<Store>, schema: Arc<EngineSchema>, commits: Commits) -> Self {
         let core = Arc::new(Core::new(Box::new(SystemClock)));
+        #[cfg(test)]
+        let forged = super::order::forged();
         let thread = {
             let core = Arc::clone(&core);
             let store = Arc::clone(&store);
             std::thread::Builder::new()
                 .name("elmdb-index".to_owned())
                 .spawn(move || {
+                    // A stamp forged by the thread that opened the database is this thread's too
+                    #[cfg(test)]
+                    super::order::forge(forged);
                     core.run(|work, stopping| match work {
                         Work::Index { entity_type, index } => {
-                            build_index(&store, &commits, entity_type, index, stopping)
+                            build_index(&store, &core, &commits, entity_type, index, stopping)?;
+                            // A value index just built has an order to build
+                            core.queue([Work::Order { entity_type: entity_type.clone(), index: index.clone() }]);
+                            Ok(())
+                        }
+                        Work::Order { entity_type, index } => {
+                            build_order(&store, &schema, &commits, &core, work, entity_type, index, stopping)
                         }
                         Work::Rank { name } => {
-                            build_rank(&store, &schema, &commits, name, stopping, &|| core.await_quiet(name))
+                            build_rank(&store, &schema, &core, &commits, name, stopping, &|| core.await_quiet(name))
                         }
                     });
                 })
@@ -228,7 +311,8 @@ impl Builder {
     /// Work left after stop joins the worker, including an interrupted chunk's index.
     pub fn pending(&self) -> Vec<Work> {
         let state = self.core.lock();
-        state.active.iter().chain(state.queue.iter()).cloned().collect()
+        let put_off = state.later.iter().map(|(_, work)| work);
+        state.active.iter().chain(state.queue.iter()).chain(put_off).cloned().collect()
     }
 
     pub fn failures(&self) -> Vec<IndexFailure> {
@@ -274,9 +358,10 @@ impl Builder {
 pub struct Waiter(Arc<Core>);
 
 impl Waiter {
-    /// Blocks until every queued index is built or has failed, or the builder stops
-    pub fn wait(&self) {
-        self.0.wait();
+    /// Blocks until every queued index is built or has failed, or the builder stops, or is held up by what refused its
+    /// work with nothing made, a sync behind or a full reader table, which this answers: the builder waits that out
+    pub fn wait(&self) -> Option<crate::Error> {
+        self.0.wait()
     }
 }
 
@@ -286,19 +371,78 @@ impl Drop for Builder {
     }
 }
 
-/// Runs `chunk` as units until it says it's done, waiting out a unit the app holds open; `Ok` once done or stopping
+/// How long the builder pauses, after its work was refused with nothing made by what it waits out, before it asks
+/// whether a write would go on: a pause apart, each ask a sync where the pin is past its bound, and the work run
+/// again only once one would
+const HELD_WAIT: Duration = Duration::from_secs(1);
+
+/// Whether a failure refused the builder's work with nothing of it made, for a cause outside the build that it waits
+/// out rather than failing the build, which would stay failed until the database is opened again: a sync behind
+/// (`SYNC_BEHIND`), or a full reader table met by a read before the chunk's commit
+fn held_up(failure: &crate::Error) -> bool {
+    matches!(failure.code, ErrorCode::SyncBehind | ErrorCode::ReadersFull)
+}
+
+/// Waits out what refused the builder's work, `refused`, a pause at a time, until `ask` says a write would go on
+/// (`Store::hold_to_the_bound`: a sync that succeeds lets one past the bound) or the builder stops; a wait for the
+/// builds meanwhile answers what refused it last
+fn wait_out(
+    ask: &dyn Fn() -> crate::Result<()>,
+    core: &Core,
+    stopping: &dyn Fn() -> bool,
+    refused: crate::Error,
+) -> crate::Result<()> {
+    core.hold(Some(refused));
+    let waited = loop {
+        let until = Instant::now() + HELD_WAIT;
+        // mutant-skip: replace < with <= in wait_out
+        // The two differ only for an instant that lands on the deadline itself, which no test can arrange
+        while Instant::now() < until && !stopping() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if stopping() {
+            break Ok(());
+        }
+        match ask() {
+            Err(e) if e.code == ErrorCode::SyncBehind => core.hold(Some(e)),
+            other => break other,
+        }
+    };
+    core.hold(None);
+    waited
+}
+
+/// What `attempt` answers, run again after each refusal that made nothing (`held_up`) is waited out; `None` where the
+/// builder stops first
+fn outlasting<T>(
+    store: &Store,
+    core: &Core,
+    stopping: &dyn Fn() -> bool,
+    mut attempt: impl FnMut() -> crate::Result<T>,
+) -> crate::Result<Option<T>> {
+    loop {
+        if stopping() {
+            return Ok(None);
+        }
+        match attempt() {
+            Err(e) if held_up(&e) => wait_out(&|| store.hold_to_the_bound(), core, stopping, e)?,
+            answered => return answered.map(Some),
+        }
+    }
+}
+
+/// Runs `chunk` as units until it says it's done, waiting out a unit the app holds open, a sync behind and a full
+/// reader table; `Ok` once done or stopping
 fn chunks(
     store: &Store,
+    core: &Core,
     stopping: &dyn Fn() -> bool,
     mut chunk: impl FnMut() -> crate::Result<bool>,
 ) -> crate::Result<()> {
     loop {
-        if stopping() {
-            return Ok(());
-        }
-        match chunk() {
-            Ok(true) => return Ok(()),
-            Ok(false) => {}
+        match outlasting(store, core, stopping, &mut chunk) {
+            Ok(None | Some(true)) => return Ok(()),
+            Ok(Some(false)) => {}
             // A unit held open by the app has the write transaction: try again once it ends
             Err(e) if e.code == ErrorCode::UnitOpen => store.wait_while_unit_open(stopping),
             Err(e) => return Err(e),
@@ -311,13 +455,14 @@ fn chunks(
 /// commit that writes it is the one that tells it to read again
 fn build_index(
     store: &Store,
+    core: &Core,
     commits: &Commits,
     entity_type: &str,
     index: &str,
     stopping: &dyn Fn() -> bool,
 ) -> crate::Result<()> {
     let mut after = 0;
-    chunks(store, stopping, || {
+    chunks(store, core, stopping, || {
         // The cursor moves only once its chunk commits: a chunk refused leaves it where it was
         let mut next = None;
         let done = commits(&mut |t| {
@@ -329,31 +474,83 @@ fn build_index(
     })
 }
 
+/// Builds the order a value index keeps of its strings (`order::build_unit`), a chunk of its entries at a time, each
+/// a unit: nothing for an index that keeps none, or isn't built. A build this builder has begun before and finds
+/// ended is put off, and begins when its wait is over
+#[allow(clippy::too_many_arguments)]
+fn build_order(
+    store: &Store,
+    schema: &EngineSchema,
+    commits: &Commits,
+    core: &Core,
+    work: &Work,
+    entity_type: &str,
+    index: &str,
+    stopping: &dyn Fn() -> bool,
+) -> crate::Result<()> {
+    use super::order::{Step, build_unit, settled};
+    let mut step = Step::Begin;
+    chunks(store, core, stopping, || {
+        let may_begin = core.may_begin(work);
+        // A unit that would write nothing isn't made: its commit would be heard, and say nothing
+        let nothing = store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            settled(&super::unit::Snapshot { txn, db, schema }, entity_type, index, &step, may_begin)
+        })?;
+        // Where the build is moves on only once its unit commits
+        let mut next = nothing.map(|reached| (reached, false));
+        if next.is_none() {
+            commits(&mut |t| {
+                next = Some(build_unit(t, entity_type, index, step.clone(), may_begin, CHUNK)?);
+                Ok(true)
+            })?;
+        }
+        let (reached, began) = next.expect("the unit ran");
+        if began {
+            core.began(work);
+        }
+        step = reached;
+        if step == Step::PutOff {
+            core.put_off(work);
+        }
+        Ok(matches!(step, Step::Done | Step::PutOff))
+    })
+}
+
 /// Adds a rank index's nodes a chunk at a time until every one is in it, then pushes a chunk at a time until none
 /// waits, and settles its totals
 /// Kept a function of its own for the instruction counts to enter at (`benches/instructions.rs`)
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 fn build_rank(
     store: &Store,
     schema: &EngineSchema,
+    core: &Core,
     commits: &Commits,
     name: &str,
     stopping: &dyn Fn() -> bool,
     pause: &dyn Fn(),
 ) -> crate::Result<()> {
     failure_point!(BUILD_RANK at store.path(), crate::Error::new(crate::ErrorCode::Io, "injected rank build failure"));
-    let (joined, owes) = store.read(|txn, db| {
-        schema.validate(txn, db)?;
-        let s = super::unit::Snapshot { txn, db, schema };
-        Ok((super::ranks::totals(&s, name)?.stage != super::ranks::Stage::Joining, super::ranks::owes_work(&s, name)?))
+    // Read before any chunk, and a full reader table waited out as a chunk's read waits it out
+    let read = outlasting(store, core, stopping, || {
+        store.read(|txn, db| {
+            schema.validate(txn, db)?;
+            let s = super::unit::Snapshot { txn, db, schema };
+            Ok((
+                super::ranks::totals(&s, name)?.stage != super::ranks::Stage::Joining,
+                super::ranks::owes_work(&s, name)?,
+            ))
+        })
     })?;
+    let Some((joined, owes)) = read else { return Ok(()) };
     // A commit that left the index alone queues it while a drain is computed; that drain has done what it owed
     if !owes {
         return Ok(());
     }
     if !joined {
         let mut after = None;
-        chunks(store, stopping, || {
+        chunks(store, core, stopping, || {
             // The cursor moves only once its chunk commits: a chunk refused leaves it where it was
             let mut next = None;
             let done = commits(&mut |t| {
@@ -366,7 +563,7 @@ fn build_rank(
     }
     let mirror = store.mirror();
     let mut retries = 0;
-    chunks(store, stopping, || {
+    chunks(store, core, stopping, || {
         // Computed outside the write lock, so commits go on meanwhile; only what it writes holds them up
         let planned = store.read(|txn, db| {
             schema.validate(txn, db)?;
@@ -430,4 +627,142 @@ fn build_rank(
         }
         Ok(done)
     })
+}
+
+#[cfg(all(test, not(shuttle), not(loom)))]
+mod tests {
+    use super::*;
+
+    /// A clock that stands where a test put it
+    struct Stood(Instant);
+
+    impl Clock for Stood {
+        fn now(&self) -> Instant {
+            self.0
+        }
+    }
+
+    fn refused(code: ErrorCode) -> crate::Error {
+        crate::Error::new(code, "refused")
+    }
+
+    #[test]
+    fn a_chunk_refused_with_nothing_made_is_waited_out_and_any_other_failure_ends_the_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), crate::store::StoreOptions::default()).unwrap();
+        let core = Core::new(Box::new(SystemClock));
+        // A sync behind, then a full reader table: each waited out a pause, then the chunk run again
+        let began = Instant::now();
+        let mut tries = 0;
+        chunks(&store, &core, &|| began.elapsed() > Duration::from_secs(20), || {
+            tries += 1;
+            match tries {
+                1 => Err(refused(ErrorCode::SyncBehind)),
+                2 => Err(refused(ErrorCode::ReadersFull)),
+                _ => Ok(true),
+            }
+        })
+        .unwrap();
+        assert_eq!(tries, 3);
+        assert!(began.elapsed() >= 2 * HELD_WAIT, "run again before its pause");
+        assert!(core.lock().held.is_none(), "still held up once it went on");
+        // Any other failure ends the build at once: given a stop after one try, a chunk tried again isn't
+        let tries = std::cell::Cell::new(0);
+        let ended = chunks(&store, &core, &|| tries.get() > 1, || {
+            tries.set(tries.get() + 1);
+            Err(refused(ErrorCode::Io))
+        });
+        assert_eq!(ended.unwrap_err().code, ErrorCode::Io);
+        store.close().unwrap();
+    }
+
+    #[test]
+    fn a_wait_out_asks_a_pause_apart_until_a_write_would_go_on_and_ends_at_a_stop() {
+        let core = Core::new(Box::new(SystemClock));
+        let began = Instant::now();
+        let late = || began.elapsed() > Duration::from_secs(10);
+        // Behind at the first ask, and through at the second
+        let asks = std::cell::Cell::new(0);
+        let ask = || {
+            asks.set(asks.get() + 1);
+            if asks.get() < 2 { Err(refused(ErrorCode::SyncBehind)) } else { Ok(()) }
+        };
+        wait_out(&ask, &core, &late, refused(ErrorCode::SyncBehind)).unwrap();
+        assert_eq!(asks.get(), 2);
+        assert!(began.elapsed() >= 2 * HELD_WAIT, "asked before a pause");
+        assert!(core.lock().held.is_none());
+        // Behind, and stopped meanwhile: it ends without asking again. At the fifth ask it would end all the same
+        let (asks, stopped) = (std::cell::Cell::new(0), std::cell::Cell::new(false));
+        let ask = || {
+            asks.set(asks.get() + 1);
+            stopped.set(true);
+            if asks.get() < 5 { Err(refused(ErrorCode::SyncBehind)) } else { Ok(()) }
+        };
+        wait_out(&ask, &core, &|| stopped.get() || late(), refused(ErrorCode::SyncBehind)).unwrap();
+        assert_eq!(asks.get(), 1, "asked again once stopped");
+        // A failure other than a sync behind ends the wait with it
+        let ask = || Err(refused(ErrorCode::Io));
+        assert_eq!(wait_out(&ask, &core, &late, refused(ErrorCode::SyncBehind)).unwrap_err().code, ErrorCode::Io);
+    }
+
+    #[test]
+    fn a_wait_for_the_builds_answers_what_holds_them_up_and_a_stop_ends_the_hold_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::open(dir.path(), crate::store::StoreOptions::default()).unwrap());
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        // As while the builder's thread runs a piece of work, every chunk of which is refused. Each wait is on a thread
+        // of its own and bounded, so that a wait that never ends fails the test rather than hanging it
+        core.lock().busy = true;
+        let (built, building) = std::sync::mpsc::channel();
+        {
+            let (store, core) = (Arc::clone(&store), Arc::clone(&core));
+            std::thread::spawn(move || {
+                let _ = built.send(chunks(&store, &core, &|| core.stopping(), || Err(refused(ErrorCode::SyncBehind))));
+            });
+        }
+        let (answered, answer) = std::sync::mpsc::channel();
+        {
+            let core = Arc::clone(&core);
+            std::thread::spawn(move || {
+                let _ = answered.send(core.wait());
+            });
+        }
+        let held = answer.recv_timeout(Duration::from_secs(10)).expect("the wait for the builds waited on the hold");
+        assert_eq!(held.expect("the wait answered what holds the builds up").code, ErrorCode::SyncBehind);
+        let stopped_at = Instant::now();
+        core.stop();
+        building.recv_timeout(Duration::from_secs(10)).expect("the stopped builder went on").unwrap();
+        assert!(stopped_at.elapsed() < HELD_WAIT / 2, "the stop waited for the pause to end");
+        assert!(core.lock().held.is_none());
+    }
+
+    #[test]
+    fn a_build_of_an_order_begun_again_is_put_off_once_and_twice_as_long_each_time() {
+        let start = Instant::now();
+        let core = Core::new(Box::new(Stood(start)));
+        let order = |index: &str| Work::Order { entity_type: "Note".to_owned(), index: index.to_owned() };
+        let (name, title) = (order("name"), order("title"));
+        let later = |core: &Core| core.lock().later.clone();
+        // The first build of an order may begin, and once it has, the next may not: of that order alone
+        assert!(core.may_begin(&name));
+        core.began(&name);
+        assert!(!core.may_begin(&name) && core.may_begin(&title));
+        // Put off, it is due after the first wait, and is there once however often it is put off
+        core.put_off(&name);
+        core.put_off(&name);
+        core.began(&title);
+        core.put_off(&title);
+        assert_eq!(later(&core), [(start + ORDER_PUT_OFF, name.clone()), (start + ORDER_PUT_OFF, title.clone())]);
+        // Begun again, the one after waits twice as long, and so on up to the longest wait
+        core.lock().later.clear();
+        core.began(&name);
+        core.put_off(&name);
+        assert_eq!(later(&core), [(start + 2 * ORDER_PUT_OFF, name.clone())]);
+        for _ in 0..20 {
+            core.began(&name);
+        }
+        core.lock().later.clear();
+        core.put_off(&name);
+        assert_eq!(later(&core), [(start + ORDER_PUT_OFF_MOST, name)]);
+    }
 }

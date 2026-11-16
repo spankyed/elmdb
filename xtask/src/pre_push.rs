@@ -108,6 +108,7 @@ const THEN: &[Step] = &[
                 "--lib",
                 "--",
                 "store::unit_slot::model",
+                "store::call_reads::model",
                 "engine::watch::model",
                 "engine::builder::model",
             ],
@@ -228,8 +229,17 @@ pub fn pre_push(root: &Path, args: &[String], checks: &[Check<'_>]) -> Result<()
     if !dirty.is_empty() {
         return Err(format!("pre-push checks what is committed; commit or set aside first:\n{}", dirty.join("\n")));
     }
-    std::fs::create_dir_all(root.join(READINGS)).map_err(|e| format!("{READINGS}: {e}"))?;
     let started = Instant::now();
+    // Before anything builds: every build directory bounded, and the run refused where what is left free would fill
+    // part way through it
+    println!("pre-push: build directories");
+    crate::build_dir::sweep(root).map_err(|e| format!("pre-push: build directories failed: {e}"))?;
+    let target = crate::build_dir::target_dir(root)?;
+    // The target's filesystem, which a shared target may put on another than the checkout's; the checkout's before a
+    // first build has made it
+    let free = crate::build_dir::free_bytes(&target).or_else(|| crate::build_dir::free_bytes(root));
+    crate::build_dir::refuse_below(&target, free, crate::build_dir::FLOOR).map_err(|e| format!("pre-push: {e}"))?;
+    std::fs::create_dir_all(root.join(READINGS)).map_err(|e| format!("{READINGS}: {e}"))?;
     for step in FIRST {
         run(root, step, &[])?;
     }

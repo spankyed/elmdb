@@ -11,11 +11,11 @@ waiting on a trigger below, which add to them and reorder nothing.
 |---|---|---|---|
 | 1 | The defects the review reproduced | each is fixed with a test that failed first; the model harness covers change sets, `changedSince`, `reset`, `renameRelation` and `renameField`; `renameType` and `replaceWith` have deterministic engine tests, and purge has them for types and fields | fixed, `79f646f`; the model harness covers change sets, `changedSince`, `reset`, `renameRelation` and `renameField` (#117, #118, #119, #121, #122); the gate was amended to this coverage, by the author's decision. Built |
 | 2 | Panics caught at the binding | a failpoint's panic in each export is a JavaScript error with a code of its own, and the process lives | built: `PANICKED` (`architecture/engine.md`, Errors; `architecture/testing.md`, The binding) |
-| 3 | A mode that survives power loss | an open option commits with LMDB's own sync; a crash-replay harness passes it and fails the grouped mode once; the README states the trade | built: `syncEachCommit` (`architecture/engine.md`, Durability; `architecture/testing.md`, Power loss); the README states the trade |
-| 4 | `write`, `check`, `rebuild` and `backup` off the calling thread | the event loop is never held 10 ms during a rebuild of 200,000 notes | built (#113); the quiet reading holds the loop under 3 ms for a 200,000-note rebuild on the pool (`evidence/million-notes.md`, off the calling thread) |
-| 5 | Ranges, ordered reads and a cursor that seeks | `orderBy` and `limit 10` on an indexed field visit about ten entities, and a page costs the same wherever its cursor is | built for booleans, numbers and the engine's times: ten of a million notes read for their first ten, fifty for a page of fifty near either order's end (`evidence/million-notes.md`). A string's order is still sorted, the collation's order not being its index's: designed, not built, in `roadmap/string-order.md` |
+| 3 | A mode that survives power loss | an open option commits with LMDB's own sync; a crash-replay harness passes it and fails the grouped mode once; the README states the trade | built: `syncEachCommit` (`architecture/engine.md`, Durability; `architecture/testing.md`, Power loss); the README states the trade. The grouped mode keeps its last synced commit and restores it after a power loss (`roadmap/synced-commit.md`: phases 1 to 5 built, but for phase 5's steps by hand on each platform) |
+| 4 | `check`, `rebuild` and `backup` off the calling thread | the event loop is never held 10 ms during a rebuild of 200,000 notes that no write waits on | built (#113); the quiet reading holds the loop under 3 ms for a 200,000-note rebuild on the pool (`evidence/million-notes.md`, off the calling thread). `write` left the item on 2026-11-15, by the owner's decision that reads and writes block (`architecture/design.md`, principle 9): its promise form answered what EARS hands back at the call too late, and a write made during a rebuild now waits for it on the calling thread |
+| 5 | Ranges, ordered reads and a cursor that seeks | `orderBy` and `limit 10` on an indexed field visit about ten entities, and a page costs the same wherever its cursor is | built for booleans, numbers, the engine's times and strings: ten of a million notes read for their first ten, fifty for a page of fifty near either order's end, and a string's order read from the keys its index keeps in the collation's order (`roadmap/string-order.md`, phases 1 to 4; `evidence/million-notes.md`) |
 | 6 | Vector builds off the commit path | one embedding a commit costs within twice a batch's; a commit of one takes under 2 ms at 100,000 vectors | open |
-| 7 | Typed answers and a thin client | answers are generated as the rest of the protocol is, and a test decodes each into its type | open |
+| 7 | Typed answers and a thin client | answers are generated as the rest of the protocol is, and a test decodes each into its type | open: a write's answer is generated (`Written`, `protocol/Written.ts`) and a test decodes it into its type; `read`'s answers aren't yet |
 | 8 | Format 1 frozen | databases and dumps of every tag open and pass `check()` in CI; the move to LMDB 1.0 is decided first | open |
 | 9 | Release and supply chain | prebuilt binaries for the seven targets; `cargo-deny` and an audit in CI; the `$schema` URL resolves | open |
 | 10 | A benchmark against SQLite, committed | bytes per note, search and rebuild at a million notes are read for each release | the benchmark is built (`architecture/testing.md`, Against SQLite) and read once (`evidence/million-notes.md`) |
@@ -34,6 +34,14 @@ walked while that is cheaper than sorting the filter's matches (`evidence/millio
 order). The smaller filter first is built as the places the filters' indexes hold in common, a read bounded by the
 shortest of them whichever is written first, equalities on every field of a compound index among
 them as one list (`architecture/engine.md`, Reads: plans). Least, greatest and sum are the plan's terminals `least`, `greatest` and `sum` (`architecture/engine.md`, Reads: plans).
+
+Milestone 0.2 is reached, its uses read against the plan's steps on 2026-11-16 at `387e8c4`: the README's search of a
+misspelled word and its most central note are `search` and `ranked` with `limit`, and its tracked reads are `track`;
+the uses it lists are `search` for text, `near`, `like` and `hybrid` for vectors, `containing` and `matching` for
+substrings and patterns, and `pathTo`, the `communities` terminal and `rank` or `ranked` for graphs. None needs a filter in
+JavaScript. What a stranger's first queries would meet, and the README doesn't use: no filter keeps a field holding
+one of several values, a value other than one, or either of two filters, so a caller reads twice and joins the
+answers, or filters in JavaScript.
 
 The benchmark comes first, out of its milestone, since it is what the gates below are read from. The indexes' layout
 at a million notes is designed in `roadmap/text-index-at-scale.md` and changes derived keys, so it is built before the

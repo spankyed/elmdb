@@ -91,15 +91,30 @@ pub enum ErrorCode {
     UnknownIndex,
     /// A second listener for a database's builder commits
     AlreadyListening,
+    /// A tracked read asked to be answered later, while nothing listens for the builder's commits: a commit that writes
+    /// into what it reads before it is filed is told only to that listener
+    NoListener,
+    /// A read asked of one database and answered through another: a read is answered by the database that asked it
+    DatabaseMismatch,
     /// A read of an index still being built that nothing answers in its place: a text index's `search`, `hybrid` or
     /// `suggest`, whose terms and statistics are the answer, and a `ranked` read that asked to be refused rather than
     /// computed
     IndexBuilding,
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
+    /// An open that found the database to be restored to its last synced commit, after a power loss or a failed sync,
+    /// and couldn't make the restore: another process has it open, or the open can't write its data file
+    RestorePending,
     /// A durable operation whose transaction committed and whose sync then failed: the data is committed, and not yet known to
     /// be on disk. Retrying the operation would apply it twice
     NotDurable,
+    /// A write refused before it began: what the last synced commit keeps from reuse passed its bound, and the sync
+    /// that would let it go failed having written nothing to rely on, as a full reader table fails it. Nothing of the
+    /// write was made, and it may be tried again: it goes on once a sync succeeds
+    SyncBehind,
+    /// A writable open in another mode than a writer that has the database open in another process: the grouped mode
+    /// (the default), `syncEachCommit` or `syncs: false`. One database is written in one mode at a time
+    ModeMismatch,
     /// A second elmdb binary loaded into a process that already loaded one: two copies of LMDB in one process share no
     /// locks
     AlreadyLoaded,
@@ -164,9 +179,14 @@ impl ErrorCode {
             Self::UnitOpen => "UNIT_OPEN",
             Self::UnknownIndex => "UNKNOWN_INDEX",
             Self::AlreadyListening => "ALREADY_LISTENING",
+            Self::NoListener => "NO_LISTENER",
+            Self::DatabaseMismatch => "DATABASE_MISMATCH",
             Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
+            Self::RestorePending => "RESTORE_PENDING",
             Self::NotDurable => "NOT_DURABLE",
+            Self::SyncBehind => "SYNC_BEHIND",
+            Self::ModeMismatch => "MODE_MISMATCH",
             Self::AlreadyLoaded => "ALREADY_LOADED",
             Self::DuplicateEdge => "DUPLICATE_EDGE",
             Self::NumbersExhausted => "NUMBERS_EXHAUSTED",
@@ -261,6 +281,8 @@ mod tests {
             ErrorCode::UnitOpen,
             ErrorCode::UnknownIndex,
             ErrorCode::AlreadyListening,
+            ErrorCode::NoListener,
+            ErrorCode::DatabaseMismatch,
             ErrorCode::IndexBuilding,
             ErrorCode::IndexBuildFailed,
             ErrorCode::CallbackPanicked,

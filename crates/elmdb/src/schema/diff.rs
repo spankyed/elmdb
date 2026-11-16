@@ -63,8 +63,9 @@ pub struct Held {
 pub fn diff(stored: &Schema, given: &Schema, held: &Held) -> Vec<SchemaChange> {
     let mut out = Changes(Vec::new());
     if stored.collation != given.collation {
-        // A value index holds its values as written; the collation orders `orderBy` as a query runs
-        out.push("collation", Change::Changed, Effect::Applied);
+        // A value index holds its values as written, and the order it keeps of its strings is the collation's: each
+        // is built again in the background, and an order is sorted as it is read until its index's is built
+        out.push("collation", Change::Changed, Effect::Builds);
     }
     // A declaration added over data a removed one left holds that data to its rules from then on
     let over = |data: bool| if data { Effect::Enforced } else { Effect::Applied };

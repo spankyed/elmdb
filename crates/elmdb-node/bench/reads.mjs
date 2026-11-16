@@ -1,6 +1,6 @@
 // The read benchmark's four reads through the binding (`docs/archive/roadmap/read-allocation-codec.md`): `node
 // crates/elmdb-node/bench/reads.mjs` after `npm run build`. It builds the message store `tests/support/reads.rs`
-// describes, checks each answer, then times `readSync` and the decoding of its answer apart, as medians of many runs.
+// describes, checks each answer, then times `read` and the decoding of its answer apart, as medians of many runs.
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -121,21 +121,21 @@ try {
   const measurements = [];
   for (const [name, reads, check] of workloads) {
     const request = packr.pack(reads);
-    const checkedAnswer = db.readSync(request);
+    const checkedAnswer = db.read(request);
     check(packr.unpack(checkedAnswer)[0]);
     // Enough runs for a stable median at each size: the read of every row takes tens of milliseconds
     const runs = requestedRuns ?? (name === 'all_rows' ? 30 : 2000);
     const read = [], decode = [];
     for (let n = 0; n < runs; n++) {
       let t = process.hrtime.bigint();
-      const answer = db.readSync(request);
+      const answer = db.read(request);
       read.push(Number(process.hrtime.bigint() - t));
       t = process.hrtime.bigint();
       packr.unpack(answer);
       decode.push(Number(process.hrtime.bigint() - t));
     }
     measurements.push({ workload: name, answerBytes: checkedAnswer.length, answerSha256: createHash('sha256').update(checkedAnswer).digest('hex'), readSyncNs: read, decodeNs: decode });
-    if (!json) console.log(`${name}: readSync_median_us=${(median(read) / 1000).toFixed(1)} decode_median_us=${(median(decode) / 1000).toFixed(1)} runs=${runs}`);
+    if (!json) console.log(`${name}: read_median_us=${(median(read) / 1000).toFixed(1)} decode_median_us=${(median(decode) / 1000).toFixed(1)} runs=${runs}`);
   }
   if (json) {
     console.log(JSON.stringify({
@@ -146,7 +146,7 @@ try {
       runtime: { node: process.versions.node, napi: process.versions.napi, v8: process.versions.v8, platform: process.platform, arch: process.arch },
       host: { cpu: cpus()[0]?.model, logicalCpus: cpus().length, totalMemoryBytes: totalmem(), loadAverage: loadavg() },
       fixture: { version: 2, rows: ROWS, perChannel: PER_CHANNEL, syncs: false },
-      policy: 'fixture and answer checks excluded; one warmup per workload; readSync and decode alternate; fresh process is not cold filesystem cache; no timing gate',
+      policy: 'fixture and answer checks excluded; one warmup per workload; read and decode alternate; fresh process is not cold filesystem cache; no timing gate',
       workloads: measurements,
     }));
   }

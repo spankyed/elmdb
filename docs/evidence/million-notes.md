@@ -397,3 +397,96 @@ A third run at a million with a second enum of two values in two indexes, at the
 entities hold adds 19.6 µs, 56% of the unit, where a second filing of a string no other holds added 13.2 in that
 run (32.4 and 45.6). Not read: why. By the layout a value's places are in blocks by place, so each change of a
 unit spread over the type would write a block of its own under each value, which is an inference.
+
+## A string's order, read from its index
+
+The same benchmark on `session/string-order-build` at `0655330` with untracked files of no part in it, a million
+notes, one run (Apple M1 Pro, 2026-11-14, Node 24.16.0, SQLite 3.53.0, the binding built in release). The machine
+was at load 202 as the run began and 66 as it ended, other work having it: no time here is one to compare with the
+readings above, and two engines' times are compared only within this run. What load doesn't change is what was
+visited.
+
+| | elmdb | SQLite | elmdb visited | visited before |
+|---|---:|---:|---:|---:|
+| The first ten of the names' order | 0.052 ms | 0.020 ms | 10 | 1,000,092 |
+| A page of 50 near the end of the loaded notes' names | 0.129 ms | 0.167 ms | 50 | 1,000,092 |
+| The count of the last 200 names, by a range | 0.425 ms | 0.053 ms | 200 | 1,000,092 |
+| Every note in the names' order, a million ids handed over | 3,220 ms | 2,510 ms | 1,000,092 | 1,000,092 |
+| A unit that gives 1,000 notes each a name elsewhere in the order, the process's CPU | 42.8 ms | 57.2 ms | | |
+| A unit that gives 1,000 notes each the other status, the process's CPU | 38.0 ms | 48.2 ms | | |
+
+The name's index is 113.2 MB where it was 41.0: its order's keys are 72 MB, 72 bytes a note, and a note is 1,327
+bytes as loaded where it was 1,304. The status's index is 1.1 MB as it was, its order two keys.
+
+What they say. An order of strings, a page of it and a range of it each read what they answer with and no more.
+Every note in the names' order took 1.28 times what SQLite took in this run, where it took 3.1 times in the run
+above; whether it is under half its own time before, which `../roadmap/string-order.md`'s fourth phase asks, a
+run this loaded can't say, nor what the order adds to the two units: both are owed a run on a quiet machine.
+
+## An order taken whole, against phase 2's walk
+
+`../roadmap/string-order.md`'s fourth phase asks that every note of a million in the names' order, and in the
+number's, be read in under half the time phase 2 took. Phase 2 and phase 4 landed together, so phase 2's time was
+never read alone: it is read here beside phase 4's, by the same benchmark (`against-sqlite.mjs` as of this section,
+which adds every note in the number's order), on phase 2's engine, `5b691bb`, and on
+`session/string-order-followups` at `b79d868`, whose engine is main's `0e056b5` and an EXPLAIN field. Two runs of
+each, alternated, a million notes (Apple M1 Pro, 2026-11-15 from 03:27 to 03:49, Node 24.16.0, SQLite 3.53.0, the
+binding built in release). The load was 9.4 to 17.8 at the runs' ends and beginnings, from other sessions' work:
+the two arms are compared with each other, run against run, and no time here is a quiet machine's.
+
+| | phase 2, run 1 | phase 4, run 1 | phase 2, run 2 | phase 4, run 2 | SQLite, the four runs |
+|---|---:|---:|---:|---:|---:|
+| Every note in the names' order, a million ids handed over | 2,348 ms | 1,881 ms | 2,321 ms | 1,959 ms | 902 to 942 ms |
+| Every note in the number's order | 1,610 ms | 272 ms | 1,533 ms | 420 ms | 1,942 to 2,238 ms |
+| A unit that gives 1,000 notes each a name elsewhere in the order | 43.3 ms | 37.5 ms | 37.4 ms | 38.4 ms | |
+| A unit that gives 1,000 notes each the other status | 34.1 ms | 32.3 ms | 32.4 ms | 32.7 ms | |
+
+Both arms visited 1,000,092 entities for each whole order, ten for the first ten names, and held the same bytes: the
+name's index 113.2 MB, the status's 1.1 MB, the number's 27.0 MB, a note 1,327 bytes as loaded. The first ten names,
+the page of 50 and the range of 200 took the same in both, 0.05, 0.13 and 0.4 to 0.5 ms.
+
+What they say. The number's whole order takes a fifth of phase 2's time, 0.17 and 0.27 of it, and meets the gate.
+The names' takes 0.80 and 0.84 of it, and does not: resolving the order in its keys' order saves a fifth of the
+walk where the strings are a million distinct ones, each its own key of the order and its own entry. The number's
+whole order hands over as many ids and reads as many entities in under a quarter of the names' time, so what is
+left is the strings' own part: the order's million keys walked and their strings met with their entries. The two units are the same in both arms, phase 2 filing the same keys.
+
+## The names' whole order, its strings kept as their keys' bytes
+
+The names' whole order above took 0.80 and 0.84 of phase 2's time. A profile of it alone, by
+`cargo run --profile profiling -p elmdb --example profile-order -- name 1000000` under macOS `sample` (Apple M1 Pro,
+2026-11-15, load 11 to 15, the example's million notes those of `against-sqlite.mjs` without the text index, each
+read about 2,000 ms there), put nearly all of it in what the read built for each string, and little in LMDB: the
+`d/xo` key decoded into an owned string and parts, 17% of the samples; the string's `d/x` key encoded again to find
+its entry, 14%; a hash map of the million keys, 11%; and for each entry a key of its blocks, a set of its places and
+a list from the set, 30%. Naming the entities and putting the ids back, the part the number's order shares, was 6%.
+So the read changed (`engine/reads.rs`, `whole_strings`): a string is kept as the bytes of its part of the order's
+key, which are the bytes of its part of its entry's key, and decoded only in a run the collator orders again; the
+parts are sorted by their bytes and met with their entries by one walk; and an entry's own places are read where
+they are. The example then read the names' order in 316 to 354 ms and the number's in 235 to 265, five reads of
+each at `2b73f06` (load 7.7 to 8.5).
+
+Read again as above, by `against-sqlite.mjs` as of the section before, on phase 2's engine, `5b691bb`, and on
+`session/names-order-half` at `2b73f06`, alternated, two runs of each, a million notes (Apple M1 Pro, 2026-11-15 from
+05:35 to 05:55, Node 24.16.0, SQLite 3.53.0, the binding built in release). The load was 5.8 to 11.7 at the runs'
+ends and beginnings, and 17.9 at the last run's end:
+
+| | phase 2, run 1 | this, run 1 | phase 2, run 2 | this, run 2 | SQLite, the four runs |
+|---|---:|---:|---:|---:|---:|
+| Every note in the names' order, a million ids handed over | 2,396 ms | 366 ms | 2,348 ms | 354 ms | 800 to 932 ms |
+| Every note in the number's order | 1,540 ms | 285 ms | 1,572 ms | 302 ms | 1,972 to 2,155 ms |
+| A unit that gives 1,000 notes each a name elsewhere in the order | 35.9 ms | 37.9 ms | 36.8 ms | 37.5 ms | |
+| A unit that gives 1,000 notes each the other status | 34.9 ms | 32.9 ms | 31.7 ms | 33.8 ms | |
+
+Both arms visited 1,000,092 entities for each whole order and ten for the first ten names, and held the same bytes:
+the name's index 113.2 MB, the status's 1.1 MB, the number's 27.0 MB, a note 1,327 bytes as loaded. The first ten
+names, the page of 50 and the range of 200 took the same in both, 0.05, 0.12 to 0.13 and 0.40 to 0.44 ms.
+
+What they say. The names' whole order takes 0.15 of phase 2's time in both runs, and the number's 0.19, so phase 4's
+gate is met for both; the names' order of a million distinct strings now costs about what the number's does, the
+part they share, and reads in 0.41 and 0.39 of SQLite's time in the same runs. The writes are the same in both arms.
+
+A first pair of runs (2026-11-15 from 04:59 to 05:28, load 12.9 to 37.1), of an earlier build of the same read that
+differed in how its code meets the strings and their entries and not in what it reads, took 365 and 393 ms for the
+names' order against phase 2's 2,309; phase 2's other run of that pair ended when the disk filled under SQLite's
+rebuild, so the pair above was read again whole.

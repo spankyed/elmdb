@@ -117,3 +117,20 @@ fn an_owner_reading_the_same_keys_and_ranges_again_files_them_once() {
     index.add(&"w", reads());
     assert_eq!(index.size(), (1, 4), "a removed owner files its reads anew");
 }
+
+#[test]
+fn a_read_set_is_touched_by_a_key_it_got_or_one_in_a_range_it_read_and_by_no_other() {
+    let reads = ReadSet {
+        keys: [b"k".to_vec()].into(),
+        ranges: vec![(b"b".to_vec(), Some(b"d".to_vec())), (b"x".to_vec(), None)],
+    };
+    let touched = |keys: &[&[u8]]| reads.touched_by(&keys.iter().map(|key| key.to_vec()).collect());
+    assert!(touched(&[b"k"]), "a key it got");
+    assert!(touched(&[b"b"]) && touched(&[b"c"]), "a range holds its low end and what is between");
+    assert!(!touched(&[b"d"]), "and not its high end");
+    assert!(touched(&[b"z"]), "a range with no high end runs to the store's end");
+    assert!(!touched(&[b"a", b"e", b"w"]), "keys before, between and after its ranges");
+    assert!(touched(&[b"a", b"c"]), "any one of several keys");
+    assert!(!touched(&[]));
+    assert!(ReadSet::everything().touched_by(&[b"anything".to_vec()].into()));
+}

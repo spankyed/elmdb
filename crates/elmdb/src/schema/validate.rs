@@ -257,7 +257,7 @@ impl Validator<'_> {
                         None => self.problem(field_at, format!("no such field on {type_name}"), who),
                         Some(value) if !value.is_value_indexable() => self.problem(
                             field_at,
-                            format!("a value index can't hold a {} field (\"{field}\")", value.name()),
+                            format!("a value index can't hold {} field (\"{field}\")", value.named()),
                             who,
                         ),
                         Some(_) => {}
@@ -275,8 +275,8 @@ impl Validator<'_> {
                         Some(value) if !value.is_text() && *value != ValueType::Any => self.problem(
                             field_at.clone(),
                             format!(
-                                "a text index reads string and any fields, and \"{field}\" is a {} field",
-                                value.name()
+                                "a text index reads string and any fields, and \"{field}\" is {} field",
+                                value.named()
                             ),
                             who,
                         ),
@@ -309,8 +309,8 @@ impl Validator<'_> {
                         Some(value) if !value.is_text() && *value != ValueType::Any => self.problem(
                             field_at,
                             format!(
-                                "a trigram index reads string and any fields, and \"{field}\" is a {} field",
-                                value.name()
+                                "a trigram index reads string and any fields, and \"{field}\" is {} field",
+                                value.named()
                             ),
                             who,
                         ),
@@ -340,8 +340,8 @@ impl Validator<'_> {
                         Some(value) if !value.is_text() && *value != ValueType::Any => self.problem(
                             field_at,
                             format!(
-                                "a vector index embeds string and any fields, and \"{field}\" is a {} field",
-                                value.name()
+                                "a vector index embeds string and any fields, and \"{field}\" is {} field",
+                                value.named()
                             ),
                             who,
                         ),

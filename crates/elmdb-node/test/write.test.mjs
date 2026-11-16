@@ -23,8 +23,8 @@ function open(t) {
   return db;
 }
 
-// A unit has no blocking write of its own: it writes as it always has
-const write = (target, ops) => packr.unpack(('writeSync' in target ? target.writeSync : target.write).call(target, packr.pack({ ops, now: 1000 })));
+// A database and a unit write alike, each answering on this thread
+const write = (target, ops) => packr.unpack(target.write(packr.pack({ ops, now: 1000 })));
 
 test('a batch creates and links, and answers each operation and the change set', (t) => {
   const db = open(t);
@@ -47,7 +47,7 @@ test('a path and each entity\'s degree cross the binding', (t) => {
     { op: 'link', source: 'Note-2', kind: 'refs', target: 'Note-3' },
   ]);
   const start = { from: 'ids', ids: ['Note-1'] };
-  const [path, degrees] = packr.unpack(db.readSync(packr.pack({ reads: [
+  const [path, degrees] = packr.unpack(db.read(packr.pack({ reads: [
     { read: 'query', plan: { start, steps: [{ step: 'pathTo', to: 'Note-3', kinds: ['refs'] }], terminal: { answer: 'ids' } } },
     { read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'degrees', kinds: ['refs'], direction: 'both' } } },
   ] })));
@@ -57,18 +57,18 @@ test('a path and each entity\'s degree cross the binding', (t) => {
 
 test('a refused batch throws its code and writes nothing', (t) => {
   const db = open(t);
-  assert.throws(() => db.writeSync(packr.pack({ ops: [{ op: 'create', type: 'Note', fields: {} }] })), { code: 'REQUIRED_FIELD' });
+  assert.throws(() => db.write(packr.pack({ ops: [{ op: 'create', type: 'Note', fields: {} }] })), { code: 'REQUIRED_FIELD' });
   // Bytes outside msgpack's value spec are a value elmdb doesn't store; well-formed bytes that are no batch are a batch
-  assert.throws(() => db.writeSync(Buffer.from([0xc1])), { code: 'VALUE_INVALID' });
-  assert.throws(() => db.writeSync(packr.pack({ ops: [{ op: 'set', id: 'Note-1', fields: { n: Number.NaN }, touch: false }] })), { code: 'VALUE_INVALID' });
-  assert.throws(() => db.writeSync(packr.pack({ ops: [{ op: 'explode' }] })), { code: 'BATCH_INVALID' });
+  assert.throws(() => db.write(Buffer.from([0xc1])), { code: 'VALUE_INVALID' });
+  assert.throws(() => db.write(packr.pack({ ops: [{ op: 'set', id: 'Note-1', fields: { n: Number.NaN }, touch: false }] })), { code: 'VALUE_INVALID' });
+  assert.throws(() => db.write(packr.pack({ ops: [{ op: 'explode' }] })), { code: 'BATCH_INVALID' });
 });
 
 test('a unit reads its own writes, refuses a write beside it, and commits its change set', (t) => {
   const db = open(t);
   const unit = db.begin();
   write(unit, [{ op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } }]);
-  assert.throws(() => db.writeSync(packr.pack({ ops: [] })), { code: 'UNIT_OPEN' });
+  assert.throws(() => db.write(packr.pack({ ops: [] })), { code: 'UNIT_OPEN' });
   const depth = unit.savepoint();
   write(unit, [{ op: 'create', type: 'Note', id: 'Note-2', fields: { title: 'two' } }]);
   unit.rollbackTo(depth);
@@ -89,13 +89,13 @@ test('reads answer on this thread and on the pool, the same, and a unit reads it
     { read: 'query', plan: { start: { from: 'types', types: ['Note'] }, steps: [{ step: 'orderBy', field: 'title', descending: true }], terminal: { answer: 'rows', fields: ['title'] } } },
     { read: 'row', id: 'Note-1' },
   ] });
-  const now = packr.unpack(db.readSync(reads));
-  const pooled = packr.unpack(await db.read(reads));
+  const now = packr.unpack(db.read(reads));
+  const pooled = packr.unpack(await db.readAsync(reads));
   assert.deepEqual(pooled, now);
   assert.deepEqual(now[0].rows, [{ id: 'Note-2', title: 'two' }, { id: 'Note-1', title: 'one' }]);
   assert.equal(now[0].plainObjects, true);
   assert.equal(now[1].row.entityType, 'Note');
-  await assert.rejects(db.read(packr.pack({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Nope'] }, terminal: { answer: 'ids' } } }] })), { code: 'UNKNOWN_TYPE' });
+  await assert.rejects(db.readAsync(packr.pack({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Nope'] }, terminal: { answer: 'ids' } } }] })), { code: 'UNKNOWN_TYPE' });
   const unit = db.begin();
   write(unit, [{ op: 'create', type: 'Note', id: 'Note-3', fields: { title: 'three' } }]);
   const inUnit = packr.unpack(unit.read(packr.pack({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'count' } } }] })));
@@ -107,16 +107,16 @@ test('admin: stats, check, a backup that opens on its own, reset, and a load the
   const db = open(t);
   write(db, [{ op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } }]);
   assert.equal(db.stats().types.Note.live, 1);
-  assert.deepEqual(db.checkSync(), { differences: [], violations: [] });
+  assert.deepEqual(db.check(), { differences: [], violations: [], notes: [] });
   assert.ok(db.indexStatus().every((s) => s.built));
   const target = mkdtempSync(join(tmpdir(), 'elmdb-backup-'));
   t.after(() => rmSync(target, { recursive: true, force: true }));
-  db.backupSync(join(target, 'b'));
+  db.backup(join(target, 'b'));
   const copy = Database.open(join(target, 'b'), { readOnly: true });
-  assert.equal(packr.unpack(copy.readSync(packr.pack({ reads: [{ read: 'row', id: 'Note-1' }] })))[0].row.title, 'one');
+  assert.equal(packr.unpack(copy.read(packr.pack({ reads: [{ read: 'row', id: 'Note-1' }] })))[0].row.title, 'one');
   copy.close();
   db.bulkLoad(packr.pack([{ load: 'entity', id: 'Note-2', fields: {} }]));
-  assert.match(db.checkSync().violations[0].message, /lacks title/);
+  assert.match(db.check().violations[0].message, /lacks title/);
   // A load skips the schema's rules, not the value spec: a weight that is no number is refused, and so are bytes that are no loads
   const nan = { load: 'relation', id: 'Relation-x', kind: 'refs', source: 'Note-1', target: 'Note-2', weight: Number.NaN };
   assert.throws(() => db.bulkLoad(packr.pack([nan])), { code: 'VALUE_INVALID' });

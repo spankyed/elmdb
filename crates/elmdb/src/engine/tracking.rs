@@ -21,6 +21,25 @@ pub struct ReadSet {
     pub ranges: Vec<(Vec<u8>, Option<Vec<u8>>)>,
 }
 
+impl ReadSet {
+    /// What a read that read nothing stands for when it failed: everything, so that any commit names it, where nothing
+    /// would leave whoever filed it on the failure for good
+    pub fn everything() -> Self {
+        ReadSet { keys: BTreeSet::new(), ranges: vec![(Vec::new(), None)] }
+    }
+
+    /// Whether a commit that wrote `written` wrote into what these reads read: one of their keys, or a key in one of
+    /// their ranges, as `TrackIndex::touched_by` finds it
+    pub fn touched_by(&self, written: &HashSet<Vec<u8>>) -> bool {
+        written.iter().any(|key| {
+            self.keys.contains(key)
+                || self.ranges.iter().any(|(low, high)| {
+                    low.as_slice() <= key.as_slice() && high.as_deref().is_none_or(|high| key.as_slice() < high)
+                })
+        })
+    }
+}
+
 /// The least key above every key `key` starts: `key` with its trailing `0xFF`s dropped and its last byte raised, or the
 /// store's end for one of nothing but `0xFF`s
 fn above_all_starting(key: &[u8]) -> Option<Vec<u8>> {

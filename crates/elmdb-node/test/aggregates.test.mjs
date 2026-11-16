@@ -23,11 +23,11 @@ test('least, greatest and sum answer what the set of a plan holds, through the b
     rmSync(dir, { recursive: true, force: true });
   });
   const prices = [5, 2, 9, undefined, 2, 7.5];
-  db.writeSync(packr.pack({
+  db.write(packr.pack({
     ops: prices.map((price, i) => ({ op: 'create', type: 'Item', id: `Item-${i}`, fields: { ...(price === undefined ? {} : { price }), qty: 1, name: `item ${i}` } })),
     now: 1000,
   }));
-  const answer = (terminal) => packr.unpack(db.readSync(packr.pack({
+  const answer = (terminal) => packr.unpack(db.read(packr.pack({
     reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Item'] }, terminal } }],
   })))[0];
   assert.deepEqual(answer({ answer: 'least', field: 'price' }), { kind: 'least', id: 'Item-1', value: 2 });

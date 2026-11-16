@@ -32,7 +32,7 @@ positive = mounted(executable(Path.cwd(), os.environ))
 print(positive.stdout)
 assert positive.returncode == 0 and "ELMDB_READ_ONLY_MOUNT_REFUSED" in positive.stdout
 mutations = [
-    ("crates/elmdb/src/store/mod.rs", "require_registered_reader(&env, &canonical)?;",
+    ("crates/elmdb/src/store/mod.rs", "registered(&env, &canonical, &opening.read()?)?;",
      "a read-only mount must not open without a lock table"),
     ("crates/elmdb/src/engine/maintenance.rs", "crate::store::require_registered_reader(&env, source)?;",
      "a replacement source must register its reader"),

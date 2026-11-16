@@ -60,6 +60,9 @@ fn a_windows_read_only_map_never_claims_unmapped_file_capacity() {
     assert_eq!(read_only_map_size(32 * 4096, None), 32 * 4096);
     assert_eq!(read_only_map_size(32 * 4096, Some(MAP_STEP)), 32 * 4096);
     assert_eq!(read_only_map_size(32 * 4096, Some(16 * 4096)), 16 * 4096);
+    // A torn tail page leaves the file short of whole pages: the view ends at the last whole one, whatever was asked
+    assert_eq!(read_only_map_size(32 * 4096 + 100, None), 32 * 4096);
+    assert_eq!(read_only_map_size(32 * 4096 + 100, Some(MAP_STEP)), 32 * 4096);
 }
 
 #[cfg(windows)]
@@ -422,6 +425,37 @@ fn a_read_after_another_process_commits_sees_the_commit_though_a_read_transactio
     assert_eq!(get(&store, "a").as_deref(), Some(&b"2"[..]));
 }
 
+/// Asks for a read of `key` at the last commit, held for later, which sends what it read to the receiver answered
+fn ask_for(store: &Store, key: &str) -> (CallRead, std::sync::mpsc::Receiver<Option<Vec<u8>>>) {
+    let (told, answer) = std::sync::mpsc::channel();
+    let key = crate::format::key::encode(&[key.into()]);
+    let read = move |txn: &RoTxn<'static, WithoutTls>, db: Db| {
+        told.send(db.get(txn, &key).unwrap().map(<[u8]>::to_vec)).unwrap();
+    };
+    (store.ask(read).unwrap().expect("held, not run at the call"), answer)
+}
+
+#[test]
+fn a_read_asked_before_another_process_grew_the_map_runs_on_its_own_snapshot_when_this_one_takes_the_new_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(16 * (16 << 10)), ..quiet() }).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let (asked, answer) = ask_for(&store, "grown");
+    grow_elsewhere(dir.path());
+    let before = store.map_size();
+    // The next read asked here is refused the map as it was, which is taken at its new size once the read waiting has
+    // run on its own snapshot, and then asked again
+    let (after, answer_after) = ask_for(&store, "grown");
+    assert!(store.map_size() > before, "the map was taken at the size the other process grew it to");
+    assert_eq!(answer.try_recv().unwrap(), None, "the read ran on a later snapshot than its call's");
+    assert_eq!(store.held_for_calls(), (1, 1));
+    store.run_asked(asked).unwrap();
+    assert!(answer.try_recv().is_err(), "the read ran twice");
+    store.run_asked(after).unwrap();
+    assert_eq!(answer_after.try_recv().unwrap().as_deref(), Some(&b"yes"[..]));
+    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+}
+
 #[test]
 fn a_listener_is_told_of_what_another_process_commits_and_not_of_its_own() {
     let dir = tempfile::tempdir().unwrap();
@@ -675,6 +709,21 @@ fn backup_reports_a_postpublication_sync_failure_without_losing_the_complete_cop
 }
 
 #[test]
+fn backup_reports_a_record_it_could_not_remove_as_after_its_publication() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "value", b"complete").unwrap();
+    // A record's name that no file removal takes: a directory, with something in it
+    std::fs::create_dir(target.path().join(record::RECORD)).unwrap();
+    std::fs::write(target.path().join(record::RECORD).join("held"), b"").unwrap();
+    let error = store.copy_to(target.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("was published") && error.message.contains("retrying backup is safe"), "{error}");
+    assert!(target.path().join("data.mdb").is_file(), "the copy wasn't published");
+}
+
+#[test]
 fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -885,6 +934,10 @@ fn room_is_made_by_growing_the_map_to_as_many_times_what_is_in_use() {
     writer.release();
     store.end_unit();
     assert_eq!(store.map_size(), grown);
+    drop(store);
+    // A growth refused for any other reason is the caller's to hear: a read-only store grows nothing, and says why
+    let read_only = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    assert_eq!(read_only.make_room(1000).unwrap_err().code, ErrorCode::ReadOnly);
 }
 
 #[test]
@@ -903,7 +956,9 @@ fn a_store_closing_at_exit_reports_a_sync_that_failed() {
 #[ignore = "run only by the tests that grow a database from another process, as their child process"]
 fn child_grower() {
     let Ok(path) = std::env::var("ELMDB_GROW_DB") else { return };
-    let store = Store::open(Path::new(&path), quiet()).unwrap();
+    // In the parent's mode: a writer of another is refused while the parent has the database open
+    let options = if std::env::var("ELMDB_GROW_GROUPED").is_ok() { StoreOptions::default() } else { quiet() };
+    let store = Store::open(Path::new(&path), options).unwrap();
     let value = vec![9u8; 64 << 10];
     store
         .write(
@@ -1294,9 +1349,10 @@ fn what_reads_through_the_map_waits_for_a_resize_of_it_to_end() {
     // A process that is exiting waits on no thread, one resizing the map among them: it syncs what it can read
     put(&store, "a", b"owed").unwrap();
     let resizing = store.gate.write();
-    assert_eq!(store.sync_owed().unwrap_err().code, ErrorCode::Io);
+    let deadline = || std::time::Instant::now() + Duration::from_secs(1);
+    assert_eq!(store.sync_owed(deadline()).unwrap_err().code, ErrorCode::Io);
     drop(resizing);
-    store.sync_owed().unwrap();
+    store.sync_owed(deadline()).unwrap();
 }
 /// A store of many rows, of which `destroy` removes them all in one commit, and its data file's path
 fn filled(dir: &tempfile::TempDir, destroy: bool) -> std::path::PathBuf {
@@ -1397,6 +1453,28 @@ fn drained(dir: &tempfile::TempDir) -> std::path::PathBuf {
     data
 }
 
+/// Counts on this thread each time an open syncs a commit of its own, from now on
+fn count_open_syncs(count: std::rc::Rc<std::cell::Cell<u32>>) {
+    crate::failpoints::run_once_here(crate::failpoints::points::OPEN_SYNCED, move || {
+        count.set(count.get() + 1);
+        count_open_syncs(std::rc::Rc::clone(&count));
+    });
+}
+
+#[test]
+fn an_open_syncs_each_commit_it_makes_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let synced = std::rc::Rc::new(std::cell::Cell::new(0));
+    count_open_syncs(std::rc::Rc::clone(&synced));
+    // A new environment's stamp, then the graphs' databases: two commits of the open's own, which group commit never
+    // hears of, each synced before the open goes on. So a database made and closed has no commit left unsynced
+    Store::open(dir.path(), quiet()).unwrap().close().unwrap();
+    assert_eq!(synced.get(), 2);
+    // Opened again the environment has both: the open commits nothing, and syncs nothing
+    Store::open(dir.path(), quiet()).unwrap().close().unwrap();
+    assert_eq!(synced.get(), 2);
+}
+
 #[test]
 fn a_short_file_whose_tail_the_trees_do_not_reach_opens_and_a_writable_open_extends_it() {
     // Emptied, the trees reach far fewer pages than the file holds, and LMDB leaves the free tail out of the file. Such a
@@ -1456,11 +1534,53 @@ fn a_writable_open_cuts_nothing_another_process_wrote_after_the_file_was_found_s
             written.set(std::fs::metadata(&data).unwrap().len());
         }
     });
-    let store = Store::open(dir.path(), quiet()).expect("a writable open of a healthy short file");
+    // The open's map is no larger than the file it found, so what the other process wrote is past it: the write
+    // transaction the file is extended under is the first the open begins after, and takes the grown map
+    let found_grown = Rc::new(Cell::new(false));
+    failpoints::run_once_here(points::OPEN_MAP_GROWN, {
+        let found_grown = Rc::clone(&found_grown);
+        move || found_grown.set(true)
+    });
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(1 << 20), ..quiet() })
+        .expect("a writable open of a healthy short file");
     assert!(written.get() > (last + 1) * page, "the other process wrote past the pages the open had read of");
+    assert!(found_grown.get(), "the open began its write transaction in the map the other process had outgrown");
     let held = std::fs::metadata(&data).unwrap().len();
     assert!(held >= written.get(), "the open cut the file to {held} bytes, of the {} written", written.get());
     assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+}
+
+#[test]
+fn an_open_takes_the_map_another_process_grows_the_file_past_while_it_opens() {
+    use crate::failpoints::{self, points};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    // Grown before the open's first transaction, which for a read-only open is the one its reader is registered by
+    // and for a writable one the snapshot its walk reads at, and grown after the walk, before the databases are opened
+    let cases = [points::OPEN_ENV, points::OPEN_WALKED].into_iter().flat_map(|point| [(point, false), (point, true)]);
+    for (point, read_only) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let small = 1 << 20;
+        let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), ..quiet() }).unwrap();
+        put(&store, "a", b"1").unwrap();
+        store.close().unwrap();
+        // The open holds the file in a map of 1 MiB when another process writes some 4 MiB: each transaction it
+        // begins from then on is refused in the map as it was opened, until it takes the new size
+        failpoints::run_once_here(point, {
+            let dir = dir.path().to_path_buf();
+            move || grow_elsewhere(&dir)
+        });
+        let found_grown = Rc::new(Cell::new(false));
+        failpoints::run_once_here(points::OPEN_MAP_GROWN, {
+            let found_grown = Rc::clone(&found_grown);
+            move || found_grown.set(true)
+        });
+        let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(small), read_only, ..quiet() })
+            .unwrap_or_else(|e| panic!("an open while another process grows the file at {point}: {e}"));
+        assert!(found_grown.get(), "the open began a transaction in the map the other process had outgrown");
+        assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+        assert!(store.map_size() > small);
+    }
 }
 
 #[test]
@@ -1522,7 +1642,8 @@ fn a_file_that_holds_every_page_its_meta_page_names_is_not_read_for_its_trees() 
     let mut file = std::fs::File::open(&data).unwrap();
     let page = super::page_size_of(&mut file, &data).unwrap();
     assert_eq!(std::fs::metadata(&data).unwrap().len(), (store.env.info().last_page_number as u64 + 1) * page as u64);
-    assert!(!super::short_of_its_pages(&store.env, &mut file, page, &data).unwrap(), "a whole file is not short");
+    let opening = super::Opening { env: &store.env, dir: store.path(), read_only: false, kept: None };
+    assert!(!super::short_of_its_pages(&opening, &mut file, page, &data).unwrap(), "a whole file is not short");
 }
 
 #[test]
@@ -1636,6 +1757,26 @@ fn a_file_names_its_own_page_size_whatever_the_host_is() {
     image[40..44].copy_from_slice(&3000u32.to_ne_bytes());
     std::fs::write(&path, &image).unwrap();
     let refused = super::page_size_of(&mut std::fs::File::open(&path).unwrap(), &path).expect_err("refused");
+    assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
+}
+
+#[test]
+fn a_file_one_byte_short_of_a_page_its_trees_reach_is_refused_read_only_as_corrupt() {
+    // Cut inside a page the trees reach, so the file is short of whole pages: refused as corrupt by the walk on every
+    // platform, Windows' read-only view included, not as an I/O failure of the map
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path(), quiet()).unwrap();
+        put(&store, "big", &vec![9u8; 200_000]).unwrap();
+    }
+    let data = dir.path().join("data.mdb");
+    let (highest, last) = reached_in(&dir, &data);
+    assert_eq!(highest, last, "the big value's overflow pages are the file's last, and the trees reach them");
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len((last + 1) * page - 1).unwrap();
+    drop(file);
+    let refused = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("refused");
     assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
 }
 

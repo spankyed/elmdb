@@ -18,7 +18,7 @@ const batch = (id) => packr.pack({ ops: [{ op: 'create', type: 'Note', id, field
 const reads = packr.pack({ reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'ids' } } }] });
 const none = Buffer.alloc(0);
 const open = () => Database.open(dir, { schema, syncs: false });
-const ids = (db) => packr.unpack(db.readSync(reads))[0].ids;
+const ids = (db) => packr.unpack(db.read(reads))[0].ids;
 
 /** The error `call` throws, or none */
 const thrown = (call) => {
@@ -51,11 +51,11 @@ const ofDatabase = {
   schema: (db) => db.schema,
   setSchema: (db) => db.setSchema(schema),
   openReport: (db) => db.openReport,
+  acknowledgeRestore: (db) => db.acknowledgeRestore(),
   syncs: (db) => db.syncs,
   write: (db) => db.write(batch('Note-lost')),
-  writeSync: (db) => db.writeSync(batch('Note-lost')),
-  readSync: (db) => db.readSync(reads),
   read: (db) => db.read(reads),
+  readAsync: (db) => db.readAsync(reads),
   untrack: (db) => db.untrack(1),
   hearBuilderCommits: (db) => db.hearBuilderCommits(() => {}),
   hearCommitsElsewhere: (db) => db.hearCommitsElsewhere(() => {}),
@@ -65,9 +65,9 @@ const ofDatabase = {
   sequence: (db) => db.sequence,
   begin: (db) => db.begin(),
   check: (db) => db.check(),
-  checkSync: (db) => db.checkSync(),
+  checkAsync: (db) => db.checkAsync(),
   rebuild: (db) => db.rebuild(),
-  rebuildSync: (db) => db.rebuildSync(),
+  rebuildAsync: (db) => db.rebuildAsync(),
   indexStatus: (db) => db.indexStatus(),
   committedElsewhere: (db) => db.committedElsewhere(),
   checkpoint: (db) => db.checkpoint('reader'),
@@ -78,7 +78,7 @@ const ofDatabase = {
   renameField: (db) => db.renameField('Note', 'gone', 'went'),
   renameRelation: (db) => db.renameRelation('gone', 'went'),
   backup: (db) => db.backup(join(dir, 'backup')),
-  backupSync: (db) => db.backupSync(join(dir, 'backup')),
+  backupAsync: (db) => db.backupAsync(join(dir, 'backup')),
   replaceWith: (db) => db.replaceWith(join(dir, 'nothing')),
   stats: (db) => db.stats(),
   bulkLoad: (db) => db.bulkLoad(packr.pack([])),
@@ -153,6 +153,6 @@ const unit = db.begin();
 unit.write(batch('Note-after'));
 assert.deepEqual(packr.unpack(unit.read(reads))[0].ids, ['Note-kept', 'Note-after']);
 unit.abort();
-assert.equal(db.checkSync().differences.length, 0);
+assert.equal(db.check().differences.length, 0);
 db.close();
 console.log(`${name} panicked, and the process lives`);

@@ -13,7 +13,7 @@
 //! finalizer a panic would unwind out of into Node.
 //!
 //! A test asks for a panic in an export by starting Node with `ELMDB_TEST_PANIC` set to its name, as its errors
-//! name it (`Database.readSync`): that export then panics the first time it is called
+//! name it (`Database.read`): that export then panics the first time it is called
 //! (`docs/architecture/testing.md`, The binding). Nothing else reads the variable, it is read once, and a value
 //! that names no export asks for nothing.
 
@@ -260,9 +260,9 @@ mod tests {
         assert!(health.panicked());
         // Refused without running, by the first panic, which a later one doesn't replace
         let mut ran = false;
-        let refused = health.caught("Database.readSync", || ran = true).unwrap_err();
+        let refused = health.caught("Database.read", || ran = true).unwrap_err();
         assert!(!ran && refused.code == elmdb::ErrorCode::Panicked);
-        assert!(refused.message.starts_with("Database.readSync is refused: "), "{}", refused.message);
+        assert!(refused.message.starts_with("Database.read is refused: "), "{}", refused.message);
         assert!(refused.message.contains("Database.write panicked at ") && refused.message.contains(": once. "));
         assert_eq!(health.always("Database.close", || 5).unwrap(), 5);
         health.always("Database.close", || panic!("twice")).unwrap_err();

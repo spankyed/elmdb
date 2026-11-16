@@ -14,8 +14,15 @@ matter; `durable()` then resolves at once.
 The map starts at twice the data file, 64 MiB at least (`mapSizeBytes` sets it). A unit that fills it is aborted, the
 map doubled while the process has no transaction open, and the unit run again, up to 16 times: a unit is data, so the
 engine can run it again without the caller. A growth also keeps out whatever else reads through the map: a sync and
-each read of the environment's sizes wait for it as a transaction does. A map another process grew is adopted by the
-first read to meet it, `committedElsewhere` included. Mapping capacity and physical file length are separate. On Windows,
+each read of the environment's sizes wait for it as a transaction does. A growth waits for the reads, checks and
+backups running to end. One for a write made outside an open unit, or for a rebuild, is refused (`UNIT_OPEN`) once a
+unit is open, rather than waiting on it; a unit's own beginning grows with its place already reserved, before it takes
+the gate or the writer's turn. A map another process grew is adopted by the first read to meet it,
+`committedElsewhere` included, and by an open that meets it as it opens, each of whose
+transactions takes the grown map and is begun again. What adopts it waits no more than 10 ms for what holds the gate
+(reads, syncs, backups and units), and otherwise begins its own transaction again: a unit open meanwhile has adopted
+the map as it began, and no other process can grow it again before the unit ends, so a sync or a read the unit's
+owner waits on goes on rather than waiting behind the unit. Mapping capacity and physical file length are separate. On Windows,
 a read-only view covers the current physical file: its configured bound is capped to that length at open and when
 adopting external growth, so newly appended pages trigger remapping before access. Read-only handles cannot grow
 the writable capacity. Writable mappings retain the normal capacity policy.
@@ -64,7 +71,10 @@ other targets refuse process-claim acquisition as unsupported.
 On macOS LMDB's lock takes two named POSIX semaphores per database, which the last process to close it removes. The
 Node binding closes what is still open as the process or a worker thread ends (`crates/elmdb-node/src/exit.rs`); a
 process killed by a signal, or one ending with a unit open, leaves them in the system's table until a later open of
-the same path, taking the lock first, replaces them and a close removes them.
+the same path, taking the lock first, replaces them and a close removes them. A close as the process ends waits no
+longer than its deadline for what another thread holds, an operation keeping the store or the schema a write holds
+while it waits for its sync, since on Windows that thread may already have been ended; given up on, it syncs what is
+owed and leaves the database open.
 
 ## Schema
 
@@ -118,18 +128,19 @@ there, `adopt_replacement(epoch)` takes it as seen, and answers false if another
 ## Reads: plans
 
 A call carries several reads, answered from one snapshot (or, in a unit, from its own transaction) in one msgpack
-envelope, an answer per read. A read is a query plan, or a direct read: an entity's row, one of its fields (with
-whether it is present), a relation's row (with its `weight`, for a kind declared weighted), `findRelations` by kind
-and ends, `wouldCreateCycle` (the walk a link's
-`CYCLE` check makes, a trashed entity's edges included), and search's
-`suggest`, `findLabels` and `pendingEmbeddings`, and `catalog`: each declared type with its live entities and the fields its entities have
-held, each declared kind with its relations, and the declared roles. `catalog` reads one key per name, so a watch over it
-runs again only when a count moves or a field is first written; `stats()` is the walk, for what only a walk answers. A search naming an index its type lacks, or none on a type with none or several, is refused
+envelope, an answer per read. A read is a query plan, or a direct read: an entity's row, one of its fields (with whether
+it is present), a relation's row (with its `weight`, for a kind declared weighted), `findRelations` by kind and ends,
+`wouldCreateCycle` (the walk a link's `CYCLE` check makes, a trashed entity's edges included), and search's `suggest`,
+`findLabels` and `pendingEmbeddings`, and `catalog`: each declared type with its live entities and the fields its
+entities have held, each declared kind with its relations, and the declared roles. `catalog` reads one key per name, so
+a watch over it runs again only when a count moves or a field is first written; `stats()` is the walk, for what only a
+walk answers. A search naming an index its type lacks, or none on a type with none or several, is refused
 (`UNKNOWN_INDEX`). A `search`, a `hybrid` or a `suggest` over a text index still being built is refused
 (`INDEX_BUILDING`): its terms and statistics are the answer, with no rows to walk in their place as a value or a trigram
-index's are, so read part way it would answer from the entities filed so far and say nothing of the rest. `waitForIndexBuilds`
-resolves once it is built; a tracked read and a watch are told by the commit that ends the build (below, Change sets
-and watch).
+index's are, so read part way it would answer from the entities filed so far and say nothing of the rest.
+`waitForIndexBuilds` resolves once it is built, and is refused with what holds a build up while the builder waits that
+out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller to make again; a tracked read and a watch are told by
+the commit that ends the build (below, Change sets and watch).
 
 A plan is a scope, a start, steps and a terminal:
 
@@ -280,9 +291,45 @@ an answer:
   in place order, then the entities without a value; `descending`, those first and the values from the greatest. Such
   an index accounts for every entity of its type (`schema.md`, Indexes), which is what lets the walk leave none out.
   Each entity is handed on as its entry is read, so a `limit`, `first` or `exists` after it reads no further than its
-  answer: the first ten of a million read ten. A field holding a string, whose order is the collation's and not its
-  entry's bytes', or a list or another value the index doesn't order, is sorted as before, as are several types, a
-  start of ids, and the trash alone.
+  answer: the first ten of a million read ten. A string is after every number and before the entities without a
+  value, and its order is the collation's, which its entry's bytes don't have: it is read from the order the index
+  keeps of its strings (the next point), where this elmdb filed that order and holds it whole; under any other
+  marker, and under names and values that leave its keys no room, the set is sorted as before. So are a field
+  holding a list or another value the index doesn't order, several types, a start of ids, and the trash alone. A
+  range of numbers holds no string, and is read from the index whatever strings the field holds.
+- **An order of strings is kept beside the index's entries** (`engine/order.rs`, `../roadmap/string-order.md`). A
+  value index a schema declares has, under each tuple of the values before its last field, a key for each string an
+  entry is for, where the collation orders it: the string's sort key as far as the key has room, whether it was cut,
+  and the string (`format.md`, `d/xo`). A write puts the key with the entry's first place and deletes it with its
+  last, so a write that repeats a string another entity holds files nothing. An entity holding a string with no
+  such key, one past 256 bytes or one whose zero bytes make it as long in a key, has a key of its own, by its place.
+  A read walks the keys, forwards or from the last, and reads each string's entities from its entry, in place
+  order. Keys of one sort key are a run: strings the collator holds equal, in the order of their bytes, are handed
+  on as they are walked, and a run whose sort key was cut, or that holds an entity filed by its place, is ordered
+  by the collator and then the bytes before any of it is, from the strings in its keys and the rows of the entities
+  filed by place. A sort key is the collator's output and is stale after any change to it, so an order has a marker
+  (`d/xob`): the stamp of the collator that filed it, a build, and whether the build is whole. A read trusts keys
+  under a whole build of its own stamp. A write that files a string or takes one out reads the marker: under its own
+  stamp it files under the marker's build, and under another's it deletes the marker and files nothing, which ends
+  that build, since what the other would have filed is its layout's. The builder builds the order of a built index
+  whose marker isn't its own and whole, from the index's entries and the rows of its long strings, beside the writes
+  that keep it, and deletes what is under any other build; `rebuild()` files an order whole under a build of its
+  own, and an index marked built with no entity has its order whole with it. A `range` with string bounds reads
+  the same keys, alone, counted, among a type's leading filters and before an order: it seeks the run of each
+  bound's sort key and walks between them, and tests each string it comes to against the bounds by the collator,
+  which is what a bound whose sort key was cut, and one the collator holds equal to a string of other bytes, ask. A build this builder began and finds
+  ended is begun again after a wait that doubles, so two elmdbs of different collators writing one database leave
+  its orders to the rows more of the time the longer both stay.
+- **An order taken whole is resolved in the order of its keys.** An order read from an index with no `limit` after
+  it, under a terminal that answers of every entity, reads the places first and names the entities at them by one
+  walk of the type's entities in place order, putting the ids back in the order's, where naming each as it is
+  handed on is a seek for each; the entries of its strings are met by one walk of the index's entries the same way
+  when they are 256 or more. Its strings are kept as the bytes of their parts of the order's keys, and sorted by
+  them for that walk, which is their entries' order: only a run of keys the collator orders again is decoded, one
+  of a cut sort key or holding an entity filed by its place, and every run under a range. An order of fewer than
+  one in eight of the type's live entities, which equalities or a range keep, names each by its own seek, and one a `limit`, `first` or `exists` may stop is handed on an entity
+  at a time, so a page reads its own. It holds its places in memory, and a tracked read of a whole order is one a
+  commit to any entity of the type writes into.
 - **A least and a greatest are an order's ends.** `least` and `greatest` of a field over a set an order of that
   field would be read from an index for (the points on either side of this one) answer the first entry under the index's least
   value or under its greatest, the first in place order of those holding it, passing over an entry of an entity the
@@ -295,7 +342,8 @@ an answer:
   `orderBy n`, then `limit 10` reads ten entries of an index on `[status, n]`, and a page after a cursor is sought
   in it as in any order read from an index. A list in an equality's field is under each of its elements
   (`schema.md`, Indexes), so `where tags = x`, then `orderBy updatedAt`, reads an index on `[tags, updatedAt]`.
-  The index is read while, under those values, it holds no entity it doesn't order and no entry of a string;
+  The index is read while, under those values, it holds no entity it doesn't order and no string, in an entry or
+  among the long ones;
   otherwise the equalities are filtered and their matches sorted. What an entity under other values holds leaves
   the read alone: one task with a list for its number has its own status sorted, and no other.
 - **With no such index, the order is walked while that is the cheaper way.** An `orderBy` straight before a `limit`,
@@ -368,11 +416,14 @@ what it answers); and `ms` the time spent in the stage's own code, not in the st
 the stages' times add up to at most the whole. A filter before the stage that reads a type start's filters together
 visits and keeps nothing of its own: that stage does its filtering. An `orderBy` stage that sorted, or walked its
 order testing the filters, for want of an index that reads it in order says which would have: `wants` names that
-index's fields, the equalities' and then its own, where the field is declared a number or a boolean or is a time the
-engine writes, whose order an index's entries have, and each equality is of a field the schema lets an index name.
-So does a `range` the `orderBy` after it reads between. A `search` stage says how many of its matches it `held` to
-rank them: every one, or those ranked past a page's cursor, and of either no more than it was asked for; none when it
-was asked for any one. A search that held every match before a `limit` further on is one a filter stands between.
+index's fields, the equalities' and then its own, where the field is declared a number, a boolean, a string, an enum
+or a `ref`, or is a time the engine writes, whose order an index has, and each equality is of a field the schema lets
+an index name. So does a `range` the `orderBy` after it reads between. One that sorted strings though a built index
+reads its order says why that order wasn't read: `sorted: "noRoom"` where the index's names and the equalities'
+values leave its order's keys no room, and `sorted: "building"` where its order isn't yet one this elmdb filed
+whole. A `search` stage says how many of its matches it `held` to rank them: every one, or those ranked past a
+page's cursor, and of either no more than it was asked for; none when it was asked for any one. A search that held
+every match before a `limit` further on is one a filter stands between.
 A stage that read lists of places, or walked a type's rows, says how many `places` it was handed, each one walked
 or sought; `set: "and"` when it read the places several lists hold in common; and a `search` that ran within its
 filters' places names their indexes as its `index` and says how many places it ran `within`.
@@ -385,8 +436,32 @@ the process makes no further database calls; expiration depends on the operating
 A commit here clears the cache, and an older read finishing after that clear cannot return its snapshot to it.
 Active reads and open units keep their snapshots until they finish. The worker owns only the cache, cannot keep
 the database itself alive, and is joined on normal close; process-exit cleanup detaches it with bounded locking.
-The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.readSync(reads)` runs on the calling thread. `db.read(reads)` runs on a thread of the pool, in a snapshot of its
-own, and resolves with the same answer, so a large read doesn't block the event loop.
+The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.read(reads)` runs on the calling thread. `db.readAsync(reads)` runs on a thread of the pool and resolves with the
+answer `read` would have given at the call, so a large read doesn't block the event loop: its snapshot is the last
+commit as it is at the call, and a commit made before the pool runs it, here or in another process, is not in its
+answer. The reads are decoded and their values checked, and the read transaction is taken, at the call, on the
+calling thread; the transaction is held, outside the gate as an idle one is, until the pool runs the read on it
+(`store/call_reads.rs`), and the read's check of the schema runs then, against the call's schema and snapshot.
+A call made while a growth of the map on another thread runs the reads waiting waits for it, as a `read` would. What
+that holds is bounded. The reads asked at one commit share at most four
+transactions, as many as libuv's pool runs at once unless told more, each used by one read at a time, so a burst of
+calls, a `Promise.all` over many reads, takes four of LMDB's reader slots (126, LMDB's default, which elmdb doesn't
+change, shared by every process with the database open) rather than one each. At most sixteen are held in all, and a
+read asked at a commit that holds none once sixteen are held runs at its call, on the calling thread, which is what a
+loop of writes each followed by a `readAsync` it doesn't await meets. A held snapshot keeps the pages freed since its
+commit from reuse until its read runs, as an idle one does. A growth of the map, and the adoption of a size another
+process grew it to, which no transaction of the process may outlast, first runs every read still waiting, on its own
+snapshot, on the thread that grows the map, and a close refuses the reads still waiting `CLOSED`: no read is run on a
+later snapshot than its call's. A tracked read is filed once it has run, after the commits made since its call, so
+each of those commits notes what it wrote for the reads waiting, and one that wrote into what the read read is told
+to the listener of `hearBuilderCommits`, with its sequence and the read's token, once the read's promise has settled:
+no commit's result could name a read that wasn't filed. So a tracked `readAsync` is refused (`NO_LISTENER`) while no
+listener is registered, as nothing would tell its caller of such a commit. Another process's commits name no tracked
+read here, waiting or filed: when `committedElsewhere()` answers true, a tracked `readAsync` not yet settled is as
+stale as the reads already filed. In Rust the call is `Database::read_at_call` and the answer
+`Database::answer_call_read`. A read still waiting when it is answered through another database than the one that
+asked it is refused `DATABASE_MISMATCH`, and its snapshot let go; one that has run already, at its call or in a
+growth of the asking database's map, answers as it ran, its answer that database's own.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 
@@ -397,36 +472,42 @@ the rest; decoding is most of a long read's cost (`docs/evidence/phase-1.md`).
 
 ## Writes: batches and units
 
-`db.write(batch, durable?)` applies a batch as one unit, on a thread of the pool, answering a promise; `db.writeSync` is
-the same on the calling thread. Writes in flight together are applied one at a time in the order they were asked for,
-a rebuild among them in its turn: the binding keeps them in the database's queue, and one job of the pool at a time
-applies them until none waits (`elmdb-node/src/jobs.rs`). A write is applied after the ones asked before it whether
-or not they were awaited, and a caller awaits one whose answer or failure the next depends on. The order is among
-these promises: a blocking call made while they wait (`writeSync`, `begin`, `setSchema`, a purge, a load) doesn't wait
-its turn among them, and a write that comes to its turn while a unit is open is refused (`UNIT_OPEN`). A `durable`
-write among them is applied with no sync of its own and answered once a sync has covered it: the job goes on to the
-durable writes straight behind it and asks for a sync when the next is no durable write, or none is, or 64 are owed
-one, so a run of them waits for one sync between them, and none waits for a rebuild behind it. Its watches are told
-as it commits, before that sync. A job that catches up with the asking syncs more than once; `offthread.test.mjs`
-asks for forty behind a rebuild, where all of them wait when the job comes to the first, and holds them to one sync.
-Ten awaited in turn took 10 syncs and 42 to 47 ms over three runs of that test, which prints both counts (Apple M1
-Pro, 2026-11-13, the binding built in release). A database's check and backup read, and each is a job of the pool of
-its own; every `…Sync` form runs on the calling thread. A process that exits by `process.exit()` runs the pool to its
-end first, so what was asked for is applied. A refusal made before any work begins (a rebuild naming only a type, a
-handle that
-has panicked) throws at the call in every form; a call on a closed database throws in the blocking forms and rejects the
-promise in the others. A close waits for the operations running, which for a large rebuild or backup is the whole of it,
-so the event loop is held by a close made during one. An operation still queued when the close takes the database
-rejects with `CLOSED` and writes nothing, and a write whose commit has landed is answered as made, not `CLOSED`.
-However many writes wait, for their turn or for the write lock another process holds, they hold one thread of the
-pool between them, which Node shares with its file system work; a check or a backup holds one for as long as it
-runs. A unit can also
+`db.write(batch, durable?)` applies a batch as one unit, on the calling thread, and answers once it has committed,
+or with `durable` once its sync has run. A write is never answered by a promise: what it answers, an entity's id and
+short code, and what it refuses are its caller's at the call, and a read made after it sees it. In the grouped mode a
+`set` committed alone took about 38 µs, one inside a unit about 11 µs and a `create` about 107 µs, through apack's
+engine (`../evidence/phase-10.md`, D17's re-reading, 2026-10-25), and the sync runs later on a thread of its own,
+which `db.durable()` waits for without holding the event loop. A batch of thousands of operations holds the calling
+thread for as long as it runs.
+
+A check, a rebuild and a backup can take as long as the database is large, so each also runs on a thread of the pool,
+answering a promise: `db.checkAsync()`, `db.rebuildAsync(type?, index?)` and `db.backupAsync(target)`, each a job
+of its own (`elmdb-node/src/jobs.rs`); `db.check()`, `db.rebuild()` and `db.backup()` run on the calling thread. A rebuild of 200,000 notes held the event
+loop for its whole 3.5 s in its blocking form and for at most 2.9 ms on the pool (`../evidence/million-notes.md`, Off
+the calling thread). A check and a backup read a snapshot, and the database's writes go on beside them, except a
+write that must grow the map, or a `begin` on a map more than half used, which waits for them to end on the calling
+thread. A rebuild writes, in one unit of its own: a write made on the calling thread while it runs waits for the
+database's write lock
+until the rebuild commits, holding the event loop for that long, and one made before the rebuild has the lock commits
+first. Either order leaves derived data matching primary data, since a rebuild derives from what is committed when it
+begins. Every other call that takes the write lock waits for it the same way, holding the event loop: `begin`,
+`setSchema`, a purge, a rename, a load, `reset`, `replaceWith` and `close`. Rebuilds asked together run one after
+another. A rebuild is refused while a unit is open (`UNIT_OPEN`), as a write is: which of a unit begun and a
+rebuild asked for in the same turn takes the write lock first is the pool's timing, and the other waits or is
+refused. Call a rebuild with no unit open and await a `rebuildAsync` before writing, or make the writes on another thread. A process
+that exits by `process.exit()` runs the pool to its end first, so what was asked for
+is applied. A refusal made before any work begins (a rebuild naming only a type, a handle that has panicked) throws at
+the call in every form; a call on a closed database throws in the blocking forms and rejects the promise in the
+others. A close waits for the operations running, which for a large rebuild or backup is the whole of it, so the event
+loop is held by a close made during one. An operation not yet begun when the close takes the database rejects with
+`CLOSED` and does nothing. Each holds one thread of the pool, which Node shares with its file system work, for as
+long as it runs; a rebuild waiting for another's turn holds its thread while it waits. A unit can also
 stay open across calls, as a caller's transaction running its own code between writes needs: `db.begin()` opens one,
 `unit.write(batch)` applies a batch in it, its writes read their own, and `unit.commit(durable?)` or `unit.abort()` ends
 it. One unit is open at a time, and while it is a write of the database refuses (`UNIT_OPEN`): its writes go through the
 unit. The unit's write transaction belongs to the thread that began it. A unit opening on a map more than half used
 grows the map first, since an open unit can't grow it. A background index build waits for an open unit to end, woken
-when it does, and goes on from where it stopped; so does any other write but the unit's.
+when it does, and goes on from where it stopped; any other write is refused (`UNIT_OPEN`).
 
 A batch is applied in a savepoint of its unit, so a refused operation keeps none of its batch, and the unit goes on.
 
@@ -464,53 +545,108 @@ A batch is data, so the engine can retry it (after growing the map, `design.md`)
 
 ## Durability
 
-A unit is visible when it commits and survives the process crashing once `write` returns. Surviving the machine
-failing is a sync: group commit syncs once writes pause for `syncIdleMs` (100 ms) and at most `syncIntervalMs` (1 s)
-after the first unsynced commit, on a background thread. `db.durable()` resolves once everything committed before it is
-on disk, and rejects if the sync it waits on fails. A failed sync is final until the database is reopened: an OS may
-mark the pages it couldn't write clean and drop them (PostgreSQL's "fsyncgate"), so a later sync that succeeds proves
-nothing about them, and every later commit is built on them; every wait after it rejects, naming it. A write or a
-commit passed `durable` commits with a sync, and throws `NOT_DURABLE` if that sync fails, the commit having been made
-and its change set delivered. Admin and schema mutations use the same finalization: they report `NOT_DURABLE` after
-notifying watches, with committed data and in-memory schema already installed. Empty-index markers are settled inside
-the schema/reset/replace transaction, not by a second commit. A caller must not retry the mutation as though it had been
-refused; the error names its sequence, and `db.sequence` gives the current commit without parsing the message.
-The failed call does not return its touched-token list: callers managing tracked tokens must conservatively invalidate
-all of them on `NOT_DURABLE`. Native watches have already been finalized. apack follows that invalidation rule.
-`close()` syncs what is owed, and reports a sync that failed.
+A unit is visible when it commits and survives the process crashing once `write` returns. Surviving the machine failing
+is a sync: group commit syncs once writes pause for `syncIdleMs` (100 ms) and at most `syncIntervalMs` (1 s) after the
+first unsynced commit, on a background thread. `db.durable()` resolves once everything committed before it is on disk,
+and rejects if the sync it waits on fails. A sync that fails as it reads or flushes the record, or flushes the data, is
+final until the database is reopened: an OS may mark the pages it couldn't write clean and drop them (PostgreSQL's
+"fsyncgate"), so a later sync that succeeds proves nothing about them, and every later commit is built on them; every
+wait after it rejects, naming it. One that wrote nothing to rely on is not (below). A write or a commit passed `durable`
+commits with a sync, and throws `NOT_DURABLE` if that sync fails, the commit having been made and its change set
+delivered. Admin and schema mutations use the same finalization: they report `NOT_DURABLE` after notifying watches, with
+committed data and in-memory schema already installed. Empty-index markers are settled inside the schema/reset/replace
+transaction, not by a second commit. A caller must not retry the mutation as though it had been refused; the error names
+its sequence, and `db.sequence` gives the current commit without parsing the message. The failed call does not return
+its touched-token list: callers managing tracked tokens must conservatively invalidate all of them on `NOT_DURABLE`.
+Native watches have already been finalized. apack follows that invalidation rule. `close()` syncs what is owed, and
+reports a sync that failed.
 
-`syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made,
-its pages before the meta page that names them, so a commit that returned survives the machine losing power, and no
-group commit runs. On Apple a full sync (`F_FULLFSYNC`, which LMDB makes of the data file) follows each commit as well, since
-LMDB writes the meta page with `O_DSYNC`, which doesn't flush the drive's cache there. A write's `durable` and `durable()`
-then answer at once, since each commit was synced. The price is a
-sync for every commit: on an Apple M1 Pro at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three
-rounds, after the Apple full sync was added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs;
-4.0 ms for a durable write in the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped mode, where a commit that returned
-may be lost to a power loss until its sync, a moment later. More than the last commits can go with it: nothing orders
-the pages and meta pages written between two syncs, so a loss can leave a meta page on disk without all the pages it
-names, and LMDB opens a file by the newer of its two meta pages, whatever it names. The file is then no commit's, a
-`durable` commit's neither: its sync covered the file as it was, not what later commits wrote over. Such a file is
-refused at open (`CORRUPTED`) where its trees reach past its end (`store/reach.rs`). Torn within its length it may
-read wrongly or end the process that reads it: LMDB reads a page as it finds it, and where it is built with its
-assertions on, as a debug build is, aborts on one that is no page of the tree it is in. The remedy is a backup. A test
-replays the loss in both modes (`testing.md`, Power loss).
+`syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made, its
+pages before the meta page that names them, so a commit that returned survives the machine losing power, and no group
+commit runs. On Apple a full sync (`F_FULLFSYNC`, which LMDB makes of the data file) follows each commit as well, since
+LMDB writes the meta page with `O_DSYNC`, which doesn't flush the drive's cache there. A write's `durable` and
+`durable()` then answer at once, since each commit was synced. The price is a sync for every commit: on an Apple M1 Pro
+at a load of 22 to 25 (2026-11-12, 300 commits of one note, median of three rounds, after the Apple full sync was
+added), a commit took 0.03 ms in the grouped default, where the timer merges its syncs; 4.0 ms for a durable write in
+the grouped mode, which syncs once; and 8.0 ms with `syncEachCommit`, which syncs twice. The default is the grouped
+mode, where a commit that returned may be lost to a power loss until its sync, a moment later, and nothing before it is:
+the last synced commit is kept (`../roadmap/synced-commit.md`). A process with commits not yet synced holds a read
+transaction, the pin, at a commit on disk, so LMDB gives no writer that commit's pages, and a write makes sure of the
+pin before its transaction begins. A sync begins a read transaction at the newest commit, takes its meta page while
+LMDB's newest is still that one, syncs the data, writes that commit's meta page to the record beside the data file
+(`synced`, `format.md`) and syncs it, and only then lets the old pin go; a process that owes nothing then holds no pin.
+An open that finds the record written in another boot, a later commit on the file and no other process with the database
+open writes the record's meta page over the file's two, the two it wrote over saved once in `synced.restored`, and so
+opens at that commit, whatever the loss left of the pages after it. Every open after it reports the restore, with the
+sequence the database opened at, until a caller says it read it: the open's report's `restored`
+(`db.openReport.restored`, `{ sequence }`), cleared by `acknowledgeRestore()`, and the command's error stream, cleared
+by `elmdb acknowledge-restore`. The open that restores reads the sequence once LMDB has opened the file, before any
+write, and writes it into the record's notice, which held the commit until then; a read-only open on a filesystem it
+can't write leaves that to the next open, and reports the restore without it. A writable open that can't write the
+sequence into the notice is refused; the restore has been made and recorded, and the next open writes it in. The
+report's `notBorneOut` says the record named another file than this one, which was opened as it is.
+A process's death leaves its commits to the OS,
+which holds them: a database another process has open, or whose record is of this boot, opens at its newest commit. A
+sync that fails as it reads or flushes the record, or flushes the data, is final: the process refuses every commit after
+it, and where the data's flush or the record's write failed it marks the record `failed`, so that the next open restores
+the record's commit, in this boot too. One that fails short of those, as its read transaction begins, which a full
+reader table fails, as it reads its commit's meta page, or as it reads the root pages after the data's flush, has
+written nothing to rely on: it fails the waits on it alone, with `IO` for a read of the data file. The pin doesn't move
+until a sync succeeds, so while what it keeps is past the bound every write is refused before it begins, once a sync it
+asks for has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again after a pause,
+where a full reader table is the cause, until other processes, or threads of its
+own, end the read transactions they hold. The index builder waits it out, a second at a time, and runs its work again
+only once a write would go on, as it waits out a full reader table its own reads meet; `waitForIndexBuilds` meanwhile
+answers what holds the builds up (`SYNC_BEHIND` or `READERS_FULL`) rather than waiting on it. The next sync is tried at
+once by a `durable` wait or a write past the bound, and by the timer `syncIntervalMs` after the failure, or 100 ms where
+that is less, whether or not anything is committed since. An open that finds a restore to make beside another process,
+or can't write the data file, is refused (`RESTORE_PENDING`). The boot is Linux's `boot_id`, Apple's
+`kern.bootsessionuuid`, and on Windows a random value the first process to ask writes in a volatile registry key under
+the current user, which a restart or a logoff takes away; where none can be read, a process's death costs the commits
+since its last sync, as a loss would. A sync is also due once the pages commits from the pin's on freed, which wait for
+the next record before any commit may take them, are more than 16 MiB or a quarter of the file, whichever is more, as
+read from the free tree; and a write past that waits, before it begins, for the sync. So the file grows by the bound, by
+what is written before the free tree is read again (once the file has grown by an eighth of the bound, or once in 16
+asks, which a write makes two of), by a single write larger than the bound, and by writes already past their check when
+it was crossed. A pin of another process older than this one's keeps more, until that process's own sync, which its
+timers make due within `syncIntervalMs` (1 s); a read transaction a caller holds keeps more for as long as it is held,
+as it does today. The cost is a second sync after each, the record's: a `durable` write waits for both. A database
+written by an elmdb from before the record keeps no pin and reads no record, and its file may be no commit's after a
+loss, as every grouped file was. A test replays the loss in both modes (`testing.md`, Power loss).
+
+A database is written in one mode at a time. Every writable open holds its mode's lock beside the data file
+(`grouped.lock`, `ordered.lock`, `unsynced.lock`, `format.md`), and an open in another mode than a writer that has the
+database open in another process is refused (`MODE_MISMATCH`), naming both; a read-only open takes none. A writer that
+died lets its lock go once the system has closed its files, which Windows does a moment after the process ends, so an
+open of another mode just after a crash there may be refused for that moment. The first writable open of
+`syncEachCommit` or `syncs: false` makes any restore owed, syncs the data file, since a writer of the grouped mode may
+have died with commits unsynced, and writes its mode's record, `ordered` or `unsynced`, before its first write: an open
+after a loss then opens the file as it is, never at a grouped record's commit whose pages the commits since wrote over.
+Neither mode writes the record again, so a commit pays nothing it didn't; an open pays more: the first in the mode syncs
+the data file, a full flush on Apple, writes and syncs the record and syncs the directory, and each writable open after
+syncs the record it reads. A backup into a directory removes the record a database there left, which names that file and
+not the copy, and `replaceWith` opens its source as an open does: at its record's commit where a loss left it to be
+restored, holding it open while it reads it. The replay holds each mode, alone and after a grouped writer that died with
+commits unsynced, a backup and `replaceWith` (`testing.md`, Power loss).
 
 After the atomic reset, a small optional LMDB checkpoint rewrites the sequence value read within its own transaction,
 without changing logical sequence, schema, data or notifications. Advancing the physical generation lets a subsequent
 bulk load reuse the reset's freed pages: LMDB protects the immediately preceding generation even with no readers.
-The checkpoint runs before reset's required sync. If it aborts, reset still syncs its committed mutation; only the
-space/performance benefit is lost. Active read snapshots retain LMDB's normal protection. Measured rationale and
+The checkpoint runs before reset's required sync, and in the grouped mode the sync moves the pin to the
+checkpoint's commit at once, since a pin before the reset would keep every page it freed from the load. If it aborts,
+reset still syncs its committed mutation; only the space/performance benefit is lost. Active read snapshots retain LMDB's normal protection. Measured rationale and
 failure/page-reuse regressions are recorded in [remediation evidence](../evidence/elmdb-remediation.md).
 
 ## Change sets and watch
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
 fields and relation kinds touched, each relation with its ends as they are and, for one the commit moved, the ends it
-had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
+had before its first move (`movedFrom`: as the commit began, or the ends a relation the commit made was made with), and
+the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
-checkpoint does not raise it). A batch's result carries
-the change set and the sequence, and so does a unit's commit, so a caller can tell whether a result it was handed
+checkpoint does not raise it). A database's write answers each operation's result and the commit's change set, which
+holds its sequence, and across the binding the three cross as `Written` (generated as `protocol/Written.ts`); a unit's
+commit answers its change set, whose `sequence` is the commit's, and a unit's write its results alone (`BatchResult`). So a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
 in either order. `db.sequence` is the last commit's.
 
@@ -596,7 +732,10 @@ unit is open.
 - `reset()`: every entry removed but the database's own (its format and schema), in one durable unit.
 - `stats()`: entities per type (live and trashed), each field's entities and bytes, relations per kind, entries per
   index, the database's entries, file and map sizes; `indexStatus()` says which value and rank indexes are built, the
-  built-in `shortCode` and `role` among them; it does not report text, trigram or vector indexes.
+  built-in `shortCode` and `role` among them, and of a value index that keeps an order of its strings whether a read
+  takes it (`ordered`) and the `room` the type's and the index's names leave a sort key in its keys, before a
+  compound index's leading values take theirs: 0 where they leave none, and its strings are sorted as they are
+  read; it does not report text, trigram or vector indexes.
 - `check()`: derives every derived key from primary data and compares it with what is stored (a built index's entries
   included, an unbuilt one's left out), and reports each difference as missing, extra or differing; and reports each
   row that breaks a rule of the schema: a missing required field, a value its field doesn't take, a field its type
@@ -634,7 +773,8 @@ unit is open.
   visits grow linearly at fixed chunk size; sorting costs O(chunk size × log(chunk size)) per chunk. Closing stops
   a build between chunks, and the next open finishes it.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
-  relations, a role. It refuses a name the schema still declares. It refuses one of the engine's own fields too
+  relations, a role, which goes from every entity holding it, a removed type's kept entities included. It refuses a name
+  the schema still declares. It refuses one of the engine's own fields too
   (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
 - `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit. A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves. A `renameType` rewrites the ids its entities are named by in relations' ends, in `ref` fields and in a relation's info declared a `ref`. It is refused (`SCHEMA_CHANGE_REFUSED`), and nothing moves, when `check()` would report of what it leaves a rule it didn't report before: an entity the new type's fields don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the new type, a `ref` that doesn't name it, or that names a moved entity where it is declared for neither type. A rule a load left broken is left to `check()` when it names no moved entity; one that does is reported in other words after the rename, and is held to as the rename's own.
   `renameRelation` holds each edge it moves to the new kind's rules as a link of that kind is held: its info

@@ -58,13 +58,13 @@ const endings = {
   'calls process.exit': (dir) => [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    `db.readSync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
+    `db.read(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
     'process.exit(0);',
   ].join('\n'),
   'runs out of work': (dir) => [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    `db.readSync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
+    `db.read(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
   ].join('\n'),
   'is a worker thread its parent terminates': (dir) => [
     `const { Worker } = require('node:worker_threads');`,
@@ -97,7 +97,7 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncIdleMs: 60000, syncIntervalMs: 60000 });`,
-    `db.writeSync(Buffer.from(${JSON.stringify(batch.toString('base64'))}, 'base64'));`,
+    `db.write(Buffer.from(${JSON.stringify(batch.toString('base64'))}, 'base64'));`,
     'process.stdout.write(String(db.sequence));',
     'process.exit(0);',
   ].join('\n');
@@ -108,65 +108,58 @@ test('a process that exits with a write group commit hasn\'t synced yet ends, it
   assert.equal(reopened, sequence);
 });
 
-test('a process that exits with writes asked for and not yet answered ends with every one applied', (t) => {
+test('a process that exits with a rebuild asked for and not yet answered ends with it applied', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const schema = {
     $schema: 'https://elmdb.dev/schema/1.json',
     types: { Note: { fields: { title: { type: 'string' } }, indexes: { byTitle: { kind: 'value', fields: ['title'] } } } },
   };
-  const packr = new Packr({ useRecords: false, mapsAsObjects: true });
-  const late = Array.from({ length: 40 }, (_, i) => `Note-${20000 + i}`);
-  // A rebuild of 20,000 notes and forty writes behind it, none awaited, and the process told to exit while the
-  // rebuild runs: the pool is run to its end as a process exits, the job applying this database's writes with it, so
-  // each is applied, in the order asked for
+  // A rebuild of 20,000 notes, not awaited, and the process told to exit while it runs: the pool is run to its end as
+  // a process exits, so the rebuild is applied whole
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const { Packr } = require(${JSON.stringify(createRequire(import.meta.url).resolve('msgpackr'))});`,
     'const packr = new Packr({ useRecords: false, mapsAsObjects: true });',
     "const batch = (ids) => packr.pack({ ops: ids.map((id) => ({ op: 'create', type: 'Note', id, fields: { title: 'of ' + id } })), now: 1000 });",
     `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncs: false });`,
-    "db.writeSync(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
-    'db.rebuild();',
-    `for (const id of ${JSON.stringify(late)}) db.write(batch([id]));`,
+    "db.write(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
+    "process.stdout.write(String(db.sequence));",
+    'db.rebuildAsync();',
     'process.exit(0);',
   ].join('\n');
-  execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 60_000 });
+  const before = Number(execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 60_000 }));
   const db = Database.open(dir, { syncs: false });
-  const last = { start: { from: 'ids', ids: late }, terminal: { answer: 'ids' } };
-  const ids = packr.unpack(db.readSync(packr.pack({ reads: [{ read: 'query', plan: last }] })))[0].ids;
-  const clean = db.checkSync().differences.length;
+  const after = db.sequence;
+  const clean = db.check().differences.length;
   db.close();
-  assert.deepEqual(ids, late);
+  assert.equal(after, before + 1, 'the rebuild committed');
   assert.equal(clean, 0, 'the rebuild ran to its end');
 });
 
-test('a durable write of a handle nothing else holds is answered once the handle has been collected', (t) => {
+test('a rebuild of a handle nothing else holds is answered once the handle has been collected', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const schema = {
     $schema: 'https://elmdb.dev/schema/1.json',
     types: { Note: { fields: { title: { type: 'string' } }, indexes: { byTitle: { kind: 'value', fields: ['title'] } } } },
   };
-  // The write holds the last hold on the database once the handle is collected, and its store until its sync has
-  // been waited for: letting the database go first would close it, and wait for the store the write still held.
-  // A rebuild of 20,000 notes runs ahead of the write, so the handle is collected before the write's turn comes: the
-  // child says `collected` only where the handle's finalizer has run and the rebuild hasn't ended, and `late` or
-  // `kept` where this run showed nothing. The handle was collected 6 to 7 ms in and the rebuild ended 245 to 274 ms
-  // in, over three runs (Apple M1 Pro, 2026-11-13, the binding built in release)
+  // The rebuild holds the last hold on the database once the handle is collected: letting the database go then would
+  // close it under the rebuild. A rebuild of 20,000 notes outlasts the handle's collection: the child says `collected`
+  // only where the handle's finalizer has run and the rebuild hasn't ended, and `late` or `kept` where this run showed
+  // nothing
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const { Packr } = require(${JSON.stringify(createRequire(import.meta.url).resolve('msgpackr'))});`,
     'const packr = new Packr({ useRecords: false, mapsAsObjects: true });',
     "const batch = (ids) => packr.pack({ ops: ids.map((id) => ({ op: 'create', type: 'Note', id, fields: { title: 'of ' + id } })), now: 1000 });",
     `let db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)} });`,
-    "db.writeSync(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
+    "db.write(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
     'let collected = false;',
     'let rebuilt = false;',
     'const registry = new FinalizationRegistry(() => { collected = true; });',
     'registry.register(db, 0);',
-    'db.rebuild().then(() => { rebuilt = true; });',
-    "const written = db.write(batch(['Note-late']), true);",
+    'const rebuilding = db.rebuildAsync().then(() => { rebuilt = true; });',
     'db = undefined;',
     'const until = Date.now() + 20000;',
     // Two more turns once the registry has been told, for the binding's own finalizer, which Node defers as well
@@ -175,11 +168,49 @@ test('a durable write of a handle nothing else holds is answered once the handle
     '  global.gc();',
     '  if (!collected || turns-- > 0) return Date.now() < until ? setImmediate(wait) : process.stdout.write("kept");',
     '  process.stdout.write(rebuilt ? "late" : "collected");',
-    "  written.then(() => process.stdout.write('answered'));",
+    "  rebuilding.then(() => process.stdout.write('answered'));",
     '})();',
   ].join('\n');
   const said = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 60_000 });
   assert.equal(said, 'collectedanswered');
+});
+
+test('a handle that ran a call answering a promise is collected once nothing holds it', (t) => {
+  // Each call that answers a promise holds the database by a hold of its own, so nothing roots the handle's
+  // JavaScript object for it: a handle dropped after the promise has settled is collected like one that never made the
+  // call. Each child prints `collected`, or `kept` after five seconds of collections that never found it. Returned as
+  // napi-rs's AsyncTask, every one of these was `kept`
+  const said = {};
+  const calls = {
+    read: "db.readAsync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]))",
+    durable: 'db.durable()',
+    check: 'db.checkAsync()',
+    rebuild: 'db.rebuildAsync()',
+  };
+  for (const what of ['read', 'durable', 'check', 'rebuild', 'backup']) {
+    const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const child = [
+      `const { Database } = require(${JSON.stringify(binding)});`,
+      `let db = Database.open(${JSON.stringify(join(dir, 'db'))}, { syncs: false });`,
+      'const began = Date.now();',
+      'let collected = null;',
+      'const registry = new FinalizationRegistry(() => { collected = Date.now() - began; });',
+      'registry.register(db, 0);',
+      `const asked = ${what === 'backup' ? `db.backupAsync(${JSON.stringify(join(dir, 'copy'))})` : calls[what]};`,
+      'db = undefined;',
+      'asked.then(() => {',
+      '  const until = Date.now() + 5000;',
+      '  (function wait() {',
+      '    global.gc();',
+      "    if (collected === null && Date.now() < until) return setImmediate(wait);",
+      "    process.stdout.write(collected === null ? 'kept' : 'collected');",
+      '  })();',
+      '});',
+    ].join('\n');
+    said[what] = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 60_000 });
+  }
+  assert.deepEqual(said, { read: 'collected', durable: 'collected', check: 'collected', rebuild: 'collected', backup: 'collected' });
 });
 
 test('a process that ends while V8 frees the answers it dropped ends cleanly', { timeout: 120_000 }, (t) => {
@@ -194,7 +225,7 @@ test('a process that ends while V8 frees the answers it dropped ends cleanly', {
     `const { Database } = require(${JSON.stringify(binding)});`,
     `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
     'const reads = Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]);',
-    'for (let i = 0; i < 20000; i++) db.readSync(reads);',
+    'for (let i = 0; i < 20000; i++) db.read(reads);',
     'db.close();',
     `require('node:v8').setFlagsFromString('--expose-gc');`,
     `require('node:vm').runInNewContext('gc')({ type: 'minor' });`,

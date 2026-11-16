@@ -26,8 +26,13 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/xp` type index values start | a block of the places of the entities holding values more than 256 hold: those of a range of places that starts at `start`, the largest range of a power of two places starting at a multiple of its size that holds no more than 256, as a text index's `d/fb` has them, with no counts | derived |
 | `d/xw` type index values | the places, held as `d/x` holds them, of the entities of the type without a value in a value index's last field, which is missing or null, under what its fields before that one hold: none for an index on one field, and for one on several each a value an equality can ask for, once for each tuple of them when lists are among them | derived |
 | `d/xwp` type index values start | a block of those places, as `d/xp` is of a value's | derived |
-| `d/xu` type index values | the places, held as `d/x` holds them, of the entities of the type the index doesn't order, under what its fields before the last hold as `d/xw` has them: its last field holds a list or a value the index can't file, or the index is unique and a field before the last holds a list | derived |
+| `d/xu` type index values | the places, held as `d/x` holds them, of the entities of the type the index doesn't order, under what its fields before the last hold as `d/xw` has them: its last field holds a list or a value the index can't file but a long string, or the index is unique and a field before the last holds a list | derived |
 | `d/xup` type index values start | a block of those places, as `d/xp` is of a value's | derived |
+| `d/xl` type index values | the places, held as `d/x` holds them, of the entities of the type whose last field in the index is a long string, one of more than 256 bytes, which the index has no entry for, under what its fields before the last hold as `d/xw` has them | derived |
+| `d/xlp` type index values start | a block of those places, as `d/xp` is of a value's | derived |
+| `d/xo` type index build values sortkey cut string | nothing: that the value index has an entry for the string under these values, filed where the schema's collation orders it (`../roadmap/string-order.md`). `build` is the sequence of the commit that began the keys' build; `sortkey` is the collator's sort key of the string, its first bytes when the key hasn't room for them all, and `cut` says which. The room is what a key's 511 bytes leave after what comes before the sort key, its tag and end, `cut`, and the 258 bytes the longest string an entry holds takes with no zero byte in it: one room for every string under the values, and no order is kept under names and values that leave a key no room at all. What is under a build is its stamp's to lay out, and this is the layout of stamp number 1. The key is there while the string's `d/x` entry holds a place: a write puts it with the entry's first place and deletes it with its last (`engine.md`, An order of strings) | derived |
+| `d/xo` type index build values sortkey cut place | nothing: that the entity at the place holds, under these values, a string with no key of the kind above: a long one, or one of fewer bytes whose zero bytes, two bytes each in a key, make it take more than those 258 | derived |
+| `d/xob` type index | the marker of an index's `d/xo` keys: the stamp of the collator that made them, their build, and whether the build is whole, as msgpack `[stamp, build, whole]`. `check()` holds the keys under it to the index's entries when the stamp is its own and the build whole, and compares nothing under any other | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
 | `d/b` source kind target seq | the edges between two entities, among which a link finds the one with its identity | derived |
 | `d/ft` type index term | a text index's term: the places of the entities holding it, each with the term's count in each field, when they are no more than 256; that they are in blocks, when more | derived |
@@ -131,6 +136,23 @@ and a load by the build after it. That is how our databases are converted once, 
 - A load of a dump, dumped again, is byte-identical to it.
 
 The dump version is the file's, not the stored format's: it moves only when `Load` does.
+
+## Beside the data file
+
+A database's directory holds LMDB's two files, `data.mdb` and `lock.mdb`, and elmdb's own (`store/record.rs`):
+
+| File | What it holds |
+|---|---|
+| `synced` | the record of the last commit the grouped mode knows to be on disk (`engine.md`, Durability): two slots of 4096 bytes, written in turn in place, each the 8 bytes `elmdbsyn`, a u32 version (1), then little-endian the count of records written, the mode (1 grouped, 2 synced each commit, 3 unsynced), the state (1 kept, 2 failed), the LMDB transaction of the commit, that commit's 136-byte meta page body as LMDB writes it, a SHA-256 of its root pages and of each named database's root, a SHA-256 of the boot it was written in or zeros for none, the notice of a restore no caller has said it read: a byte saying what the u64 after it is, 0 nothing, 1 the LMDB transaction a restore took the database to, until the open that made it reads that commit's sequence, 2 that sequence (an elmdb that knows 0 and 1 alone reads 2 as no notice), and a SHA-256 of all of it. The slot of the higher count that reads is the record |
+| `synced.restored` | the two meta pages the first restore wrote over, as they were |
+| `open.lock` | nothing: locked shared by every open for as long as it is open |
+| `synced.lock` | nothing: locked by the one reading or writing the record, and by an open as it decides what to open at |
+| `writer.lock` | nothing: on macOS, locked by the writer inside a write transaction (`store/writers.rs`) |
+| `grouped.lock`, `ordered.lock`, `unsynced.lock` | nothing: locked shared by each writable open of the grouped mode, `syncEachCommit` and `syncs: false`, for as long as it is open; a writable open of another mode is refused while one is held (`MODE_MISMATCH`) |
+
+A record of another version reads as no record. The record names an LMDB transaction and a meta page, so a file put
+in place of the data file that the record's commit and root pages don't match is opened as it is, a record that
+says `failed` excepted, which is refused.
 
 ## LMDB
 

@@ -3,8 +3,14 @@ import type { SchemaChange } from './protocol/SchemaChange.js'
 import type { CheckReport } from './protocol/CheckReport.js'
 import type { IndexStatus } from './protocol/IndexStatus.js'
 import type { Stats } from './protocol/Stats.js'
+import type { OpenReport } from './protocol/OpenReport.js'
+import type { Restore } from './protocol/Restore.js'
 export type { ErrorCode } from './protocol/ErrorCode.js'
-export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats }
+export type { Written } from './protocol/Written.js'
+export type { BatchResult } from './protocol/BatchResult.js'
+export type { OpResult } from './protocol/OpResult.js'
+export type { ChangeSet } from './protocol/ChangeSet.js'
+export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats, OpenReport, Restore }
 
 /**
  * Which binding artifact the generated loader actually loaded: `'native'` for
@@ -28,33 +34,43 @@ export declare class Database {
    * Refused while a unit is open, in a read-only database, and for a change opening refuses
    */
   setSchema(schema: Schema): SchemaChange[]
-  /** What opening did: `{ schemaChanges: [{ path, change, effect }] }` */
-  get openReport(): { schemaChanges: SchemaChange[] }
+  /**
+   * What opening did: `{ schemaChanges: [{ path, change, effect }], restored, notBorneOut }`. `restored` is a
+   * restore this open or an earlier one made, a power loss or a failed sync having taken the database back to its
+   * last synced commit, with the sequence it opened at; every open reports it until `acknowledgeRestore()`.
+   * `notBorneOut` says the record beside the data file named another file than this one, which was opened as it is
+   */
+  get openReport(): OpenReport
+  /** Says the restore an open reported was read, so that no open reports it after; refused on a read-only handle */
+  acknowledgeRestore(): void
   /** Group commit's syncs so far */
   get syncs(): number
   /**
-   * Applies a batch (msgpack bytes of a `Batch`) as one unit, answering msgpack bytes of
-   * `{ results: OpResult[], changes: ChangeSet, sequence: number }`. `durable` commits it with a sync. On a thread of
-   * the pool, so the event loop isn't held while it runs. Writes in flight at once are applied one at a time in the
-   * order they were asked for, a rebuild among them in its turn, and hold one thread of the pool between them; one
-   * is refused while a unit is open
+   * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
+   * once it has committed. `durable` commits it with a sync. Refused while a unit is open (`UNIT_OPEN`): writes go
+   * through the unit then
    */
-  write(batch: Buffer, durable?: boolean | undefined | null): Promise<Buffer>
-  /** `write` on this thread, held until the batch is applied */
-  writeSync(batch: Buffer, durable?: boolean | undefined | null): Buffer
+  write(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
    * Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
    * answer per read
    */
-  readSync(reads: Buffer): Buffer
-  /** `readSync` on a thread of the pool, in a snapshot of its own, so a large read doesn't hold up the event loop */
-  read(reads: Buffer): Promise<Buffer>
+  read(reads: Buffer): Buffer
+  /**
+   * `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
+   * answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
+   * never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
+   * `hearBuilderCommits`, once its promise has settled, and is refused (`NO_LISTENER`) while there is none
+   */
+  readAsync(reads: Buffer): Promise<Buffer>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
   untrack(token: number): void
   /**
    * Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
-   * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. There is one listener,
-   * a second being refused, which keeps no process alive, and closing the database drops it
+   * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. It is called too once
+   * a tracked `readAsync` has settled, for the last commit since its call that wrote into what it read, which no
+   * commit's result could name, the read not being filed yet. There is one listener, a second being refused, which
+   * keeps no process alive, and closing the database drops it
    */
   hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
   /**
@@ -77,21 +93,21 @@ export declare class Database {
    */
   get sequence(): number
   /**
-   * Opens a unit that stays open across calls until it is committed or aborted; while it is, `write` refuses
-   * (`UNIT_OPEN`), and writes go through the unit
+   * Opens a unit that stays open across calls until it is committed or aborted; while it is, a write or a rebuild
+   * outside it is refused (`UNIT_OPEN`), and writes go through the unit
    */
   begin(): Unit
-  /** Compares derived data with primary data and every row with the schema's rules, on a thread of the pool */
-  check(): Promise<CheckReport>
-  /** `check` on this thread */
-  checkSync(): CheckReport
+  /** Compares derived data with primary data and every row with the schema's rules */
+  check(): CheckReport
+  /** `check` on a thread of the pool, in a snapshot of its own: the database's writes go on beside it */
+  checkAsync(): Promise<CheckReport>
   /**
-   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's. On a
-   * thread of the pool and in its turn among the writes asked for, as a write is
+   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's, in
+   * one unit of its own. Refused while a unit is open (`UNIT_OPEN`)
    */
-  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
-  /** `rebuild` on this thread */
-  rebuildSync(entityType?: string | undefined | null, index?: string | undefined | null): void
+  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
+  /** `rebuild` on a thread of the pool: a write made on this thread while it runs waits for it to commit */
+  rebuildAsync(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
   /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
   indexStatus(): IndexStatus[]
   /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
@@ -104,9 +120,10 @@ export declare class Database {
    */
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /**
-   * Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
-   * (`UNIT_OPEN`), and from the listener of the builder's commits, on the thread of the builder it would wait for
-   * (`CALLBACK_ACTIVE`): wait after the listener returns
+   * Blocks until every index waiting to be built is built or has failed, or answers what holds a build up while the
+   * builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again after a pause to wait on. Refused while a unit
+   * is open (`UNIT_OPEN`), and from the listener of the builder's commits, on the thread of the builder it would wait
+   * for (`CALLBACK_ACTIVE`): wait after the listener returns
    */
   waitForIndexBuilds(): void
   /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
@@ -114,13 +131,10 @@ export declare class Database {
   renameType(from: string, to: string): void
   renameField(entityType: string, from: string, to: string): void
   renameRelation(from: string, to: string): void
-  /**
-   * A compacted copy of one moment of the database into `target`, which opens as a database of its own, on a thread of
-   * the pool
-   */
-  backup(target: string): Promise<void>
-  /** `backup` on this thread */
-  backupSync(target: string): void
+  /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
+  backup(target: string): void
+  /** `backup` on a thread of the pool, copying a snapshot: the database's writes go on beside it */
+  backupAsync(target: string): Promise<void>
   /** Every entry replaced by another database's primary data, derived data rebuilt under this schema */
   replaceWith(source: string): void
   /** Every entry removed but the database's format and schema */
@@ -152,7 +166,7 @@ export declare class Database {
 export declare class Unit {
   /**
    * Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
-   * bytes of `{ results: OpResult[] }`
+   * bytes of a `BatchResult`
    */
   write(batch: Buffer): Buffer
   /** Records `value` as the checkpoint `name`, committing with this unit or not at all */

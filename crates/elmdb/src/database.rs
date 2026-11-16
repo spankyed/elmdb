@@ -48,10 +48,29 @@ impl Default for OpenOptions {
 }
 
 /// What opening did
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
 pub struct OpenReport {
     /// The schema's changes, each with what opening did about it; every addition when the database is new
     pub schema_changes: Vec<SchemaChange>,
+    /// A restore this open or an earlier one made, which every open reports until a caller says it read it
+    /// (`Database::acknowledge_restore`)
+    pub restored: Option<Restore>,
+    /// The record beside the data file named another file than this one, put where the database's was: the file was
+    /// opened as it is
+    pub not_borne_out: bool,
+}
+
+/// A power loss or a failed sync took the database back to its last synced commit: the commits after it are gone
+/// (`docs/roadmap/synced-commit.md`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Restore {
+    /// The sequence the database opened at: none where the open that restored it couldn't write it down, a read-only
+    /// open on a filesystem it can't write
+    pub sequence: Option<u64>,
 }
 
 /// An open database. Closing it, or dropping it, syncs what is owed and releases the environment
@@ -69,6 +88,11 @@ pub struct Database {
     builder: Arc<Mutex<Option<crate::engine::Builder>>>,
     /// The tracked reads' read sets, and the database's watches
     pub(crate) tracks: crate::engine::watch::SharedTracks,
+    /// Held by a rebuild from before it makes room in the map until its commit has been delivered: rebuilds asked on
+    /// several threads at once run one after another, so the map grows for one of them and none redoes another's work
+    /// beside it. A watch's listener the rebuild's commit runs may rebuild in turn, on the thread that holds it: so the
+    /// lock lets that thread in again
+    pub(crate) rebuilding: parking_lot::ReentrantMutex<()>,
 }
 
 /// The schema of a database that has none: nothing declared
@@ -145,6 +169,7 @@ impl Database {
             return Err(error);
         }
         let engine_schema = Arc::new(EngineSchema::stored(schema.clone(), hash));
+        let report = OpenReport { restored: store.restored(), not_borne_out: store.not_borne_out(), ..report };
         let store = Arc::new(store);
         let tracks: crate::engine::watch::SharedTracks = Default::default();
         let observing = Arc::new(RwLock::new(Arc::clone(&engine_schema)));
@@ -162,6 +187,7 @@ impl Database {
             report,
             builder: Arc::new(Mutex::new(builder)),
             tracks,
+            rebuilding: Default::default(),
         })
     }
 
@@ -365,6 +391,8 @@ impl Database {
     }
 
     fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
+        // The whole close's: an operation that keeps the store, and at exit the schema's lock, share it
+        let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         // A watch's listener, or the listener of the builder's commits, which runs on the builder's thread: a close
         // waits for the operation the listener is called from, and for the store that thread holds
         if crate::engine::watch::in_callback(&self.tracks) {
@@ -387,8 +415,23 @@ impl Database {
         };
         let (taken, running) = {
             // Held while the builder is told to stop and the store is taken, so a schema change can't start a builder
-            // after; released before either is waited for
-            let _schema = self.engine_schema.write();
+            // after; released before either is waited for. At exit it is waited for until the deadline: on Windows the
+            // exit handlers run after every other thread was ended, and one ended holding the schema for reading (a
+            // write waiting for its sync) never lets it go. Given up on, the database is synced and left open
+            let _schema = match (at_exit, deadline) {
+                (true, Some(deadline)) => match self.engine_schema.try_write_until(deadline) {
+                    Some(schema) => schema,
+                    None => {
+                        let store = self.store.lock().expect("the store slot's lock is never poisoned").clone();
+                        // The caller's wait is spent: the record's locks are tried, and not waited for
+                        if let Some(store) = store {
+                            store.sync_owed(deadline)?;
+                        }
+                        return Ok(false);
+                    }
+                },
+                _ => self.engine_schema.write(),
+            };
             let mut slot = self.store.lock().expect("the store slot's lock is never poisoned");
             match slot.as_ref() {
                 None => return Ok(true),
@@ -406,19 +449,23 @@ impl Database {
         run_point!(CLOSE_TAKEN);
         // An operation that took the store before the close finishes first, and none keeps it long. The slot is free
         // meanwhile, so an operation that asks for the store again is told the database is closed rather than waiting
-        let deadline = wait.map(|wait| std::time::Instant::now() + wait);
         loop {
             match Arc::try_unwrap(store) {
                 Ok(store) => {
                     // Dropped by the close that closes: one refused for an open unit, or given up on below, leaves the
                     // database open, and its listener is still to hear the builder's commits
                     self.tracks.lock().hear_builder_commits(None).expect("dropping the listener refuses nothing");
-                    let closed = if at_exit { store.close_at_exit(wait.unwrap_or_default()) } else { store.close() };
+                    // At exit, within what is left of the caller's wait, which the loop has spent part of
+                    let left = deadline.map_or(std::time::Duration::ZERO, |deadline| {
+                        deadline.saturating_duration_since(std::time::Instant::now())
+                    });
+                    let closed = if at_exit { store.close_at_exit(left) } else { store.close() };
                     return closed.map(|()| true);
                 }
                 Err(shared) => {
-                    if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
-                        let synced = if at_exit { shared.sync_owed() } else { Ok(()) };
+                    if let Some(deadline) = deadline.filter(|deadline| std::time::Instant::now() >= *deadline) {
+                        // The caller's wait is spent: the record's locks are tried, and not waited for
+                        let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
                         synced?;
                         // The database stays open with its builder stopped: what is left to build is queued again,
@@ -598,7 +645,7 @@ fn apply_schema(store: &Store, given: Option<Schema>, expected: Option<&EngineSc
     Ok(AppliedSchema {
         schema: Some(given),
         hash: Some(hash.into_bytes()),
-        report: OpenReport { schema_changes: changes },
+        report: OpenReport { schema_changes: changes, ..OpenReport::default() },
         unbuilt,
         commit: Some(commit),
     })
@@ -622,8 +669,121 @@ mod tests {
         .unwrap()
     }
 
+    #[test]
+    fn an_open_after_a_loss_reports_the_restore_and_its_sequence_until_a_caller_acknowledges_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let note = |id: &str| -> crate::Batch {
+            serde_json::from_value(
+                json!({ "ops": [{ "op": "create", "type": "Note", "id": id, "fields": { "title": "t" } }] }),
+            )
+            .unwrap()
+        };
+        let options = OpenOptions {
+            schema: Some(note_schema(None)),
+            sync_idle_ms: 600_000,
+            sync_interval_ms: 600_000,
+            ..Default::default()
+        };
+        let db = Database::open(&path, options).unwrap();
+        db.write(&note("Note-1"), true).unwrap();
+        let synced = db.sequence().unwrap();
+        db.write(&note("Note-2"), false).unwrap();
+        // The files as a loss leaves them: the record written in another boot, a commit since it on the file
+        let lost = |into: &Path| {
+            std::fs::create_dir_all(into).unwrap();
+            std::fs::copy(path.join("data.mdb"), into.join("data.mdb")).unwrap();
+            let record = std::fs::read(path.join(crate::store::RECORD_FILE)).unwrap();
+            std::fs::write(into.join(crate::store::RECORD_FILE), crate::store::record_of_another_boot(&record))
+                .unwrap();
+        };
+        let restored = dir.path().join("restored");
+        lost(&restored);
+        db.close().unwrap();
+        let opened = Database::open(&restored, OpenOptions::default()).unwrap();
+        let report = opened.open_report();
+        assert_eq!((report.restored, report.not_borne_out), (Some(Restore { sequence: Some(synced) }), false));
+        assert_eq!(opened.sequence().unwrap(), synced, "opened at the record's commit");
+        opened.acknowledge_restore().unwrap();
+        opened.close().unwrap();
+        let again = Database::open(&restored, OpenOptions::default()).unwrap();
+        assert_eq!(again.open_report().restored, None, "reported again once acknowledged");
+        again.close().unwrap();
+        // The record beside another database's data file: opened as it is, and said so
+        let other = tempfile::tempdir().unwrap();
+        let elsewhere =
+            Database::open(other.path(), OpenOptions { schema: Some(note_schema(None)), ..quiet() }).unwrap();
+        elsewhere.write(&note("Note-9"), false).unwrap();
+        elsewhere.close().unwrap();
+        let swapped = dir.path().join("swapped");
+        lost(&swapped);
+        std::fs::copy(other.path().join("data.mdb"), swapped.join("data.mdb")).unwrap();
+        let opened = Database::open(&swapped, quiet()).unwrap();
+        assert_eq!((opened.open_report().restored, opened.open_report().not_borne_out), (None, true));
+        opened.close().unwrap();
+    }
+
     fn quiet() -> OpenOptions {
         OpenOptions { syncs: false, ..Default::default() }
+    }
+
+    // Each gives a margin past its wait for the flush of the data the exit makes, a full flush of the drive on Apple,
+    // slow on a loaded machine
+    #[test]
+    fn an_exit_given_up_on_for_an_operation_s_store_tries_the_record_and_is_over_within_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
+        // An operation holds the store past the wait, and a sync of another thread the record
+        let store = db.store().unwrap();
+        let held = store.hold_record();
+        let began = std::time::Instant::now();
+        assert_eq!(db.close_at_exit(Duration::from_millis(300)).unwrap_err().code, ErrorCode::Io);
+        let took = began.elapsed();
+        // Bounded, the record being held a minute: what a flush beside a loaded suite takes is no part of the test
+        assert!(took < Duration::from_secs(10), "{took:?}, for a wait of 300 ms");
+        drop(held);
+        drop(store);
+    }
+
+    #[test]
+    fn an_exit_whose_store_comes_free_late_closes_within_what_is_left_of_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
+        // An operation lets the store go 2.5 s into a wait of 3, and a sync of another thread holds the record past
+        // both: a close given the whole wait again would take 5.5 s
+        let store = db.store().unwrap();
+        let held = store.hold_record();
+        let operation = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2500));
+            drop(store);
+        });
+        let began = std::time::Instant::now();
+        assert_eq!(db.close_at_exit(Duration::from_secs(3)).unwrap_err().code, ErrorCode::Io);
+        let took = began.elapsed();
+        assert!(took < Duration::from_millis(4500), "{took:?}, for a wait of 3 s");
+        operation.join().unwrap();
+        drop(held);
+    }
+
+    #[test]
+    fn a_close_at_exit_gives_up_on_the_schema_a_thread_holds_past_its_wait() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Arc::new(Database::open(dir.path().join("db"), quiet()).unwrap());
+        // The schema held for reading, as a write waiting for its sync holds it, by a thread the exit never sees end
+        let held = db.engine_schema.read();
+        let (closed, has_closed) = std::sync::mpsc::channel();
+        let closing = {
+            let db = Arc::clone(&db);
+            std::thread::spawn(move || closed.send(db.close_at_exit(Duration::from_millis(100))).unwrap())
+        };
+        let answer =
+            has_closed.recv_timeout(Duration::from_secs(10)).expect("the close at exit gave up within its wait");
+        assert!(!answer.unwrap(), "left open, the schema being held");
+        drop(held);
+        closing.join().unwrap();
+        assert!(db.is_open());
+        db.close().unwrap();
+        assert!(!db.is_open());
     }
 
     #[test]
