@@ -219,3 +219,21 @@ fn a_tracked_read_waiting_through_more_commits_than_are_noted_is_told_of_the_las
     // Past the bound the commits stand for one that wrote everything: a notice too many, never one missed
     assert_eq!(db.answer_call_read(more).touched, Some((last, 8)));
 }
+
+#[test]
+fn a_read_asked_of_one_database_is_refused_through_another_and_lets_its_snapshot_go() {
+    let (asking_dir, other_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let (asking, other) = (open(&asking_dir), open(&other_dir));
+    listening(&asking);
+    create(&asking, "Task", "Task-1");
+    let store = asking.store().unwrap();
+    for track in [None, Some(7)] {
+        let refused = other.answer_call_read(asking.read_at_call(count(track)));
+        assert_eq!(refused.answer.unwrap_err().code, ErrorCode::DatabaseMismatch);
+        assert_eq!(refused.touched, None);
+        assert_eq!(store.held_for_calls(), (0, 0), "the refused read's snapshot was kept");
+    }
+    // Nothing of the tracked read is filed or noted, in either database
+    assert!(asking.tracks.lock().is_empty() && other.tracks.lock().is_empty());
+    assert_eq!(counted(&asking, asking.read_at_call(count(None))), 1);
+}

@@ -873,7 +873,8 @@ impl Database {
     }
 
     /// Answers a read asked with `read_at_call`, running it here unless it ran at the call or a growth of the map ran
-    /// it. Refused `CLOSED` when the database closed before it ran. A tracked read is filed here, as `read` files one,
+    /// it. Refused `CLOSED` when the database closed before it ran, and `DATABASE_MISMATCH` when another database asked
+    /// it. A tracked read is filed here, as `read` files one,
     /// and answered with the last commit since its call that wrote into what it read, for the caller to tell once it
     /// has handed the answer over (`tell_touched`)
     pub fn answer_call_read(&self, read: CallRead) -> CallAnswer {
@@ -886,8 +887,8 @@ impl Database {
         let (answer, reads) = match (taken, ran) {
             (Some(Ok(ran)), _) => ran,
             (Some(Err(panic)), _) => std::panic::resume_unwind(panic),
-            // The database closed first: nothing was read, and nothing is filed
-            (None, Err(error)) if error.code == ErrorCode::Closed => {
+            // The database closed first, or the read was answered through another: nothing was read, and nothing is filed
+            (None, Err(error)) if matches!(error.code, ErrorCode::Closed | ErrorCode::DatabaseMismatch) => {
                 return CallAnswer { answer: Err(error), touched: None };
             }
             // No snapshot could be taken: filed as `read` files a read that failed so, for everything

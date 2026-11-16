@@ -948,9 +948,16 @@ impl Store {
         }
     }
 
-    /// Runs a read `ask` kept waiting, unless a growth of the map ran it first: one this store asked, a database's
-    /// store being the one its open made until it closes. Refused `CLOSED` when the store closed first
+    /// Runs a read `ask` kept waiting, unless a growth of the map ran it first. Refused `CLOSED` when the store closed
+    /// first, and `DATABASE_MISMATCH` when another store asked it: its transaction is that store's, which this one's
+    /// gate keeps no growth from, nor would its idle cache hold it. Refused, it is let go of, and its transactions with it
     pub(crate) fn run_asked(&self, read: CallRead) -> Result<()> {
+        if !read.0.of(&self.calls) {
+            return Err(Error::new(
+                ErrorCode::DatabaseMismatch,
+                "A read asked of one database was answered through another: answer it through the database that asked it",
+            ));
+        }
         read.0.run(
             || self.gate(),
             |freed| {

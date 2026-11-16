@@ -436,8 +436,9 @@ the database itself alive, and is joined on normal close; process-exit cleanup d
 The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.read(reads)` runs on the calling thread. `db.readAsync(reads)` runs on a thread of the pool and resolves with the
 answer `read` would have given at the call, so a large read doesn't block the event loop: its snapshot is the last
 commit as it is at the call, and a commit made before the pool runs it, here or in another process, is not in its
-answer. The reads are decoded and checked, and the read transaction is taken, at the call, on the calling thread; the
-transaction is held, outside the gate as an idle one is, until the pool runs the read on it (`store/call_reads.rs`).
+answer. The reads are decoded and their values checked, and the read transaction is taken, at the call, on the
+calling thread; the transaction is held, outside the gate as an idle one is, until the pool runs the read on it
+(`store/call_reads.rs`), and the read's check of the schema runs then, against the call's schema and snapshot.
 A call made while a growth of the map on another thread runs the reads waiting waits for it, as a `read` would. What
 that holds is bounded. The reads asked at one commit share at most four
 transactions, as many as libuv's pool runs at once unless told more, each used by one read at a time, so a burst of
@@ -454,7 +455,9 @@ to the listener of `hearBuilderCommits`, with its sequence and the read's token,
 no commit's result could name a read that wasn't filed. So a tracked `readAsync` is refused (`NO_LISTENER`) while no
 listener is registered, as nothing would tell its caller of such a commit. Another process's commits name no tracked
 read here, waiting or filed: when `committedElsewhere()` answers true, a tracked `readAsync` not yet settled is as
-stale as the reads already filed.
+stale as the reads already filed. In Rust the call is `Database::read_at_call` and the answer
+`Database::answer_call_read`; a read answered through another database than the one that asked it is refused
+`DATABASE_MISMATCH`, and its snapshot let go.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 

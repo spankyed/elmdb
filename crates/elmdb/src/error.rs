@@ -94,6 +94,8 @@ pub enum ErrorCode {
     /// A tracked read asked to be answered later, while nothing listens for the builder's commits: a commit that writes
     /// into what it reads before it is filed is told only to that listener
     NoListener,
+    /// A read asked of one database and answered through another: a read is answered by the database that asked it
+    DatabaseMismatch,
     /// A read of an index still being built that nothing answers in its place: a text index's `search`, `hybrid` or
     /// `suggest`, whose terms and statistics are the answer, and a `ranked` read that asked to be refused rather than
     /// computed
@@ -178,6 +180,7 @@ impl ErrorCode {
             Self::UnknownIndex => "UNKNOWN_INDEX",
             Self::AlreadyListening => "ALREADY_LISTENING",
             Self::NoListener => "NO_LISTENER",
+            Self::DatabaseMismatch => "DATABASE_MISMATCH",
             Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
             Self::RestorePending => "RESTORE_PENDING",
@@ -279,6 +282,7 @@ mod tests {
             ErrorCode::UnknownIndex,
             ErrorCode::AlreadyListening,
             ErrorCode::NoListener,
+            ErrorCode::DatabaseMismatch,
             ErrorCode::IndexBuilding,
             ErrorCode::IndexBuildFailed,
             ErrorCode::CallbackPanicked,
