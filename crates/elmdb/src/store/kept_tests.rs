@@ -254,7 +254,7 @@ fn a_loss_with_nothing_unsynced_opens_as_it_is_and_records_this_boot() {
 }
 
 #[test]
-fn a_record_another_file_bears_out_is_opened_as_it_is_and_recorded_again() {
+fn a_kept_record_the_file_does_not_bear_out_is_opened_as_it_is_and_recorded_again() {
     let (one, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     // Two databases apart from their first write: made alike, the one's file would hold the other's commit whole
     for (dir, key, writes) in [(&one, "one", 6), (&other, "other", 3)] {
