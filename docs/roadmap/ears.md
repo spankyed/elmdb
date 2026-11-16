@@ -303,15 +303,19 @@ Opened by having both halves in one repository, each to be decided on a reading,
        when the builder is held (#151);
      - a writable open in another mode than a live writer's is refused with `MODE_MISMATCH` (#156), which apack's specs
        that open a database with `syncs: false` beside a child process opening it with the defaults meet (`apack-ears`'
-       `watch.spec.ts` and `writers-converge.spec.ts`, the SDK's `projections-converge.spec.ts`); each writable open
-       holds `grouped.lock`, `ordered.lock` or `unsynced.lock` beside `data.mdb`; under `syncEachCommit` or `syncs:
-       false`, which apack's temporary databases use, the first writable open syncs the data file and writes and syncs
-       the record, and each after it syncs the record it reads; a backup into a directory removes the record a database
-       there left, once the copy is published; and `replaceWith` opens its source as an open does, at its record's
-       commit where a loss left one to restore;
-     - an open after a restore reports it, `openReport.restored` with the sequence it opened at, and
-       `openReport.notBorneOut`, until a caller calls `acknowledgeRestore()`; the CLI says so on every command's error
-       stream until `elmdb acknowledge-restore`; and a writable open that can't write that notice is refused (#157).
+       `watch.spec.ts` and `writers-converge.spec.ts`, the SDK's `projections-converge.spec.ts`), which pass once each
+       child opens with `syncs: false` too; each writable open holds `grouped.lock`, `ordered.lock` or `unsynced.lock`
+       beside `data.mdb`; under `syncEachCommit` or `syncs: false`, a writable open syncs the record it reads, or writes
+       one and syncs the directory where there is none, as apack's temporary databases do on their empty directories,
+       and the first in its mode over an existing data file syncs that file too, as `apack-ears`' `model-based.spec.ts`
+       does in each case it copies a database for; a backup into a directory removes the record a database there left,
+       once the copy is published; and `replaceWith` opens its source as an open does, at its record's commit where a
+       loss left one to restore;
+     - an open after a restore reports it, `openReport.restored` with the sequence it opened at (null where a read-only
+       open couldn't write it), and `openReport.notBorneOut`, until a caller calls `acknowledgeRestore()`, which apack
+       doesn't yet, so nothing there shows a restore; the CLI says so on every command's error stream until `elmdb
+       acknowledge-restore`; and a writable open that can't write that notice is refused with the failure that stopped
+       it, `IO` where the filesystem refused the write (#157).
    - **apack's databases are rebuilt once on the new pin.** Format 1 was edited in place between the pin and `main`, in
      derived data (`../architecture/format.md`, Versions): a value index's orders, ranges and pages (#95), a compound
      index's order under equalities (#96), a term's places in blocks with lengths by place (#93), a list before a
