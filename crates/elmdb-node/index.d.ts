@@ -24,9 +24,10 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 export declare class Database {
   /**
    * Opens the database at `path`, creating it unless `readOnly`. Refused where the path is open in this process
-   * already (`ALREADY_OPEN`), in a process another copy of the binding is loaded in (`ALREADY_LOADED`), read-only
-   * where there is no database (`NO_DATABASE`), in another mode than a process that has it open for writing
-   * (`MODE_MISMATCH`), and where a restore is owed that this open can't make (`RESTORE_PENDING`)
+   * already (`ALREADY_OPEN`), in a process another copy of the binding has opened a database in
+   * (`ALREADY_LOADED`), read-only where there is no database (`NO_DATABASE`), in another mode than a process that
+   * has it open for writing (`MODE_MISMATCH`), and where a restore is owed that this open can't make
+   * (`RESTORE_PENDING`)
    */
   static open(path: string, options?: OpenOptions | undefined | null): Database
   /** The directory the database was opened at */
@@ -39,8 +40,8 @@ export declare class Database {
   get schema(): Schema | null
   /**
    * Changes the open database's schema as opening with it would, answering each change and what was done about it.
-   * Refused while a unit is open (`UNIT_OPEN`), and with `SCHEMA_CHANGE_REFUSED` in a read-only database, for a
-   * schema that differs from the stored one, and for a change opening refuses
+   * Refused while a unit is open (`UNIT_OPEN`), and with `SCHEMA_CHANGE_REFUSED` for a schema that differs from
+   * the stored one in a read-only database, and for a change opening refuses
    */
   setSchema(schema: Schema): SchemaChange[]
   /**
@@ -70,10 +71,10 @@ export declare class Database {
    * `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
    * answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
    * never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
-   * `hearBuilderCommits`, once its promise has settled. Its refusals reject the promise: `NO_LISTENER` for a
-   * tracked read asked while there is no such listener, and `CLOSED` when the database closes before it runs. Once
-   * sixteen snapshots are held for reads still waiting, a read asked at a commit that holds none runs at the call,
-   * on this thread
+   * `hearBuilderCommits`, once its promise has settled. elmdb's refusals of the read reject the promise:
+   * `NO_LISTENER` for a tracked read asked while there is no such listener, and `CLOSED` when the database closes
+   * before it runs. Once sixteen snapshots are held for reads still waiting, a read asked at a commit that holds
+   * none runs at the call, on this thread
    */
   readAsync(reads: Buffer): Promise<Buffer>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
@@ -111,7 +112,8 @@ export declare class Database {
   /**
    * Opens a unit that stays open across calls until it is committed or aborted, and writes go through it. While it
    * is open, what would write or wait outside it is refused (`UNIT_OPEN`): a write, a rebuild, a second `begin`,
-   * `setSchema`, `purge`, a rename, `reset`, `replaceWith`, `bulkLoad`, `waitForIndexBuilds` and `close`
+   * `setSchema`, `purge`, a rename, `reset`, `replaceWith`, `bulkLoad`, `close`, and `waitForIndexBuilds` once the
+   * index builder has started
    */
   begin(): Unit
   /** Compares derived data with primary data and every row with the schema's rules */
@@ -243,8 +245,8 @@ export interface BuilderCommit {
 export interface OpenOptions {
   /**
    * Opens existing files and refuses every write (`READ_ONLY`). The stored schema is used, and a `schema` that
-   * differs from it is refused (`SCHEMA_CHANGE_REFUSED`). It writes only to make a restore a power loss or a failed
-   * sync left owed, and is refused (`RESTORE_PENDING`) where it can't
+   * differs from it is refused (`SCHEMA_CHANGE_REFUSED`). Of the database's data it writes only to make a restore a
+   * power loss or a failed sync left owed, and is refused (`RESTORE_PENDING`) where it can't
    */
   readOnly?: boolean
   /**
@@ -266,12 +268,15 @@ export interface OpenOptions {
   syncEachCommit?: boolean
   /**
    * Group commit syncs once writes have paused for this many milliseconds: 100 by default. A whole number, as the
-   * two below are, or refused (`VALUE_INVALID`)
+   * next is, or refused (`VALUE_INVALID`)
    */
   syncIdleMs?: number
   /** Group commit syncs no later than this many milliseconds after the first commit not yet synced: 1000 by default */
   syncIntervalMs?: number
-  /** The map's size at open: by default twice the data file, and 64 MiB at least */
+  /**
+   * The map's size at open: by default twice the data file, and 64 MiB at least. A whole number of 1 at least, or
+   * refused (`VALUE_INVALID`), and a multiple of the system's page size, or refused by LMDB's binding (`IO`)
+   */
   mapSizeBytes?: number
 }
 

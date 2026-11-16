@@ -61,8 +61,8 @@ fn answer<'env>(env: &Env, bytes: &[u8]) -> Result<BufferSlice<'env>, Code> {
 #[napi(object)]
 pub struct OpenOptions {
     /// Opens existing files and refuses every write (`READ_ONLY`). The stored schema is used, and a `schema` that
-    /// differs from it is refused (`SCHEMA_CHANGE_REFUSED`). It writes only to make a restore a power loss or a failed
-    /// sync left owed, and is refused (`RESTORE_PENDING`) where it can't
+    /// differs from it is refused (`SCHEMA_CHANGE_REFUSED`). Of the database's data it writes only to make a restore a
+    /// power loss or a failed sync left owed, and is refused (`RESTORE_PENDING`) where it can't
     pub read_only: Option<bool>,
     /// The schema, as the canonical JSON `docs/architecture/schema.md` describes; a schema that differs from the stored one
     /// changes it
@@ -77,11 +77,12 @@ pub struct OpenOptions {
     /// commits are synced in groups, a moment after they return
     pub sync_each_commit: Option<bool>,
     /// Group commit syncs once writes have paused for this many milliseconds: 100 by default. A whole number, as the
-    /// two below are, or refused (`VALUE_INVALID`)
+    /// next is, or refused (`VALUE_INVALID`)
     pub sync_idle_ms: Option<f64>,
     /// Group commit syncs no later than this many milliseconds after the first commit not yet synced: 1000 by default
     pub sync_interval_ms: Option<f64>,
-    /// The map's size at open: by default twice the data file, and 64 MiB at least
+    /// The map's size at open: by default twice the data file, and 64 MiB at least. A whole number of 1 at least, or
+    /// refused (`VALUE_INVALID`), and a multiple of the system's page size, or refused by LMDB's binding (`IO`)
     pub map_size_bytes: Option<f64>,
 }
 
@@ -202,9 +203,10 @@ impl Database {
 #[napi]
 impl Database {
     /// Opens the database at `path`, creating it unless `readOnly`. Refused where the path is open in this process
-    /// already (`ALREADY_OPEN`), in a process another copy of the binding is loaded in (`ALREADY_LOADED`), read-only
-    /// where there is no database (`NO_DATABASE`), in another mode than a process that has it open for writing
-    /// (`MODE_MISMATCH`), and where a restore is owed that this open can't make (`RESTORE_PENDING`)
+    /// already (`ALREADY_OPEN`), in a process another copy of the binding has opened a database in
+    /// (`ALREADY_LOADED`), read-only where there is no database (`NO_DATABASE`), in another mode than a process that
+    /// has it open for writing (`MODE_MISMATCH`), and where a restore is owed that this open can't make
+    /// (`RESTORE_PENDING`)
     #[napi(factory)]
     pub fn open(env: Env, path: String, options: Option<OpenOptions>) -> Result<Self, Code> {
         guarded("Database.open", || {
@@ -268,8 +270,8 @@ impl Database {
     }
 
     /// Changes the open database's schema as opening with it would, answering each change and what was done about it.
-    /// Refused while a unit is open (`UNIT_OPEN`), and with `SCHEMA_CHANGE_REFUSED` in a read-only database, for a
-    /// schema that differs from the stored one, and for a change opening refuses
+    /// Refused while a unit is open (`UNIT_OPEN`), and with `SCHEMA_CHANGE_REFUSED` for a schema that differs from
+    /// the stored one in a read-only database, and for a change opening refuses
     #[napi(ts_args_type = "schema: Schema", ts_return_type = "SchemaChange[]")]
     pub fn set_schema(&self, schema: serde_json::Value) -> Result<serde_json::Value, Code> {
         self.guarded("Database.setSchema", || {
@@ -323,10 +325,10 @@ impl Database {
     /// `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
     /// answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
     /// never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
-    /// `hearBuilderCommits`, once its promise has settled. Its refusals reject the promise: `NO_LISTENER` for a
-    /// tracked read asked while there is no such listener, and `CLOSED` when the database closes before it runs. Once
-    /// sixteen snapshots are held for reads still waiting, a read asked at a commit that holds none runs at the call,
-    /// on this thread
+    /// `hearBuilderCommits`, once its promise has settled. elmdb's refusals of the read reject the promise:
+    /// `NO_LISTENER` for a tracked read asked while there is no such listener, and `CLOSED` when the database closes
+    /// before it runs. Once sixteen snapshots are held for reads still waiting, a read asked at a commit that holds
+    /// none runs at the call, on this thread
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn read_async<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.readAsync", || {
@@ -441,7 +443,8 @@ impl Database {
 
     /// Opens a unit that stays open across calls until it is committed or aborted, and writes go through it. While it
     /// is open, what would write or wait outside it is refused (`UNIT_OPEN`): a write, a rebuild, a second `begin`,
-    /// `setSchema`, `purge`, a rename, `reset`, `replaceWith`, `bulkLoad`, `waitForIndexBuilds` and `close`
+    /// `setSchema`, `purge`, a rename, `reset`, `replaceWith`, `bulkLoad`, `close`, and `waitForIndexBuilds` once the
+    /// index builder has started
     #[napi]
     pub fn begin(&self) -> Result<Unit, Code> {
         self.guarded("Database.begin", || {
