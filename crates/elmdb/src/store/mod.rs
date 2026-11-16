@@ -486,15 +486,31 @@ fn open_paths() -> &'static Mutex<HashSet<PathBuf>> {
 /// Releases a path's registration unless the open that took it succeeded
 pub(crate) struct Registration(Option<PathBuf>);
 
+/// Reserves a canonical path in this process until the registration is dropped, refused with `refused`'s message when
+/// an open, a publisher or a reader holds it
+fn reserve(canonical: &Path, refused: impl FnOnce() -> String) -> Result<Registration> {
+    if !open_paths().lock().expect("the open-paths lock is never poisoned").insert(canonical.to_owned()) {
+        return Err(Error::new(ErrorCode::AlreadyOpen, refused()));
+    }
+    Ok(Registration(Some(canonical.to_owned())))
+}
+
 /// Reserve an existing canonical destination against opens and publishers in this process.
 pub(crate) fn reserve_destination(target: &Path) -> Result<Registration> {
-    if !open_paths().lock().expect("the open-paths lock is never poisoned").insert(target.to_owned()) {
-        return Err(Error::new(
-            ErrorCode::AlreadyOpen,
-            format!("The database at {} is open or being published; use another directory", target.display()),
-        ));
-    }
-    Ok(Registration(Some(target.to_owned())))
+    reserve(target, || {
+        format!("The database at {} is open or being published; use another directory", target.display())
+    })
+}
+
+/// Reserves the database in `source`, which a reader opens itself, against every other environment of it in this
+/// process while it is read: refused when it is open here, the reading database's own directory included
+pub(crate) fn reserve_source(source: &Path) -> Result<Registration> {
+    reserve(&source.canonicalize()?, || {
+        format!(
+            "The database at {} is open in this process, so it can't be read as a source; back it up and use the backup",
+            source.display()
+        )
+    })
 }
 
 impl Drop for Registration {
