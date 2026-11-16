@@ -303,14 +303,14 @@ Opened by having both halves in one repository, each to be decided on a reading,
        when the builder is held (#151);
      - a writable open in another mode than a live writer's is refused with `MODE_MISMATCH` (#156), which apack's specs
        that open a database with `syncs: false` beside a child process opening it with the defaults meet (`apack-ears`'
-       `watch.spec.ts` and `writers-converge.spec.ts`, the SDK's `projections-converge.spec.ts`), which pass once each
-       child opens with `syncs: false` too; each writable open holds `grouped.lock`, `ordered.lock` or `unsynced.lock`
-       beside `data.mdb`; under `syncEachCommit` or `syncs: false`, a writable open syncs the record it reads, or writes
-       one and syncs the directory where there is none, as apack's temporary databases do on their empty directories,
-       and the first in its mode over an existing data file syncs that file too, as `apack-ears`' `model-based.spec.ts`
-       does in each case it copies a database for; a backup into a directory removes the record a database there left,
-       once the copy is published; and `replaceWith` opens its source as an open does, at its record's commit where a
-       loss left one to restore;
+       `watch.spec.ts` and `writers-converge.spec.ts`, the SDK's `projections-converge.spec.ts`), a refusal that a child
+       opening with `syncs: false` too clears; each writable open holds `grouped.lock`, `ordered.lock` or
+       `unsynced.lock` beside `data.mdb`; under `syncEachCommit` or `syncs: false`, a writable open syncs the record it
+       reads, or writes one and syncs the directory where there is none, as apack's temporary databases do on their
+       empty directories, and the first in its mode over an existing data file syncs that file too, as `apack-ears`'
+       `model-based.spec.ts` does in each case it copies a database for; a backup into a directory removes the record a
+       database there left, once the copy is published; and `replaceWith` opens its source as an open does, at its
+       record's commit where a loss left one to restore;
      - an open after a restore reports it, `openReport.restored` with the sequence it opened at (null where a read-only
        open couldn't write it), and `openReport.notBorneOut`, until a caller calls `acknowledgeRestore()`, which apack
        doesn't yet, so nothing there shows a restore; the CLI says so on every command's error stream until `elmdb
