@@ -336,7 +336,7 @@ the index's nodes to the model's live entities and its scores within their bound
 the tolerance, since every state of the index is within the bound it reports whether its drain ran or not.
 
 The order a value index keeps of its strings has its specs in `engine/tests/order.rs` and `engine/order.rs`
-(`../roadmap/string-order.md`). Of its keys: a sort key's bytes held to the collator's comparison over eleven
+(`../archive/roadmap/string-order.md`). Of its keys: a sort key's bytes held to the collator's comparison over eleven
 collations, cut at any room, and every key to 511 bytes over random names, values and strings; a key there while
 its entry holds a place, through an entry that passes into blocks and back; the keys of entities filed by their
 place; a `rebuild()`, a builder's units of one key each and a build gone on with, each held to the same keys; and

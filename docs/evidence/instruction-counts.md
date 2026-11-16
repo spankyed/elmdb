@@ -1,6 +1,6 @@
 # Instruction counts: readings
 
-The evidence for [stage 7 of the verification tooling](../roadmap/verification-tooling.md#7-instruction-count-benchmarks).
+The evidence for [stage 7 of the verification tooling](../archive/roadmap/verification-tooling.md#7-instruction-count-benchmarks).
 2026-10-30, on `session/instruction-counts` from `af3f0f0`, in a `rust:1-bookworm` container on an Apple M1 Pro
 (aarch64 Linux, four CPUs and 6 GiB given to it), Rust 1.99.1, Valgrind 3.19.0, gungraun 0.20.0 and its runner. The
 host's load doesn't enter a count, which is the point; it is recorded because a run's duration does move with it.

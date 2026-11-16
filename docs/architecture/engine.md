@@ -309,7 +309,7 @@ an answer:
   marker, and under names and values that leave its keys no room, the set is sorted as before. So are a field
   holding a list or another value the index doesn't order, several types, a start of ids, and the trash alone. A
   range of numbers holds no string, and is read from the index whatever strings the field holds.
-- **An order of strings is kept beside the index's entries** (`engine/order.rs`, `../roadmap/string-order.md`). A
+- **An order of strings is kept beside the index's entries** (`engine/order.rs`, `../archive/roadmap/string-order.md`). A
   value index a schema declares has, under each tuple of the values before its last field, a key for each string an
   entry is for, where the collation orders it: the string's sort key as far as the key has room, whether it was cut,
   and the string (`format.md`, `d/xo`). A write puts the key with the entry's first place and deletes it with its
