@@ -59,13 +59,16 @@ struct State<T> {
 }
 
 impl<T: AtCommit> State<T> {
-    /// Holds `txn` for the reads of its commit, answering that commit
+    /// Holds `txn` for the reads of its commit, answering that commit. One opened at a later commit than the one asked
+    /// for, which landed since, may find it holding as many as it may: it is ended, and the read shares the commit's
     fn hold(&mut self, txn: T, generation: u64) -> u64 {
         let at = txn.read_at();
         let commit = self.commits.entry(at).or_insert_with(|| Commit { free: Vec::new(), opened: 0, waiting: 0 });
-        commit.free.push((txn, generation));
-        commit.opened += 1;
-        self.held += 1;
+        if commit.opened < PER_COMMIT {
+            commit.free.push((txn, generation));
+            commit.opened += 1;
+            self.held += 1;
+        }
         at
     }
 

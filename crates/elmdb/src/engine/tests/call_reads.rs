@@ -26,6 +26,18 @@ fn counted(db: &Database, read: CallRead) -> u64 {
     answer[0]["n"].as_u64().unwrap()
 }
 
+/// What a listener of the builder's commits heard: each commit's sequence and the tokens told with it
+type Heard = Arc<Mutex<Vec<(u64, Vec<u32>)>>>;
+
+/// Registers a listener for the builder's commits, which a tracked read answered later needs, answering what it hears
+fn listening(db: &Database) -> Heard {
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let hearing = Arc::clone(&heard);
+    db.hear_builder_commits(Some(Arc::new(move |sequence, touched| hearing.lock().unwrap().push((sequence, touched)))))
+        .unwrap();
+    heard
+}
+
 /// Creates `id`, answering the commit's sequence and the tokens its result named
 fn create(db: &Database, entity_type: &str, id: &str) -> (u64, Vec<u32>) {
     let (_, changes) =
@@ -97,6 +109,7 @@ fn a_growth_of_the_map_runs_the_reads_waiting_on_their_own_snapshots() {
 fn a_close_refuses_the_reads_still_waiting_and_closes_though_their_snapshots_were_held() {
     let dir = tempfile::tempdir().unwrap();
     let db = Arc::new(open(&dir));
+    listening(&db);
     create(&db, "Task", "Task-1");
     let asked = db.read_at_call(count(None));
     let tracked = db.read_at_call(count(Some(7)));
@@ -115,6 +128,7 @@ fn a_close_refuses_the_reads_still_waiting_and_closes_though_their_snapshots_wer
 fn a_tracked_read_refused_its_snapshot_at_its_call_is_filed_for_everything_as_a_read_that_failed_so_is() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
+    listening(&db);
     create(&db, "Task", "Task-1");
     let store = db.store().unwrap();
     let every = store.every_reader_slot();
@@ -130,6 +144,7 @@ fn a_tracked_read_refused_its_snapshot_at_its_call_is_filed_for_everything_as_a_
 fn a_tracked_read_is_told_of_the_last_commit_that_wrote_into_it_before_it_was_filed_and_of_none_elsewhere() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
+    listening(&db);
     create(&db, "Task", "Task-1");
     let asked = db.read_at_call(count(Some(7)));
     // Not filed yet: no commit's result names it
@@ -153,6 +168,7 @@ fn a_tracked_read_is_told_of_the_last_commit_that_wrote_into_it_before_it_was_fi
 fn a_read_untracked_while_it_waited_is_neither_filed_nor_told() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
+    listening(&db);
     let asked = db.read_at_call(count(Some(7)));
     create(&db, "Task", "Task-1");
     db.untrack(7);
@@ -166,18 +182,30 @@ fn what_a_tracked_read_is_told_reaches_the_listener_of_the_builder_s_commits() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     db.tell_touched(3, 7);
-    let heard = Arc::new(Mutex::new(Vec::new()));
-    let hearing = Arc::clone(&heard);
-    db.hear_builder_commits(Some(Arc::new(move |sequence, touched| hearing.lock().unwrap().push((sequence, touched)))))
-        .unwrap();
+    let heard = listening(&db);
     db.tell_touched(5, 7);
     assert_eq!(*heard.lock().unwrap(), [(5, vec![7])]);
+}
+
+#[test]
+fn a_tracked_read_asked_while_nothing_listens_for_the_builder_s_commits_is_refused_and_an_untracked_one_is_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    create(&db, "Task", "Task-1");
+    let refused = db.answer_call_read(db.read_at_call(count(Some(7))));
+    assert_eq!(refused.answer.unwrap_err().code, ErrorCode::NoListener);
+    assert_eq!(refused.touched, None);
+    assert!(db.tracks.lock().is_empty(), "nothing of the refused read is noted or filed");
+    assert_eq!(counted(&db, db.read_at_call(count(None))), 1);
+    listening(&db);
+    assert_eq!(counted(&db, db.read_at_call(count(Some(7)))), 1);
 }
 
 #[test]
 fn a_tracked_read_waiting_through_more_commits_than_are_noted_is_told_of_the_last_though_none_wrote_into_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
+    listening(&db);
     let fewer = db.read_at_call(count(Some(7)));
     for n in 0..MOST_NOTED {
         create(&db, "Note", &format!("Note-{n}"));

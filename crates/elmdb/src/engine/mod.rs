@@ -826,13 +826,26 @@ impl Database {
     /// `read`, answered by `answer_call_read` on whichever thread calls it, from the snapshot of the last commit as it
     /// is at this call: a commit made before the answer, here or in another process, changes nothing it reads
     /// (`docs/architecture/engine.md`, Reads). The snapshot is held until the read runs, unless as many are held for
-    /// such reads as may be, when the read runs here
+    /// such reads as may be, when the read runs here. A tracked one is refused (`NO_LISTENER`) while nothing listens for
+    /// the builder's commits (`hear_builder_commits`), which is where it is told of a commit that wrote into it before it
+    /// was filed
     pub fn read_at_call(&self, reads: plan::Reads) -> CallRead {
         let answered = Arc::default();
         let store = match self.store() {
             Ok(store) => store,
             Err(error) => return CallRead { asked: Err(error), answered, tracked: None },
         };
+        // A commit that writes into a tracked read before it is filed is told to the listener of the builder's commits
+        // alone, which lets it go only at a close: without one, its caller would keep an answer it took to be tracked
+        if reads.track.is_some() && self.tracks.lock().builder_commit_listener().is_none() {
+            let refused = Error::new(
+                ErrorCode::NoListener,
+                "A tracked read answered later is told of a commit that writes into it before it is filed only through \
+                 the listener of the builder's commits: register one (`hearBuilderCommits`), or track the read with \
+                 `read`",
+            );
+            return CallRead { asked: Err(refused), answered, tracked: None };
+        }
         // Held until the snapshot is taken, so the schema read with it is the one it was written under
         let schema = self.schema_guard();
         // Noted for before the snapshot is taken, so that every commit it doesn't hold is noted

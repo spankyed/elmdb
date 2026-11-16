@@ -232,3 +232,9 @@ test('a tracked readAsync that a commit wrote into before it was filed is told t
   // Filed now: the next write into it names it
   assert.deepEqual(note(db, 'after').changes.touched, [3]);
 });
+
+test('a tracked readAsync is refused while nothing listens for the commits no write names', async (t) => {
+  const { db } = open(t);
+  await assert.rejects(db.readAsync(counting(3)), { code: 'NO_LISTENER' });
+  assert.equal(counted(await db.readAsync(counting())), 0);
+});

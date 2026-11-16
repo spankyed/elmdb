@@ -436,8 +436,10 @@ the database itself alive, and is joined on normal close; process-exit cleanup d
 The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.read(reads)` runs on the calling thread. `db.readAsync(reads)` runs on a thread of the pool and resolves with the
 answer `read` would have given at the call, so a large read doesn't block the event loop: its snapshot is the last
 commit as it is at the call, and a commit made before the pool runs it, here or in another process, is not in its
-answer. The read transaction is taken at the call and held, outside the gate as an idle one is, until the pool runs
-the read on it (`store/call_reads.rs`). What that holds is bounded. The reads asked at one commit share at most four
+answer. The reads are decoded and checked, and the read transaction is taken, at the call, on the calling thread; the
+transaction is held, outside the gate as an idle one is, until the pool runs the read on it (`store/call_reads.rs`).
+A call made while a growth of the map on another thread runs the reads waiting waits for it, as a `read` would. What
+that holds is bounded. The reads asked at one commit share at most four
 transactions, as many as libuv's pool runs at once unless told more, each used by one read at a time, so a burst of
 calls, a `Promise.all` over many reads, takes four of LMDB's reader slots (126, LMDB's default, which elmdb doesn't
 change, shared by every process with the database open) rather than one each. At most sixteen are held in all, and a
@@ -449,7 +451,10 @@ snapshot, on the thread that grows the map, and a close refuses the reads still 
 later snapshot than its call's. A tracked read is filed once it has run, after the commits made since its call, so
 each of those commits notes what it wrote for the reads waiting, and one that wrote into what the read read is told
 to the listener of `hearBuilderCommits`, with its sequence and the read's token, once the read's promise has settled:
-no commit's result could name a read that wasn't filed.
+no commit's result could name a read that wasn't filed. So a tracked `readAsync` is refused (`NO_LISTENER`) while no
+listener is registered, as nothing would tell its caller of such a commit. Another process's commits name no tracked
+read here, waiting or filed: when `committedElsewhere()` answers true, a tracked `readAsync` not yet settled is as
+stale as the reads already filed.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 

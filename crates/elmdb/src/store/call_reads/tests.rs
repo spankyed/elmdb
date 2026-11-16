@@ -269,3 +269,25 @@ fn a_failure_to_open_other_than_a_full_table_refuses_a_read_whose_commit_holds_a
     assert_eq!(refused.code, ErrorCode::Io);
     assert_eq!(reads.held(), (1, 1));
 }
+
+#[test]
+fn a_transaction_opened_at_a_later_commit_that_holds_as_many_as_it_may_is_ended_and_the_read_shares_that_commit_s() {
+    let (env, reads, saw) = (Env::default(), Arc::new(CallReads::default()), Arc::default());
+    env.commit();
+    let held: Vec<_> = (0..PER_COMMIT).map(|_| ask(&reads, &env, &saw)).collect();
+    assert_eq!(reads.held(), (PER_COMMIT, PER_COMMIT));
+    // Asked as commit 0 was the last, and opened at commit 1, which landed meanwhile and holds as many as it may
+    let work: Work<Txn> = {
+        let saw = Arc::clone(&saw);
+        Box::new(move |txn: &Txn| saw.lock().unwrap().push(txn.commit))
+    };
+    let Ok(Asked::Waiting(late)) = reads.ask(0, || env.open(), work) else { panic!("refused") };
+    assert_eq!(reads.held(), (PER_COMMIT, PER_COMMIT));
+    assert_eq!(env.open_now(), PER_COMMIT);
+    late.run(|| (), drop).unwrap();
+    for ticket in held {
+        ticket.run(|| (), drop).unwrap();
+    }
+    assert_eq!(*saw.lock().unwrap(), [1; PER_COMMIT + 1]);
+    assert_eq!(env.open_now(), 0);
+}
