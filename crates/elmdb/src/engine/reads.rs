@@ -331,8 +331,22 @@ fn get_value(r: &impl Read, id: &str, name: &str) -> Result<Option<Value>> {
     get(r, id, name)?.map(|b| values::decode(&b)).transpose()
 }
 
-/// An entity's row, `{ id, entityType, …fields }`, or with `fields`, `{ id, …those it holds }`
-fn write_row(r: &impl Read, id: &str, fields: Option<&[String]>, w: &mut W<'_>) -> Result<()> {
+/// The fields a read asks each row for, each once, and `id` not among them, the row answering it as its id: a map holds a
+/// key once. Read once for the read, not for each row
+fn asked(fields: Option<&[String]>) -> Option<Vec<&str>> {
+    fields.map(|names| {
+        let mut asked: Vec<&str> = Vec::with_capacity(names.len());
+        for name in names {
+            if name != field::ID && !asked.contains(&name.as_str()) {
+                asked.push(name);
+            }
+        }
+        asked
+    })
+}
+
+/// An entity's row, `{ id, entityType, …fields }`, or with `fields` (as `asked` answers them), `{ id, …those it holds }`
+fn write_row(r: &impl Read, id: &str, fields: Option<&[&str]>, w: &mut W<'_>) -> Result<()> {
     match fields {
         None => {
             let stored = entities::fields(r, id)?;
@@ -347,12 +361,8 @@ fn write_row(r: &impl Read, id: &str, fields: Option<&[String]>, w: &mut W<'_>) 
             }
         }
         Some(names) => {
-            let mut held: Vec<(&String, Vec<u8>)> = Vec::new();
-            // A field asked for twice is answered once: a map holds a key once
-            for (at, name) in names.iter().enumerate().filter(|(_, n)| *n != field::ID) {
-                if names[..at].contains(name) {
-                    continue;
-                }
+            let mut held: Vec<(&str, Vec<u8>)> = Vec::new();
+            for &name in names {
                 if let Some(bytes) = get(r, id, name)? {
                     held.push((name, bytes));
                 }
@@ -5228,6 +5238,7 @@ fn query_with(
             w.str("rows");
             let start = w.0.len();
             w.array(ids.len() as u32);
+            let fields = asked(fields.as_deref());
             for id in &ids {
                 write_row(r, id, fields.as_deref(), &mut w)?;
             }
@@ -5247,7 +5258,7 @@ fn query_with(
             w.str("row");
             let start = w.0.len();
             match &first {
-                Some(id) => write_row(r, id, fields.as_deref(), &mut w)?,
+                Some(id) => write_row(r, id, asked(fields.as_deref()).as_deref(), &mut w)?,
                 None => w.nil(),
             }
             let plain = !may_hold_proto(&w.0[start..]);
@@ -5499,6 +5510,7 @@ fn query_with(
             w.str("hits");
             let start = w.0.len();
             w.array(ids.len() as u32);
+            let fields = asked(fields.as_deref());
             for id in &ids {
                 let hit = hits.get(id);
                 // A vector search matches no terms, so its hits have nothing to highlight
@@ -5535,7 +5547,7 @@ fn query_with(
                         }
                     }
                 }
-                if let Some(names) = fields {
+                if let Some(names) = &fields {
                     w.str("row");
                     write_row(r, id, Some(names), &mut w)?;
                 }
