@@ -8,7 +8,12 @@ import type { Batch } from './protocol/Batch.js'
  * The caller's msgpack: values encoded and decoded as its program wants them (times, extensions). `unpack` decodes
  * each map as an object, and `unpackMaps` each as a `Map`, for an answer whose maps may hold a key `__proto__`. Both
  * write and read plain msgpack: with msgpackr, two `Packr`s with `useRecords: false`, as elmdb refuses its record
- * extension, that differ only in `mapsAsObjects`
+ * extension, that differ only in `mapsAsObjects`.
+ *
+ * Both decode a 64-bit integer as a number where one holds it exactly: msgpackr's `int64AsType: 'auto'`. Every
+ * integer the generated types declare is within ±2^53, so each decodes as the `number` they say; msgpackr's default
+ * decodes any integer past 2^32 as a `BigInt`. A stored value past 2^53, which the types declare `unknown`, decodes as
+ * a `BigInt` and keeps every digit
  */
 export interface Codec {
   pack(value: unknown): Buffer
