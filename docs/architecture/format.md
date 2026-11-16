@@ -4,9 +4,10 @@ How a database lays out its data, and how a layout changes. Built: `crates/elmdb
 
 ## Keys
 
-One LMDB database per environment holds every key, in an order-preserving binary encoding of tuples (strings, integers,
-booleans, null) defined in `format`. Every prefix is declared in one table there, marked primary or derived; the table
-below starts from apack's format 4 layout, with the prefixes split by kind.
+One LMDB database per environment holds every key, in an order-preserving binary encoding of tuples of
+null, booleans, numbers (each as a float64), strings and bytes, defined in `format/key.rs`. Every prefix is declared in
+one table there (`format/mod.rs`), marked primary, derived or meta; the table below starts from apack's format 4
+layout, with the prefixes split by kind.
 
 | Prefix | Holds | Kind |
 |---|---|---|
@@ -15,7 +16,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `p/r` relation | a relation's row: its kind, ends, info, sequence, and its weight when it isn't 1 | primary |
 | `p/s` key | a numbering sequence | primary |
 | `p/q` type index id chunk | an embedding: its model, its chunk's hash, its f32 values | primary |
-| `m/` | the format, the kind, the schema and its hash, the last commit's sequence, how many times every row has been replaced, whether the change order is built, and how far tombstones are trimmed and each type's newest destroy | meta |
+| `m/` name | the format (`format`), the kind (`kind`), the schema and its hash (`schema`, `schemaHash`), the last commit's sequence (`sequence`), how many times every row has been replaced (`epoch`), the sequence a type's change order starts from (`changeOrder:<type>`), and how far tombstones are trimmed and each type's newest destroy (`destroyedFloor`, `destroyed:<type>`) | meta |
 | `d/e`, `d/t` type seq | a type's live and trashed entities, in creation order | derived |
 | `d/c` type | a type's count | derived |
 | `d/h` type changed place | a type's entities in the order of the commits that last wrote them, for a type whose schema sets `changeOrder` | derived |
@@ -30,7 +31,7 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/xup` type index values start | a block of those places, as `d/xp` is of a value's | derived |
 | `d/xl` type index values | the places, held as `d/x` holds them, of the entities of the type whose last field in the index is a long string, one of more than 256 bytes, which the index has no entry for, under what its fields before the last hold as `d/xw` has them | derived |
 | `d/xlp` type index values start | a block of those places, as `d/xp` is of a value's | derived |
-| `d/xo` type index build values sortkey cut string | nothing: that the value index has an entry for the string under these values, filed where the schema's collation orders it (`../roadmap/string-order.md`). `build` is the sequence of the commit that began the keys' build; `sortkey` is the collator's sort key of the string, its first bytes when the key hasn't room for them all, and `cut` says which. The room is what a key's 511 bytes leave after what comes before the sort key, its tag and end, `cut`, and the 258 bytes the longest string an entry holds takes with no zero byte in it: one room for every string under the values, and no order is kept under names and values that leave a key no room at all. What is under a build is its stamp's to lay out, and this is the layout of stamp number 1. The key is there while the string's `d/x` entry holds a place: a write puts it with the entry's first place and deletes it with its last (`engine.md`, An order of strings) | derived |
+| `d/xo` type index build values sortkey cut string | nothing: that the value index has an entry for the string under these values, filed where the schema's collation orders it (`../roadmap/string-order.md`). `build` is the sequence of the commit that began the keys' build; `sortkey` is the collator's sort key of the string, its first bytes when the key hasn't room for them all, and `cut` says which. The room is what a key's 511 bytes leave after what comes before the sort key, its tag and end, `cut`, and the 258 bytes the longest string an entry holds takes with no zero byte in it: one room for every string under the values, and no order is kept under names and values that leave a key no room at all. What is under a build is its stamp's to lay out, and this is layout 1 (`LAYOUT`, `engine/order.rs`), one of the things a stamp is a hash of, with the collation, the collator's crates at their versions and the sort keys it gives some probe strings. The key is there while the string's `d/x` entry holds a place: a write puts it with the entry's first place and deletes it with its last (`engine.md`, An order of strings) | derived |
 | `d/xo` type index build values sortkey cut place | nothing: that the entity at the place holds, under these values, a string with no key of the kind above: a long one, or one of fewer bytes whose zero bytes, two bytes each in a key, make it take more than those 258 | derived |
 | `d/xob` type index | the marker of an index's `d/xo` keys: the stamp of the collator that made them, their build, and whether the build is whole, as msgpack `[stamp, build, whole]`. `check()` holds the keys under it to the index's entries when the stamp is its own and the build whole, and compares nothing under any other | derived |
 | `d/o`, `d/n` entity kind seq | an entity's outgoing and incoming edges: `[relation, far end]`, and the row's weight third when it holds one | derived |
@@ -50,10 +51,10 @@ below starts from apack's format 4 layout, with the prefixes split by kind.
 | `d/rk` index score type seq | a rank index's nodes in score order, highest first, the estimate kept to as many significant bits as a cell of 256 times the tolerance takes, 4 to 52 | derived |
 | `d/rq` index type seq | a rank index's nodes whose residual is over its threshold, waiting to be pushed | derived |
 | `d/rs` index | a rank index's totals: its nodes, their estimates and residuals summed, the changes to a node since those were counted, the store's sequence as the last commit to write the index read it, how far it is built, where its sweep is | derived |
-| `l/d` sequence type id | an entity a commit destroyed, which leaves no `p/i`; those of the last 4096 commits (`TOMBSTONE_COMMITS`) | log |
-| `l/k` name | a reader's checkpoint, the bytes it gave, written in the unit whose work it records (`Unit::set_checkpoint`) | log |
+| `l/d` sequence type id | an entity a commit destroyed, which leaves no `p/i`; those of the last 4096 commits (`TOMBSTONE_COMMITS`) | meta |
+| `l/k` name | a reader's checkpoint, the bytes it gave, written in the unit whose work it records (`Unit::set_checkpoint`) | meta |
 
-A tombstone or a checkpoint is neither primary nor derived: a dump leaves it out, `rebuild()` leaves it alone, and
+A tombstone or a checkpoint is meta, neither primary nor derived: a dump leaves it out, `rebuild()` leaves it alone, and
 `check()` doesn't read it. A backup keeps it with the rows it describes, and `reset` and `replace_with` drop it with
 them.
 
@@ -72,7 +73,8 @@ A value is msgpack bytes, written by the caller and stored as given:
   ignores entry order but preserves each entry's multiplicity;
 - `nil`, booleans, integers, floats, strings, binary, arrays and maps whose keys are strings, and of the extension
   types only msgpack's timestamp (type −1, how a JavaScript `Date` encodes); a write holding any other extension is
-  refused (`VALUE_INVALID`). apack's stored values hold no extension at all (`docs/evidence/phase-1.md`);
+  refused (`VALUE_INVALID`), as is a float that isn't finite and a value that nests deeper than 256
+  (`format/value.rs`). apack's stored values hold no extension at all (`docs/evidence/phase-1.md`);
 - the engine decodes a value only where it must: to index it, to check a required field, to filter by it, to extract
   text.
 
@@ -87,8 +89,10 @@ as they are. Per-type dictionaries for small values are designed and not built: 
 
 ## Versions
 
-`m/format` records the format as an integer, and an open refuses a database in another format, naming both: a newer
-one says to update elmdb, an older one that it is from before the format was fixed and is made again.
+`m/format` records the format as an integer, and an open refuses a database in another format (`WRONG_FORMAT`),
+naming both: a newer one says to update elmdb, an older one that it is from before the format was fixed and is made
+again. Files whose `m/kind` isn't elmdb's are refused as no database of its (`NOT_A_DATABASE`), and one that records
+no format as damaged (`CORRUPTED`).
 
 **The format is 1 until a release has users** (apack's `docs/archive/plans/storage-format-one.md`). Until then a change to the
 stored layout edits format 1 in place: the number doesn't move, and no upgrade step is written. A change to derived data
@@ -150,9 +154,16 @@ A database's directory holds LMDB's two files, `data.mdb` and `lock.mdb`, and el
 | `writer.lock` | nothing: on macOS, locked by the writer inside a write transaction (`store/writers.rs`) |
 | `grouped.lock`, `ordered.lock`, `unsynced.lock` | nothing: locked shared by each writable open of the grouped mode, `syncEachCommit` and `syncs: false`, for as long as it is open; a writable open of another mode is refused while one is held (`MODE_MISMATCH`) |
 
+A handle that listens for other processes' commits files a mailbox in the directory `wake/` (`store/wake.rs`): a
+FIFO on Unix, and on Windows a file naming an event. A backup stages its copy in its target as `.elmdb-backup-*`,
+and once it is published removes the target's `synced` and `synced.restored`, which describe the file it replaced
+(`store/backup.rs`).
+
 A record of another version reads as no record. The record names an LMDB transaction and a meta page, so a file put
 in place of the data file that the record's commit and root pages don't match is opened as it is, a record that
-says `failed` excepted, which is refused.
+says `failed` excepted, which is refused. The record is written to two slots in turn, each whole, so one always
+reads: a file holding two written slots of which neither reads is refused as damaged (`CORRUPTED`), naming the file
+to move aside (`store/record.rs`).
 
 ## LMDB
 
