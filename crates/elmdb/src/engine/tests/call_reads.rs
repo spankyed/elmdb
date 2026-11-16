@@ -39,6 +39,8 @@ fn a_read_answers_what_read_would_have_at_its_call_though_commits_landed_before_
     let db = open(&dir);
     create(&db, "Task", "Task-1");
     let first = db.read_at_call(count(None));
+    // Read already: the first commit has a transaction to spare, which no read asked after the next may take
+    assert_eq!(counted(&db, db.read_at_call(count(None))), 1);
     create(&db, "Task", "Task-2");
     let second = db.read_at_call(count(None));
     create(&db, "Task", "Task-3");

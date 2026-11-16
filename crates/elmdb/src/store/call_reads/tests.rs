@@ -84,12 +84,16 @@ fn reads_asked_at_one_commit_share_at_most_a_few_transactions_and_let_them_go_on
 fn a_read_asked_after_a_commit_reads_that_commit_and_one_asked_before_it_does_not() {
     let (env, reads, saw) = (Env::default(), Arc::new(CallReads::default()), Arc::default());
     let before = ask(&reads, &env, &saw);
+    // A second read at the first commit, run already, leaves that commit a transaction to spare
+    let spare = ask(&reads, &env, &saw);
+    spare.run(|| (), drop).unwrap();
+    assert_eq!(reads.held(), (2, 2));
     env.commit();
     let after = ask(&reads, &env, &saw);
     // Run in the other order: each reads its call's commit whichever runs first
     after.run(|| (), drop).unwrap();
     before.run(|| (), drop).unwrap();
-    assert_eq!(*saw.lock().unwrap(), [1, 0]);
+    assert_eq!(*saw.lock().unwrap(), [0, 1, 0]);
 }
 
 #[test]
@@ -234,7 +238,9 @@ fn a_close_at_exit_waits_no_longer_than_its_deadline_for_the_lock_and_no_close_a
         closing.close();
         closed.send(()).unwrap();
     });
-    done.recv_timeout(std::time::Duration::from_secs(10)).expect("the closes returned while the lock was held");
+    let returned = done.recv_timeout(std::time::Duration::from_secs(10));
+    // The growth lets the lock go before anything is asserted, so a failure ends the test rather than its drops waiting
     barrier.wait();
     growing.join().unwrap();
+    returned.expect("the closes returned while the lock was held");
 }
