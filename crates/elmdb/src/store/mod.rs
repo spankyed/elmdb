@@ -1611,7 +1611,10 @@ impl Store {
         self.env.info().map_size
     }
 
-    /// Waits for every unit committed before the call to be on disk
+    /// Waits for every unit committed before the call to be on disk. A unit's owner may wait on it while its unit is
+    /// open: the unit holds the write transaction every process takes to commit, so no map grows while it is open; a
+    /// sync that met a growth from before it gives way to the unit rather than waiting on it (`gate_to_adopt`), and
+    /// the sync takes nothing else the unit holds
     pub fn durable(&self) -> Option<Durable> {
         self.commit.as_ref().map(GroupCommit::durable)
     }

@@ -1330,6 +1330,38 @@ fn a_sync_that_met_a_grown_map_as_a_unit_began_gives_way_to_the_unit_and_its_own
 }
 
 #[test]
+fn a_unit_s_owner_waits_on_a_sync_though_another_process_grew_the_map_before_the_unit_began() {
+    // A unit holds the write transaction every process takes to commit, so no map grows while it is open; one grown
+    // before it is taken as it begins. Its owner's wait on a sync then waits on nothing the unit holds. In order: the
+    // unit begins before any sync meets the growth, where the test above has a sync meet it first
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(256 << 10), ..grouped() }).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir.path())
+        .env("ELMDB_GROW_GROUPED", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    let (txn, gate, writer) = store.begin().unwrap();
+    // Waited on a thread of its own, so a wait that never ends fails here rather than hanging the test
+    let waiting = store.durable().expect("the grouped mode syncs");
+    let (answered, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answered.send(waiting.wait());
+    });
+    answer.recv_timeout(Duration::from_secs(10)).expect("the unit's owner waited on its sync for good").unwrap();
+    txn.abort();
+    drop(gate);
+    writer.release();
+    store.end_unit();
+    store.close().unwrap();
+}
+
+#[test]
 fn a_write_that_takes_the_map_another_process_grew_runs_a_read_waiting_on_its_own_snapshot_first() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(256 << 10), ..grouped() }).unwrap();
