@@ -144,8 +144,9 @@ walk answers. A search naming an index its type lacks, or none on a type with no
 index's are, so read part way it would answer from the entities filed so far and say nothing of the rest.
 `waitForIndexBuilds` blocks until it is built. It is refused with what holds a build up while the builder waits that
 out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller to make again; with `INDEX_BUILD_FAILED`, naming
-each, when a build failed; while a unit is open (`UNIT_OPEN`), since a build waits for the unit to end; and in a
-listener running on the builder's thread (`CALLBACK_ACTIVE`). A tracked read and a watch are told by the commit that
+each, when a build failed; while a unit is open, once the database has started its index builder (`UNIT_OPEN`),
+since a build waits for the unit to end; and in a listener running on the builder's thread (`CALLBACK_ACTIVE`). With
+no builder started, it answers at once. A tracked read and a watch are told by the commit that
 ends the build (below, Change sets and watch).
 
 A plan is a scope, a start, steps and a terminal, and holds at most 256 steps (`MAX_STEPS`, `engine/reads.rs`): each
@@ -412,7 +413,7 @@ an answer:
   rather than sorting the whole set: the set is still read, and the memory is the limit's.
 
 A query asked for its `visits` answers `{ kind: "visited", answer, visited }`: the answer, and how many entities its
-start and walks read from the store, one found
+start and walks read from the database, one found
 through an index counted as it is read at its place, which is what says whether a filter walked rows an index could
 have answered. A range's places, read to make a list of them, are no visits until an entity is read at one; a
 `count` of a range reads no entity and counts each place it counted as a visit.
@@ -521,7 +522,7 @@ long as it runs; a rebuild waiting for another's turn holds its thread while it 
 stay open across calls, as a caller's transaction running its own code between writes needs: `db.begin()` opens one,
 `unit.write(batch)` applies a batch in it, its writes read their own (`unit.read(reads)` answers from the unit's
 transaction, and `unit.pendingChanges()` its change set so far), and `unit.commit(durable?)` or `unit.abort()` ends
-it; `unit.isOpen` says whether it has, and a call on a unit that has ended is refused (`CLOSED`). One unit is open at a time, and while it is a write of the database refuses (`UNIT_OPEN`): its writes go through the
+it; `unit.isOpen` says whether it is still open, and a call on a unit that has ended is refused (`CLOSED`). One unit is open at a time, and while it is a write of the database refuses (`UNIT_OPEN`): its writes go through the
 unit. The unit's write transaction belongs to the thread that began it. A unit opening on a map more than half used
 grows the map first, since an open unit can't grow it. A background index build waits for an open unit to end, woken
 when it does, and goes on from where it stopped; any other write is refused (`UNIT_OPEN`).
@@ -547,7 +548,7 @@ The operations:
 - **Refusals** are the engine's, each an error code: an undeclared type, kind or role (`UNKNOWN_TYPE`,
   `UNKNOWN_RELATION_KIND`, `UNKNOWN_ROLE`), a type named as the engine's own ids are (`Relation`, `Sequence`:
   `RESERVED_TYPE`), a missing required field (`REQUIRED_FIELD`), an id in use (`ID_IN_USE`), an id of another type
-  (`TYPE_MISMATCH`), an id longer than 128 bytes or a key the store can't hold however it is made
+  (`TYPE_MISMATCH`), an id longer than 128 bytes or a key the database can't hold however it is made
   (`VALUE_INVALID`, naming what the key is made of), a write to an entity of a type the schema no longer declares
   (`UNKNOWN_TYPE`), no such entity or relation (`NO_SUCH_ENTITY`, `NO_SUCH_RELATION`), a reserved field
   (`RESERVED_FIELD`), a value that isn't a list (`NOT_A_LIST`), an invalid or taken code (`INVALID_SHORT_CODE`,
@@ -796,7 +797,8 @@ unit is open.
   device durability still depend on the platform honoring its sync operations.
 - `replaceWith(dir)`: every entry replaced by another elmdb database's primary data, with derived data rebuilt under
   this database's schema, in one durable unit, the database staying open. A source that holds no database is
-  refused (`NO_DATABASE`), as is one that isn't elmdb's (`NOT_A_DATABASE`) or is of another format (`WRONG_FORMAT`).
+  refused (`NO_DATABASE`), as is one that holds no elmdb database (`NOT_A_DATABASE`) or records another format, or
+  none (`WRONG_FORMAT`).
 - `reset()`: every entry removed but the database's own (its format and schema), in one durable unit.
 - `stats()`: entities per type (live and trashed), each field's entities and bytes, relations per kind, entries per
   index, the bytes of each value index's keys and values (`indexBytes`), the database's entries, file and map sizes; `indexStatus()` says which value and rank indexes are built, the
@@ -984,10 +986,11 @@ the process; caught, the process lives. What the panic left in memory is not kno
   until its handle is collected or the process ends, a later open of its path refused (`ALREADY_OPEN`), and
   `isOpen` may throw too.
 - **A panic on one of elmdb's own threads**, the index builder's, the sync's, the one that lets idle reads go or the
-  one that hears other processes' commits, is not a call's and marks no handle. A listener's is caught there and the
-  listener dropped, with no error to any call: `CALLBACK_PANICKED` is what a `watch` answers when its first delivery
-  panics. A panic on the thread that hears other processes' commits ends it unreported, and any other ends its
-  thread, which the close that joins it then reports as its own panic.
+  one that hears other processes' commits, is not a call's and marks no handle. A listener's panic on the builder's
+  thread is caught there and the listener dropped, with no error to any call; a `watch` whose first delivery panics
+  answers `CALLBACK_PANICKED` for its listener and `WATCH_PANICKED` for its read. A panic of the listener of other
+  processes' commits ends its thread unreported, and any other ends its thread, which the close that joins it then
+  reports as its own panic.
 
 What V8 collects, an unclosed database or an open unit, and the closes the binding makes as an environment or the
 process ends, are dropped where a panic is caught as well. In Rust a panic unwinds to the caller, as any does.

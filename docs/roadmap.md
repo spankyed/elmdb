@@ -9,7 +9,7 @@ waiting on a trigger below, which add to them and reorder nothing.
 
 | # | Change | Done when | State |
 |---|---|---|---|
-| 1 | The defects the review reproduced | each is fixed with a test that failed first; the model harness covers change sets, `changedSince`, `reset`, `renameRelation` and `renameField`; `renameType` and `replaceWith` have deterministic engine tests, and purge has them for types and fields | fixed, `79f646f`; the model harness covers change sets, `changedSince`, `reset`, `renameRelation` and `renameField` (#117, #118, #119, #121, #122), and since then a field's and a relation kind's purge, a replacement by a backup and `renameType` (#171); a type purge and a role purge have deterministic engine tests (`architecture/testing.md`, The model harness). The gate was amended to the first coverage, by the author's decision. Built |
+| 1 | The defects the review reproduced | each is fixed with a test that failed first; the model harness covers change sets, `changedSince`, `reset`, `renameRelation` and `renameField`; `renameType` and `replaceWith` have deterministic engine tests, and purge has them for types and fields | fixed, `79f646f`; the model harness covers change sets, `changedSince`, `reset`, `renameRelation` and `renameField` (#117, #118, #119, #121, #122), and since then a field's and a relation kind's purge, a replacement by a backup and `renameType` (#168); a type purge and a role purge have deterministic engine tests (`architecture/testing.md`, The model harness). The gate was amended to the first coverage, by the author's decision. Built |
 | 2 | Panics caught at the binding | a failpoint's panic in each export is a JavaScript error with a code of its own, and the process lives | built: `PANICKED` (`architecture/engine.md`, Errors; `architecture/testing.md`, The binding) |
 | 3 | A mode that survives power loss | an open option commits with LMDB's own sync; a crash-replay harness passes it and fails the grouped mode once; the README states the trade | built: `syncEachCommit` (`architecture/engine.md`, Durability; `architecture/testing.md`, Power loss); the README states the trade. Since the gate was set the grouped mode keeps its last synced commit and restores it after a power loss (`roadmap/synced-commit.md`: phases 1 to 5 built, but for phase 5's steps by hand on each platform), so the replay holds both modes, and fails the grouped one only with its pin turned off |
 | 4 | `check`, `rebuild` and `backup` off the calling thread | the event loop is never held 10 ms during a rebuild of 200,000 notes that no write waits on | built (#113); the quiet reading holds the loop under 3 ms for a 200,000-note rebuild on the pool (`evidence/million-notes.md`, off the calling thread). `write` left the item on 2026-11-15, by the owner's decision that reads and writes block (`architecture/design.md`, principle 9): its promise form answered what EARS hands back at the call too late, and a write made during a rebuild now waits for it on the calling thread |
@@ -29,8 +29,10 @@ waiting on a trigger below, which add to them and reorder nothing.
 | 0.5, a known envelope | 6, 10 | readings at a million notes are published, each with its target |
 | 1.0 | | two releases break neither the format nor the protocol, and an upgrade from 0.3 is tested |
 
-Milestone 0.1 is reached but for one thing: changes 1 to 4 are built, and power loss has a tested answer in the
-replay and over LazyFS, while no machine's power has been cut under a test (`roadmap/synced-commit.md`, phase 5's
+Milestone 0.1's gate holds as far as it is known: changes 1 to 4 are built, so the inputs the review found to abort
+or hang the host are fixed and a panic is an error at the binding, and power loss has a tested answer, in the replay
+and over LazyFS.
+What is left is outside the gate: no machine's power has been cut under a test (`roadmap/synced-commit.md`, phase 5's
 steps by hand).
 
 Of milestone 0.2, compound indexes are read for an order or a range under equalities, and with none the order is

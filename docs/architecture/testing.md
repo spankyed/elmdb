@@ -484,9 +484,9 @@ suite calls.
 ## Platforms
 
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
-Its jobs there, on Node 23: `checks` (format, clippy with and without the `diagnostics` feature, the workspace's suite,
+Its jobs there: `checks` (on Node 23: format, clippy with and without the `diagnostics` feature, the workspace's suite,
 the engine's with `diagnostics`, the doc tests); `heap` (the maintenance heap bound and the benchmarks' smoke runs);
-`repo` (`cargo xtask check-generated`, `check-one-lmdb`, `check-icu-exact`, `check-diagnostics-off`,
+`repo` (on Node 23: `cargo xtask check-generated`, `check-one-lmdb`, `check-icu-exact`, `check-diagnostics-off`,
 `check-leiden-serial`, `check-sync`, `check-commits` and `check-mutant-exclusions`; the binding's build, typecheck and
 suite; the read profile; SQLite's comparison at 2,000 notes; the read-only mount, idle-reader, reader-recovery,
 process-claim and publication scripts under `scripts/`; and that the generated loader and declarations are
@@ -525,10 +525,11 @@ These are required checks configured by the workflow, not a claim that a particu
 
 Filesystem support requirements and the limits of this platform coverage are in [filesystems.md](filesystems.md).
 
-Three workflows gate no pull request. `lossy-filesystem.yml` runs each night (Power loss). `lmdb-upstream.yml` runs
-each Monday and fails when OpenLDAP's `mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone
-reads what lands upstream of heed's LMDB (`scripts/lmdb-upstream.py`). `instruction-determinism.yml` is dispatched
-(Repeatable maintenance measurements).
+Four workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
+or its test, as no required check (Power loss). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
+`mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
+LMDB (`scripts/lmdb-upstream.py`). `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
+and so is `models.yml` (Concurrency models).
 
 Suites the sections above don't name: `store/wait_tests.rs` (what a unit's owner may wait on answers while the unit
 is open; `engine.md`, What waits on what), `engine/algorithms/tests.rs` (the graph algorithms against plain references

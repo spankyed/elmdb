@@ -27,8 +27,8 @@ cargo xtask pre-push              # cheapest first; --base REF when the branch m
 It sweeps the build directories first and refuses to start below 20 GB free (`cargo xtask sweep`, which needs
 cargo-sweep; `testing.md`, The build directory). What it can't run is CI's: the other platforms' builds and suites,
 the Valgrind readings, the binding loaded unchanged by Node 24 and Electron, and the checks CI makes on its Linux
-runner alone (the read-only mount, the idle-reader and
-reader-recovery scripts). A
+runner alone: the read-only mount, the idle-reader and reader-recovery scripts, and, where `pre-push` runs off Linux,
+the process-claim and publication scripts. A
 mutated or scratch copy of the tree builds with `CARGO_TARGET_DIR=$(cargo xtask scratch-target)`.
 
 While working, run what your change touches:
@@ -50,7 +50,8 @@ python3 scripts/mutants-in-diff.py BASE  # every mutant of the change caught, BA
 ```
 
 `pre-push` runs more than these: clippy and the engine's suite with the `diagnostics` feature, the heap bound, the
-benchmarks' smoke runs, the Loom and Shuttle models, and the read profile. `xtask/src/pre_push.rs` is the list.
+benchmarks' smoke runs, the Loom and Shuttle models, and the read profile. `xtask/src/pre_push.rs`, with the
+repository checks `xtask/src/main.rs` hands it, is the list.
 
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.
 - **Moved a line a `// mutant-skip:` excuses?** Keep its comment directly above it, and that is all: the comment is the

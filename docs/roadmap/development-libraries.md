@@ -117,7 +117,8 @@ Descriptor-relative opens, ownership checks, no-follow handling and file locking
 of elmdb's own, and the read-only mount refusal is LMDB's error with elmdb's reader registration. Nothing here would
 lose unsafe code or gain clearer ownership by moving, so rustix isn't a dependency of elmdb's own. The engine has
 since come to make more Unix calls through `libc`, none of them weighed here: a FIFO and its wake (`store/wake.rs`),
-the boot's identity (`store/boot.rs`) and a writer's file lock on macOS (`store/writers.rs`).
+the boot's identity (`store/boot.rs`) and, on macOS, LMDB's write semaphore, read beside a writer's file lock
+(`store/writers.rs`).
 
 ## 4. Concurrency model checking
 
