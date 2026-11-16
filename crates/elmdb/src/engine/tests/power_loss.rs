@@ -632,7 +632,8 @@ fn child_writes_until_it_dies() {
             std::process::abort();
         }
     }
-    println!("finished");
+    // A line of its own: the harness's summary says "finished in" whether the test passed or not
+    println!("wrote every commit of the workload");
 }
 
 /// Run by the nightly job over LazyFS (`.github/workflows/lossy-filesystem.yml`), which tears a write: in each round
@@ -664,7 +665,10 @@ fn a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync() {
             .output()
             .unwrap();
         let said = String::from_utf8_lossy(&child.stdout);
-        assert!(!said.contains("finished"), "round {round}: write {write} wasn't torn, and the writer finished");
+        assert!(
+            !said.lines().any(|line| line.contains("wrote every commit of the workload")),
+            "round {round}: write {write} wasn't torn, and the writer finished: {said}"
+        );
         // No sync finished: the record the open wrote, before any commit
         let synced = said
             .lines()
