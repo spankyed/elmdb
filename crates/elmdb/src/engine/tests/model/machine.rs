@@ -80,8 +80,21 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
         assert!(error <= 2.0 * TOLERANCE, "the drain left a bound of {error}");
     }
 
-    fn teardown(engine: Engine, _: Reference) {
+    fn teardown(engine: Engine, reference: Reference) {
         crate::failpoints::disarm_at(crate::failpoints::points::COMMIT, engine.db.path());
+        // While the spare names are removed, what they kept is reported: each Task holding the field, a field its type
+        // doesn't declare. An edge of a removed kind is data no rule reads, so it is reported as nothing
+        if reference.model.spares_removed {
+            let report = engine.db.check().unwrap();
+            assert!(report.differences.is_empty(), "check() with the spare names removed: {report:?}");
+            let got: BTreeSet<(String, String)> =
+                report.violations.into_iter().map(|v| (v.subject, v.message)).collect();
+            let kept: BTreeSet<(String, String)> = (reference.model.entities.iter())
+                .filter(|(id, e)| crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key("spare"))
+                .map(|(id, _)| (id.clone(), "holds spare, which Task doesn't declare".to_owned()))
+                .collect();
+            assert_eq!(got, kept, "check() with the spare names removed: each Task holding spare, and nothing else");
+        }
         declare_the_spares(&engine.db);
         let report = engine.db.check().unwrap();
         assert!(report.is_clean(), "check() after the workload: {report:?}");
