@@ -60,6 +60,9 @@ fn a_windows_read_only_map_never_claims_unmapped_file_capacity() {
     assert_eq!(read_only_map_size(32 * 4096, None), 32 * 4096);
     assert_eq!(read_only_map_size(32 * 4096, Some(MAP_STEP)), 32 * 4096);
     assert_eq!(read_only_map_size(32 * 4096, Some(16 * 4096)), 16 * 4096);
+    // A torn tail page leaves the file short of whole pages: the view ends at the last whole one, whatever was asked
+    assert_eq!(read_only_map_size(32 * 4096 + 100, None), 32 * 4096);
+    assert_eq!(read_only_map_size(32 * 4096 + 100, Some(MAP_STEP)), 32 * 4096);
 }
 
 #[cfg(windows)]
@@ -1754,6 +1757,26 @@ fn a_file_names_its_own_page_size_whatever_the_host_is() {
     image[40..44].copy_from_slice(&3000u32.to_ne_bytes());
     std::fs::write(&path, &image).unwrap();
     let refused = super::page_size_of(&mut std::fs::File::open(&path).unwrap(), &path).expect_err("refused");
+    assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
+}
+
+#[test]
+fn a_file_one_byte_short_of_a_page_its_trees_reach_is_refused_read_only_as_corrupt() {
+    // Cut inside a page the trees reach, so the file is short of whole pages: refused as corrupt by the walk on every
+    // platform, Windows' read-only view included, not as an I/O failure of the map
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path(), quiet()).unwrap();
+        put(&store, "big", &vec![9u8; 200_000]).unwrap();
+    }
+    let data = dir.path().join("data.mdb");
+    let (highest, last) = reached_in(&dir, &data);
+    assert_eq!(highest, last, "the big value's overflow pages are the file's last, and the trees reach them");
+    let page = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap() as u64;
+    let file = std::fs::OpenOptions::new().write(true).open(&data).unwrap();
+    file.set_len((last + 1) * page - 1).unwrap();
+    drop(file);
+    let refused = Store::open(dir.path(), StoreOptions { read_only: true, ..quiet() }).err().expect("refused");
     assert_eq!(refused.code, ErrorCode::Corrupted, "{refused}");
 }
 

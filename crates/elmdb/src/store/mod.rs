@@ -338,11 +338,16 @@ pub fn initial_map_size(file_bytes: u64) -> usize {
 }
 
 // Windows read-only sections map only the current file, not a writer's reserved capacity. The logical bound
-// must not exceed that view: transaction renewal then reports MAP_RESIZED before accessing newly appended pages.
+// must not exceed that view: transaction renewal then reports MAP_RESIZED before accessing newly appended pages. The view
+// ends at the file's last whole page: heed refuses a map that isn't whole pages, and a torn tail page past it is one the
+// open's walk of the trees judges (`short_of_its_pages`), as it does on every other platform
 #[cfg(any(windows, test))]
 pub(crate) fn read_only_map_size(file_bytes: u64, requested: Option<usize>) -> usize {
+    /// The page every Windows target has, which heed requires the map to be a multiple of
+    const WINDOWS_PAGE: usize = 4096;
     let physical = usize::try_from(file_bytes).unwrap_or(usize::MAX);
-    requested.unwrap_or(physical).min(physical)
+    let whole = physical - physical % WINDOWS_PAGE;
+    requested.unwrap_or(whole).min(whole)
 }
 
 /// A transaction that committed, with its sync outcome kept apart until in-memory state and observers are finalized.
