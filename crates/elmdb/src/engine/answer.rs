@@ -19,7 +19,12 @@ pub type Value = rmpv::Value;
 pub struct Answers(pub Vec<Answer>);
 
 /// One read's answer. A plan's terminal names its kind, and so does each direct read; `visits` and `explain` wrap a
-/// plan's answer in `visited` and `explained`
+/// plan's answer in `visited` and `explained`.
+///
+/// In TypeScript each map is declared an object, which is what the answer decodes to with maps as objects (msgpackr's
+/// `mapsAsObjects`). That decode is exact where the answer's `plainObjects` is true. Where it is false a stored map in
+/// a row, a group or a hit may hold a key `__proto__`, which no object holds as its own: decode such an answer with
+/// maps as `Map`s, and every map these types declare arrives as a `Map` of the same keys
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -109,7 +114,8 @@ pub enum Answer {
 }
 
 /// An entity's row: its id and the fields it holds, each value as stored. A whole row holds `entityType` and every
-/// field; one of the fields asked for holds those of them the entity holds
+/// field; one of the fields asked for holds those of them the entity holds. Declared an object, as the answer decodes
+/// where its `plainObjects` is true; where it is false, a `Map` of the same keys (`Answer`)
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
 #[cfg_attr(feature = "codegen", ts(type = "{ id: string, entityType?: string, [field: string]: unknown }"))]

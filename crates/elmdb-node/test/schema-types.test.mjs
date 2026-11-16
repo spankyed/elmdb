@@ -238,3 +238,38 @@ test('a read answers what its generated types declare, kind by kind', (t) => {
   ];
   assert.deepEqual(answers, expected);
 });
+
+test('an answer that may hold `__proto__` decodes exactly as Maps of the keys its types declare', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
+  /** @type {{ Packr: new (options: object) => { pack(value: unknown): Buffer, unpack(bytes: Buffer): unknown } }} */
+  const { Packr } = require('msgpackr');
+  const objects = new Packr({ useRecords: false, mapsAsObjects: true });
+  const exact = new Packr({ useRecords: false, mapsAsObjects: false });
+  const db = Database.open(dir, {
+    syncs: false,
+    schema: {
+      $schema: 'https://elmdb.dev/schema/1.json',
+      types: { Note: { fields: { meta: { type: 'any', optional: true } } } },
+    },
+  });
+  t.after(() => {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  // A Map, as an object literal's `__proto__` would set its prototype rather than hold the key
+  db.write(objects.pack({
+    ops: [{ op: 'create', type: 'Note', id: 'Note-1', fields: { meta: new Map([['__proto__', 1]]) } }],
+    now: 1000,
+  }));
+  /** @type {Reads} */
+  const reads = { reads: [{ read: 'query', plan: { start: { from: 'types', types: ['Note'] }, terminal: { answer: 'rows', fields: ['meta'] } } }] };
+  const bytes = db.read(objects.pack(reads));
+  const [answer] = /** @type {Answers} */ (objects.unpack(bytes));
+  assert.ok(answer.kind === 'rows' && answer.plainObjects === false, JSON.stringify(answer));
+  // Decoded exactly, each map the types declare an object is a Map of the same keys, and the stored key is kept
+  const [held] = /** @type {Map<string, unknown>[]} */ (exact.unpack(bytes));
+  assert.deepEqual([...held.keys()], ['kind', 'rows', 'plainObjects']);
+  const [row] = /** @type {Map<string, unknown>[]} */ (held.get('rows'));
+  assert.deepEqual([...row.keys()], ['id', 'meta']);
+  assert.deepEqual(row.get('meta'), new Map([['__proto__', 1]]));
+});

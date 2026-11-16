@@ -2,6 +2,7 @@
 
 /**
  * An entity's row: its id and the fields it holds, each value as stored. A whole row holds `entityType` and every
- * field; one of the fields asked for holds those of them the entity holds
+ * field; one of the fields asked for holds those of them the entity holds. Declared an object, as the answer decodes
+ * where its `plainObjects` is true; where it is false, a `Map` of the same keys (`Answer`)
  */
 export type Row = { id: string, entityType?: string, [field: string]: unknown };
