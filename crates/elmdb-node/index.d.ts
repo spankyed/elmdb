@@ -108,7 +108,10 @@ export declare class Database {
   rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
   /** `rebuild` on a thread of the pool: a write made on this thread while it runs waits for it to commit */
   rebuildAsync(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
-  /** Every value index of every declared type: whether it is built, and why it couldn't be when a build failed */
+  /**
+   * Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when
+   * a build failed
+   */
   indexStatus(): IndexStatus[]
   /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
   committedElsewhere(): boolean
