@@ -378,12 +378,15 @@ impl Database {
 
     /// Every entry replaced by another database's primary data, and derived data rebuilt from it under this database's
     /// schema, in one durable unit, the database staying open. The other database must be an elmdb database in this
-    /// version's format
+    /// version's format, and not one open in this process, this one included (`AlreadyOpen`)
     pub fn replace_with(&self, source: impl AsRef<Path>) -> Result<()> {
         let source = source.as_ref();
         if !source.join("data.mdb").is_file() {
             return Err(Error::new(ErrorCode::NoDatabase, format!("No database at {}", source.display())));
         }
+        // This process's only environment of the source until the one below is closed, which is declared after it and
+        // so dropped first on every path: taken before the source's record is read or its files opened
+        let _reserved = crate::store::reserve_source(source)?;
         // Opened as an open opens it: at the last synced commit where the record asks for a restore, and held open
         // while it is read, so that no open that finds it alone restores it meanwhile
         let _opened = crate::store::decide_for_reading(source)?;
@@ -391,7 +394,9 @@ impl Database {
         options.max_dbs(8);
         #[cfg(windows)]
         options.map_size(crate::store::read_only_map_size(std::fs::metadata(source.join("data.mdb"))?.len(), None));
-        // SAFETY: the source is another directory than this database's, opened read-only for this call alone
+        // SAFETY: LMDB's locks are per process, so an environment must be this process's only one of its files: the
+        // source's path is reserved above, which every open in this process asks first, and heed refuses a second
+        // environment of a path besides. It is opened read-only, for this call alone
         unsafe { options.flags(EnvFlags::READ_ONLY) };
         let env = unsafe { options.open(source) }?;
         crate::store::require_registered_reader(&env, source)?;

@@ -84,6 +84,32 @@ fn replace_with_takes_another_databases_data_and_rebuilds_under_this_schema() {
 }
 
 #[test]
+fn replace_with_refuses_a_source_open_in_this_process_its_own_directory_included() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let db = open(&a);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-mine" })]).unwrap();
+    let other = open(&b);
+    let sequence = db.sequence().unwrap();
+    // Its own directory under another spelling, which only the canonical path tells from another
+    for source in [a.path().join("."), b.path().to_owned()] {
+        let refused = db.replace_with(&source).unwrap_err();
+        assert_eq!(refused.code, crate::ErrorCode::AlreadyOpen, "{}", source.display());
+        // Named, with the way on
+        assert!(refused.message.contains(&source.display().to_string()), "{}", refused.message);
+        assert!(refused.message.contains("back it up"), "{}", refused.message);
+    }
+    assert_eq!(db.sequence().unwrap(), sequence);
+    assert!(row(&db, "Task-mine").is_some());
+    assert!(db.check().unwrap().is_clean());
+    // Closed, the other is a source, and what the replacement held of it is let go once it ends
+    other.close().unwrap();
+    db.replace_with(b.path()).unwrap();
+    assert!(row(&db, "Task-mine").is_none());
+    open(&b).close().unwrap();
+}
+
+#[test]
 fn stats_count_entities_fields_relations_and_index_entries() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
