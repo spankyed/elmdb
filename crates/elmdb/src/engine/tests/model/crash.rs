@@ -84,6 +84,8 @@ fn a_killed_writer_leaves_the_state_after_its_acknowledged_steps_or_one_more() {
         std::fs::create_dir(&path).unwrap();
         // Somewhere past the prelude, and sometimes the whole workload
         let kill_at = 6 + (seed as usize * 7) % steps.len().max(7);
+        // What the child says on its stderr, read when it ends on its own: an assertion the child's steps make fails there
+        let errors = dir.path().join("child-stderr");
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--ignored",
@@ -99,21 +101,30 @@ fn a_killed_writer_leaves_the_state_after_its_acknowledged_steps_or_one_more() {
             .env("ELMDB_CRASH_SEED", seed.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(&errors).unwrap())
             .spawn()
             .unwrap();
         let mut acked = 0usize;
+        let mut alive = false;
         let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
         for line in lines.by_ref() {
             let line = line.unwrap();
             if let Some(i) = line.strip_prefix("ack ") {
                 acked = i.parse::<usize>().unwrap() + 1;
                 if acked >= kill_at {
+                    alive = true;
                     break;
                 }
             } else if line == "done" {
+                alive = true;
                 break;
             }
+        }
+        // Its output ended before the kill and before its workload did: the child ended on its own
+        if !alive {
+            let status = child.wait().unwrap();
+            let said = std::fs::read_to_string(&errors).unwrap_or_default();
+            panic!("seed {seed}: the child ended on its own ({status}) after {acked} acknowledged steps:\n{said}");
         }
         child.kill().unwrap();
         child.wait().unwrap();
