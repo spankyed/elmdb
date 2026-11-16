@@ -147,11 +147,8 @@ fn every_kind_of_answer_decodes_into_its_type() {
         query(json!([]), json!({ "answer": "last" })),
         query(json!([{ "step": "where", "field": "n", "value": 9 }]), json!({ "answer": "first" })),
         query(json!([]), json!({ "answer": "exists" })),
-        query(json!([]), json!({ "answer": "rows" })),
-        query(json!([]), json!({ "answer": "rows", "fields": ["title", "entityType", "unheld", "title", "id"] })),
         query(json!([]), json!({ "answer": "firstRow" })),
         query(json!([{ "step": "where", "field": "n", "value": 9 }]), json!({ "answer": "firstRow" })),
-        query(json!([]), json!({ "answer": "edges", "kinds": ["refs", "weighs"], "direction": "both" })),
         query(json!([]), json!({ "answer": "degrees", "kinds": ["refs"] })),
         query(json!([]), json!({ "answer": "weakComponents", "kinds": ["refs"] })),
         query(json!([]), json!({ "answer": "weakComponents", "kinds": ["refs"], "counts": true })),
@@ -165,7 +162,6 @@ fn every_kind_of_answer_decodes_into_its_type() {
         query(json!([]), json!({ "answer": "greatest", "field": "title" })),
         query(json!([]), json!({ "answer": "sum", "field": "n" })),
         query(search.clone(), json!({ "answer": "hits" })),
-        query(search.clone(), json!({ "answer": "hits", "fields": ["title"], "highlights": true })),
         query(json!([{ "step": "rank", "kinds": ["refs"] }]), json!({ "answer": "hits" })),
         query(json!([{ "step": "ranked", "index": "noteRank" }]), json!({ "answer": "hits" })),
         query(
@@ -180,26 +176,31 @@ fn every_kind_of_answer_decodes_into_its_type() {
         json!({ "read": "findRelations", "source": "Note-1" }),
         json!({ "read": "suggest", "type": "Note", "term": "alp" }),
         json!({ "read": "findLabels", "query": "al", "fields": { "Note": "title" } }),
-        json!({ "read": "pendingEmbeddings", "type": "Doc" }),
         json!({ "read": "catalog" }),
         json!({ "read": "wouldCreateCycle", "source": "Note-3", "target": "Note-1", "kinds": ["refs"] }),
         json!({ "read": "query", "visits": true, "plan": {
             "start": { "from": "types", "types": ["Note"] }, "terminal": { "answer": "ids" } } }),
         json!({ "read": "query", "explain": true, "plan": {
-            "start": { "from": "types", "types": ["Note"] }, "steps": search, "terminal": { "answer": "hits" } } }),
+            "start": { "from": "types", "types": ["Note"] }, "steps": search.clone(), "terminal": { "answer": "hits" } } }),
     ];
-    let mut seen = BTreeSet::new();
-    let mut answers = Vec::new();
-    for r in reads {
-        let answer = read(&db, r);
-        seen.insert(kind(&answer));
-        answers.push(answer);
-    }
+    let mut answers: Vec<Answer> = reads.into_iter().map(|r| read(&db, r)).collect();
+    // The reads whose answers are checked past their round trip, each made by name
+    let edges =
+        read(&db, query(json!([]), json!({ "answer": "edges", "kinds": ["refs", "weighs"], "direction": "both" })));
+    let whole = read(&db, query(json!([]), json!({ "answer": "rows" })));
+    let picked = read(
+        &db,
+        query(json!([]), json!({ "answer": "rows", "fields": ["title", "entityType", "unheld", "title", "id"] })),
+    );
+    let marked = read(&db, query(search, json!({ "answer": "hits", "fields": ["title"], "highlights": true })));
+    let pending = read(&db, json!({ "read": "pendingEmbeddings", "type": "Doc" }));
+    answers.extend([&edges, &whole, &picked, &marked, &pending].map(Answer::clone));
     // A relation read of one that exists, by the id the walk answered
-    let Answer::Relations { relations } = answers[10].clone() else { panic!("edges answered {:?}", answers[10]) };
+    let Answer::Relations { relations } = &edges else { panic!("edges answered {edges:?}") };
     let found = read(&db, json!({ "read": "relation", "id": relations[0].id }));
     assert!(matches!(&found, Answer::Relation { relation: Some(row) } if *row == relations[0]), "{found:?}");
-    seen.insert(kind(&found));
+    answers.push(found);
+    let seen: BTreeSet<&str> = answers.iter().map(kind).collect();
 
     let missing: Vec<&str> = KINDS.iter().copied().filter(|k| !seen.contains(k)).collect();
     assert!(missing.is_empty(), "no read here answers {missing:?}");
@@ -216,16 +217,16 @@ fn every_kind_of_answer_decodes_into_its_type() {
     assert_eq!(shapes(|a| matches!(a, Answer::Groups { groups: Groups::Members(_), .. })), 1);
     assert_eq!(shapes(|a| matches!(a, Answer::Hits { rank: Some(HitsRank::Rank { .. }), .. })), 1);
     assert_eq!(shapes(|a| matches!(a, Answer::Hits { rank: Some(HitsRank::Ranked { .. }), .. })), 1);
-    let Answer::Hits { hits, .. } = &answers[24] else { panic!("hits answered {:?}", answers[24]) };
+    let Answer::Hits { hits, .. } = &marked else { panic!("hits answered {marked:?}") };
     assert!(hits.iter().all(|h| h.highlights.is_some() && h.row.is_some()), "{hits:?}");
-    let Answer::Rows { rows, .. } = &answers[6] else { panic!("rows answered {:?}", answers[6]) };
+    let Answer::Rows { rows, .. } = &whole else { panic!("rows answered {whole:?}") };
     assert!(rows.iter().all(|r| r.fields.contains_key("entityType") && r.fields.contains_key("createdAt")));
     // A field asked for twice is answered once: written twice, the row's map would hold the key twice, which
     // `conforms` tells in `read`. A field the entity lacks isn't answered, and `id` only as the row's id
-    let Answer::Rows { rows, .. } = &answers[7] else { panic!("rows answered {:?}", answers[7]) };
+    let Answer::Rows { rows, .. } = &picked else { panic!("rows answered {picked:?}") };
     assert_eq!(rows[0].id, "Note-1");
     assert_eq!(rows[0].fields.keys().collect::<Vec<_>>(), ["entityType", "title"]);
-    let Answer::Pending { chunks, .. } = &answers[36] else { panic!("pending answered {:?}", answers[36]) };
+    let Answer::Pending { chunks, .. } = &pending else { panic!("pending answered {pending:?}") };
     assert_eq!(chunks.len(), 1);
 }
 
