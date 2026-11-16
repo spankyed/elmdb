@@ -5,9 +5,14 @@ on:
     - cron: '0 6 * * 1'
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   unread:
     runs-on: ubuntu-24.04
+    # A fetch of upstream's commits and the fork's one, and cargo's metadata: a few minutes at most
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - run: rustup show active-toolchain

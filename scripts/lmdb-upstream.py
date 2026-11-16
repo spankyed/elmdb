@@ -37,8 +37,9 @@ reviewed = (ROOT / "scripts/lmdb-upstream-reviewed.txt").read_text().strip()
 pinned = heeds_lmdb()
 with tempfile.TemporaryDirectory() as scratch:
     text("git", "init", "--bare", "-q", scratch)
-    text("git", "fetch", "-q", "--filter=blob:none", UPSTREAM, "mdb.master:refs/upstream", cwd=scratch)
-    text("git", "fetch", "-q", "--filter=blob:none", FORK, pinned, cwd=scratch)
+    # Commits alone: the log reads no tree
+    text("git", "fetch", "-q", "--filter=tree:0", UPSTREAM, "mdb.master:refs/upstream", cwd=scratch)
+    text("git", "fetch", "-q", "--filter=tree:0", FORK, pinned, cwd=scratch)
     unread = text("git", "log", "--format=%h %ad %s", "--date=short", f"{reviewed}..refs/upstream", cwd=scratch).splitlines()
     missing = set(text("git", "log", "--format=%h", f"{pinned}..refs/upstream", cwd=scratch).split())
     head = text("git", "rev-parse", "refs/upstream", cwd=scratch)
