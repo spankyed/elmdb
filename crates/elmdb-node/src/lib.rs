@@ -603,7 +603,7 @@ impl Database {
     }
 
     /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
-    /// the database is closed
+    /// the database is closed, and while a unit is open (`UNIT_OPEN`), whose end the sync may wait for
     #[napi(ts_return_type = "Promise<void>")]
     pub fn durable<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.durable", || {

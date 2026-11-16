@@ -149,7 +149,7 @@ export declare class Database {
   bulkLoad(loads: Buffer): void
   /**
    * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
-   * the database is closed
+   * the database is closed, and while a unit is open (`UNIT_OPEN`), whose end the sync may wait for
    */
   durable(): Promise<void>
   /** Syncs what is owed and releases the environment; closing a closed database does nothing */

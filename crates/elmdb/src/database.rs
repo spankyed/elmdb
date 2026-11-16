@@ -302,9 +302,19 @@ impl Database {
     }
 
     /// Waits for every unit committed before the call to be on disk; resolved at once when nothing is owed, when
-    /// syncs are off or the database is read-only, or when each commit is synced as it is made (`sync_each_commit`)
+    /// syncs are off or the database is read-only, or when each commit is synced as it is made (`sync_each_commit`).
+    /// Refused while a unit is open (`UNIT_OPEN`): a sync that finds the map grown by another process takes the new
+    /// size only once no transaction of this one is open, so it waits for the unit to end, and a wait made where the
+    /// unit is held would never end. Commit the unit with `durable`, or wait once it has ended
     pub fn durable(&self) -> Result<Durable> {
-        Ok(self.store()?.durable().unwrap_or_else(Durable::resolved))
+        let store = self.store()?;
+        if store.unit_is_open() {
+            return Err(Error::new(
+                ErrorCode::UnitOpen,
+                "A unit is open: commit it durably, or wait for durability once it has ended",
+            ));
+        }
+        Ok(store.durable().unwrap_or_else(Durable::resolved))
     }
 
     /// Group commit's syncs so far
@@ -865,6 +875,31 @@ mod tests {
         db.close().unwrap();
         let again = Database::open(dir.path(), quiet()).unwrap();
         assert_eq!(again.schema(), Some(note_schema(None)), "the change is stored");
+    }
+
+    #[test]
+    fn a_durable_wait_is_refused_while_a_unit_is_open_and_waits_once_it_has_ended() {
+        let dir = tempfile::tempdir().unwrap();
+        let note: crate::Batch = serde_json::from_value(
+            json!({ "ops": [{ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "t" } }] }),
+        )
+        .unwrap();
+        // Group commit's timers far off, so the commit is owed until a wait asks for its sync
+        let options = OpenOptions {
+            schema: Some(note_schema(None)),
+            sync_idle_ms: 600_000,
+            sync_interval_ms: 600_000,
+            ..Default::default()
+        };
+        let db = Database::open(dir.path(), options).unwrap();
+        db.write(&note, false).unwrap();
+        let before = db.syncs().unwrap();
+        let unit = db.begin().unwrap();
+        assert_eq!(db.durable().err().map(|error| error.code), Some(ErrorCode::UnitOpen));
+        drop(unit);
+        db.durable().unwrap().wait().unwrap();
+        assert!(db.syncs().unwrap() > before, "the wait asked for the sync the commit was owed");
+        db.close().unwrap();
     }
 
     #[test]
