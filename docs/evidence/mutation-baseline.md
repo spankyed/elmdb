@@ -1,6 +1,6 @@
 # The mutation baseline over the store, watches, derived data and the process claim
 
-The rest of stage 1 of `../roadmap/verification-tooling.md`: cargo-mutants over the modules
+The rest of stage 1 of `../archive/roadmap/verification-tooling.md`: cargo-mutants over the modules
 `../archive/goals/goal-verification-tooling.md` left, `store/`, `engine/watch.rs`, `engine/derive.rs` with
 `engine/derive/`, and `elmdb-node/src/process.rs`. 2026-10-28 and 29, on `session/mutation-baseline`. Machine: Apple
 M1 Pro, 10 cores, cargo-mutants 27.1.0 at `-j 3`; the Linux readings in a `rust:1-bookworm` container of 3 CPUs and

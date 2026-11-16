@@ -1,6 +1,6 @@
-//! The order a value index keeps of its strings (`docs/roadmap/string-order.md`): a key for each string an entry is
-//! for, there while the entry holds a place, one for each entity holding a string with no key of its own, and the
-//! marker that says which elmdb filed them and whether they are all there.
+//! The order a value index keeps of its strings (`docs/archive/roadmap/string-order.md`): a key for each string an
+//! entry is for, there while the entry holds a place, one for each entity holding a string with no key of its own,
+//! and the marker that says which elmdb filed them and whether they are all there.
 
 use serde_json::{Value as Json, json};
 
