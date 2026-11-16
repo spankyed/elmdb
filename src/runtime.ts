@@ -222,6 +222,18 @@ export interface QueryStage {
   kept: number;
   /** Milliseconds spent in the stage's own work */
   ms: number;
+  /** For a stage that read lists of places, or walked a type's rows: the places it was handed, each one walked or sought */
+  places?: number;
+  /** `and` for a stage that read the places several lists hold in common */
+  set?: string;
+  /** For a `search` that ran within its filters' places: how many */
+  within?: number;
+  /** For a `search`: the matches it held to rank them */
+  held?: number;
+  /** For a stage that could have read an index's order and didn't: why (`noRoom`, `building`) */
+  sorted?: string;
+  /** For an order read by testing the filters, for want of an index that reads it in order: the fields one would hold */
+  wants?: string;
   /** For a stage that built a graph, which `explain()` reaches only through a `rank`: its entities */
   nodes?: number;
   /** For a stage that built a graph: the edges between its entities; for a `similar`, the edges it read */

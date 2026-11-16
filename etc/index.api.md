@@ -746,15 +746,21 @@ export interface QueryStage {
     cycles?: number;
     edges?: number;
     error?: number;
+    held?: number;
     index?: string;
     iterations?: number;
     kept: number;
     ms: number;
     neighbours?: number;
     nodes?: number;
+    places?: number;
+    set?: string;
+    sorted?: string;
     stage: string;
     visited: number;
+    wants?: string;
     weight?: number;
+    within?: number;
 }
 
 // @public

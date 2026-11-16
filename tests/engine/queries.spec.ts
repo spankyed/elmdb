@@ -399,7 +399,7 @@ describe('explain', () => {
     expect(explained.stages.map(({ ms, ...stage }) => (expect(ms).toBeGreaterThanOrEqual(0), stage))).toEqual([
       { stage: 'types', visited: 0, kept: 0 },
       { stage: 'has', visited: 0, kept: 0 },
-      { stage: 'where', index: 'status', visited: 5, kept: 5 },
+      { stage: 'where', index: 'status', visited: 5, kept: 5, places: 5 },
       { stage: 'limit', visited: 5, kept: 5 },
       { stage: 'ids', visited: 5, kept: 5 },
     ]);
