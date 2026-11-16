@@ -515,6 +515,7 @@ fn a_removed_role_is_held_until_purged_and_the_purge_takes_it_from_every_holder(
     let mut schema = serde_json::to_value(super::schema()).unwrap();
     schema["roles"].as_object_mut().unwrap().remove("r1");
     let db = with_schema(&dir, schema).unwrap();
+    assert_eq!(row(&db, "Task-1").unwrap()["role"], json!(["r1"]), "a removed role is held until purged");
     db.purge(&Purge::Role("r1".into())).unwrap();
     assert_eq!(row(&db, "Task-1").unwrap().get("role"), None, "its only role went, and the field with it");
     assert_eq!(row(&db, "Task-2").unwrap()["role"], json!(["r2"]), "the other role stays");

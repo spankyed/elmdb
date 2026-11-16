@@ -175,9 +175,9 @@ enum Step {
     PurgeField,
     /// The `tags` edges purged: refused while the schema declares the kind
     PurgeKind,
-    /// `Note` renamed to `Memo`, a type the harness declares as `Note` is, and back, in one commit: what the two renames
-    /// leave is what was there, and a reader of `Note` from before it is told the answer is incomplete, as after a
-    /// reset. One commit, so that a crash leaves the ids as they were or as they are again
+    /// `Note` renamed to `Memo`, a type the harness declares with `Note`'s fields and indexes, and back, in one commit:
+    /// what the two renames leave is what was there, and a reader of `Note` from before it is told the answer is
+    /// incomplete, as after a reset. One commit, so that a crash leaves the ids as they were or as they are again
     RenameTypeAndBack,
 }
 
@@ -1856,8 +1856,9 @@ fn by_number(t: &impl Read, entity_type: &str) -> crate::Result<ByNumber> {
 /// The harness's schema: the engine tests' with `RANKED` declared and change order kept for `Task` and `Note`, which
 /// `changed_since` is asked of. With `spares`, it declares the names renames and purges move data to and from: `spare`, a
 /// second unindexed field of `Task`, and the relation kind `tags`, which the workload never links. Without them, both are
-/// names a removed declaration left, which a purge takes and a rename can't move to. It declares `Memo` as `Note` is,
-/// which `Note` is renamed to and back. Every database the model compares opens with it, the crash child's included
+/// names a removed declaration left, which a purge takes and a rename can't move to. It declares `Memo` with `Note`'s
+/// fields and indexes and no change order, which `Note` is renamed to and back. Every database the model compares opens
+/// with it, the crash child's included
 fn harness_schema(spares: bool) -> Json {
     let mut schema = schema_json();
     schema["types"]["Memo"] = schema["types"]["Note"].clone();
@@ -2367,8 +2368,9 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
     if let (Step::RenameTypeAndBack, Ok(_)) = (step, got)
         && engine.before.entities.keys().any(|id| crate::engine::ids::type_of(id) == "Note")
     {
-        // Its commit takes `Note`'s entities away and brings them back with no stamp of their own, and a reader of the
-        // type from before it is told the answer is incomplete. A reader from it reads what changes after it
+        // Its commit takes `Note`'s entities away and brings them back, stamping the ends of each relation it rewrote,
+        // and a reader of the type from before it is told the answer is incomplete. A reader from it reads what changes
+        // after it, which those stamps, at its own sequence, are not
         let sequence = quiet + 1;
         assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
         engine.sequence = sequence;
@@ -2953,7 +2955,7 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
     use proptest::test_runner::TestRunner;
     use proptest_state_machine::ReferenceStateMachine;
     // Each reason `Model::apply` and `Model::step` refuse with
-    const REFUSALS: [&str; 9] = [
+    const REFUSALS: [&str; 16] = [
         "id in use",
         "no such entity",
         "not a list",
@@ -2963,6 +2965,13 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
         "link target missing at commit",
         "the unit threw",
         "the store refused the commit",
+        "the spare field is declared",
+        "the kind tags is declared",
+        "the spare field isn't declared",
+        "the kind tags isn't declared",
+        "no backup to replace with",
+        "a Task holds both names",
+        "an edge of the new kind joins the ends",
     ];
     let mut runner = TestRunner::deterministic();
     let mut completed: BTreeMap<&str, usize> = BTreeMap::new();
@@ -2973,10 +2982,15 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
             ModelMachine::sequential_strategy(10..60).new_tree(&mut runner).unwrap().current();
         let mut model = reference.model;
         for transition in transitions {
-            // A purge that took nothing would pass whatever the engine's purge left
+            // A purge that took nothing, a rename of a type with no entities and a replacement by what is there already
+            // would each pass whatever the engine did
             let took = match transition.step {
                 Step::PurgeField => model.entities.values().any(|e| e.fields.contains_key("spare")),
                 Step::PurgeKind => model.edges.iter().any(|(_, kind, _)| kind == "tags"),
+                Step::RenameTypeAndBack => model.entities.keys().any(|id| crate::engine::ids::type_of(id) == "Note"),
+                Step::ReplaceWith => model.backup.as_deref().is_some_and(|saved| {
+                    (&saved.entities, &saved.edges, &saved.keyed) != (&model.entities, &model.edges, &model.keyed)
+                }),
                 _ => false,
             };
             match model.step(&transition.step) {
@@ -2994,9 +3008,9 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
         let n = completed.get(kind).copied().unwrap_or(0);
         assert!(n >= 20, "{kind} completed {n} times in 200 workloads: {completed:?}");
     }
-    for kind in ["PurgeField", "PurgeKind"] {
+    for kind in ["PurgeField", "PurgeKind", "RenameTypeAndBack", "ReplaceWith"] {
         let n = taking.get(kind).copied().unwrap_or(0);
-        assert!(n >= 20, "{kind} took data {n} times in 200 workloads: {taking:?}");
+        assert!(n >= 20, "{kind} had data to act on {n} times in 200 workloads: {taking:?}");
     }
     for reason in REFUSALS {
         assert!(refused.contains_key(reason), "no step was refused with {reason:?}: {refused:?}");
