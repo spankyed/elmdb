@@ -43,7 +43,8 @@ function anotherProcess(path: string) {
     const { Database } = require(${JSON.stringify(requireFromEars.resolve('elmdb'))});
     const { Packr } = require(${JSON.stringify(requireFromEars.resolve('msgpackr'))});
     const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
-    const database = Database.open(process.argv[1]);
+    // In the parent's mode, syncs: false: elmdb refuses a writer of another mode beside a live one (MODE_MISMATCH)
+    const database = Database.open(process.argv[1], { syncs: false });
     let held = '';
     process.stdin.setEncoding('utf8').on('data', (chunk) => {
       held += chunk;

@@ -39,7 +39,8 @@ const commitElsewhere = async (database: EarsDatabase, create?: string) => {
   await promisify(execFile)(process.execPath, ['-e', [
     `const { Database } = require(${JSON.stringify(elmdb)});`,
     `const { Packr } = require(${JSON.stringify(msgpackr)});`,
-    'const database = Database.open(process.argv[1]);',
+    // In the engine's mode, syncs: false: elmdb refuses a writer of another mode beside a live one (MODE_MISMATCH)
+    'const database = Database.open(process.argv[1], { syncs: false });',
     type
       ? `database.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: ${JSON.stringify(type)}, id: ${JSON.stringify(id)}, fields: {} }], now: 1 }));`
       : 'database.begin().commit(false);',
@@ -159,7 +160,8 @@ describe('another process replacing every row', () => {
     const elmdb = createRequire(createRequire(import.meta.url).resolve('@apackdev/ears/package.json')).resolve('elmdb');
     await promisify(execFile)(process.execPath, ['-e', [
       `const { Database } = require(${JSON.stringify(elmdb)});`,
-      'const database = Database.open(process.argv[1]);',
+      // In the engine's mode, as commitElsewhere opens it
+      'const database = Database.open(process.argv[1], { syncs: false });',
       'database.reset();',
       'database.close();',
     ].join('\n'), database.path]);
