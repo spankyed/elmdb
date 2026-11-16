@@ -220,7 +220,8 @@ fn every_kind_of_answer_decodes_into_its_type() {
     assert!(hits.iter().all(|h| h.highlights.is_some() && h.row.is_some()), "{hits:?}");
     let Answer::Rows { rows, .. } = &answers[6] else { panic!("rows answered {:?}", answers[6]) };
     assert!(rows.iter().all(|r| r.fields.contains_key("entityType") && r.fields.contains_key("createdAt")));
-    // A field asked for twice is answered once, and a field the entity lacks not at all
+    // A field asked for twice is answered once: written twice, the row's map would hold the key twice, which
+    // `conforms` tells in `read`. A field the entity lacks isn't answered, and `id` only as the row's id
     let Answer::Rows { rows, .. } = &answers[7] else { panic!("rows answered {:?}", answers[7]) };
     assert_eq!(rows[0].id, "Note-1");
     assert_eq!(rows[0].fields.keys().collect::<Vec<_>>(), ["entityType", "title"]);
