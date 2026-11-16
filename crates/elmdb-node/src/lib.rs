@@ -259,12 +259,21 @@ impl Database {
         })
     }
 
-    /// What opening did: `{ schemaChanges: [{ path, change, effect }] }`
-    #[napi(getter, ts_return_type = "{ schemaChanges: SchemaChange[] }")]
+    /// What opening did: `{ schemaChanges: [{ path, change, effect }], restored, notBorneOut }`. `restored` is a
+    /// restore this open or an earlier one made, a power loss or a failed sync having taken the database back to its
+    /// last synced commit, with the sequence it opened at; every open reports it until `acknowledgeRestore()`.
+    /// `notBorneOut` says the record beside the data file named another file than this one, which was opened as it is
+    #[napi(getter, ts_return_type = "OpenReport")]
     pub fn open_report(&self) -> Result<serde_json::Value, Code> {
         self.guarded("Database.openReport", || {
-            Ok(serde_json::json!({ "schemaChanges": self.inner.open_report().schema_changes }))
+            Ok(serde_json::to_value(self.inner.open_report()).expect("an open's report serializes"))
         })
+    }
+
+    /// Says the restore an open reported was read, so that no open reports it after; refused on a read-only handle
+    #[napi]
+    pub fn acknowledge_restore(&self) -> Result<(), Code> {
+        self.guarded("Database.acknowledgeRestore", || self.inner.acknowledge_restore().map_err(to_js))
     }
 
     /// Group commit's syncs so far

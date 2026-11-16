@@ -27,10 +27,30 @@ enum Command {
     Dump { dir: PathBuf, target: PathBuf },
     /// A dump into a new database, held to the dump's schema, its derived data built
     Load { dump: PathBuf, target: PathBuf },
+    /// Says the restore an open reported was read, so that no open reports it after. Opens the database to write
+    AcknowledgeRestore { dir: PathBuf },
 }
 
 fn read_only(dir: &PathBuf) -> elmdb::Result<Database> {
-    Database::open(dir, OpenOptions { read_only: true, ..Default::default() })
+    told(Database::open(dir, OpenOptions { read_only: true, ..Default::default() })?)
+}
+
+/// The database, its open having said on the error stream what its caller is to hear: a restore no caller has said it
+/// read, which every open reports until one does, and a record that named another file
+fn told(db: Database) -> elmdb::Result<Database> {
+    let report = db.open_report();
+    if let Some(restored) = report.restored {
+        let at =
+            restored.sequence.map_or_else(|| "at a sequence not yet read".to_owned(), |n| format!("at sequence {n}"));
+        eprintln!(
+            "Restored: a power loss or a failed sync took the database back to its last synced commit, which it opened \
+             {at}; the commits after it are gone. `elmdb acknowledge-restore DIR` says this was read"
+        );
+    }
+    if report.not_borne_out {
+        eprintln!("The record beside the data file named another file than this one, which was opened as it is");
+    }
+    Ok(db)
 }
 
 fn run(command: Command) -> elmdb::Result<bool> {
@@ -46,7 +66,7 @@ fn run(command: Command) -> elmdb::Result<bool> {
             Ok(report.is_clean())
         }
         Command::Backup { dir, target } => {
-            let db = Database::open(&dir, OpenOptions { read_only: true, ..Default::default() })?;
+            let db = read_only(&dir)?;
             db.backup(&target)?;
             println!("{} copied to {}", dir.display(), target.display());
             Ok(true)
@@ -59,6 +79,17 @@ fn run(command: Command) -> elmdb::Result<bool> {
         Command::Load { dump, target } => {
             let report = elmdb::dump::load(&dump, &target)?;
             println!("{}", serde_json::to_string_pretty(&report).expect("a report serializes"));
+            Ok(true)
+        }
+        Command::AcknowledgeRestore { dir } => {
+            let db = told(Database::open(&dir, OpenOptions::default())?)?;
+            let had = db.open_report().restored.is_some();
+            db.acknowledge_restore()?;
+            db.close()?;
+            println!(
+                "{}",
+                if had { "Acknowledged: no open reports the restore now" } else { "No restore to acknowledge" }
+            );
             Ok(true)
         }
     }

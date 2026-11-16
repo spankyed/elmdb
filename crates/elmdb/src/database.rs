@@ -48,10 +48,29 @@ impl Default for OpenOptions {
 }
 
 /// What opening did
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
 pub struct OpenReport {
     /// The schema's changes, each with what opening did about it; every addition when the database is new
     pub schema_changes: Vec<SchemaChange>,
+    /// A restore this open or an earlier one made, which every open reports until a caller says it read it
+    /// (`Database::acknowledge_restore`)
+    pub restored: Option<Restore>,
+    /// The record beside the data file named another file than this one, put where the database's was: the file was
+    /// opened as it is
+    pub not_borne_out: bool,
+}
+
+/// A power loss or a failed sync took the database back to its last synced commit: the commits after it are gone
+/// (`docs/roadmap/synced-commit.md`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "codegen", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct Restore {
+    /// The sequence the database opened at: none where the open that restored it couldn't write it down, a read-only
+    /// open on a filesystem it can't write
+    pub sequence: Option<u64>,
 }
 
 /// An open database. Closing it, or dropping it, syncs what is owed and releases the environment
@@ -150,6 +169,7 @@ impl Database {
             return Err(error);
         }
         let engine_schema = Arc::new(EngineSchema::stored(schema.clone(), hash));
+        let report = OpenReport { restored: store.restored(), not_borne_out: store.not_borne_out(), ..report };
         let store = Arc::new(store);
         let tracks: crate::engine::watch::SharedTracks = Default::default();
         let observing = Arc::new(RwLock::new(Arc::clone(&engine_schema)));
@@ -625,7 +645,7 @@ fn apply_schema(store: &Store, given: Option<Schema>, expected: Option<&EngineSc
     Ok(AppliedSchema {
         schema: Some(given),
         hash: Some(hash.into_bytes()),
-        report: OpenReport { schema_changes: changes },
+        report: OpenReport { schema_changes: changes, ..OpenReport::default() },
         unbuilt,
         commit: Some(commit),
     })
@@ -647,6 +667,60 @@ mod tests {
             "types": { "Note": { "shortCode": { "prefix": "NTE" }, "fields": fields } }
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn an_open_after_a_loss_reports_the_restore_and_its_sequence_until_a_caller_acknowledges_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db");
+        let note = |id: &str| -> crate::Batch {
+            serde_json::from_value(
+                json!({ "ops": [{ "op": "create", "type": "Note", "id": id, "fields": { "title": "t" } }] }),
+            )
+            .unwrap()
+        };
+        let options = OpenOptions {
+            schema: Some(note_schema(None)),
+            sync_idle_ms: 600_000,
+            sync_interval_ms: 600_000,
+            ..Default::default()
+        };
+        let db = Database::open(&path, options).unwrap();
+        db.write(&note("Note-1"), true).unwrap();
+        let synced = db.sequence().unwrap();
+        db.write(&note("Note-2"), false).unwrap();
+        // The files as a loss leaves them: the record written in another boot, a commit since it on the file
+        let lost = |into: &Path| {
+            std::fs::create_dir_all(into).unwrap();
+            std::fs::copy(path.join("data.mdb"), into.join("data.mdb")).unwrap();
+            let record = std::fs::read(path.join(crate::store::RECORD_FILE)).unwrap();
+            std::fs::write(into.join(crate::store::RECORD_FILE), crate::store::record_of_another_boot(&record))
+                .unwrap();
+        };
+        let restored = dir.path().join("restored");
+        lost(&restored);
+        db.close().unwrap();
+        let opened = Database::open(&restored, OpenOptions::default()).unwrap();
+        let report = opened.open_report();
+        assert_eq!((report.restored, report.not_borne_out), (Some(Restore { sequence: Some(synced) }), false));
+        assert_eq!(opened.sequence().unwrap(), synced, "opened at the record's commit");
+        opened.acknowledge_restore().unwrap();
+        opened.close().unwrap();
+        let again = Database::open(&restored, OpenOptions::default()).unwrap();
+        assert_eq!(again.open_report().restored, None, "reported again once acknowledged");
+        again.close().unwrap();
+        // The record beside another database's data file: opened as it is, and said so
+        let other = tempfile::tempdir().unwrap();
+        let elsewhere =
+            Database::open(other.path(), OpenOptions { schema: Some(note_schema(None)), ..quiet() }).unwrap();
+        elsewhere.write(&note("Note-9"), false).unwrap();
+        elsewhere.close().unwrap();
+        let swapped = dir.path().join("swapped");
+        lost(&swapped);
+        std::fs::copy(other.path().join("data.mdb"), swapped.join("data.mdb")).unwrap();
+        let opened = Database::open(&swapped, quiet()).unwrap();
+        assert_eq!((opened.open_report().restored, opened.open_report().not_borne_out), (None, true));
+        opened.close().unwrap();
     }
 
     fn quiet() -> OpenOptions {

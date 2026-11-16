@@ -52,9 +52,18 @@ test('a read-only open of an empty directory throws NO_DATABASE', (t) => {
 test('stores a schema, reports what opening did, and refuses an invalid one listing every problem', (t) => {
   const dir = tempDir(t);
   const db = Database.open(dir, { schema: noteSchema, syncs: false });
-  assert.deepEqual(db.openReport, { schemaChanges: [{ path: 'types.Note', change: 'added', effect: 'applied' }] });
+  assert.deepEqual(db.openReport, {
+    schemaChanges: [{ path: 'types.Note', change: 'added', effect: 'applied' }],
+    restored: null,
+    notBorneOut: false,
+  });
+  // No restore to acknowledge: nothing changes, and a read-only handle is refused
+  db.acknowledgeRestore();
   assert.equal(db.schema.types.Note.additionalFields, 'refuse', 'the canonical form, defaults written');
   db.close();
+  const reader = Database.open(dir, { readOnly: true });
+  assert.throws(() => reader.acknowledgeRestore(), { code: 'READ_ONLY' });
+  reader.close();
   const bad = structuredClone(noteSchema);
   bad.types.Note.fields.title.type = 'text';
   bad.types.Note.extra = true;

@@ -15,7 +15,7 @@ use std::path::Path;
 
 use super::boot::Boot;
 use super::reach;
-use super::record::{self, Mode, Record, RecordFile, State};
+use super::record::{self, Mode, Record, RecordFile, Restored, State};
 use crate::error::{Error, ErrorCode, Result};
 
 /// The locks an open holds for as long as it is open
@@ -35,7 +35,7 @@ pub(super) struct Decided {
     /// The commit of the grouped mode's record, where the file bears it out: what the open's process may rely on
     pub remembered: Option<u64>,
     /// A restore was made to this commit and no caller has said it read so
-    pub restored: Option<u64>,
+    pub restored: Option<Restored>,
     /// The record named a file other than this one, which was opened as it is
     pub not_borne_out: bool,
 }
@@ -120,7 +120,7 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
             };
             // Its notice first, the rest of the record as it was: an open after a restore stopped once the meta pages
             // are written finds nothing left to restore, and still says one was made
-            let intent = Record { restored: Some(earlier.commit), ..earlier.next(earlier.state) };
+            let intent = Record { restored: Some(Restored::Commit(earlier.commit)), ..earlier.next(earlier.state) };
             file.write(&intent)?;
             restore(dir, &mut data, &intent)?;
             let again = Record { boot, ..intent.next(State::Kept) };
@@ -275,4 +275,44 @@ fn pending(dir: &Path, why: &str) -> Error {
             dir.display()
         ),
     )
+}
+
+/// Makes a restore's notice of the LMDB commit it took the file to, `commit`, name `sequence`, that commit's: answers
+/// the notice the record holds after
+pub(super) fn note(dir: &Path, commit: u64, sequence: u64) -> Result<Option<Restored>> {
+    failure_point!(RESTORE_NOTE at dir, Error::new(ErrorCode::Io, "Injected failure to note the restore"));
+    let lock = record::lock_file(dir, record::RECORD_LOCK)?;
+    let _locked = record::exclusive(&lock)?;
+    let mut file = RecordFile::open(dir, true)?.expect("a record's file a writable open makes");
+    let Some(record) = file.read()? else { return Ok(None) };
+    if record.restored != Some(Restored::Commit(commit)) {
+        // Another open noted it, or acknowledged it, first
+        return Ok(record.restored);
+    }
+    // Relied on only once synced, before its other slot is written over: its writer may have died before syncing it
+    file.sync()?;
+    let noted = Record { restored: Some(Restored::Sequence(sequence)), ..record.next(record.state) };
+    file.write(&noted)?;
+    Ok(noted.restored)
+}
+
+/// Writes the record again without its notice: a caller has read it
+pub(super) fn acknowledge(dir: &Path) -> Result<()> {
+    let lock = record::lock_file(dir, record::RECORD_LOCK)?;
+    let _locked = record::exclusive(&lock)?;
+    let mut file = RecordFile::open(dir, true)?.expect("a record's file a writable open makes");
+    if let Some(record) = file.read()?.filter(|record| record.restored.is_some()) {
+        // Relied on only once synced, before its other slot is written over: its writer may have died before syncing it
+        file.sync()?;
+        file.write(&Record { restored: None, ..record.next(record.state) })?;
+    }
+    Ok(())
+}
+
+/// The notice the record holds, read under the record's lock: none where there is no record, or it can't be read
+pub(super) fn notice(dir: &Path) -> Result<Option<Restored>> {
+    let lock = record::lock_file(dir, record::RECORD_LOCK)?;
+    let _locked = record::exclusive(&lock)?;
+    let Some(mut file) = RecordFile::open(dir, false)? else { return Ok(None) };
+    Ok(file.read()?.and_then(|record| record.restored))
 }

@@ -301,6 +301,13 @@ enum Claimed<'a, H> {
 /// How long a growth beside units tries for the gate before it looks again whether a unit has opened
 const GROWTH_GATE_TRY: Duration = Duration::from_millis(5);
 
+/// Takes every open of this process from now on for one of another boot than any record's, as after a restart: for a
+/// test whose writer was another process of this boot
+#[cfg(test)]
+pub(crate) fn forget_the_boot() {
+    boot::NO_BOOT.store(true, Ordering::Relaxed);
+}
+
 /// The record held by another thread for a test (`Store::hold_record`), let go as this drops
 #[cfg(test)]
 pub(crate) struct HeldRecord {
@@ -412,13 +419,11 @@ pub struct Store {
     accounted: PlainMutex<Accounted>,
     /// The grouped mode's pin and record (`kept`), in a writable store of that mode
     kept: Option<Arc<Kept>>,
-    /// The commit a restore took the database back to at this open or an earlier one, which no caller has read: the
-    /// notice an open reports (`docs/roadmap/synced-commit.md`, The design), read so far by the tests alone
-    #[cfg_attr(not(test), allow(dead_code))]
-    restored: Option<u64>,
+    /// The notice of a restore made at this open or an earlier one, which no caller has said it read
+    /// (`docs/roadmap/synced-commit.md`, The design)
+    restored: PlainMutex<Option<record::Restored>>,
     /// The record beside the data file named another file than this one, which was opened as it is; reported with
     /// the notice
-    #[cfg_attr(not(test), allow(dead_code))]
     not_borne_out: bool,
     /// The locks that say this process has the database open, and in which mode a writable one writes it, held shared
     /// until the environment has closed: an open that finds the first unheld may restore the file, and one of another
@@ -658,7 +663,7 @@ impl Store {
         let wake = wake::Wake::new(&canonical);
         let accounted = PlainMutex::<Accounted>::default();
         accounted.lock().through = sequence;
-        Ok(Self {
+        let store = Self {
             path: canonical,
             read_only: options.read_only,
             // A read-only store makes no commit, so the mode is none of its concern
@@ -685,10 +690,55 @@ impl Store {
             touched: PlainMutex::default(),
             accounted,
             kept,
-            restored,
+            restored: PlainMutex::new(restored),
             not_borne_out,
             presence: Some(presence),
+        };
+        store.note_the_restore()?;
+        Ok(store)
+    }
+
+    /// A restore's notice that names the LMDB commit it took the file to, that commit being the file's newest still:
+    /// made to name the sequence the database opened at, before any write. A read-only open on a filesystem it can't
+    /// write leaves that to the next open
+    fn note_the_restore(&self) -> Result<()> {
+        let Some(record::Restored::Commit(commit)) = *self.restored.lock() else { return Ok(()) };
+        run_point!(RESTORE_NOTING at &self.path);
+        if self.env.info().last_txn_id as u64 != commit {
+            // Another process opened the database since, and may have noted the sequence before it wrote: the
+            // record's notice is the one to report
+            if let Ok(noticed) = restore::notice(&self.path) {
+                *self.restored.lock() = noticed;
+            }
+            return Ok(());
+        }
+        match restore::note(&self.path, commit, self.sequence()) {
+            Ok(noted) => *self.restored.lock() = noted,
+            Err(_) if self.read_only => {}
+            Err(error) => return Err(error),
+        }
+        Ok(())
+    }
+
+    /// The notice of a restore made at this open or an earlier one, until a caller says it read it: the sequence the
+    /// database opened at, where the open that made it could read it
+    pub fn restored(&self) -> Option<crate::database::Restore> {
+        self.restored.lock().map(|restored| crate::database::Restore {
+            sequence: match restored {
+                record::Restored::Sequence(sequence) => Some(sequence),
+                record::Restored::Commit(_) => None,
+            },
         })
+    }
+
+    /// Says the notice of a restore was read: the record is written again without it, and no open reports it after
+    pub fn acknowledge_restore(&self) -> Result<()> {
+        self.check_writable()?;
+        if self.restored.lock().is_some() {
+            restore::acknowledge(&self.path)?;
+            *self.restored.lock() = None;
+        }
+        Ok(())
     }
 
     /// The environment's elmdb database, checked to be in this version's format; a new environment's is created and
@@ -1511,14 +1561,7 @@ impl Store {
         backup::copy(self, target)
     }
 
-    /// The commit a restore took the database back to, at this open or an earlier one, until a caller says it read so
-    #[cfg(test)]
-    pub(crate) fn restored(&self) -> Option<u64> {
-        self.restored
-    }
-
     /// Whether the record beside the data file named another file than this one, which was opened as it is
-    #[cfg(test)]
     pub(crate) fn not_borne_out(&self) -> bool {
         self.not_borne_out
     }

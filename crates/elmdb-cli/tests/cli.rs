@@ -62,3 +62,64 @@ fn inspects_checks_backs_up_dumps_and_loads_a_database() {
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("NO_DATABASE"), "{out}");
 }
+
+/// The record beside a data file, `synced`, as a power loss leaves it to the next boot: each slot that reads written
+/// as of no boot, which is another boot than any (`docs/architecture/format.md`, Beside the data file)
+fn of_another_boot(record: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    // The magic, the version, the count, the mode, the state, the commit, the meta body and the roots' checksum come
+    // before the boot; the notice's byte and u64 after it, and the slot's checksum of all of them last
+    const BOOT: usize = 8 + 4 + 8 + 1 + 1 + 8 + 136 + 32;
+    const FIELDS: usize = BOOT + 32 + 1 + 8;
+    let mut record = record.to_vec();
+    for slot in record.chunks_mut(4096) {
+        let whole = slot.len() >= FIELDS + 32 && sha2::Sha256::digest(&slot[..FIELDS])[..] == slot[FIELDS..FIELDS + 32];
+        if whole {
+            slot[BOOT..BOOT + 32].fill(0);
+            let checksum = sha2::Sha256::digest(&slot[..FIELDS]);
+            slot[FIELDS..FIELDS + 32].copy_from_slice(&checksum);
+        }
+    }
+    record
+}
+
+#[test]
+fn every_command_says_a_power_loss_restored_the_database_until_it_is_acknowledged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let note = |id: &str| -> Batch {
+        serde_json::from_value(json!({ "ops": [{ "op": "create", "type": "Note", "id": id, "fields": {} }] })).unwrap()
+    };
+    let schema = elmdb::schema::Schema::from_json(&json!({
+        "$schema": elmdb::schema::SCHEMA_LANGUAGE,
+        "types": { "Note": { "fields": {} } }
+    }))
+    .unwrap();
+    // A commit synced, and one after it that isn't when the machine loses power
+    let options =
+        OpenOptions { schema: Some(schema), sync_idle_ms: 600_000, sync_interval_ms: 600_000, ..Default::default() };
+    let db = Database::open(&path, options).unwrap();
+    db.write(&note("Note-1"), true).unwrap();
+    let synced = db.sequence().unwrap();
+    db.write(&note("Note-2"), false).unwrap();
+    let lost = dir.path().join("lost");
+    std::fs::create_dir(&lost).unwrap();
+    std::fs::copy(path.join("data.mdb"), lost.join("data.mdb")).unwrap();
+    std::fs::write(lost.join("synced"), of_another_boot(&std::fs::read(path.join("synced")).unwrap())).unwrap();
+    db.close().unwrap();
+    let lost = lost.to_str().unwrap();
+    // The open that restores it and every open after say so, with the sequence it opened at
+    for _ in 0..2 {
+        let (code, out) = elmdb(&["inspect", lost]);
+        assert_eq!(code, 0, "{out}");
+        assert!(out.contains("Restored: ") && out.contains(&format!("at sequence {synced};")), "{out}");
+    }
+    let (code, out) = elmdb(&["acknowledge-restore", lost]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Acknowledged"), "{out}");
+    let (code, out) = elmdb(&["inspect", lost]);
+    assert_eq!(code, 0, "{out}");
+    assert!(!out.contains("Restored"), "said again once acknowledged: {out}");
+    let (_, out) = elmdb(&["acknowledge-restore", lost]);
+    assert!(out.contains("No restore to acknowledge"), "{out}");
+}

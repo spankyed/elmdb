@@ -159,6 +159,10 @@ pub(crate) mod points {
     pub const RESTORE_WRITTEN: &str = "store::restore_written";
     /// Runs in a restore once the data file is synced, before the record is written
     pub const RESTORE_SYNCED: &str = "store::restore_synced";
+    /// The open that restored fails as it writes the sequence it opened at into the record's notice
+    pub const RESTORE_NOTE: &str = "store::restore_note";
+    /// Runs in an open once LMDB has opened the file, before it reads the sequence a restore's notice is to name
+    pub const RESTORE_NOTING: &str = "store::restore_noting";
 }
 
 /// What a point is armed with on one thread

@@ -154,6 +154,15 @@ and once ended lets them be written over. A failed sync refuses the next commit 
 open beside another process that finds a restore to make is refused, and a read-only open beside a writer with
 commits unsynced opens where no boot can be read.
 
+Each night the engine also runs over a filesystem that loses what wasn't synced, rather than a replay of one:
+`.github/workflows/lossy-filesystem.yml` mounts LazyFS, which keeps what a process writes in a cache of its own until it
+is synced and drops it on a command. A writer in a child process dies in a sync after its data is flushed, or between
+syncs; the job drops what wasn't synced and the kernel's copy of the files, and the database opened after, as of another
+boot, must hold what the writer's last finished sync held
+(`a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync`). The same run with the pin turned
+off must fail. The test also asks whether anything was lost: a writer that died between syncs must leave a file that needs
+no restore, and one that died once a sync's data was flushed one that does.
+
 ## Failpoints
 
 A fault a test injects — a commit refused as on a full disk, a failed sync, a pause before a read takes its snapshot,
