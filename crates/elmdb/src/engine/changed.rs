@@ -261,9 +261,9 @@ pub(crate) fn settle(txn: &mut heed::RwTxn<'_>, db: Db, schema: &crate::schema::
 }
 
 /// Says that the types keeping a change order, `only` these when given, have theirs from `sequence` on: the commit that
-/// replaced their entities whole, as a reset, a replacement and a type's rename do. What such a commit took away left
-/// no tombstone and what it brought carries no stamp of its own, so a reader from before it can't be told what changed,
-/// and `since` answers it as it does one from before the order was built
+/// replaced their entities whole, as a reset, a replacement, a type's rename and a dump's load do. What such a
+/// commit took away left no tombstone and what it brought carries no stamp of its own, so a reader from before it
+/// can't be told what changed, and `since` answers it as it does one from before the order was built
 pub(crate) fn replaced(
     txn: &mut heed::RwTxn<'_>,
     db: Db,

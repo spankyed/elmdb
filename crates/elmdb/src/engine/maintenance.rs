@@ -446,6 +446,21 @@ impl Database {
         result
     }
 
+    /// Numbers this database's commits after `sequence`, the last commit of the database a dump was made of, in a
+    /// commit marked as one that replaced every type whole. A load makes a new database of that one's primary data,
+    /// so a reader holding a position from it is told to start over (`changed::replaced`), and no commit here is
+    /// numbered at or behind its position
+    pub(crate) fn number_past(&self, sequence: u64) -> Result<()> {
+        let store = self.store()?;
+        self.admin_unit(|t| {
+            let key = crate::store::meta_key(crate::format::meta::SEQUENCE);
+            let last =
+                t.db.get(t.txn, &key)?.and_then(|bytes| <[u8; 8]>::try_from(bytes).ok()).map_or(0, u64::from_be_bytes);
+            t.db.put(t.txn, &key, &last.max(sequence).to_be_bytes())?;
+            super::changed::replaced(t.txn, t.db, t.schema, None, store.next_sequence(t.txn)?)
+        })
+    }
+
     /// What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
     /// each value index, and its sizes
     pub fn stats(&self) -> Result<Stats> {

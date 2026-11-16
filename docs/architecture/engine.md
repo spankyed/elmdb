@@ -114,7 +114,9 @@ from, limit)` reads what changed after a position, however far behind it is, in 
 entities (`Position.after`), with the entities destroyed since from the tombstones of the last 4096 commits (trimmed
 every 64 commits, `TRIM_EVERY`), each once, and none that was made again under its id, which is among the changed. A reader older than the kept tombstones, of a
 type with a destroy since, is told the answer is incomplete; so is one from before a `reset`, a `replaceWith` or a
-`renameType` of the type, which take entities away with no tombstone and bring others with no stamp of their own. A commit stamps what
+`renameType` of the type, which take entities away with no tombstone and bring others with no stamp of their own, and
+one holding a position from a database a dump was made of, once the dump is loaded: a load numbers its commits past the
+dumped database's (`format.md`, Dumps). A commit stamps what
 it wrote as it commits, once whatever number of fields it wrote; a unit reads its commit's sequence (`next_sequence`)
 before it commits, so a reader inside it can say where it will have read to.
 

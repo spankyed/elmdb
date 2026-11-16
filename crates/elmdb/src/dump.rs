@@ -3,8 +3,9 @@
 //! crosses a change to format 1's layout by being dumped by the build before it and loaded by the build after.
 //!
 //! The file: the 8 bytes `ELMDBDMP`, a u32 dump version (1), a u32 length and the schema's canonical JSON (length 0:
-//! none), then each load as a u32 length and its msgpack (`Load`, with named fields), then a u32 `0xFFFFFFFF` and a u64
-//! load count. Integers are little-endian.
+//! none), then each load as a u32 length and its msgpack (`Load`, with named fields), then a u32 `0xFFFFFFFF`, a u64
+//! load count and a u64: the sequence of the dumped database's last commit, which a load numbers its commits past. A
+//! file that ends after the count loads with no sequence to number past. Integers are little-endian.
 
 use std::io::{BufWriter, Read as _, Write as _};
 use std::path::Path;
@@ -69,7 +70,13 @@ pub fn dump(db: &Database, target: &Path) -> Result<DumpReport> {
     out.write_all(MAGIC)?;
     out.write_all(&VERSION.to_le_bytes())?;
     let mut count = 0u64;
+    let mut sequence = 0u64;
     db.primary_snapshot(|schema, snapshot| {
+        sequence = snapshot
+            .db
+            .get(snapshot.txn, &crate::store::meta_key(crate::format::meta::SEQUENCE))?
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map_or(0, u64::from_be_bytes);
         let schema = schema.map(|s| s.canonical()).unwrap_or_default();
         report.schema = !schema.is_empty();
         write_framed(&mut out, schema.as_bytes())?;
@@ -82,12 +89,14 @@ pub fn dump(db: &Database, target: &Path) -> Result<DumpReport> {
     })?;
     out.write_all(&END.to_le_bytes())?;
     out.write_all(&count.to_le_bytes())?;
+    out.write_all(&sequence.to_le_bytes())?;
     out.into_inner().map_err(|e| Error::from(e.into_error()))?.sync_all()?;
     written.keep();
     Ok(report)
 }
 
-/// Reads the dump at `dump` into a new database at `target`, held to the dump's schema, and builds its derived data
+/// Reads the dump at `dump` into a new database at `target`, held to the dump's schema, builds its derived data, and
+/// numbers its commits past the dumped database's, telling a reader from that one to start over
 pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
     if target.join("data.mdb").exists() {
         return Err(Error::new(
@@ -156,14 +165,20 @@ pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
     if u64::from_le_bytes(count) != seen {
         return Err(invalid(format!("it records {} loads and holds {seen}", u64::from_le_bytes(count))));
     }
-    if file.read(&mut [0u8; 1])? != 0 {
-        return Err(invalid("it holds bytes after its load count"));
-    }
+    let mut rest = Vec::new();
+    file.read_to_end(&mut rest)?;
+    let sequence = match rest.len() {
+        0 => 0,
+        8 => u64::from_le_bytes(rest.try_into().expect("8 bytes")),
+        _ => return Err(invalid("it holds bytes after its load count and sequence")),
+    };
     if !loads.is_empty() {
         db.bulk_load(&loads)?;
     }
     drop(loads);
     db.rebuild(None)?;
+    // A reader of the dumped database holds positions in its numbering, which this one's commits come after
+    db.number_past(sequence)?;
     db.close()?;
     run_point!(LOAD_PUBLISH);
     // Publication is atomic and fails if any file already occupies the destination. The closed staging file is
@@ -292,7 +307,10 @@ mod tests {
         let db = Database::open(&target, OpenOptions { syncs: false, ..Default::default() }).unwrap();
         let again = root.path().join("again.dump");
         dump(&db, &again).unwrap();
-        assert_eq!(std::fs::read(again).unwrap(), std::fs::read(path).unwrap());
+        let (again, first) = (std::fs::read(again).unwrap(), std::fs::read(path).unwrap());
+        let sequence = |bytes: &[u8]| u64::from_le_bytes(bytes[bytes.len() - 8..].try_into().unwrap());
+        assert_eq!(again[..again.len() - 8], first[..first.len() - 8], "the same schema and loads");
+        assert!(sequence(&again) > sequence(&first), "the loaded database's commits come after the dumped one's");
         assert!(db.check().unwrap().is_clean());
     }
 
@@ -333,8 +351,9 @@ mod tests {
             let mut broken = bytes.clone();
             match kind {
                 "count" => {
-                    let at = broken.len() - 8;
-                    broken[at..].copy_from_slice(&0u64.to_le_bytes());
+                    // The count, before the last commit's sequence
+                    let at = broken.len() - 16;
+                    broken[at..at + 8].copy_from_slice(&0u64.to_le_bytes());
                 }
                 "truncated" => {
                     broken.truncate(broken.len() - 1);
@@ -346,5 +365,18 @@ mod tests {
             assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "{kind}: staging cleaned up");
         }
         assert_eq!(load(&path, &target).unwrap().entities, 1100);
+    }
+
+    #[test]
+    fn a_dump_that_ends_after_its_count_loads_with_no_sequence_to_number_past() {
+        // As a build before the sequence was written makes it, which the build after a change to format 1 loads
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path());
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes.truncate(bytes.len() - 8);
+        let short = root.path().join("short.dump");
+        std::fs::write(&short, bytes).unwrap();
+        let target = root.path().join("destination");
+        assert_eq!(load(&short, &target).unwrap().entities, 1100);
     }
 }
