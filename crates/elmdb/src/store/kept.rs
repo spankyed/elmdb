@@ -246,7 +246,8 @@ impl Kept {
                 ErrorCode::Io,
                 format!(
                     "The meta page of commit {commit} couldn't be read from the data file of the database at {}: \
-                     {error}. Nothing was synced or recorded, and the next sync reads it again",
+                     {error}. Nothing was synced or recorded, and nothing of a write that was to sync first was made: \
+                     a durable wait or the write may be tried again, and goes on once the file reads",
                     self.dir.display()
                 ),
             )
