@@ -2,8 +2,9 @@
 # a process writes in a cache of its own until it is synced, and drops it on a command, as a power loss would. A writer
 # dies part way through its syncs, what it didn't sync is dropped, and the database opened after must hold what its last
 # finished sync held (engine/tests/power_loss.rs, a_filesystem_that_drops_what_was_not_synced_...). Run again with the
-# writer's pin turned off, the test must fail: so each run shows it can. Each night, on a dispatch, and on a pull request
-# that changes this job or the test it runs.
+# writer's pin turned off, the test must fail: so each run shows it can. Then LazyFS tears a write in the middle, part of
+# it persisted, and crashes, and the same holds (a_filesystem_that_tears_a_write_...). Each night, on a dispatch, and on
+# a pull request that changes this job or the test it runs.
 name: lossy filesystem
 
 on:
@@ -20,7 +21,7 @@ permissions:
 
 jobs:
   lossy:
-    name: a filesystem that drops what wasn't synced (LazyFS)
+    name: a filesystem that drops what wasn't synced, and tears a write (LazyFS)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -46,10 +47,13 @@ jobs:
       - name: The tests, built before the filesystem is mounted
         run: cargo test -p elmdb --lib --no-run
 
-      - name: LazyFS mounted, and the script that drops what wasn't synced
+      - name: LazyFS mounted, and the scripts that drop what wasn't synced, tear a write, and mount it again
         run: |
           fifo="$RUNNER_TEMP/faults.fifo"
           done_fifo="$RUNNER_TEMP/faults-done.fifo"
+          mnt="$RUNNER_TEMP/lazyfs.mnt"
+          root="$RUNNER_TEMP/lazyfs.root"
+          mkdir -p "$mnt" "$root"
           cat > "$RUNNER_TEMP/lazyfs.toml" <<EOF
           [faults]
           fifo_path="$fifo"
@@ -63,17 +67,35 @@ jobs:
           log_all_operations=false
           logfile=""
           EOF
-          mkdir -p "$RUNNER_TEMP/lazyfs.mnt" "$RUNNER_TEMP/lazyfs.root"
+          # Mounts LazyFS with the config it is given, once whatever was mounted is gone: one that crashed as it tore a
+          # write leaves its mount behind it
+          cat > "$RUNNER_TEMP/mount.sh" <<EOF
+          fusermount3 -uz "$mnt" 2>/dev/null || true
+          rm -f "$fifo" "$done_fifo"
           cd "$RUNNER_TEMP/lazyfs/lazyfs"
-          nohup ./scripts/mount-lazyfs.sh -c "$RUNNER_TEMP/lazyfs.toml" -m "$RUNNER_TEMP/lazyfs.mnt" \
-            -r "$RUNNER_TEMP/lazyfs.root" -f > "$RUNNER_TEMP/lazyfs.log" 2>&1 &
-          for _ in $(seq 1 60); do mountpoint -q "$RUNNER_TEMP/lazyfs.mnt" && break; sleep 1; done
-          mountpoint "$RUNNER_TEMP/lazyfs.mnt"
+          nohup ./scripts/mount-lazyfs.sh -c "\$1" -m "$mnt" -r "$root" -f >> "$RUNNER_TEMP/lazyfs.log" 2>&1 &
+          for _ in \$(seq 1 60); do mountpoint -q "$mnt" && ls "$mnt" > /dev/null 2>&1 && exit 0; sleep 1; done
+          exit 1
+          EOF
+          sh "$RUNNER_TEMP/mount.sh" "$RUNNER_TEMP/lazyfs.toml"
           # Drops what wasn't synced, waits for LazyFS to say it has, and drops the kernel's copy of what it read, so
           # the next read is LazyFS's
           cat > "$RUNNER_TEMP/lose.sh" <<EOF
           echo "lazyfs::clear-cache" > "$fifo"
           read -r said < "$done_fifo"
+          sudo sh -c 'echo 1 > /proc/sys/vm/drop_caches'
+          EOF
+          # Mounts LazyFS again told to tear the given write to the given file, named on the mount: split in three, the
+          # first part and the last persisted, and LazyFS crashed, as a loss of power in the middle of a write leaves it
+          cat > "$RUNNER_TEMP/arm.sh" <<EOF
+          file="$root\${1#$mnt}"
+          cp "$RUNNER_TEMP/lazyfs.toml" "$RUNNER_TEMP/torn.toml"
+          printf '[[injection]]\ntype="torn-op"\nfile="%s"\noccurrence=%s\nparts=3\npersist=[1,3]\n' "\$file" "\$2" >> "$RUNNER_TEMP/torn.toml"
+          sh "$RUNNER_TEMP/mount.sh" "$RUNNER_TEMP/torn.toml"
+          EOF
+          # Mounts LazyFS again as it was, after the tear, the kernel's copy of the files dropped
+          cat > "$RUNNER_TEMP/heal.sh" <<EOF
+          sh "$RUNNER_TEMP/mount.sh" "$RUNNER_TEMP/lazyfs.toml"
           sudo sh -c 'echo 1 > /proc/sys/vm/drop_caches'
           EOF
 
@@ -105,6 +127,16 @@ jobs:
             exit 1
           fi
 
+      - name: A torn write leaves each database at its writer's last sync
+        env:
+          ELMDB_TORN_DIR: ${{ runner.temp }}/lazyfs.mnt/torn
+          ELMDB_TORN_ARM: ${{ runner.temp }}/arm.sh
+          ELMDB_TORN_HEAL: ${{ runner.temp }}/heal.sh
+          TORN: engine::tests::power_loss::a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync
+        run: |
+          mkdir -p "$ELMDB_TORN_DIR"
+          cargo test -p elmdb --lib -- --ignored --exact "$TORN" --nocapture --test-threads=1
+
       - name: LazyFS's log
         if: always()
-        run: tail -n 100 "$RUNNER_TEMP/lazyfs.log" || true
+        run: tail -n 200 "$RUNNER_TEMP/lazyfs.log" || true

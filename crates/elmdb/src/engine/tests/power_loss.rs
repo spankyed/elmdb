@@ -611,11 +611,14 @@ fn child_writes_until_it_dies() {
     if std::env::var("ELMDB_LOSSY_UNPINNED").is_ok() {
         store.unpin();
     }
+    // Torn by the filesystem: it dies of whichever write LazyFS tears, the filesystem crashing under it, and says so
+    // if it lives to the end
+    let torn = std::env::var("ELMDB_LOSSY_TORN").is_ok();
     let mut model = Model::new();
     for n in 0..COMMITS {
         commit(&db, &mut model, n);
         if (n + 1) % SYNC_EVERY == 0 {
-            if (n + 1) / SYNC_EVERY == 3 && round.is_multiple_of(2) {
+            if (n + 1) / SYNC_EVERY == 3 && round.is_multiple_of(2) && !torn {
                 // Its data flushed, the record not yet written
                 crate::failpoints::run_once_at(crate::failpoints::points::SYNC_DATA, store.path(), || {
                     std::process::abort()
@@ -625,8 +628,56 @@ fn child_writes_until_it_dies() {
             println!("synced {}", n + 1);
         }
         // Rounds 1, 3, 5 and 7: one to four commits after the second sync, before the third
-        if !round.is_multiple_of(2) && n + 1 == 2 * SYNC_EVERY + 1 + round / 2 {
+        if !round.is_multiple_of(2) && n + 1 == 2 * SYNC_EVERY + 1 + round / 2 && !torn {
             std::process::abort();
         }
+    }
+    // A line of its own: the harness's summary says "finished in" whether the test passed or not
+    println!("wrote every commit of the workload");
+}
+
+/// Run by the nightly job over LazyFS (`.github/workflows/lossy-filesystem.yml`), which tears a write: in each round
+/// the job's script `ELMDB_TORN_ARM` mounts LazyFS again told to split the given write to the round's data file in
+/// three, persist the first part and the last, and crash. A writer in a child process commits the grouped workload,
+/// syncing at every `SYNC_EVERY`th commit, until the crash ends it; `ELMDB_TORN_HEAL` mounts LazyFS again as it
+/// was. The database opened after, as of another boot, must hold what the writer's last finished sync held, and pass
+/// `check()`. A writer that finished its workload saw no tear, which fails the round
+#[test]
+#[ignore = "run by the lossy-filesystem job, which mounts the filesystem and tears a write"]
+fn a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync() {
+    let dir = std::path::PathBuf::from(std::env::var("ELMDB_TORN_DIR").expect("the job names the directory"));
+    let arm = std::env::var("ELMDB_TORN_ARM").expect("the job names the script that sets the tear");
+    let heal = std::env::var("ELMDB_TORN_HEAL").expect("the job names the script that mounts the filesystem again");
+    crate::store::forget_the_boot();
+    // The write to the data file torn: early in the workload and later, around its syncs
+    for (round, write) in [6usize, 14, 27, 45].into_iter().enumerate() {
+        let path = dir.join(format!("round-{round}"));
+        let set = std::process::Command::new("sh")
+            .args([&arm, path.join("data.mdb").to_str().unwrap(), &write.to_string()])
+            .status()
+            .unwrap();
+        assert!(set.success(), "round {round}: the tear wasn't set");
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "engine::tests::power_loss::child_writes_until_it_dies", "--nocapture"])
+            .env("ELMDB_LOSSY_DB", &path)
+            .env("ELMDB_LOSSY_ROUND", round.to_string())
+            .env("ELMDB_LOSSY_TORN", "1")
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&child.stdout);
+        assert!(
+            !said.lines().any(|line| line.contains("wrote every commit of the workload")),
+            "round {round}: write {write} wasn't torn, and the writer finished: {said}"
+        );
+        // No sync finished: the record the open wrote, before any commit
+        let synced = said
+            .lines()
+            .filter_map(|line| line.split("synced ").nth(1))
+            .filter_map(|count| count.trim().parse::<usize>().ok())
+            .next_back()
+            .unwrap_or(0);
+        let healed = std::process::Command::new("sh").arg(&heal).status().unwrap();
+        assert!(healed.success(), "round {round}: the filesystem wasn't mounted again");
+        assert_eq!(held_at(&path, COMMITS).as_ref(), Ok(&model_after(synced)), "round {round}, synced at {synced}");
     }
 }
