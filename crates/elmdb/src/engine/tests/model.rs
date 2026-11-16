@@ -163,6 +163,11 @@ enum Step {
         from: &'static str,
         to: &'static str,
     },
+    /// A copy of the database as it is, into `model-backup` inside its directory, the copy before replaced
+    Backup,
+    /// Every row replaced with those of the last backup: refused with no backup, and otherwise a commit with no change
+    /// set, after which a reader from before it is told the answer is incomplete, as after a reset
+    ReplaceWith,
 }
 
 /// The field renames the workload makes, both ways between `c` and the spare field
@@ -325,6 +330,8 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
         let blind = |steps: BoxedStrategy<Step>| steps.prop_map(|step| Aimed { step, aimed: false });
         let rebuild = prop::sample::select(&REBUILDS[..]).prop_map(|index| Step::Rebuild { index }).boxed();
         let reset = Just(Step::Reset).boxed();
+        let backup = Just(Step::Backup).boxed();
+        let replace = Just(Step::ReplaceWith).boxed();
         let rename =
             prop::sample::select(&RENAMES[..]).prop_map(|(from, to)| Step::RenameRelation { from, to }).boxed();
         let field_rename =
@@ -338,6 +345,8 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
             1 => blind(reset),
             1 => blind(rename),
             1 => blind(field_rename),
+            // One slot between them, so that the workload's other steps keep the share they had
+            1 => blind(prop_oneof![backup, replace].boxed()),
             1 => blind(onto_joined_ends(&state.model)),
         ]
         .boxed()
@@ -529,6 +538,8 @@ struct Entity {
 /// The data as the model holds it
 #[derive(Debug, Clone, Default, PartialEq)]
 struct Model {
+    /// The data as the last `Backup` copied it, which `ReplaceWith` takes the database back to
+    backup: Option<Box<Saved>>,
     entities: BTreeMap<String, Entity>,
     /// Each edge by its ends: a kind with no key joins two entities by one edge at most
     edges: BTreeSet<(String, String, String)>,
@@ -538,6 +549,14 @@ struct Model {
     pending: Vec<(String, String, String)>,
     next_seq: u64,
     refuse_next: bool,
+}
+
+/// The primary data a backup holds
+#[derive(Debug, Clone, Default, PartialEq)]
+struct Saved {
+    entities: BTreeMap<String, Entity>,
+    edges: BTreeSet<(String, String, String)>,
+    keyed: BTreeSet<(String, String, u8)>,
 }
 
 /// Why the model refused a step; the engine must refuse it too
@@ -737,9 +756,12 @@ impl Model {
             }
             // What the model holds is primary data, which a rebuild leaves as it is
             Step::Rebuild { .. } => {}
-            Step::RefuseNext | Step::Reset | Step::RenameRelation { .. } | Step::RenameField { .. } => {
-                unreachable!("only at the top")
-            }
+            Step::RefuseNext
+            | Step::Reset
+            | Step::RenameRelation { .. }
+            | Step::RenameField { .. }
+            | Step::Backup
+            | Step::ReplaceWith => unreachable!("only at the top"),
         }
         Ok(())
     }
@@ -802,6 +824,24 @@ impl Model {
                 self.edges.remove(&(source.clone(), kind, target.clone()));
                 self.edges.insert((source, to.to_string(), target));
             }
+            return Ok(());
+        }
+        if let Step::Backup = step {
+            // A copy, which commits nothing: an armed refusal waits for the next commit
+            let saved = Saved { entities: self.entities.clone(), edges: self.edges.clone(), keyed: self.keyed.clone() };
+            self.backup = Some(Box::new(saved));
+            return Ok(());
+        }
+        if let Step::ReplaceWith = step {
+            // With no backup the engine finds no database to replace with, before any commit
+            let Some(saved) = self.backup.clone() else { return Err("no backup to replace with") };
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.entities = saved.entities;
+            self.edges = saved.edges;
+            self.keyed = saved.keyed;
+            self.pending.clear();
             return Ok(());
         }
         if let Step::Reset = step {
@@ -948,6 +988,8 @@ fn op_of_plain(step: &Step) -> Json {
         | Step::Reset
         | Step::RenameRelation { .. }
         | Step::RenameField { .. }
+        | Step::Backup
+        | Step::ReplaceWith
         | Step::Rebuild { .. } => {
             unreachable!("not a write on its own")
         }
@@ -980,6 +1022,13 @@ fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
         Step::Reset => db.reset().map(|()| None),
         Step::RenameRelation { from, to } => db.rename_relation(from, to).map(|()| None),
         Step::RenameField { from, to } => db.rename_field("Task", from, to).map(|()| None),
+        Step::Backup => {
+            // Into the database's own directory, so that the copy goes with it; the last backup is the one replaced with
+            let target = db.path().join("model-backup");
+            let _ = std::fs::remove_dir_all(&target);
+            db.backup(&target).map(|()| None)
+        }
+        Step::ReplaceWith => db.replace_with(db.path().join("model-backup")).map(|()| None),
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -2138,9 +2187,9 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
         assert_since(engine, step);
         return;
     }
-    if let (Step::Reset, Ok(_)) = (step, got) {
-        // A reset commits no change set, and a reader from before it is told the answer is incomplete: the entities it
-        // removed have no tombstone. The tracking starts again from the database as it is
+    if let (Step::Reset | Step::ReplaceWith, Ok(_)) = (step, got) {
+        // A reset or a replacement commits no change set, and a reader from before it is told the answer is incomplete:
+        // the entities it removed have no tombstone. The tracking starts again from the database as it is
         engine.before = after;
         engine.since = Since::default();
         engine.replaced = true;
@@ -2629,7 +2678,7 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Every kind of step, as `kind_of` names it
-const STEP_KINDS: [&str; 27] = [
+const STEP_KINDS: [&str; 29] = [
     "Create",
     "Set",
     "Append",
@@ -2657,6 +2706,8 @@ const STEP_KINDS: [&str; 27] = [
     "Reset",
     "RenameRelation",
     "RenameField",
+    "Backup",
+    "ReplaceWith",
 ];
 
 fn kind_of(step: &Step) -> &'static str {
@@ -2688,6 +2739,8 @@ fn kind_of(step: &Step) -> &'static str {
         Step::Reset => "Reset",
         Step::RenameRelation { .. } => "RenameRelation",
         Step::RenameField { .. } => "RenameField",
+        Step::Backup => "Backup",
+        Step::ReplaceWith => "ReplaceWith",
     }
 }
 
