@@ -6,7 +6,10 @@ below, a term's places in blocks with their counts, lengths by place and ranking
 7) and what is beyond text are not built. Fuzzy terms by seeking is built (2026-10-27). Posting lists in blocks of a
 fixed range of places were built and measured at 50,000 messages, changed no write's time there and were not kept
 (`../evidence/next-phase-6.md`); at a million notes the rewrite of whole lists was most of a commit. The design is
-ordered by the road to 1.0 (`../roadmap.md`), and is built before the format is frozen.
+ordered by the road to 1.0 (`../roadmap.md`). Its journal (Order 2 and 3) changes only keys under an index, which the
+freeze leaves to each index's recorded layout (`format-freeze.md`), so it can land after the format is frozen. Order
+4 moves a type's entities in creation order, which the freeze locks: it lands before the lock, or is a format of its
+own.
 
 ## Where it starts
 

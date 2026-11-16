@@ -35,7 +35,9 @@ This document is what every "should elmdb do X?" is checked against. The others:
    Rust types; their TypeScript types are generated from them and never written by hand, so drift fails the build.
 7. **Formats are explicit.** Every database records its format, and an open refuses one it can't read. The format is
    1, edited in place, until a release has users, and a database crosses an edit by a dump and a load; from then on an
-   upgrade is a Rust function from one format to the next, run on a copy, never on open (`format.md`, Versions).
+   upgrade is a Rust function from one format to the next, run on a copy, never on open (`format.md`, Versions). A
+   move to another LMDB, which no one build holds beside the first, is crossed by a dump from the one and a load into
+   the other.
 8. **The engine owns collation.** String order is declared once, in the schema's `collation` (icu4x's root collation,
    or a locale's), so a sort means the same wherever it runs.
 9. **Reads and writes block; a promise is for work measured to hold the event loop.** A write answers at the call: what
@@ -58,9 +60,10 @@ This document is what every "should elmdb do X?" is checked against. The others:
 ## Built on
 
 - **heed** (Meilisearch's Rust binding to LMDB). Its LMDB is upstream `mdb.master` plus one patch, ITS#10395 (several
-  nested read transactions inside a write transaction), reported to OpenLDAP and listed in `format.md`. heed's
-  `heed3` variant, on stock `mdb.master3` (LMDB 1.0), is the path to LMDB 1.0 once it is released and the crates below
-  support it.
+  nested read transactions inside a write transaction), reported to OpenLDAP and listed in `format.md`. LMDB 1.0
+  is released (1.0.1, 2026-08-06), and heed's `heed3` variant is the path to it, but hannoy below doesn't run on heed3
+  and heed3's LMDB is a copy from before the release. Format 1 stays on 0.9, and a move to 1.0 is format 2
+  (`../roadmap/format-freeze.md`).
 - **roaring** bitmaps for sets of entities, as a search joins them and a trigram index keeps them, **charabia** for
   tokenizing, **rust-stemmers** for stems, **levenshtein_automata** for fuzzy terms, **regex** and **regex-syntax**
   for patterns and what a trigram index narrows them by, **hannoy** for approximate nearest neighbours on LMDB,

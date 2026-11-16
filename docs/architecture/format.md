@@ -104,7 +104,8 @@ in-place change rather than refuse it; the answer is the same reset, or a dump m
 
 **From the first release with users** (its tag is the condition), format 1 is locked: every later change to the stored
 layout bumps the format and ships an upgrade, a Rust function from one format to the next, run on a copy and never on
-open. This section then names the tag.
+open. This section then names the tag. What the lock is to hold, and how each index's recorded layout keeps the index's derived
+data out of it, is designed in `../roadmap/format-freeze.md`.
 
 ## Dumps
 
@@ -167,7 +168,9 @@ to move aside (`store/record.rs`).
 
 ## LMDB
 
-elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch.
+elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch. Its files record LMDB's data version 1, and LMDB
+1.0's record 3; neither opens the other's. Format 1 is on this LMDB, and a move to 1.0 is format 2, crossed by a dump
+from the last build on 0.9 and a load into the first on 1.0 (`../roadmap/format-freeze.md`).
 
 | Patch | What | Upstream |
 |---|---|---|
