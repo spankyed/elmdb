@@ -618,6 +618,29 @@ fn a_relation_moved_to_other_ends_moves_the_ends_it_left_and_its_change_names_th
 }
 
 #[test]
+fn a_relation_made_and_moved_in_one_commit_names_the_ends_it_was_made_with() {
+    // It had no ends as the commit began: what it moved from is the ends the commit made it with
+    use crate::engine::changes::Ends;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![task("Task-1"), task("Task-2"), task("Task-3")]).unwrap();
+    let mut unit = db.begin().unwrap();
+    let made = unit
+        .write(&batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" })]))
+        .unwrap();
+    let relation = match &made.results[0] {
+        crate::OpResult::Relation { id, .. } => id.clone(),
+        other => panic!("not a relation: {other:?}"),
+    };
+    unit.write(&batch(vec![json!({ "op": "updateRelation", "relation": relation, "target": "Task-3" })])).unwrap();
+    let changes = unit.commit(false).unwrap();
+    let change = &changes.relations[&relation];
+    assert!(change.linked && change.changed, "{change:?}");
+    assert_eq!((change.source.as_str(), change.target.as_str()), ("Task-1", "Task-3"));
+    assert_eq!(change.moved_from, Some(Ends { source: "Task-1".into(), target: "Task-2".into() }));
+}
+
+#[test]
 fn a_reader_from_before_every_row_was_replaced_is_told_to_start_again() {
     let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     {

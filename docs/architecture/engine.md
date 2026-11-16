@@ -638,7 +638,8 @@ failure/page-reuse regressions are recorded in [remediation evidence](../evidenc
 
 Every commit produces a change set: the entities created, changed, trashed, restored and destroyed, by type, with the
 fields and relation kinds touched, each relation with its ends as they are and, for one the commit moved, the ends it
-had (`movedFrom`), and the commit's **sequence**, a number that only increases for as long as the
+had before its first move (`movedFrom`: as the commit began, or the ends a relation the commit made was made with), and
+the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
 checkpoint does not raise it). A database's write answers each operation's result and the commit's change set, which
 holds its sequence, and across the binding the three cross as `Written` (generated as `protocol/Written.ts`); a unit's
