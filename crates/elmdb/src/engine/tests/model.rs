@@ -1900,13 +1900,31 @@ struct Engine {
     /// The model as it was before the step being tracked, which the step's change is the difference from
     before: Model,
     since: Since,
-    /// The entities of `Task` and `Note`, which `changed_since` is asked about
-    types: Vec<String>,
     /// The sequence of the last commit the engine reported
     sequence: u64,
-    /// Whether a reset has happened, and the position a reader from after it starts at
+    /// A reader of `changed_since` for each type it is asked about, `Task` and `Note`, each type asked alone
+    readers: BTreeMap<&'static str, Reader>,
+}
+
+/// What a reader of one type is told: whether one from the start is told the answer is incomplete, a reset or a
+/// replacement having taken the type's entities away with no tombstone, or a rename of the type; the position a reader
+/// from after the last of those starts at; and the position of the type's last rename, below which a reader is told so
+#[derive(Default)]
+struct Reader {
     replaced: bool,
     replaced_at: Option<u64>,
+    renamed_at: Option<u64>,
+}
+
+impl Engine {
+    /// A commit after a reset is where a reader from after the reset starts: the one before it
+    fn committed(&mut self, sequence: u64) {
+        for reader in self.readers.values_mut() {
+            if reader.replaced && reader.replaced_at.is_none() {
+                reader.replaced_at = Some(sequence - 1);
+            }
+        }
+    }
 }
 
 /// What `changed_since` answers from position zero: each entity still there with the sequence of its last change, and
@@ -2358,9 +2376,7 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
                 engine.since.last.insert(id, sequence);
             }
         }
-        if engine.replaced && engine.replaced_at.is_none() {
-            engine.replaced_at = Some(sequence - 1);
-        }
+        engine.committed(sequence);
         engine.before = after;
         assert_since(engine, step);
         return;
@@ -2368,16 +2384,26 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
     if let (Step::RenameTypeAndBack, Ok(_)) = (step, got)
         && engine.before.entities.keys().any(|id| crate::engine::ids::type_of(id) == "Note")
     {
-        // Its commit takes `Note`'s entities away and brings them back, stamping the ends of each relation it rewrote,
-        // and a reader of the type from before it is told the answer is incomplete. A reader from it reads what changes
-        // after it, which those stamps, at its own sequence, are not
+        // Its commit takes `Note`'s entities away and brings them back, stamping both ends of each relation it rewrote,
+        // each one with a `Note` end. A reader of `Note` from before it is told the answer is incomplete, and one from
+        // it reads what changes after it; a reader of `Task` is told nothing new but the stamps of its entities
         let sequence = quiet + 1;
         assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
         engine.sequence = sequence;
+        engine.committed(sequence);
+        let is_note = |id: &str| crate::engine::ids::type_of(id) == "Note";
+        let rewritten = (after.edges.iter().map(|(source, _, target)| (source, target)))
+            .chain(after.keyed.iter().map(|(source, target, _)| (source, target)))
+            .filter(|(source, target)| is_note(source) || is_note(target));
+        for (source, target) in rewritten {
+            engine.since.last.insert(source.clone(), sequence);
+            engine.since.last.insert(target.clone(), sequence);
+        }
+        engine.since.last.retain(|id, _| !is_note(id));
+        engine.since.gone.retain(|id| !is_note(id));
+        let note = engine.readers.get_mut("Note").expect("a reader of Note");
+        *note = Reader { replaced: true, replaced_at: Some(sequence), renamed_at: Some(sequence) };
         engine.before = after;
-        engine.since = Since::default();
-        engine.replaced = true;
-        engine.replaced_at = Some(sequence);
         assert_since(engine, step);
         return;
     }
@@ -2386,8 +2412,10 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
         // the entities it removed have no tombstone. The tracking starts again from the database as it is
         engine.before = after;
         engine.since = Since::default();
-        engine.replaced = true;
-        engine.replaced_at = None;
+        for reader in engine.readers.values_mut() {
+            reader.replaced = true;
+            reader.replaced_at = None;
+        }
         assert_since(engine, step);
         return;
     }
@@ -2414,9 +2442,7 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
             assert!(commit.sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
             engine.sequence = commit.sequence;
             // A reader from the commit before the first after a reset reads what changed since the reset
-            if engine.replaced && engine.replaced_at.is_none() {
-                engine.replaced_at = Some(commit.sequence - 1);
-            }
+            engine.committed(commit.sequence);
             assert_eq!(changes_of(commit), changes, "{step:?}: the change set the commit reported");
             engine.since.record(commit.sequence, &changes);
             // An end the step left destroyed is not stamped: its destruction is the change
@@ -2439,37 +2465,52 @@ fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate
     assert_since(engine, step);
 }
 
+/// Asks `changed_since` of each type alone: from the start, from after the last reset, and from just before the type's
+/// last rename
 fn assert_since(engine: &Engine, step: &Step) {
-    let from_start = engine
-        .db
-        .changed_since(&engine.types, &crate::engine::changed::Position::default(), 1_000_000)
-        .expect("changed_since answers");
-    if engine.replaced {
-        assert!(!from_start.complete, "{step:?}: a reader from before a reset is told the answer is incomplete");
-    } else {
-        assert_answer(engine, step, &from_start);
-    }
-    if let Some(sequence) = engine.replaced_at {
-        let position = crate::engine::changed::Position { sequence, after: None };
-        let since = engine.db.changed_since(&engine.types, &position, 1_000_000).expect("changed_since answers");
-        assert_answer(engine, step, &since);
+    for (entity_type, reader) in &engine.readers {
+        let types = [entity_type.to_string()];
+        let read = |sequence: u64| {
+            let position = crate::engine::changed::Position { sequence, after: None };
+            engine.db.changed_since(&types, &position, 1_000_000).expect("changed_since answers")
+        };
+        let from_start = read(0);
+        if reader.replaced {
+            assert!(
+                !from_start.complete,
+                "{step:?}: a reader of {entity_type} from before a reset is told it's incomplete"
+            );
+        } else {
+            assert_answer(engine, step, entity_type, &from_start);
+        }
+        if let Some(sequence) = reader.replaced_at {
+            assert_answer(engine, step, entity_type, &read(sequence));
+        }
+        if let Some(sequence) = reader.renamed_at {
+            let before = read(sequence - 1);
+            assert!(
+                !before.complete,
+                "{step:?}: a reader of {entity_type} from before its rename is told it's incomplete"
+            );
+        }
     }
 }
 
-/// What `changed_since` answers, which must be the entities still there with the sequence of their last change, and the
-/// entities destroyed and not made again, and everything
-fn assert_answer(engine: &Engine, step: &Step, got: &crate::engine::changed::Changed) {
+/// What `changed_since` answers of a type, which must be its entities still there with the sequence of their last
+/// change, and its entities destroyed and not made again, and everything
+fn assert_answer(engine: &Engine, step: &Step, entity_type: &str, got: &crate::engine::changed::Changed) {
+    let of_type = |id: &String| crate::engine::ids::type_of(id) == entity_type;
     assert_eq!(got.ids.len(), got.sequences.len(), "each changed entity has the sequence of its last change");
     let ids: BTreeMap<String, u64> = got.ids.iter().cloned().zip(got.sequences.iter().copied()).collect();
     assert_eq!(got.ids.len(), ids.len(), "each changed entity is named once");
-    assert_eq!(
-        ids, engine.since.last,
-        "{step:?}: changed since the start, each entity still there and the commit of its last change"
-    );
+    let last: BTreeMap<String, u64> =
+        engine.since.last.iter().filter(|(id, _)| of_type(id)).map(|(id, n)| (id.clone(), *n)).collect();
+    assert_eq!(ids, last, "{step:?}: changed since, each {entity_type} still there and the commit of its last change");
     let destroyed: BTreeSet<String> = got.destroyed.iter().cloned().collect();
     assert_eq!(got.destroyed.len(), destroyed.len(), "each destroyed entity is named once");
-    assert_eq!(destroyed, engine.since.gone, "changed since the start: the entities destroyed and not made again");
-    assert!(got.done && got.complete, "changed since the start answers everything: {got:?}");
+    let gone: BTreeSet<String> = engine.since.gone.iter().filter(|id| of_type(id)).cloned().collect();
+    assert_eq!(destroyed, gone, "changed since: each {entity_type} destroyed and not made again");
+    assert!(got.done && got.complete, "changed since answers everything of {entity_type}: {got:?}");
 }
 
 struct EngineMachine;
@@ -2486,10 +2527,8 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             _dir: dir,
             before: Model::default(),
             since: Since::default(),
-            types: vec!["Task".to_owned(), "Note".to_owned()],
             sequence: 0,
-            replaced: false,
-            replaced_at: None,
+            readers: BTreeMap::from([("Task", Reader::default()), ("Note", Reader::default())]),
         };
         for step in &reference.prelude {
             // Read beside the builder, which a prelude runs with: no step of one is a rename, whose commit alone is
