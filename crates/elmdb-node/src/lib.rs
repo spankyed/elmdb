@@ -292,8 +292,8 @@ impl Database {
         })
     }
 
-    /// Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
-    /// answer per read
+    /// Answers reads (msgpack bytes of a `Reads`) from one snapshot, on this thread, as msgpack bytes of its `Answers`:
+    /// an `Answer` per read, in the order asked
     #[napi]
     pub fn read<'env>(&self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
         self.guarded("Database.read", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
@@ -802,7 +802,8 @@ impl Unit {
         self.run("Unit.nextSequence", |unit| Ok(unit.open()?.next_sequence().map_err(to_js)? as f64))
     }
 
-    /// Answers reads from the unit's transaction, which sees the unit's own writes
+    /// Answers reads (msgpack bytes of a `Reads`) from the unit's transaction, which sees the unit's own writes, as
+    /// msgpack bytes of its `Answers`
     #[napi]
     pub fn read<'env>(&mut self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.read", |unit| answer(env, &unit.open()?.read_bytes(&reads).map_err(to_js)?))

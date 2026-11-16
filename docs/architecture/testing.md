@@ -434,6 +434,10 @@ msgpack as batches, reads and loads, flipped bytes, arguments of the wrong type,
 Each must apply or throw: an error carrying an elmdb code when the payload reached elmdb, and N-API's own for an
 argument of the wrong JavaScript type; and `check()` stays clean. The TypeScript types are generated
 from the Rust ones (`cargo xtask generate`), so a mismatch fails the typecheck before a test runs.
+`schema-types.test.mjs` decodes a write's answer and a read's and compares each with a literal the typecheck holds to
+its generated type (`Written`, `Answers`): a field renamed in the TypeScript fails the typecheck, one renamed on the
+wire the comparison. The Rust side is held whole: `answer::conforms` checks every read the engine's tests make against
+the answer types, and `engine/tests/answers.rs` makes a read of each kind.
 
 A panic in each export is caught (`panics.test.mjs`): for every member the binding's two classes have, the
 factory, and the work five exports do on a thread of the pool, a child process is started with `ELMDB_TEST_PANIC`

@@ -10,6 +10,14 @@ export type { Written } from './protocol/Written.js'
 export type { BatchResult } from './protocol/BatchResult.js'
 export type { OpResult } from './protocol/OpResult.js'
 export type { ChangeSet } from './protocol/ChangeSet.js'
+export type { Reads } from './protocol/Reads.js'
+export type { ReadOp } from './protocol/ReadOp.js'
+export type { Answers } from './protocol/Answers.js'
+export type { Answer } from './protocol/Answer.js'
+export type { Row } from './protocol/Row.js'
+export type { RelationRow } from './protocol/RelationRow.js'
+export type { Hit } from './protocol/Hit.js'
+export type { Stage } from './protocol/Stage.js'
 export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats, OpenReport, Restore }
 
 /**
@@ -52,8 +60,8 @@ export declare class Database {
    */
   write(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
-   * Answers reads (msgpack bytes of `{ reads: ReadOp[] }`) from one snapshot, on this thread, as msgpack bytes of an
-   * answer per read
+   * Answers reads (msgpack bytes of a `Reads`) from one snapshot, on this thread, as msgpack bytes of its `Answers`:
+   * an `Answer` per read, in the order asked
    */
   read(reads: Buffer): Buffer
   /**
@@ -173,7 +181,10 @@ export declare class Unit {
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /** The sequence this unit commits as, which what it writes is stamped with */
   nextSequence(): number
-  /** Answers reads from the unit's transaction, which sees the unit's own writes */
+  /**
+   * Answers reads (msgpack bytes of a `Reads`) from the unit's transaction, which sees the unit's own writes, as
+   * msgpack bytes of its `Answers`
+   */
   read(reads: Buffer): Buffer
   /** Opens a savepoint, answering its depth */
   savepoint(): number
