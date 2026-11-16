@@ -90,7 +90,12 @@ impl Messages {
                 name: "field",
                 reads: serde_json::from_value(json!({"reads":[{"read":"field","id":id(742),"field":"title"}]}))
                     .unwrap(),
-                check: |answer, _| assert_eq!(answer, &json!({"kind":"field","present":true,"value":"message 742","plainObjects":true})),
+                check: |answer, _| {
+                    assert_eq!(
+                        answer,
+                        &json!({"kind":"field","present":true,"value":"message 742","plainObjects":true})
+                    )
+                },
             },
             Workload {
                 name: "page",
