@@ -98,11 +98,6 @@ test('durable() resolves once what was committed is on disk', async (t) => {
   const before = db.syncs;
   await db.durable();
   assert.equal(db.syncs, before);
-  // A unit open on this thread could hold back the sync the wait is for, so the wait is refused
-  const unit = db.begin();
-  await assert.rejects(db.durable(), (error) => error.code === 'UNIT_OPEN');
-  unit.abort();
-  await db.durable();
   db.close();
 });
 

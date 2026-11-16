@@ -111,9 +111,8 @@ if (name === 'Database.open') {
   db = open();
   const call = ofDatabase[member];
   assert.ok(call, `${name} has no call in this test`);
-  // A unit open as the database's call panics, which the panic ends: no call is made on it. None for `begin`, which
-  // would open a second, or for `durable`, which is refused while one is open and so would never reach its panic
-  const unit = member === 'begin' || member === 'durable' ? undefined : db.begin();
+  // A unit open as the database's call panics, which the panic ends: no call is made on it
+  const unit = member === 'begin' ? undefined : db.begin();
   unit?.write(batch('Note-in-the-unit'));
   if (pool) {
     // The work of a promise is done on a thread of the pool, where its panic rejects the promise

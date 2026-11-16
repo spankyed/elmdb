@@ -545,10 +545,7 @@ A batch is data, so the engine can retry it (after growing the map, `design.md`)
 A unit is visible when it commits and survives the process crashing once `write` returns. Surviving the machine failing
 is a sync: group commit syncs once writes pause for `syncIdleMs` (100 ms) and at most `syncIntervalMs` (1 s) after the
 first unsynced commit, on a background thread. `db.durable()` resolves once everything committed before it is on disk,
-and rejects if the sync it waits on fails. It is refused while a unit is open (`UNIT_OPEN`), as a write is: a sync that
-finds the map grown by another process takes the new size only once no transaction of this process is open, so it
-waits for the unit to end, and a wait made where the unit is held would never end. A unit committed with `durable`
-waits for its own sync, having ended. A sync that fails as it reads or flushes the record, or flushes the data, is
+and rejects if the sync it waits on fails. A sync that fails as it reads or flushes the record, or flushes the data, is
 final until the database is reopened: an OS may mark the pages it couldn't write clean and drop them (PostgreSQL's
 "fsyncgate"), so a later sync that succeeds proves nothing about them, and every later commit is built on them; every
 wait after it rejects, naming it. One that wrote nothing to rely on is not (below). A write or a commit passed `durable`
