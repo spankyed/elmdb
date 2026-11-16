@@ -109,13 +109,15 @@ holds the event loop until it ends. A `readAsync` answers what `read` would have
 after the call is never in its answer.
 
 **Power loss:** by default commits are synced in groups: once writes have paused for 100 ms, and once a second while
-they go on. If the machine loses power between two syncs, the commits since the last sync can be lost. The file can
-also be left holding part of a commit, since nothing orders what is written between syncs: it may then be refused when
-it is opened (`CORRUPTED`), read wrongly, or end the process that reads it, and every earlier commit is lost with it.
-The remedy is a backup. A write's `durable: true` waits for its sync; it doesn't keep a later commit from leaving the
-file that way. Open with `syncEachCommit: true` to sync every commit as it is made, its pages before the page that
-names them, so a commit that returned survives a power loss and the file stays whole; each commit then costs its own
-sync.
+they go on. If the machine loses power between two syncs, the commits since the last sync are lost and nothing
+before them is: the database opens at its last synced commit, and every open reports it (`db.openReport.restored`)
+until `db.acknowledgeRestore()`. A test replays what a loss can leave on the file, and each night the engine runs over
+a filesystem that drops and tears what wasn't synced; no machine's power has been cut under a test yet
+(`docs/roadmap/synced-commit.md`, phase 5). A durable write (`db.write(batch, true)`) waits for its sync. Open with
+`syncEachCommit: true` to sync every commit as it is made, its pages before the page that names them, so a commit that
+returned survives a power loss; each commit then costs its own sync. A database is written in one mode at a time: a
+writable open in another mode (the default, `syncEachCommit`, or `syncs: false`) than a process that has it open for
+writing is refused (`MODE_MISMATCH`).
 
 **Embeddings:** elmdb doesn't call a model. It tracks what needs embedding, your worker submits vectors, and a stale one is
 refused.
@@ -132,12 +134,13 @@ See [docs map](docs/README.md). The ones most people want:
 
 ## Develop
 
-Needs Rust, which `rust-toolchain.toml` pins, and Node. `CLAUDE.md` has the full list of checks and the repository's rules.
+Needs Rust, which `rust-toolchain.toml` pins, Node, and [cargo-nextest](https://nexte.st) for the Rust suites.
+`CLAUDE.md` has the full list of checks and the repository's rules.
 
 ```sh
 npm ci && npm run build && npm test  # the binding and its tests
 cargo nextest run --workspace        # the Rust suites
-cargo run -p elmdb-cli -- check DIR  # also: inspect, backup, dump, load
+cargo run -p elmdb-cli -- check DIR  # also: inspect, backup, dump, load, acknowledge-restore
 ```
 
 ## License
