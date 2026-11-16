@@ -219,9 +219,10 @@ impl Kept {
     }
 
     /// Takes the map size another process grew the file to, as the store does, the pin ended first: LMDB changes a
-    /// map's size only while the process has no transaction
+    /// map's size only while the process has no transaction. Gives way, taking nothing, where the gate isn't free
+    /// soon (`super::gate_to_adopt`): the caller begins its transaction again
     pub(super) fn adopt(&self) -> Result<()> {
-        let _gate = self.gate.write();
+        let Some(_gate) = super::gate_to_adopt(&self.gate) else { return Ok(()) };
         self.calls.run_all();
         self.idle.clear();
         self.end_pin();
@@ -281,6 +282,7 @@ impl Kept {
             let (txn, _gate) = match self.begin() {
                 Ok(begun) => begun,
                 Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
+                    run_point!(SYNC_MAP_GROWN at &self.dir);
                     adopt()?;
                     continue;
                 }

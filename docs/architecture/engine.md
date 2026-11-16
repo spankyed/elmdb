@@ -19,7 +19,10 @@ backups running to end. One for a write made outside an open unit, or for a rebu
 unit is open, rather than waiting on it; a unit's own beginning grows with its place already reserved, before it takes
 the gate or the writer's turn. A map another process grew is adopted by the first read to meet it,
 `committedElsewhere` included, and by an open that meets it as it opens, each of whose
-transactions takes the grown map and is begun again. Mapping capacity and physical file length are separate. On Windows,
+transactions takes the grown map and is begun again. What adopts it waits no more than 10 ms for what holds the gate
+(reads, syncs, backups and units), and otherwise begins its own transaction again: a unit open meanwhile has adopted
+the map as it began, and no other process can grow it again before the unit ends, so a sync or a read the unit's
+owner waits on goes on rather than waiting behind the unit. Mapping capacity and physical file length are separate. On Windows,
 a read-only view covers the current physical file: its configured bound is capped to that length at open and when
 adopting external growth, so newly appended pages trigger remapping before access. Read-only handles cannot grow
 the writable capacity. Writable mappings retain the normal capacity policy.

@@ -187,6 +187,21 @@ impl<'a> Opening<'a> {
     }
 }
 
+/// How long taking a grown map's size waits for the gate before it gives way
+const ADOPT_WAIT: Duration = Duration::from_millis(10);
+
+/// The gate held for writing, to take the size of a map another process grew, or None where it isn't free within
+/// `ADOPT_WAIT`, the caller then beginning its transaction again rather than waiting on. A unit holds the gate for
+/// reading until it ends, and its owner may be waiting on the caller: on group commit's sync, or on a read asked of
+/// another thread. A transaction refused for a growth from before the unit began would otherwise wait behind the unit:
+/// once the unit's own beginning has taken the size, the gate lets the unit's read in ahead of a writer that waits.
+/// While a unit is open the size is taken already, its transaction having begun, and no other process can commit to
+/// grow the file again until it ends, so the transaction begun again isn't refused. The caller holds no part of the
+/// gate as it asks: one it held would make every ask give way
+fn gate_to_adopt(gate: &RecursiveRwLock<()>) -> Option<RecursiveRwLockWriteGuard<'_, ()>> {
+    gate.try_write_for(ADOPT_WAIT)
+}
+
 /// Takes the map size another process grew the file to.
 ///
 /// # Safety
@@ -1403,8 +1418,8 @@ impl Store {
         op: &Op,
     ) -> Result<(RwTxn<'_>, ArcRwLockReadGuard<RawRwLockRecursive, ()>, writers::WriterLock)> {
         self.check_writable()?;
-        // Refused before any wait, as the reservation would refuse it: a unit's owner asking again would otherwise wait
-        // on a sync that may wait on its unit, to take a map another process grew
+        // Refused before any wait, as the reservation would refuse it: a unit's owner asking again has its answer
+        // without waiting on a sync held back to the bound
         if self.unit_is_open() {
             return Err(Error::new(ErrorCode::UnitOpen, "A unit is already open on this database"));
         }
@@ -1438,9 +1453,9 @@ impl Store {
                         return Ok((txn, guard, writer));
                     }
                     // Another process grew the file: adopting its size takes the gate for writing, so this
-                    // transaction's hold on it goes first, and the writer's turn with it: adopting waits for this
-                    // process's reads to end, and on macOS the turn keeps the file lock other processes' writers
-                    // wait for
+                    // transaction's hold on it goes first, which would otherwise make the adopting give way every
+                    // time, and the writer's turn with it, which on macOS keeps the file lock other processes'
+                    // writers wait for
                     Err(heed::Error::Mdb(heed::MdbError::MapResized)) => {
                         drop((guard, writer));
                         run_point!(UNIT_MAP_GROWN);
@@ -1575,12 +1590,14 @@ impl Store {
         Ok(())
     }
 
-    /// Takes the map size another process grew the file to
+    /// Takes the map size another process grew the file to, or gives way, taking nothing, where the gate isn't free
+    /// soon (`gate_to_adopt`): every caller begins its transaction again after it, and takes the size when it is
+    /// refused again
     fn adopt_map_size(&self) -> Result<()> {
         if let Some(kept) = &self.kept {
             return kept.adopt();
         }
-        let _gate = self.gate.write();
+        let Some(_gate) = gate_to_adopt(&self.gate) else { return Ok(()) };
         self.calls.run_all();
         self.drop_idle();
         // SAFETY: as in `grow`
