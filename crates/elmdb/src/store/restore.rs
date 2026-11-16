@@ -205,7 +205,17 @@ fn decided(data: &Path, record: &Record, boot: Boot) -> Result<Outcome> {
     }
     let mut file = File::open(data)?;
     let page = super::page_size_of(&mut file, data)?;
-    let Some(newest) = reach::newer_meta_page(&mut file, page) else {
+    let newer = reach::newer_meta_page(&mut file, page).map_err(|error| {
+        Error::new(
+            ErrorCode::Io,
+            format!(
+                "{}'s meta pages couldn't be read ({error}), so the record beside it can't be checked against it: open \
+                 the database once the file reads",
+                data.display()
+            ),
+        )
+    })?;
+    let Some(newest) = newer else {
         return Err(reach::refused(data, "holds no meta page LMDB reads"));
     };
     let roots = record::roots_checksum(&mut file, page, reach::roots_of(&record.body))?;

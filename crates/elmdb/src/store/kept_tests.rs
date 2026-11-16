@@ -254,7 +254,7 @@ fn a_loss_with_nothing_unsynced_opens_as_it_is_and_records_this_boot() {
 }
 
 #[test]
-fn a_record_another_file_bears_out_is_opened_as_it_is_and_recorded_again() {
+fn a_kept_record_the_file_does_not_bear_out_is_opened_as_it_is_and_recorded_again() {
     let (one, other) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     // Two databases apart from their first write: made alike, the one's file would hold the other's commit whole
     for (dir, key, writes) in [(&one, "one", 6), (&other, "other", 3)] {
@@ -366,6 +366,50 @@ fn a_meta_page_read_beside_a_commit_is_not_taken() {
     synced(&store);
     assert_eq!(record_in(dir.path()).unwrap().commit, newest(&store));
     store.close().unwrap();
+}
+
+/// What `run` answers on a thread of its own, waited for a while: a sync that took a read of the meta page that failed
+/// for a commit landing would read it again for as long as the read fails, and never answer
+#[track_caller]
+fn answered_within<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+    let (answered, answer) = std::sync::mpsc::channel();
+    let running = std::thread::spawn(move || {
+        let _ = answered.send(run());
+    });
+    let answer =
+        answer.recv_timeout(Duration::from_secs(10)).expect("no answer: the meta page was read again for good");
+    running.join().unwrap();
+    answer
+}
+
+#[test]
+fn a_meta_page_the_file_can_t_read_fails_a_durable_wait_and_a_write_that_syncs_first_with_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = shared(dir.path());
+    put(&store, "a", b"1").unwrap();
+    let recorded = record_in(dir.path()).unwrap().commit;
+    // As a disk that answers EIO for the data file's first pages, until the test lets it go
+    let failing = failpoints::fail_while_at(points::META_READ, &store.path);
+    let waiting = std::sync::Arc::clone(&store);
+    let failed = answered_within(move || waiting.durable().unwrap().wait());
+    assert_eq!(failed.as_ref().map_err(|error| error.code), Err(ErrorCode::Io), "{failed:?}");
+    // Nothing was written to rely on: the record is as it was, and the process refuses no commit
+    assert_eq!(record_in(dir.path()).unwrap().commit, recorded);
+    assert!(kept(&store).refused().is_none(), "a read that failed refused the process's commits");
+    drop(failing);
+    synced(&store);
+    // A write after another process's commit syncs and records that commit before it begins, and fails so too
+    committed_elsewhere(&store, b"elsewhere");
+    let theirs = newest(&store);
+    let failing = failpoints::fail_while_at(points::META_READ, &store.path);
+    let writing = std::sync::Arc::clone(&store);
+    let refused = answered_within(move || put(&writing, "b", b"2"));
+    assert_eq!(refused.as_ref().map_err(|error| error.code), Err(ErrorCode::Io), "{refused:?}");
+    drop(failing);
+    // Once the page reads, the next write syncs and goes on
+    put(&store, "b", b"2").unwrap();
+    assert_eq!(record_in(dir.path()).unwrap().commit, theirs);
+    std::sync::Arc::into_inner(store).expect("the threads have ended").close().unwrap();
 }
 
 #[test]
@@ -899,7 +943,7 @@ fn what_the_pin_keeps_from_reuse_is_what_commits_from_its_own_freed() {
     }
     let data = dir.path().join("data.mdb");
     let mut file = std::fs::File::open(&data).unwrap();
-    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap().unwrap();
     let root = meta.roots()[0];
     let kept_pages = reach::freed_from(&mut file, page as usize, root, pinned);
     assert!(kept_pages >= 10 * run, "{kept_pages} pages kept, where ten rewrites freed {} pages of runs", 10 * run);
@@ -929,7 +973,7 @@ fn what_the_pin_keeps_is_read_from_a_list_of_its_own_and_from_a_tree_of_branches
     assert_eq!(kept(&store).pinned_at(), Some(pinned), "the pin stayed where the test reads from");
     let data = dir.path().join("data.mdb");
     let mut file = std::fs::File::open(&data).unwrap();
-    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page as usize).unwrap().unwrap();
     let root = meta.roots()[0];
     let run = (16 - 1 + big.len() as u64) / page + 1;
     let kept_pages = reach::freed_from(&mut file, page as usize, root, pinned);
@@ -1303,7 +1347,7 @@ fn a_meta_page_names_the_last_page_lmdb_does() {
     let data = dir.path().join("data.mdb");
     let mut file = std::fs::File::open(&data).unwrap();
     let page = page_size_of(&mut file, &data).unwrap();
-    let meta = reach::newer_meta_page(&mut file, page).unwrap();
+    let meta = reach::newer_meta_page(&mut file, page).unwrap().unwrap();
     assert_eq!(meta.txnid, newest(&store));
     assert_eq!(meta.last_page(), store.env.info().last_page_number as u64);
     store.close().unwrap();

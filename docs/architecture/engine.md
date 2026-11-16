@@ -587,10 +587,11 @@ which holds them: a database another process has open, or whose record is of thi
 sync that fails as it reads or flushes the record, or flushes the data, is final: the process refuses every commit after
 it, and where the data's flush or the record's write failed it marks the record `failed`, so that the next open restores
 the record's commit, in this boot too. One that fails short of those, as its read transaction begins, which a full
-reader table fails, or as it reads the root pages after the data's flush, has written nothing to rely on: it fails the
-waits on it alone. The pin doesn't move until a sync succeeds, so while what it keeps is past the bound every write is
-refused before it begins, once a sync it asks for has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the
-caller tries it again after a pause, where a full reader table is the cause, until other processes, or threads of its
+reader table fails, as it reads its commit's meta page, or as it reads the root pages after the data's flush, has
+written nothing to rely on: it fails the waits on it alone, with `IO` for a read of the data file. The pin doesn't move
+until a sync succeeds, so while what it keeps is past the bound every write is refused before it begins, once a sync it
+asks for has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again after a pause,
+where a full reader table is the cause, until other processes, or threads of its
 own, end the read transactions they hold. The index builder waits it out, a second at a time, and runs its work again
 only once a write would go on, as it waits out a full reader table its own reads meet; `waitForIndexBuilds` meanwhile
 answers what holds the builds up (`SYNC_BEHIND` or `READERS_FULL`) rather than waiting on it. The next sync is tried at

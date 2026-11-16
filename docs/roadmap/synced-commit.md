@@ -87,7 +87,9 @@ and what was is whole.
 - **A meta page is taken whole.** A sync begins a read transaction and reads its commit's meta page; it takes it
   only if LMDB's newest commit is still that one once the page is read, and otherwise begins again. A commit two
   after it writes that page field by field, and a read beside it could take one commit's free tree with another's
-  rows; while the newest is still the read's, the next commit has not landed, so the one after it hasn't begun.
+  rows; while the newest is still the read's, the next commit has not landed, so the one after it hasn't begun. A
+  read of the page that fails is no commit landing, and fails the sync: begun again for it, a sync would read the
+  page for as long as the disk refuses it.
 - **A sync moves the pin, in this order**: a read transaction is begun and its meta page taken; the record is
   read, a process's memory of it being no more than the least it can be; the data file is synced; the record is
   written and synced; the transaction that was the pin is ended. If the process has no commit after the one the
@@ -103,16 +105,21 @@ and what was is whole.
   transaction), before the unit that filled the map is run again. The pin's own beginning can meet a map another
   process grew, and takes it as any transaction does. One process writing pays nothing by this rule; of two, one
   pays a sync at its first write after a pause while the other is writing, and pays it outside LMDB's write lock.
-- **A sync is due by what the pin holds back as well as by time, and a write waits for it**: once the pages that
-  commits from the pin's on freed, which no commit may take while the pin is there, are more than a bound, the
-  greater of a fixed size and a fraction of the file, whichever process's commits freed them. They are read from
-  the newest commit's free tree, by seeks under a read transaction at it. A write past the bound waits, before it
-  begins and outside every lock, for a sync of the commits made so far, which moves the pin. So a file grows by that
-  bound, by an eighth of it more before the free tree is read again (once in 16 asks, two to a write, and whenever the
-  file has grown by that much since), by a single write larger than the bound, and by writes already past their check
-  when it was crossed. What a process measures is its own pin's: another process's older pin keeps more, until that
-  process's own sync, which its timers make due within a second, and a read transaction a caller holds keeps more for as
-  long as it is held, as it does today. Only a process that holds a pin asks: one that holds none holds nothing back.
+- **A sync is due by what the pin holds back as well as by time, and a write waits for it**: once the pages that commits
+  from the pin's on freed, which no commit may take while the pin is there, are more than a bound, the greater of a
+  fixed size and a fraction of the file, whichever process's commits freed them. They are read from the newest commit's
+  free tree, by seeks under a read transaction at it; where that commit's meta page, which names the tree, can't be
+  read, no sync can move the pin either, and it is taken as past. Where that page alone can't be read, the process's
+  writes then stay refused until another process commits or the database is opened again: the commit that would land on
+  the other page, and let a sync go on, is one of them. A disk that fails a read of a page LMDB keeps in memory is
+  failing, and its writes are refused, a retry away, rather than let grow a file whose bound can't be read. A write past
+  the bound waits, before it begins and outside every lock, for a sync of the commits made so far, which moves the pin.
+  So a file grows by that bound, by an eighth of it more before the free tree is read again (once in 16 asks, two to a
+  write, and whenever the file has grown by that much since), by a single write larger than the bound, and by writes
+  already past their check when it was crossed. What a process measures is its own pin's: another process's older pin
+  keeps more, until that process's own sync, which its timers make due within a second, and a read transaction a caller
+  holds keeps more for as long as it is held, as it does today. Only a process that holds a pin asks: one that holds
+  none holds nothing back.
   The file's last page is not the measure: where commits rewrite what they change, the file grows only once the pages
   freed before the pin run out, so a sync due by its growth leaves the pin holding a cycle's pages and a bound more,
   each cycle more than the last (the readings below).
@@ -194,9 +201,10 @@ commit, as it refuses every wait today, and keeps its pin until it ends; a proce
 own sync does the same, as does one whose sync before a write fails so: only a restore writes over it. If the record
 can't be written either, the process refuses its commits all the same, and an open of the database in this boot opens at
 its newest commit, which the error says. A sync that fails as it reads or flushes the record is final too, and writes
-nothing. One that fails as its read transaction begins, which a full reader table fails, or as it reads the root pages
-after the data's flush, has written nothing to rely on: it fails the waits on it alone. The pin doesn't move until a
-sync succeeds, so while what it keeps is past the bound every write is refused before it begins, once a sync it asks for
+nothing. One that fails as its read transaction begins, which a full reader table fails, as it reads its commit's meta
+page, or as it reads the root pages after the data's flush, has written nothing to rely on: it fails the waits on it
+alone, with the failure's own code, `IO` for a read of the data file. The pin doesn't move until a sync succeeds, so
+while what it keeps is past the bound every write is refused before it begins, once a sync it asks for
 has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again after a pause, where a full
 reader table is the cause, until other processes, or threads of its own, end the read transactions they hold; the index
 builder waits it out, a second at a time, and runs its work again only once a write would go on, and
