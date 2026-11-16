@@ -168,6 +168,13 @@ enum Step {
     /// Every row replaced with those of the last backup: refused with no backup, and otherwise a commit with no change
     /// set, after which a reader from before it is told the answer is incomplete, as after a reset
     ReplaceWith,
+    /// The schema set with the spare names if it lacks them, and without them if it has them (`harness_schema`): a commit
+    /// that stamps nothing. Data under a removed name stays until purged
+    Redeclare,
+    /// The spare field's values purged from every Task: refused while the schema declares it
+    PurgeField,
+    /// The `tags` edges purged: refused while the schema declares the kind
+    PurgeKind,
 }
 
 /// The field renames the workload makes, both ways between `c` and the spare field
@@ -332,22 +339,62 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
         let reset = Just(Step::Reset).boxed();
         let backup = Just(Step::Backup).boxed();
         let replace = Just(Step::ReplaceWith).boxed();
+        let model = &state.model;
+        let held_kind = |kind: &str| model.edges.iter().any(|(_, k, _)| k == kind);
+        let held_field = |field: &str| {
+            model
+                .entities
+                .iter()
+                .any(|(id, e)| crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key(field))
+        };
+        let (spare_field, spare_kind) = (held_field("spare"), held_kind("tags"));
+        // A purge takes something only when the spare names were removed while data was held under them, and the writes
+        // soon replace that data, so while it is held the declaration steps take a larger share: the toggle while the
+        // names are declared, and a purge of what is held while they are removed
+        let declaration_share = if spare_field || spare_kind { 10 } else { 4 };
+        let declarations = if model.spares_removed {
+            let (field, kind) = (1 + 4 * u32::from(spare_field), 1 + 4 * u32::from(spare_kind));
+            prop_oneof![1 => Just(Step::Redeclare), field => Just(Step::PurgeField), kind => Just(Step::PurgeKind)]
+                .boxed()
+        } else {
+            let toggle = 1 + 3 * u32::from(spare_field || spare_kind);
+            prop_oneof![toggle => Just(Step::Redeclare), 1 => Just(Step::PurgeField), 1 => Just(Step::PurgeKind)]
+                .boxed()
+        };
+        // A rename that moves nothing tests only its refusals, and the model holds few edges, so a rename is chosen
+        // mostly from those that move something onto a spare name while there are any: the data a purge takes
+        let moving_kinds: Vec<_> =
+            RENAMES.iter().copied().filter(|&(from, to)| to == "tags" && held_kind(from)).collect();
+        let moving_fields: Vec<_> =
+            FIELD_RENAMES.iter().copied().filter(|&(from, to)| to == "spare" && held_field(from)).collect();
+        let renames = |all: &'static [(&'static str, &'static str)], moving: Vec<(&'static str, &'static str)>| {
+            if moving.is_empty() {
+                prop::sample::select(all).boxed()
+            } else {
+                prop_oneof![1 => prop::sample::select(all), 3 => prop::sample::select(moving)].boxed()
+            }
+        };
+        // Edges are few and short-lived, so one a rename could move onto the spare kind raises the renames' share too
+        let rename_share = if moving_kinds.is_empty() { 2 } else { 6 };
         let rename =
-            prop::sample::select(&RENAMES[..]).prop_map(|(from, to)| Step::RenameRelation { from, to }).boxed();
+            renames(&RENAMES[..], moving_kinds).prop_map(|(from, to)| Step::RenameRelation { from, to }).boxed();
         let field_rename =
-            prop::sample::select(&FIELD_RENAMES[..]).prop_map(|(from, to)| Step::RenameField { from, to }).boxed();
+            renames(&FIELD_RENAMES[..], moving_fields).prop_map(|(from, to)| Step::RenameField { from, to }).boxed();
+        // The admin steps take a small share between them, so that the writes keep the share that makes each kind of
+        // step complete often enough (`generated_workloads_complete_every_kind_of_step_and_make_every_refusal`)
         prop_oneof![
-            7 => aimed(aimed_write(&state.model)),
-            1 => blind(write()),
-            2 => aimed(aimed_unit(&state.model, true)),
-            1 => blind(Just(Step::RefuseNext).boxed()),
-            1 => blind(rebuild),
-            1 => blind(reset),
-            1 => blind(rename),
-            1 => blind(field_rename),
-            // One slot between them, so that the workload's other steps keep the share they had
-            1 => blind(prop_oneof![backup, replace].boxed()),
-            1 => blind(onto_joined_ends(&state.model)),
+            16 => aimed(aimed_write(&state.model)),
+            2 => blind(write()),
+            4 => aimed(aimed_unit(&state.model, true)),
+            2 => blind(Just(Step::RefuseNext).boxed()),
+            2 => blind(rebuild),
+            2 => blind(reset),
+            rename_share => blind(rename),
+            2 => blind(field_rename),
+            // A replacement completes only once a backup was taken, and a purge only while the spare names are removed
+            2 => blind(prop_oneof![1 => backup, 2 => replace].boxed()),
+            declaration_share => blind(declarations),
+            2 => blind(onto_joined_ends(&state.model)),
         ]
         .boxed()
     }
@@ -540,6 +587,8 @@ struct Entity {
 struct Model {
     /// The data as the last `Backup` copied it, which `ReplaceWith` takes the database back to
     backup: Option<Box<Saved>>,
+    /// The schema lacks the spare names (`harness_schema`), so data under them waits to be purged
+    spares_removed: bool,
     entities: BTreeMap<String, Entity>,
     /// Each edge by its ends: a kind with no key joins two entities by one edge at most
     edges: BTreeSet<(String, String, String)>,
@@ -761,7 +810,10 @@ impl Model {
             | Step::RenameRelation { .. }
             | Step::RenameField { .. }
             | Step::Backup
-            | Step::ReplaceWith => unreachable!("only at the top"),
+            | Step::ReplaceWith
+            | Step::Redeclare
+            | Step::PurgeField
+            | Step::PurgeKind => unreachable!("only at the top"),
         }
         Ok(())
     }
@@ -784,7 +836,43 @@ impl Model {
             self.refuse_next = true;
             return Ok(());
         }
+        if let Step::Redeclare = step {
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.spares_removed = !self.spares_removed;
+            return Ok(());
+        }
+        if let Step::PurgeField = step {
+            // Refused before any commit while the field is declared, so an armed refusal waits for the next commit
+            if !self.spares_removed {
+                return Err("the spare field is declared");
+            }
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            for (id, entity) in self.entities.iter_mut() {
+                if crate::engine::ids::type_of(id) == "Task" {
+                    entity.fields.remove("spare");
+                }
+            }
+            return Ok(());
+        }
+        if let Step::PurgeKind = step {
+            if !self.spares_removed {
+                return Err("the kind tags is declared");
+            }
+            if std::mem::take(&mut self.refuse_next) {
+                return Err("the store refused the commit");
+            }
+            self.edges.retain(|(_, kind, _)| kind != "tags");
+            return Ok(());
+        }
         if let Step::RenameField { from, to } = step {
+            // A rename to a name the schema doesn't declare is refused before the commit
+            if *to == "spare" && self.spares_removed {
+                return Err("the spare field isn't declared");
+            }
             // A Task holding both names would have one value replaced: refused before the commit, so an armed refusal stays
             let clash = self.entities.iter().any(|(id, e)| {
                 crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key(*from) && e.fields.contains_key(*to)
@@ -806,6 +894,9 @@ impl Model {
             return Ok(());
         }
         if let Step::RenameRelation { from, to } = step {
+            if *to == "tags" && self.spares_removed {
+                return Err("the kind tags isn't declared");
+            }
             // An edge of the new kind joining the ends of a moving edge would be one identity twice: refused, nothing moves.
             // The engine refuses that before its commit, so an armed refusal stays armed for the next commit
             let moving: Vec<(String, String, String)> =
@@ -990,6 +1081,9 @@ fn op_of_plain(step: &Step) -> Json {
         | Step::RenameField { .. }
         | Step::Backup
         | Step::ReplaceWith
+        | Step::Redeclare
+        | Step::PurgeField
+        | Step::PurgeKind
         | Step::Rebuild { .. } => {
             unreachable!("not a write on its own")
         }
@@ -1029,6 +1123,14 @@ fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate::Error> {
             db.backup(&target).map(|()| None)
         }
         Step::ReplaceWith => db.replace_with(db.path().join("model-backup")).map(|()| None),
+        Step::Redeclare => {
+            let declared = db.schema().is_some_and(|schema| schema.relations.contains_key("tags"));
+            db.set_schema(Schema::from_json(&harness_schema(!declared)).unwrap()).map(|_| None)
+        }
+        Step::PurgeField => db
+            .purge(&crate::engine::admin::Purge::Field { entity_type: "Task".into(), field: "spare".into() })
+            .map(|()| None),
+        Step::PurgeKind => db.purge(&crate::engine::admin::Purge::RelationKind("tags".into())).map(|()| None),
         Step::Unit { steps, throws, durable } => {
             let mut unit = db.begin()?;
             let outcome = steps.iter().try_for_each(|s| apply_in(&mut unit, s));
@@ -1684,25 +1786,39 @@ const RANKED: RankIndex<'static> =
 
 const TOLERANCE: f64 = 1e-9;
 
-/// The schema with the spare field a renameField moves values into: unindexed, so the workload's indexes are the same as
-/// before. Every database the model compares declares it, the crash child's included
-fn with_spare(mut schema: Json) -> Json {
-    schema["types"]["Task"]["fields"]["spare"] = json!({ "type": "any", "optional": true });
-    schema
-}
-
-/// The engine tests' schema with `RANKED` declared, the spare field included, opened over a fresh directory
-fn open(dir: &tempfile::TempDir) -> Database {
+/// The harness's schema: the engine tests' with `RANKED` declared and change order kept for `Task` and `Note`, which
+/// `changed_since` is asked of. With `spares`, it declares the names renames and purges move data to and from: `spare`, a
+/// second unindexed field of `Task`, and the relation kind `tags`, which the workload never links. Without them, both are
+/// names a removed declaration left, which a purge takes and a rename can't move to. Every database the model compares
+/// opens with it, the crash child's included
+fn harness_schema(spares: bool) -> Json {
     let mut schema = schema_json();
-    // Change order is what `changed_since` answers from: each type it is asked of is declared to keep it
     for entity_type in ["Task", "Note"] {
         schema["types"][entity_type]["changeOrder"] = json!(true);
     }
-    schema = with_spare(schema);
+    if spares {
+        schema["types"]["Task"]["fields"]["spare"] = json!({ "type": "any", "optional": true });
+    } else {
+        schema["relations"].as_object_mut().expect("relations").remove("tags");
+    }
     schema["ranks"] = json!({ RANKED.name: { "types": RANKED.types, "relations": RANKED.kinds,
                                               "direction": RANKED.direction, "weights": RANKED.weights,
                                               "tolerance": TOLERANCE } });
-    let schema = Schema::from_json(&schema).unwrap();
+    schema
+}
+
+/// Declares the spare names again where the workload left them removed. `check()` reports data a removed declaration
+/// kept as a violation, a field its type doesn't declare (`architecture/engine.md`, `check()`), and declaring them again
+/// is what clears it short of a purge
+fn declare_the_spares(db: &Database) {
+    if !db.schema().is_some_and(|schema| schema.relations.contains_key("tags")) {
+        db.set_schema(Schema::from_json(&harness_schema(true)).unwrap()).expect("the spare names declared again");
+    }
+}
+
+/// The harness's schema, its spare names declared, opened over a fresh directory
+fn open(dir: &tempfile::TempDir) -> Database {
+    let schema = Schema::from_json(&harness_schema(true)).unwrap();
     Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap()
 }
 
@@ -2136,45 +2252,38 @@ fn touched_ends(before: &Model, after: &Model) -> BTreeSet<String> {
 /// the one after that. The database's own sequence by now may be past it, by a commit of the builder's the rename
 /// gave work to
 fn track(engine: &mut Engine, step: &Step, got: &Result<Option<ChangeSet>, crate::Error>, after: Model, quiet: u64) {
-    if let (Step::RenameField { from, .. }, Ok(_)) = (step, got) {
-        // A field rename commits, consuming a sequence even when no entity held the field; it stamps the entities that did
-        let sequence = quiet + 1;
-        assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
-        engine.sequence = sequence;
-        let holders: Vec<String> = engine
+    // A rename or a purge commits no change set and reports no sequence: its commit is the one after the database's as
+    // the step began. It stamps the entities whose fields it moved or took, or the ends of the edges it moved or took
+    let holders = |field: &str| -> Vec<String> {
+        engine
             .before
             .entities
             .iter()
-            .filter(|(id, e)| crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key(*from))
+            .filter(|(id, e)| crate::engine::ids::type_of(id) == "Task" && e.fields.contains_key(field))
             .map(|(id, _)| id.clone())
-            .collect();
-        for id in holders {
-            if after.entities.contains_key(&id) {
-                engine.since.gone.remove(&id);
-                engine.since.last.insert(id, sequence);
-            }
-        }
-        if engine.replaced && engine.replaced_at.is_none() {
-            engine.replaced_at = Some(sequence - 1);
-        }
-        engine.before = after;
-        assert_since(engine, step);
-        return;
-    }
-    if let (Step::RenameRelation { from, .. }, Ok(_)) = (step, got) {
-        // A rename commits no change set and reports no sequence: its commit is the one after the database's as the
-        // step began. It stamps the ends of each edge it moved, and the ends are alive
-        let sequence = quiet + 1;
-        assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
-        engine.sequence = sequence;
-        let moved: Vec<(String, String)> = engine
+            .collect()
+    };
+    let ends = |kind: &str| -> Vec<String> {
+        engine
             .before
             .edges
             .iter()
-            .filter(|(_, kind, _)| kind.as_str() == *from)
-            .map(|(source, _, target)| (source.clone(), target.clone()))
-            .collect();
-        for id in moved.into_iter().flat_map(|(source, target)| [source, target]) {
+            .filter(|(_, k, _)| k.as_str() == kind)
+            .flat_map(|(source, _, target)| [source.clone(), target.clone()])
+            .collect()
+    };
+    let stamped = match (step, got) {
+        (Step::RenameField { from, .. }, Ok(_)) => Some(holders(from)),
+        (Step::PurgeField, Ok(_)) => Some(holders("spare")),
+        (Step::RenameRelation { from, .. }, Ok(_)) => Some(ends(from)),
+        (Step::PurgeKind, Ok(_)) => Some(ends("tags")),
+        _ => None,
+    };
+    if let Some(stamped) = stamped {
+        let sequence = quiet + 1;
+        assert!(sequence > engine.sequence, "{step:?}: a commit's sequence only increases");
+        engine.sequence = sequence;
+        for id in stamped {
             if after.entities.contains_key(&id) {
                 engine.since.gone.remove(&id);
                 engine.since.last.insert(id, sequence);
@@ -2357,6 +2466,7 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
 
     fn teardown(engine: Engine, _: Reference) {
         crate::failpoints::disarm_at(crate::failpoints::points::COMMIT, engine.db.path());
+        declare_the_spares(&engine.db);
         let report = engine.db.check().unwrap();
         assert!(report.is_clean(), "check() after the workload: {report:?}");
     }
@@ -2678,7 +2788,7 @@ proptest_state_machine::prop_state_machine! {
 }
 
 /// Every kind of step, as `kind_of` names it
-const STEP_KINDS: [&str; 29] = [
+const STEP_KINDS: [&str; 32] = [
     "Create",
     "Set",
     "Append",
@@ -2708,6 +2818,9 @@ const STEP_KINDS: [&str; 29] = [
     "RenameField",
     "Backup",
     "ReplaceWith",
+    "Redeclare",
+    "PurgeField",
+    "PurgeKind",
 ];
 
 fn kind_of(step: &Step) -> &'static str {
@@ -2741,6 +2854,9 @@ fn kind_of(step: &Step) -> &'static str {
         Step::RenameField { .. } => "RenameField",
         Step::Backup => "Backup",
         Step::ReplaceWith => "ReplaceWith",
+        Step::Redeclare => "Redeclare",
+        Step::PurgeField => "PurgeField",
+        Step::PurgeKind => "PurgeKind",
     }
 }
 
@@ -2766,13 +2882,25 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
     let mut runner = TestRunner::deterministic();
     let mut completed: BTreeMap<&str, usize> = BTreeMap::new();
     let mut refused: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut taking: BTreeMap<&str, usize> = BTreeMap::new();
     for _ in 0..200 {
         let (reference, transitions, _) =
             ModelMachine::sequential_strategy(10..60).new_tree(&mut runner).unwrap().current();
         let mut model = reference.model;
         for transition in transitions {
+            // A purge that took nothing would pass whatever the engine's purge left
+            let took = match transition.step {
+                Step::PurgeField => model.entities.values().any(|e| e.fields.contains_key("spare")),
+                Step::PurgeKind => model.edges.iter().any(|(_, kind, _)| kind == "tags"),
+                _ => false,
+            };
             match model.step(&transition.step) {
-                Ok(()) => *completed.entry(kind_of(&transition.step)).or_default() += 1,
+                Ok(()) => {
+                    *completed.entry(kind_of(&transition.step)).or_default() += 1;
+                    if took {
+                        *taking.entry(kind_of(&transition.step)).or_default() += 1;
+                    }
+                }
                 Err(reason) => *refused.entry(reason).or_default() += 1,
             }
         }
@@ -2780,6 +2908,10 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
     for kind in STEP_KINDS {
         let n = completed.get(kind).copied().unwrap_or(0);
         assert!(n >= 20, "{kind} completed {n} times in 200 workloads: {completed:?}");
+    }
+    for kind in ["PurgeField", "PurgeKind"] {
+        let n = taking.get(kind).copied().unwrap_or(0);
+        assert!(n >= 20, "{kind} took data {n} times in 200 workloads: {taking:?}");
     }
     for reason in REFUSALS {
         assert!(refused.contains_key(reason), "no step was refused with {reason:?}: {refused:?}");
@@ -2841,9 +2973,7 @@ mod crash {
         let db = Database::open(
             &path,
             crate::OpenOptions {
-                schema: Some(
-                    crate::schema::Schema::from_json(&super::with_spare(super::super::schema_json())).unwrap(),
-                ),
+                schema: Some(crate::schema::Schema::from_json(&super::harness_schema(true)).unwrap()),
                 ..Default::default()
             },
         )
@@ -2937,6 +3067,7 @@ mod crash {
                 differences(&got, &after_acked),
                 steps.get(acked)
             );
+            super::declare_the_spares(&db);
             let report = db.check().unwrap();
             assert!(report.is_clean(), "seed {seed}: {report:?}");
         }
