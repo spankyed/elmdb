@@ -243,8 +243,7 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
         let clash = relations::with_identity(t, def, &stored.source, to, &stored.target, &key, None)?;
         let group = by_ends.entry((stored.source.clone(), stored.target.clone())).or_default();
         let twin = group.iter().any(|other| relations::same_key(other, &key));
-        let identity =
-            if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) };
+        let identity = relations::identity_beyond_ends(def);
         if clash.is_some() {
             return Err(Error::new(
                 ErrorCode::DuplicateEdge,
