@@ -18,10 +18,10 @@
 //!   where the data's flush or the record's write failed the record says so.
 //! - No record is written once the process refuses its commits: a flush that succeeds after one that failed proves
 //!   nothing of the pages the OS may have dropped.
-//! - One that wrote nothing to rely on, as a full reader table fails it, refuses nothing for good: while the pin is
-//!   past its bound, which it can't leave until a sync succeeds, a write is refused before it begins once a sync it
-//!   asks for has failed so too (`SYNC_BEHIND`, `Store::hold_to_the_bound`), since it would grow the file past the
-//!   bound.
+//! - One that wrote nothing to rely on, as a full reader table or a meta page the file can't read fails it, refuses
+//!   nothing for good: while the pin is past its bound, which it can't leave until a sync succeeds, a write is refused
+//!   before it begins once a sync it asks for has failed so too (`SYNC_BEHIND`, `Store::hold_to_the_bound`), since it
+//!   would grow the file past the bound.
 //!
 //! Locks are taken in one order: the gate, held for reading from a read transaction's beginning until it is the pin,
 //! then the record's, then the data file's handle; the gate is read again within, which it lets a reader do whenever
@@ -235,11 +235,22 @@ impl Kept {
     /// The meta page of the commit `txn` is at, taken only where it is whole: the commit two after it writes over it
     /// field by field, so it is taken only if LMDB's newest commit is still that one once it is read. The newest is
     /// the lock file's, which a read transaction begins at: the meta pages' newest is ahead of it for good where a
-    /// writer died between writing its meta page and telling the lock file, and no sync would take a page again. The
-    /// caller holds the gate
+    /// writer died between writing its meta page and telling the lock file, and no sync would take a page again. None
+    /// where a commit landed as it was read, for the caller to begin again at the newer one. A read of the file that
+    /// fails is an `IO` error and not that: begun again for it, the caller would read the page for as long as the read
+    /// fails. The caller holds the gate
     fn take_meta(&self, txn: &RoTxn<'static, WithoutTls>) -> Result<Option<MetaPage>> {
         let commit = txn.id() as u64;
-        let meta = reach::meta_page(&mut self.data.lock(), self.page, commit % 2);
+        let meta = self.read_meta(commit % 2).map_err(|error| {
+            Error::new(
+                ErrorCode::Io,
+                format!(
+                    "The meta page of commit {commit} couldn't be read from the data file of the database at {}: \
+                     {error}. Nothing was synced or recorded, and the next sync reads it again",
+                    self.dir.display()
+                ),
+            )
+        })?;
         let Some(meta) = meta.filter(|meta| meta.txnid == commit) else { return Ok(None) };
         let newest = match super::with_reader_recovery(&self.env, || self.env.clone().static_read_txn()) {
             Ok(newest) => newest.id() as u64,
@@ -248,6 +259,12 @@ impl Kept {
             Err(error) => return Err(error.into()),
         };
         Ok((newest == commit).then_some(meta))
+    }
+
+    /// The data file's meta page in `slot`, read by a seek
+    fn read_meta(&self, slot: u64) -> std::io::Result<Option<MetaPage>> {
+        failure_point!(META_READ at &self.dir, std::io::Error::other("Injected meta page read failure"));
+        reach::meta_page(&mut self.data.lock(), self.page, slot)
     }
 
     /// A sync: the pin moved to the newest commit, which is on disk and named by the record when this returns. `adopt`

@@ -368,6 +368,50 @@ fn a_meta_page_read_beside_a_commit_is_not_taken() {
     store.close().unwrap();
 }
 
+/// What `run` answers on a thread of its own, waited for a while: a sync that took a read of the meta page that failed
+/// for a commit landing would read it again for as long as the read fails, and never answer
+#[track_caller]
+fn answered_within<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> T {
+    let (answered, answer) = std::sync::mpsc::channel();
+    let running = std::thread::spawn(move || {
+        let _ = answered.send(run());
+    });
+    let answer =
+        answer.recv_timeout(Duration::from_secs(10)).expect("no answer: the meta page was read again for good");
+    running.join().unwrap();
+    answer
+}
+
+#[test]
+fn a_meta_page_the_file_can_t_read_fails_a_durable_wait_and_a_write_that_syncs_first_with_io() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = shared(dir.path());
+    put(&store, "a", b"1").unwrap();
+    let recorded = record_in(dir.path()).unwrap().commit;
+    // As a disk that answers EIO for the data file's first pages, until the test lets it go
+    let failing = failpoints::fail_while_at(points::META_READ, &store.path);
+    let waiting = std::sync::Arc::clone(&store);
+    let failed = answered_within(move || waiting.durable().unwrap().wait());
+    assert_eq!(failed.as_ref().map_err(|error| error.code), Err(ErrorCode::Io), "{failed:?}");
+    // Nothing was written to rely on: the record is as it was, and the process refuses no commit
+    assert_eq!(record_in(dir.path()).unwrap().commit, recorded);
+    assert!(kept(&store).refused().is_none(), "a read that failed refused the process's commits");
+    drop(failing);
+    synced(&store);
+    // A write after another process's commit syncs and records that commit before it begins, and fails so too
+    committed_elsewhere(&store, b"elsewhere");
+    let theirs = newest(&store);
+    let failing = failpoints::fail_while_at(points::META_READ, &store.path);
+    let writing = std::sync::Arc::clone(&store);
+    let refused = answered_within(move || put(&writing, "b", b"2"));
+    assert_eq!(refused.as_ref().map_err(|error| error.code), Err(ErrorCode::Io), "{refused:?}");
+    drop(failing);
+    // Once the page reads, the next write syncs and goes on
+    put(&store, "b", b"2").unwrap();
+    assert_eq!(record_in(dir.path()).unwrap().commit, theirs);
+    std::sync::Arc::into_inner(store).expect("the threads have ended").close().unwrap();
+}
+
 #[test]
 fn a_sync_after_a_writer_died_between_its_meta_page_and_the_lock_file_takes_the_commit_before() {
     let dir = tempfile::tempdir().unwrap();

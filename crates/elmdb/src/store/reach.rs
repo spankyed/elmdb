@@ -187,19 +187,25 @@ pub(super) fn named_roots(page: &[u8]) -> Vec<u64> {
         .collect()
 }
 
-/// The meta page in `slot`, 0 or 1, where it reads as one: LMDB's magic, and whole as far as a read of it goes
-pub(super) fn meta_page(file: &mut File, psize: usize, slot: u64) -> Option<MetaPage> {
-    let page = read_at(file, slot * psize as u64, META_LEN)?;
+/// The meta page in `slot`, 0 or 1, where it reads as one: LMDB's magic, and whole as far as a read of it goes. None
+/// where the page doesn't carry the magic, and an error where the file can't be read there: a failed read says nothing
+/// of what the page holds
+pub(super) fn meta_page(file: &mut File, psize: usize, slot: u64) -> std::io::Result<Option<MetaPage>> {
+    let mut page = vec![0u8; META_LEN];
+    file.seek(SeekFrom::Start(slot * psize as u64))?;
+    file.read_exact(&mut page)?;
     if u32_at(&page, META_MAGIC) != MAGIC {
-        return None;
+        return Ok(None);
     }
     let body = page[PAGE_HEADER..META_LEN].try_into().expect("a meta page's body");
-    Some(MetaPage { txnid: u64_at(&page, META_TXNID), body })
+    Ok(Some(MetaPage { txnid: u64_at(&page, META_TXNID), body }))
 }
 
-/// The file's newer meta page, the one LMDB opens it at: of the higher commit, the first where both are of one
+/// The file's newer meta page, the one LMDB opens it at: of the higher commit, the first where both are of one. Read
+/// before LMDB opens the file, where either page may be torn: one that can't be read is taken as one that doesn't read
+/// as a meta page, and LMDB's open then fails on the same read
 pub(super) fn newer_meta_page(file: &mut File, psize: usize) -> Option<MetaPage> {
-    let (first, second) = (meta_page(file, psize, 0), meta_page(file, psize, 1));
+    let (first, second) = (meta_page(file, psize, 0).ok().flatten(), meta_page(file, psize, 1).ok().flatten());
     match (first, second) {
         (Some(first), Some(second)) => Some(if second.txnid > first.txnid { second } else { first }),
         (first, second) => first.or(second),
@@ -607,5 +613,22 @@ mod tests {
         assert_eq!(newer(meta(5, 1), meta(6, 2)), Some((6, 2)));
         assert_eq!(newer(meta(7, 1), meta(6, 2)), Some((7, 1)));
         assert_eq!(newer(vec![0; PSIZE], meta(6, 2)), Some((6, 2)), "the first no meta page");
+    }
+
+    #[test]
+    fn a_meta_page_the_file_can_t_read_is_an_error_and_one_without_the_magic_is_none() {
+        const PSIZE: usize = 4096;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data");
+        let mut page = vec![0u8; PSIZE];
+        page[META_MAGIC..META_MAGIC + 4].copy_from_slice(&MAGIC.to_ne_bytes());
+        // A meta page, then a page without the magic
+        std::fs::write(&path, [page, vec![0u8; PSIZE]].concat()).unwrap();
+        let mut readable = File::open(&path).unwrap();
+        assert!(meta_page(&mut readable, PSIZE, 0).unwrap().is_some());
+        assert!(meta_page(&mut readable, PSIZE, 1).unwrap().is_none());
+        // A handle opened for writing alone, whose every read fails, on unix and on Windows
+        let mut unreadable = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        assert!(meta_page(&mut unreadable, PSIZE, 0).is_err(), "a failed read taken as a page without the magic");
     }
 }

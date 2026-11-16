@@ -87,7 +87,9 @@ and what was is whole.
 - **A meta page is taken whole.** A sync begins a read transaction and reads its commit's meta page; it takes it
   only if LMDB's newest commit is still that one once the page is read, and otherwise begins again. A commit two
   after it writes that page field by field, and a read beside it could take one commit's free tree with another's
-  rows; while the newest is still the read's, the next commit has not landed, so the one after it hasn't begun.
+  rows; while the newest is still the read's, the next commit has not landed, so the one after it hasn't begun. A
+  read of the page that fails is no commit landing, and fails the sync: begun again for it, a sync would read the
+  page for as long as the disk refuses it.
 - **A sync moves the pin, in this order**: a read transaction is begun and its meta page taken; the record is
   read, a process's memory of it being no more than the least it can be; the data file is synced; the record is
   written and synced; the transaction that was the pin is ended. If the process has no commit after the one the
@@ -194,9 +196,10 @@ commit, as it refuses every wait today, and keeps its pin until it ends; a proce
 own sync does the same, as does one whose sync before a write fails so: only a restore writes over it. If the record
 can't be written either, the process refuses its commits all the same, and an open of the database in this boot opens at
 its newest commit, which the error says. A sync that fails as it reads or flushes the record is final too, and writes
-nothing. One that fails as its read transaction begins, which a full reader table fails, or as it reads the root pages
-after the data's flush, has written nothing to rely on: it fails the waits on it alone. The pin doesn't move until a
-sync succeeds, so while what it keeps is past the bound every write is refused before it begins, once a sync it asks for
+nothing. One that fails as its read transaction begins, which a full reader table fails, as it reads its commit's meta
+page, or as it reads the root pages after the data's flush, has written nothing to rely on: it fails the waits on it
+alone, with the failure's own code, `IO` for a read of the data file. The pin doesn't move until a sync succeeds, so
+while what it keeps is past the bound every write is refused before it begins, once a sync it asks for
 has failed so too, with `SYNC_BEHIND`: nothing of it was made, and the caller tries it again after a pause, where a full
 reader table is the cause, until other processes, or threads of its own, end the read transactions they hold; the index
 builder waits it out, a second at a time, and runs its work again only once a write would go on, and
