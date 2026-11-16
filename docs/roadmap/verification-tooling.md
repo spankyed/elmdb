@@ -14,8 +14,8 @@ in prose that the code didn't meet. This plan names the tools that turn each int
 beside [Libraries for safer implementation and easier development](development-libraries.md), which covers platform
 bindings, Criterion, rustix, Loom and tracing; nothing here repeats those stages, and where one overlaps it says so.
 
-The work is elmdb's alone. Developer tools (`cargo-mutants`, `cargo-nextest`, `samply`) are installed, not
-dependencies; the crates are development dependencies or behind a feature that release builds never enable.
+The work is elmdb's alone. Developer tools (`cargo-mutants`, `cargo-nextest`, `samply`, and since `gungraun-runner`
+and `cargo-sweep`) are installed, not dependencies; the crates are development dependencies or behind a feature that release builds never enable.
 
 ## Order and decisions
 
@@ -66,6 +66,9 @@ excluded as disjoint flags or equivalent, and `pin_module` joins `claim`'s napi 
 catches; those and an acquisition error other than an occupied claim are the findings. CI's `mutants` job runs
 `scripts/mutants-in-diff.py` on every pull request, on Linux and on Windows, reporting the survivors in the files it
 touches; it replaced `check-windows-backup-mutation.py`, which broke one line of the Windows publication by hand.
+Since then the job is a workflow of its own (`.github/workflows/mutants.yml`): a survivor fails it, the Linux mutants
+run in four shards and the Windows-only code on Windows, and its last job, `mutants-pass`, is a check a merge waits
+on (`../architecture/testing.md`, Mutation testing).
 
 ## 2. Named failpoints
 
@@ -109,7 +112,8 @@ between 6,000 and 12,000 entities whose entries fill every sorter at both (measu
 about 300), and a selected vector rebuild at most 768 bytes a vector between 1,000 and 2,000 (measured about 320 to 350). In
 disposable copies, full derivation keeping one value index's entries before emitting them grows a full rebuild 3,372
 bytes an entity and a full check 3,290, and a vector flush keeping every decoded vector grows a vector rebuild 1,506;
-each fails. The heap test takes about three minutes on an M1 Pro.
+each fails. The heap test takes about three minutes on an M1 Pro (these readings 2026-10-28). It has since come to
+hold the rank index's edge mirror and the communities too (`crates/elmdb/tests/maintenance_heap.rs`).
 
 ## 4. One process per test
 
@@ -193,7 +197,10 @@ and CI's `instructions` job reports each one's count on a pull request against i
 (`scripts/instruction-counts.py`). Two runs of one commit counted the same for every operation but the text rebuild,
 which moves by 0.07% from the tokenizer's randomly seeded hash map; a disposable copy encoding each key twice doubled
 key encoding's counts and added 3.6% to the text rebuild, and moved nothing else
-(`../evidence/instruction-counts.md`).
+(`../evidence/instruction-counts.md`). Since then a count gates one thing: the full tier's `diagnostics` job fails
+when a gated case's instructions grow past its declared bound with the `diagnostics` feature on
+(`scripts/instruction_gates.py`), and the `instruction determinism` workflow, dispatched, fails when runners disagree
+on a count (`../architecture/testing.md`, Repeatable maintenance measurements).
 
 ## 8. Randomized concurrency testing
 
@@ -208,7 +215,7 @@ Acceptance:
 - A mutation reproducing a race this branch fixed (the listener dropped outside the callback guard, or a write
   slipping between the unit check and the writer) fails within the configured iterations.
 
-Built (2026-10-30): Shuttle runs the unit slot's model, watch delivery's (`engine/watch/model.rs`) and the index builder's (`engine/builder/model.rs`) on the
+Built (2026-10-30): Shuttle runs the unit slot's model, watch delivery's (`engine/watch/model.rs`), the index builder's (`engine/builder/model.rs`) and, since 2026-11-15, that of the reads asked at a call (`store/call_reads/model.rs`) on the
 primitives Loom uses (`../architecture/testing.md`, Concurrency models). The write slipping between the unit check and
 the writer fails the slot's model. The listener dropped outside the callback guard isn't in the model: the guard is
 what `Database::close` consults, and the database is outside it; the mutations the model does catch are in

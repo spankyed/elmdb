@@ -2,7 +2,7 @@
 
 Status: designed, 2026-10-28. Not to build until a view's re-run is measured to cost: every apack view measured runs in
 well under a millisecond a commit, and a chat turn's watch runs are 0.2% of it (`../evidence/next-phase-10.md`,
-Incremental views).
+Incremental views and the boundary).
 
 ## Where it starts
 

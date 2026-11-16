@@ -2,13 +2,17 @@
 
 Status: designed, 2026-10-28: incremental backup as a set of what changed since a sequence, not a log of writes, which
 G8's data shows a log can't afford (`../evidence/next-phase-10.md`, The change log). Sync and undo are product
-decisions above it, named here and not designed.
+decisions above it, named here and not designed. Built since, for entities and not for fields: each entity keeps the
+sequence of the commit that last wrote it, and `changedSince` reads a type's changes after a position
+(`../architecture/engine.md`, Changed since). The per-field keys and the incremental backup below are not built.
 
 ## Where it starts
 
 Every commit produces a change set with a sequence that only increases (`../architecture/engine.md`, Change sets and
-watch): the entities and fields it wrote, the relations it changed. It is delivered to listeners and forgotten. A
-backup (`elmdb backup`, apack's backup screen) is a compacted copy of the whole database.
+watch): the entities and fields it wrote, the relations it changed. It is delivered to listeners and not kept; what
+is kept is each entity's last commit sequence, and for a type whose schema sets `changeOrder` its entities in that
+order, which `changedSince` reads (`../architecture/engine.md`, Changed since). No field's or relation's own sequence
+is kept. A backup (`elmdb backup`, apack's backup screen) is a compacted copy of the whole database.
 
 ## The measurements
 

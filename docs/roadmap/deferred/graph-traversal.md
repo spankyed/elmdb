@@ -1,6 +1,7 @@
 # Graph traversal
 
-Status: deferred, 2026-10-30. Nothing here is needed by apack today; this records what graph query languages (Cypher,
+Status: deferred, 2026-10-30; item 6 was built on 2026-10-31, and what a plan answers was read again on 2026-11-16.
+Nothing here is needed by apack today; this records what graph query languages (Cypher,
 Gremlin) answer that a plan doesn't, how far each gap is from the engine as it stands, and the order to take them in
 when a caller needs one.
 
@@ -19,10 +20,15 @@ A plan starts from types, ids or everything, applies steps, and answers one orde
 - an unweighted shortest path from the set to an entity, following edges out, in or both ways (`pathTo`);
 - whether a link would close a cycle (`wouldCreateCycle`), the edges out of, into or on both sides of a set as relation
   rows (`edges`), and each entity's count of them (`degrees`);
+- the set ordered by PageRank, computed (`rank`) or read from a rank index (`ranked`), in an order its edges allow
+  (`topological`), or by the neighbours its entities share with one (`similar`);
+- the set's groups: its weak and strong components and its Leiden communities (`weakComponents`, `strongComponents`,
+  `communities`);
 - ordering, distinct, paging, counts and grouping.
 
-A relation carries an `info` value (`Link`, `UpdateRelation` in `batch.rs`), not schema-declared fields, and no index
-covers it.
+A relation carries an `info` value (`Link`, `UpdateRelation` in `batch.rs`), whose type and key fields the schema may
+declare, and, in a kind declared `weighted`, a weight (`docs/architecture/schema.md`, Relations). No index covers its
+info.
 
 ## Medium
 
@@ -32,7 +38,8 @@ covers it.
 2. **A hop filtered by its relation's info** (Cypher `-[r {since: 2020}]->`). Each hop would read the relation rows
    it crosses, unindexed. Worth doing only after relation info gains declared fields in the schema, which is its own
    change.
-3. **Weighted shortest path** (Dijkstra over a numeric info field). Depends on 2.
+3. **Weighted shortest path** (Dijkstra over the weights of kinds declared `weighted`, which an edge carries and
+   `rank` and `communities` read). It depends on nothing else here.
 
 ## Large: a different answer shape
 
@@ -41,8 +48,8 @@ covers it.
    protocol. This is the line between elmdb and a graph database, and nothing apack does needs it: several reads in one
    snapshot answer the same questions.
 5. **Every path a match took**, not only its ends.
-6. **Graph algorithms** (PageRank, connected components, community detection). Planned in the engine, as plan steps
-   and answers over the plan's set: `../graph-algorithms.md`.
+6. **Graph algorithms** (PageRank, connected components, community detection). Built, as plan steps and terminals
+   over the plan's set: `../../archive/roadmap/graph-algorithms.md`.
 
 ## When to take it up
 
