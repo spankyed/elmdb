@@ -883,11 +883,12 @@ codes too (`MAP_FULL`, `READERS_FULL`, `CORRUPTED`). LMDB's assertions are compi
 `lmdb-master-sys` defines `NDEBUG` outside debug builds), so a release build never aborts on one; damage LMDB doesn't
 detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
 
-A code names what went wrong, not the call that met it, so one failure met by two calls is one code.
-`CALLBACK_ACTIVE` is a call that waits for what a listener of the database is called from, made by that listener:
-a `close`, from a watch's listener or the listener of the builder's commits, and a `waitForIndexBuilds` on the
-thread of the builder it would wait for. Either would wait for itself, and either is made after the listener
-returns (above, Change sets and watch).
+A code names what went wrong, not the call that met it, so one failure met by two calls is one code. `CALLBACK_ACTIVE`
+is a call that waits for what a listener of the database is called from, made by that listener: a `close`, from a
+watch's listener or the listener of the builder's commits, and a `waitForIndexBuilds` on the thread of the builder it
+would wait for. Either would wait for itself, and either is made after the listener returns (above, Change sets and
+watch). Both are calls of the Rust API: the binding has no watch, and hands each of the builder's commits to its
+JavaScript listener on the main thread, after the builder has gone on, so from JavaScript neither arises.
 
 A panic in elmdb is a bug in elmdb, and in Node it is an error too: the binding runs every export's work where a
 panic is caught, and throws it as `PANICKED`, naming the export, where the panic was raised and what it said, or
