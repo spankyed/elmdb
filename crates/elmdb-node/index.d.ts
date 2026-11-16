@@ -22,16 +22,25 @@ export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-was
 
 /** An open database: one directory holding one LMDB environment */
 export declare class Database {
-  /** Opens the database at `path`, creating it unless `readOnly` */
+  /**
+   * Opens the database at `path`, creating it unless `readOnly`. Refused where the path is open in this process
+   * already (`ALREADY_OPEN`), in a process another copy of the binding is loaded in (`ALREADY_LOADED`), read-only
+   * where there is no database (`NO_DATABASE`), in another mode than a process that has it open for writing
+   * (`MODE_MISMATCH`), and where a restore is owed that this open can't make (`RESTORE_PENDING`)
+   */
   static open(path: string, options?: OpenOptions | undefined | null): Database
+  /** The directory the database was opened at */
   get path(): string
+  /** Whether the database was opened read-only */
   get readOnly(): boolean
+  /** Whether the database is still open: false once `close` has closed it */
   get isOpen(): boolean
   /** The schema the database holds, in its canonical form, or `null` when none was ever given */
   get schema(): Schema | null
   /**
    * Changes the open database's schema as opening with it would, answering each change and what was done about it.
-   * Refused while a unit is open, in a read-only database, and for a change opening refuses
+   * Refused while a unit is open (`UNIT_OPEN`), and with `SCHEMA_CHANGE_REFUSED` in a read-only database, for a
+   * schema that differs from the stored one, and for a change opening refuses
    */
   setSchema(schema: Schema): SchemaChange[]
   /**
@@ -47,8 +56,9 @@ export declare class Database {
   get syncs(): number
   /**
    * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
-   * once it has committed. `durable` commits it with a sync. Refused while a unit is open (`UNIT_OPEN`): writes go
-   * through the unit then
+   * once it has committed. `durable` commits it with a sync, and where that sync fails throws `NOT_DURABLE`: the
+   * commit has landed, so the batch isn't to be written again. Refused while a unit is open (`UNIT_OPEN`): writes
+   * go through the unit then
    */
   write(batch: Buffer, durable?: boolean | undefined | null): Buffer
   /**
@@ -60,7 +70,10 @@ export declare class Database {
    * `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
    * answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
    * never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
-   * `hearBuilderCommits`, once its promise has settled, and is refused (`NO_LISTENER`) while there is none
+   * `hearBuilderCommits`, once its promise has settled. Its refusals reject the promise: `NO_LISTENER` for a
+   * tracked read asked while there is no such listener, and `CLOSED` when the database closes before it runs. Once
+   * sixteen snapshots are held for reads still waiting, a read asked at a commit that holds none runs at the call,
+   * on this thread
    */
   readAsync(reads: Buffer): Promise<Buffer>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
@@ -69,16 +82,19 @@ export declare class Database {
    * Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
    * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. It is called too once
    * a tracked `readAsync` has settled, for the last commit since its call that wrote into what it read, which no
-   * commit's result could name, the read not being filed yet. There is one listener, a second being refused, which
-   * keeps no process alive, and closing the database drops it
+   * commit's result could name, the read not being filed yet. There is one listener, a second being refused
+   * (`ALREADY_LISTENING`), which keeps no process alive, and closing the database drops it
    */
   hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
   /**
    * Tells `listener` of commits other processes make as soon as each lands, which `committedElsewhere` then answers, a
-   * second being refused. It keeps no process alive, and closing the database drops it
+   * second being refused (`ALREADY_LISTENING`). It keeps no process alive, and closing the database drops it
    */
   hearCommitsElsewhere(listener: () => void): void
-  /** The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it */
+  /**
+   * The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it:
+   * until it does (`adoptReplacement`), its commits are refused (`DATA_REPLACED`)
+   */
   replacedElsewhere(): number | null
   /**
    * Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again; false, adopting
@@ -93,8 +109,9 @@ export declare class Database {
    */
   get sequence(): number
   /**
-   * Opens a unit that stays open across calls until it is committed or aborted; while it is, a write or a rebuild
-   * outside it is refused (`UNIT_OPEN`), and writes go through the unit
+   * Opens a unit that stays open across calls until it is committed or aborted, and writes go through it. While it
+   * is open, what would write or wait outside it is refused (`UNIT_OPEN`): a write, a rebuild, a second `begin`,
+   * `setSchema`, `purge`, a rename, `reset`, `replaceWith`, `bulkLoad`, `waitForIndexBuilds` and `close`
    */
   begin(): Unit
   /** Compares derived data with primary data and every row with the schema's rules */
@@ -123,15 +140,32 @@ export declare class Database {
    */
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /**
-   * Blocks until every index waiting to be built is built or has failed, or answers what holds a build up while the
-   * builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again after a pause to wait on. Refused with a unit
-   * open once the database has started its index builder (`UNIT_OPEN`): commit or abort it, then wait
+   * Blocks until every index waiting to be built is built, throwing `INDEX_BUILD_FAILED` when a build failed, or
+   * throws what holds a build up while the builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again
+   * after a pause to wait on. Refused with a unit open once the database has started its index builder
+   * (`UNIT_OPEN`): commit or abort it, then wait
    */
   waitForIndexBuilds(): void
-  /** Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }` */
+  /**
+   * Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }`. A
+   * name the schema still declares is refused (`SCHEMA_CHANGE_REFUSED`), as the call is while a unit is open
+   * (`UNIT_OPEN`)
+   */
   purge(what: PurgeTarget): void
+  /**
+   * Renames a type to one the schema declares, rewriting its entities' ids and the relations and declared `ref`
+   * fields naming them, in one durable unit. Refused while a unit is open (`UNIT_OPEN`)
+   */
   renameType(from: string, to: string): void
+  /**
+   * Moves a field's values, on every entity of a type, to another name the type declares, in one durable unit.
+   * Refused while a unit is open (`UNIT_OPEN`)
+   */
   renameField(entityType: string, from: string, to: string): void
+  /**
+   * Moves every relation of a kind to another kind the schema declares, in one durable unit. Refused while a unit
+   * is open (`UNIT_OPEN`)
+   */
   renameRelation(from: string, to: string): void
   /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
   backup(target: string): void
@@ -143,7 +177,7 @@ export declare class Database {
   reset(): void
   /**
    * What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
-   * each value index, its sizes
+   * each value index, and its sizes
    */
   stats(): Stats
   /**
@@ -153,7 +187,8 @@ export declare class Database {
   bulkLoad(loads: Buffer): void
   /**
    * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
-   * the database is closed
+   * the database is closed. It resolves at once where nothing is owed: with `syncs: false`, under `syncEachCommit`,
+   * and in a read-only database
    */
   durable(): Promise<void>
   /**
@@ -192,24 +227,36 @@ export declare class Unit {
   commit(durable?: boolean | undefined | null): Buffer
   /** Ends the unit, keeping nothing of it */
   abort(): void
+  /** Whether the unit is still open: false once it has committed, aborted, or been ended by a panic */
   get isOpen(): boolean
 }
 
-/** A commit the index builder made */
+/**
+ * A commit that wrote into tracked reads, as the listener of `hearBuilderCommits` hears it: its sequence and those
+ * reads' tokens
+ */
 export interface BuilderCommit {
   sequence: number
   touched: Array<number>
 }
 
 export interface OpenOptions {
-  /** Open existing files without writing: every write is refused, and the stored schema is used */
+  /**
+   * Opens existing files and refuses every write (`READ_ONLY`). The stored schema is used, and a `schema` that
+   * differs from it is refused (`SCHEMA_CHANGE_REFUSED`). It writes only to make a restore a power loss or a failed
+   * sync left owed, and is refused (`RESTORE_PENDING`) where it can't
+   */
   readOnly?: boolean
   /**
    * The schema, as the canonical JSON `docs/architecture/schema.md` describes; a schema that differs from the stored one
    * changes it
    */
   schema?: Schema
-  /** Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory */
+  /**
+   * Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory. With
+   * `syncEachCommit` it chooses the mode the database is written in, and a writable open in another mode than a
+   * process that has the database open for writing is refused (`MODE_MISMATCH`)
+   */
   syncs?: boolean
   /**
    * Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
@@ -217,15 +264,25 @@ export interface OpenOptions {
    * commits are synced in groups, a moment after they return
    */
   syncEachCommit?: boolean
+  /**
+   * Group commit syncs once writes have paused for this many milliseconds: 100 by default. A whole number, as the
+   * two below are, or refused (`VALUE_INVALID`)
+   */
   syncIdleMs?: number
+  /** Group commit syncs no later than this many milliseconds after the first commit not yet synced: 1000 by default */
   syncIntervalMs?: number
+  /** The map's size at open: by default twice the data file, and 64 MiB at least */
   mapSizeBytes?: number
 }
 
-/** What `purge` deletes */
+/** What `purge` deletes: one of a type's entities, a field of a type, a relation kind's relations, or a role */
 export interface PurgeTarget {
+  /** The removed type whose entities go, or with `field` the type the field is of */
   type?: string
+  /** The removed field, of `type` */
   field?: string
+  /** The removed relation kind whose relations go */
   relationKind?: string
+  /** The removed role, which goes from every entity holding it */
   role?: string
 }
