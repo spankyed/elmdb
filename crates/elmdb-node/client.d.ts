@@ -6,8 +6,9 @@ import type { Batch } from './protocol/Batch.js'
 
 /**
  * The caller's msgpack: values encoded and decoded as its program wants them (times, extensions). `unpack` decodes
- * each map as an object, and `unpackMaps` each as a `Map`, for an answer whose maps may hold a key `__proto__`; with
- * msgpackr, two `Packr`s that differ only in `mapsAsObjects`
+ * each map as an object, and `unpackMaps` each as a `Map`, for an answer whose maps may hold a key `__proto__`. Both
+ * write and read plain msgpack: with msgpackr, two `Packr`s with `useRecords: false`, as elmdb refuses its record
+ * extension, that differ only in `mapsAsObjects`
  */
 export interface Codec {
   pack(value: unknown): Buffer
