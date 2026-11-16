@@ -44,7 +44,9 @@ This document is what every "should elmdb do X?" is checked against. The others:
    sync runs later on a thread of its own, which `durable()` waits for without holding the event loop. An operation
    gets a form on a thread of the pool, answering a promise, only where its blocking form holds the event loop past
    10 ms: a check and a rebuild of a large database take seconds (`../evidence/million-notes.md`), a backup copies
-   the whole file, and the largest read measured took 266 ms (`../roadmap/javascript-boundary.md`). A batch of
+   the whole file, and the largest read measured took 266 ms (`../roadmap/javascript-boundary.md`). A read's
+   promise form answers what its blocking form would have answered at the call, so moving a read off the event loop
+   never changes what it answers (`engine.md`, Reads). A batch of
    thousands of operations, a load, a replacement, a reset and a purge can hold it as long on a large database, and
    have no such form yet. One that writes, and whose order among the caller's own writes matters (a load, a
    replacement), would need its turn among them in the order asked, which nothing builds today; a rebuild needs

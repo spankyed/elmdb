@@ -422,6 +422,34 @@ fn a_read_after_another_process_commits_sees_the_commit_though_a_read_transactio
     assert_eq!(get(&store, "a").as_deref(), Some(&b"2"[..]));
 }
 
+/// Asks for a read of `key` at the last commit, held for later, which sends what it read to the receiver answered
+fn ask_for(store: &Store, key: &str) -> (CallRead, std::sync::mpsc::Receiver<Option<Vec<u8>>>) {
+    let (told, answer) = std::sync::mpsc::channel();
+    let key = crate::format::key::encode(&[key.into()]);
+    let read = move |txn: &RoTxn<'static, WithoutTls>, db: Db| {
+        told.send(db.get(txn, &key).unwrap().map(<[u8]>::to_vec)).unwrap();
+    };
+    (store.ask(read).unwrap().expect("held, not run at the call"), answer)
+}
+
+#[test]
+fn a_read_asked_before_another_process_grew_the_map_runs_on_its_own_snapshot_when_this_one_takes_the_new_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(16 * (16 << 10)), ..quiet() }).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let (asked, answer) = ask_for(&store, "grown");
+    grow_elsewhere(dir.path());
+    let before = store.map_size();
+    // The next transaction here is refused the map as it was, which is taken at its new size once the read waiting
+    // has run on its own snapshot
+    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+    assert!(store.map_size() > before, "the map was taken at the size the other process grew it to");
+    assert_eq!(answer.try_recv().unwrap(), None, "the read ran on a later snapshot than its call's");
+    assert_eq!(store.held_for_calls(), (0, 0));
+    store.run_asked(asked).unwrap();
+    assert!(answer.try_recv().is_err(), "the read ran twice");
+}
+
 #[test]
 fn a_listener_is_told_of_what_another_process_commits_and_not_of_its_own() {
     let dir = tempfile::tempdir().unwrap();

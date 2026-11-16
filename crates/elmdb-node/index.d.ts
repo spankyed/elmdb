@@ -57,16 +57,20 @@ export declare class Database {
    */
   read(reads: Buffer): Buffer
   /**
-   * `read` on a thread of the pool, so a large read doesn't hold up the event loop. Its snapshot is the last commit
-   * as the read begins there, not as it is asked for: a write made after the call may be in its answer
+   * `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
+   * answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
+   * never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
+   * `hearBuilderCommits`, once its promise has settled
    */
   readAsync(reads: Buffer): Promise<Buffer>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
   untrack(token: number): void
   /**
    * Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
-   * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. There is one listener,
-   * a second being refused, which keeps no process alive, and closing the database drops it
+   * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. It is called too once
+   * a tracked `readAsync` has settled, for the last commit since its call that wrote into what it read, which no
+   * commit's result could name, the read not being filed yet. There is one listener, a second being refused, which
+   * keeps no process alive, and closing the database drops it
    */
   hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
   /**

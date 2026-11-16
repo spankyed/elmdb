@@ -101,6 +101,8 @@ pub struct Tracks {
     next: u64,
     pending_reads: BTreeMap<u64, u32>,
     next_read: u64,
+    /// The tracked reads asked at a call and not yet filed, with what each commit since wrote (`Waiting`)
+    waiting: BTreeMap<u64, Since>,
     /// The watches whose listener a delivery holds, ended or not: one at a time per watch
     delivering: BTreeSet<u64>,
     builder_commits: Option<BuilderCommitListener>,
@@ -142,7 +144,7 @@ pub struct Touched {
 impl Tracks {
     /// Whether anything is filed: a unit that begins when nothing is logs no keys
     pub fn is_empty(&self) -> bool {
-        self.index.is_empty() && self.pending_reads.is_empty()
+        self.index.is_empty() && self.pending_reads.is_empty() && self.waiting.is_empty()
     }
 
     pub fn hear_builder_commits(&mut self, listener: Option<BuilderCommitListener>) -> Result<()> {
@@ -168,6 +170,24 @@ impl Tracks {
     pub fn untrack(&mut self, token: u32) {
         self.index.remove(&Owner::Token(token));
         self.pending_reads.retain(|_, pending| *pending != token);
+        self.waiting.retain(|_, since| since.token != token);
+    }
+
+    /// Keeps, for each tracked read asked at a call and not yet filed, what the commit at `sequence` wrote: `None` when
+    /// it isn't known key by key, which names every read
+    pub fn note_commit(&mut self, sequence: u64, written: Option<&HashSet<Vec<u8>>>) {
+        if self.waiting.is_empty() {
+            return;
+        }
+        let written = written.map(|keys| Arc::new(keys.clone()));
+        for since in self.waiting.values_mut() {
+            // A read kept waiting through very many commits keeps one that names it rather than each one's keys
+            if since.commits.len() >= MOST_NOTED {
+                since.commits = vec![(sequence, None)];
+            } else {
+                since.commits.push((sequence, written.clone()));
+            }
+        }
     }
 
     /// The tokens and ranges filed for callers and watches: `(owners, keys, ranges)`
@@ -193,6 +213,52 @@ impl Tracks {
     }
 }
 
+/// The most commits noted for a tracked read waiting to be filed, past which they stand for one that wrote everything
+pub(crate) const MOST_NOTED: usize = 256;
+
+/// What the commits since a tracked read's call wrote, each by its sequence: `None` for one not known key by key
+struct Since {
+    token: u32,
+    commits: Vec<(u64, Option<Arc<HashSet<Vec<u8>>>>)>,
+}
+
+/// A tracked read asked at a call, to be filed once it has run (`Database::read_at_call`). It is noted before its
+/// snapshot is taken, so every commit its snapshot doesn't hold is noted for it: a commit whose note came first landed
+/// first. Dropped without filing, it is let go of
+pub(crate) struct Waiting {
+    tracks: SharedTracks,
+    id: u64,
+}
+
+impl Waiting {
+    pub(crate) fn new(tracks: &SharedTracks, token: u32) -> Self {
+        let mut held = tracks.lock();
+        let id = held.next_read;
+        held.next_read += 1;
+        held.waiting.insert(id, Since { token, commits: Vec::new() });
+        Waiting { tracks: Arc::clone(tracks), id }
+    }
+
+    /// Files what the read read under its token, unless it was untracked meanwhile, answering the token and the last
+    /// commit since its call that wrote into what it read: a commit that named no token of it, as it hadn't been filed
+    pub(crate) fn file(self, reads: ReadSet) -> Option<(u64, u32)> {
+        let mut held = self.tracks.lock();
+        let since = held.waiting.remove(&self.id)?;
+        let touched = since.commits.iter().rev().find_map(|(sequence, written)| match written {
+            Some(written) if !reads.touched_by(written) => None,
+            _ => Some((*sequence, since.token)),
+        });
+        held.file(since.token, reads);
+        touched
+    }
+}
+
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.tracks.lock().waiting.remove(&self.id);
+    }
+}
+
 /// Runs `reads` on a snapshot of the last commit, answering them with what they read. A snapshot that could not be
 /// taken read nothing, so the whole store stands for what they read: any commit then names them, where an empty read
 /// set would leave whoever filed it on the failure for good
@@ -200,12 +266,16 @@ pub(crate) fn run_tracked(store: &Store, schema: &EngineSchema, reads: &Reads) -
     run_point!(WATCH_READ);
     let ran = store.read(|txn, db| {
         schema.validate(txn, db)?;
-        let snapshot = Snapshot { txn, db, schema };
-        let recording = Recording::new(&snapshot);
-        let answer = super::reads::run(&recording, &reads.reads);
-        Ok((answer, recording.into_reads()))
+        Ok(run_recorded(&Snapshot { txn, db, schema }, reads))
     });
-    ran.unwrap_or_else(|error| (Err(error), ReadSet { keys: BTreeSet::new(), ranges: vec![(Vec::new(), None)] }))
+    ran.unwrap_or_else(|error| (Err(error), ReadSet::everything()))
+}
+
+/// Runs `reads` on `snapshot`, answering them with what they read
+pub(crate) fn run_recorded(snapshot: &Snapshot<'_, '_>, reads: &Reads) -> (Result<Vec<u8>>, ReadSet) {
+    let recording = Recording::new(snapshot);
+    let answer = super::reads::run(&recording, &reads.reads);
+    (answer, recording.into_reads())
 }
 
 /// Registers a watch of `reads` and delivers its first answer

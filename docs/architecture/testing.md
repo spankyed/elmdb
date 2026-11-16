@@ -372,6 +372,14 @@ been dropped once; that listeners ending their own or each other's watch don't w
 racing a tracked read names its token unless the read already saw the write. The engine's reads, LMDB and the
 binding are outside it; `engine/tests/tracked.rs` covers them on real threads.
 
+`store/call_reads/model.rs` is the reads `readAsync` asks for at its call (`store/call_reads.rs`), under Shuttle: three
+reads asked while commits land, each run on a thread of its own while a growth runs every read still waiting, against
+a stand-in reader table of two slots, so reads share their commit's transaction, wait for it, and are refused once it
+is full. It holds that every read asked runs once, on a commit between the last before its call and the last after it,
+that a refused one never runs, and that no transaction outlives the reads. LMDB and the gate's recursion are outside
+it; `store/call_reads/tests.rs` covers the bounds, and `engine/tests/call_reads.rs` and `store/tests.rs` real
+databases, a growth in another process among them.
+
 `engine/builder/model.rs` is the index builder's scheduling, under Shuttle: its `Core` — the queue, a rank index's
 pause for commits to stop, stopping, failures and the waiters behind `waitForIndexBuilds` — with a stand-in for what a
 piece of work does, and a clock the model moves, since Shuttle models no time and its timed waits never time out

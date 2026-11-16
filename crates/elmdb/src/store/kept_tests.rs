@@ -1243,6 +1243,34 @@ fn a_write_takes_the_map_another_process_grew_the_file_past() {
 }
 
 #[test]
+fn a_write_that_takes_the_map_another_process_grew_runs_a_read_waiting_on_its_own_snapshot_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), StoreOptions { map_size_bytes: Some(256 << 10), ..grouped() }).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let (told, answer) = std::sync::mpsc::channel();
+    let key = crate::format::key::encode(&["grown".into()]);
+    let read = move |txn: &RoTxn<'static, WithoutTls>, db: Db| {
+        told.send(db.get(txn, &key).unwrap().map(<[u8]>::to_vec)).unwrap();
+    };
+    let asked = store.ask(read).unwrap().expect("held, not run at the call");
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir.path())
+        .env("ELMDB_GROW_GROUPED", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the child's write failed");
+    put(&store, "b", b"2").unwrap();
+    assert_eq!(answer.try_recv().unwrap(), None, "the read ran on a later snapshot than its call's");
+    assert_eq!(store.held_for_calls(), (0, 0));
+    store.run_asked(asked).unwrap();
+    assert_eq!(get(&store, "grown").as_deref(), Some(&b"yes"[..]));
+    store.close().unwrap();
+}
+
+#[test]
 fn an_open_s_own_commit_is_made_under_the_pin() {
     let dir = tempfile::tempdir().unwrap();
     // A database with elmdb's own and no vector graphs, as one an earlier elmdb made: the open creates them, its own

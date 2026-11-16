@@ -105,7 +105,8 @@ created and what it refused are known at the call, and a read after it sees it. 
 the event loop; each one's plain name is its blocking form (`durable()` is a wait, and has none). A rebuild holds the
 database's write lock until it commits, so a write, a unit or a schema change made while one runs waits for it, holding
 the event loop: await a `rebuildAsync` before writing. A close waits for an operation that is running, so one made during a long rebuild
-holds the event loop until it ends.
+holds the event loop until it ends. A `readAsync` answers what `read` would have answered at its call: a write made
+after the call is never in its answer.
 
 **Power loss:** by default commits are synced in groups: once writes have paused for 100 ms, and once a second while
 they go on. If the machine loses power between two syncs, the commits since the last sync can be lost. The file can

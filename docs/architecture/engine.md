@@ -434,15 +434,22 @@ A commit here clears the cache, and an older read finishing after that clear can
 Active reads and open units keep their snapshots until they finish. The worker owns only the cache, cannot keep
 the database itself alive, and is joined on normal close; process-exit cleanup detaches it with bounded locking.
 The policy and its measured tradeoff are recorded in [idle snapshot evidence](../evidence/idle-snapshot-retention.md). `db.read(reads)` runs on the calling thread. `db.readAsync(reads)` runs on a thread of the pool and resolves with the
-same answer, so a large read doesn't block the event loop. Its snapshot is the last commit as the read begins there,
-not as it is asked for, so a write made after the call may be in its answer. One taken at the call could be kept open
-until the pool runs the read, as an idle snapshot is, but it would cost too much for what it promised. Each read waiting
-in the pool's queue, which has no bound, would keep the pages freed since from reuse and hold one of LMDB's reader
-slots, 126 (LMDB's default, which elmdb doesn't change) shared by every process with the database open, so a burst of
-calls, a `Promise.all` over many reads, would run out of slots and be refused `READERS_FULL` at the call. And the
-snapshot would not always be the call's: a growth of the map, which can't run while any transaction of the process is
-open, would end a waiting snapshot as it ends an idle one, and a tracked read reads again on a newer snapshot when a
-commit lands before it is filed (`watch::read_tracked`). A caller who needs the snapshot of the call reads with `read`.
+answer `read` would have given at the call, so a large read doesn't block the event loop: its snapshot is the last
+commit as it is at the call, and a commit made before the pool runs it, here or in another process, is not in its
+answer. The read transaction is taken at the call and held, outside the gate as an idle one is, until the pool runs
+the read on it (`store/call_reads.rs`). What that holds is bounded. The reads asked at one commit share at most four
+transactions, as many as libuv's pool runs at once unless told more, each used by one read at a time, so a burst of
+calls, a `Promise.all` over many reads, takes four of LMDB's reader slots (126, LMDB's default, which elmdb doesn't
+change, shared by every process with the database open) rather than one each. At most sixteen are held in all, and a
+read asked at a commit that holds none once sixteen are held runs at its call, on the calling thread, which is what a
+loop of writes each followed by a `readAsync` it doesn't await meets. A held snapshot keeps the pages freed since its
+commit from reuse until its read runs, as an idle one does. A growth of the map, and the adoption of a size another
+process grew it to, which no transaction of the process may outlast, first runs every read still waiting, on its own
+snapshot, on the thread that grows the map, and a close refuses the reads still waiting `CLOSED`: no read is run on a
+later snapshot than its call's. A tracked read is filed once it has run, after the commits made since its call, so
+each of those commits notes what it wrote for the reads waiting, and one that wrote into what the read read is told
+to the listener of `hearBuilderCommits`, with its sequence and the read's token, once the read's promise has settled:
+no commit's result could name a read that wasn't filed.
 
 A caller's own function can't cross: a builder holding one sends the plan up to that step, and runs the rest itself.
 

@@ -299,13 +299,21 @@ impl Database {
         self.guarded("Database.read", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
     }
 
-    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop. Its snapshot is the last commit
-    /// as the read begins there, not as it is asked for: a write made after the call may be in its answer
+    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop, answering what `read` would have
+    /// answered at the call: its snapshot is the last commit as it is at the call, and a write made after the call is
+    /// never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
+    /// `hearBuilderCommits`, once its promise has settled
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn read_async<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.readAsync", || {
-            let task =
-                ReadTask { db: self.inner.again(), health: self.health.clone(), reads: reads.to_vec(), failed: None };
+            let read = self.inner.read_at_call_bytes(&reads);
+            let task = ReadTask {
+                db: self.inner.again(),
+                health: self.health.clone(),
+                read: Some(read),
+                touched: None,
+                failed: None,
+            };
             spawned(env, task)
         })
     }
@@ -327,8 +335,10 @@ impl Database {
     }
 
     /// Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
-    /// those reads' tokens: a write's result names its own, and nothing else tells of a builder's. There is one listener,
-    /// a second being refused, which keeps no process alive, and closing the database drops it
+    /// those reads' tokens: a write's result names its own, and nothing else tells of a builder's. It is called too once
+    /// a tracked `readAsync` has settled, for the last commit since its call that wrote into what it read, which no
+    /// commit's result could name, the read not being filed yet. There is one listener, a second being refused, which
+    /// keeps no process alive, and closing the database drops it
     #[napi(ts_args_type = "listener: (commit: { sequence: number; touched: number[] }) => void")]
     pub fn hear_builder_commits(
         &self,
@@ -616,8 +626,21 @@ impl Database {
 pub struct ReadTask {
     db: Held,
     health: Health,
-    reads: Vec<u8>,
+    /// The read as asked at the call, its snapshot held
+    read: Option<elmdb::engine::CallRead>,
+    /// A commit that wrote into the tracked read before it was filed, told once the promise settles
+    touched: Option<(u64, u32)>,
     failed: Option<elmdb::Error>,
+}
+
+impl ReadTask {
+    /// Tells the listener of `hearBuilderCommits` of a commit that wrote into the read before it was filed. Told as the
+    /// promise settles, through the listener's queue, so it is heard after whatever awaited the answer has it
+    fn tell(&mut self) {
+        if let Some((sequence, token)) = self.touched.take() {
+            self.db.tell_touched(sequence, token);
+        }
+    }
 }
 
 impl Task for ReadTask {
@@ -625,9 +648,16 @@ impl Task for ReadTask {
     type JsValue = BufferSlice<'static>;
 
     fn compute(&mut self) -> napi::Result<Vec<u8>> {
-        let (db, reads) = (&self.db, &self.reads);
-        let read = self.health.caught("Database.readAsync, on a thread of the pool,", || db.read_bytes(reads));
-        read.and_then(|read| read).map_err(|error| {
+        let Some(read) = self.read.take() else {
+            return Err(napi::Error::from_reason("This read has already run".to_owned()));
+        };
+        let db = &self.db;
+        let answered = self.health.caught("Database.readAsync, on a thread of the pool,", || db.answer_call_read(read));
+        let answer = answered.and_then(|answered| {
+            self.touched = answered.touched;
+            answered.answer
+        });
+        answer.map_err(|error| {
             let reason = error.message.clone();
             self.failed = Some(error);
             napi::Error::from_reason(reason)
@@ -635,10 +665,12 @@ impl Task for ReadTask {
     }
 
     fn resolve(&mut self, env: Env, answer: Vec<u8>) -> napi::Result<BufferSlice<'static>> {
+        self.tell();
         copied(&env, &answer)
     }
 
     fn reject(&mut self, env: Env, error: napi::Error) -> napi::Result<BufferSlice<'static>> {
+        self.tell();
         match self.failed.take() {
             Some(failed) => Err(napi::Error::from(JsError::from(to_js(failed)).into_unknown(env))),
             None => Err(error),
