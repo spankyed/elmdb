@@ -171,14 +171,17 @@ fn a_read_only_open_that_can_t_write_the_notice_reports_the_restore_without_its_
     let record = record_in(dir.path()).unwrap();
     file.write(&record::Record { restored: Some(record::Restored::Commit(commit)), ..record.next(record.state) })
         .unwrap();
-    // A record this open can't write
-    let path = dir.path().join(record::RECORD);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-    let reader = Store::open(dir.path(), StoreOptions { read_only: true, ..grouped() }).unwrap();
-    assert_eq!(reader.restored(), Some(crate::database::Restore { sequence: None }));
-    reader.close().unwrap();
-    // A writable open, once it can, writes the sequence in
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    // A record this open can't write: which root can't be shown, since it may write any file
+    // SAFETY: geteuid has no preconditions and only reads the process's credentials
+    if unsafe { libc::geteuid() } != 0 {
+        let path = dir.path().join(record::RECORD);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let reader = Store::open(dir.path(), StoreOptions { read_only: true, ..grouped() }).unwrap();
+        assert_eq!(reader.restored(), Some(crate::database::Restore { sequence: None }));
+        reader.close().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    // A writable open, where it can, writes the sequence in
     let writer = Store::open(dir.path(), grouped()).unwrap();
     assert_eq!(writer.restored(), Some(crate::database::Restore { sequence: Some(writer.sequence()) }));
     writer.close().unwrap();
