@@ -148,8 +148,9 @@ what a block holds, which a rebuild makes.
   entity, which its count and every search of it pay.
 - **The journal's bound.** What a search reads beside the index is the journaled text, 55 µs a KB to tokenize, so the
   bound is on the text that waits and not on the places.
-- **`recency`** reads a field of every match (`search.rs`). It needs the field held by place as a length is, which the
-  aggregates of milestone 0.2 would read too.
+- **`recency`** reads a field of every match (`search.rs`). It needs the field held by place as a length is. The
+  aggregates of milestone 0.2 are built without it: `least` and `greatest` read an order's ends from a value index
+  (`../architecture/engine.md`, Reads: plans).
 - **A filing commit and tracked reads.** It rewrites keys a tracked search read and changes no answer; how the commit
   path knows to name no token is designed with the journal.
 - **The derived layout's version.** Kept apart from the primary format's, a later change to it is a rebuild at open

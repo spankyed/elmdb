@@ -335,7 +335,7 @@ the pool's holds were below it in both rebuild runs. The calling-thread form hel
 The benchmark with a name in a value index, a string no other note holds, beside the status, one of two
 (`fixtureVersion` 3), on `session/string-order-readings` at `d4e6544` with two untracked files of no part in it, a
 million notes, one run (Apple M1 Pro, 2026-11-13, load 9.5 as it began and 6.7 as it ended, Node 24.16.0, SQLite
-3.53.0, the binding built in release). These are the readings `../roadmap/string-order.md` starts from: an order on a
+3.53.0, the binding built in release). These are the readings `../archive/roadmap/string-order.md` starts from: an order on a
 string is answered from the rows, as is a range of strings.
 
 | | elmdb | SQLite | elmdb visited |
@@ -420,12 +420,12 @@ bytes as loaded where it was 1,304. The status's index is 1.1 MB as it was, its 
 
 What they say. An order of strings, a page of it and a range of it each read what they answer with and no more.
 Every note in the names' order took 1.28 times what SQLite took in this run, where it took 3.1 times in the run
-above; whether it is under half its own time before, which `../roadmap/string-order.md`'s fourth phase asks, a
+above; whether it is under half its own time before, which `../archive/roadmap/string-order.md`'s fourth phase asks, a
 run this loaded can't say, nor what the order adds to the two units: both are owed a run on a quiet machine.
 
 ## An order taken whole, against phase 2's walk
 
-`../roadmap/string-order.md`'s fourth phase asks that every note of a million in the names' order, and in the
+`../archive/roadmap/string-order.md`'s fourth phase asks that every note of a million in the names' order, and in the
 number's, be read in under half the time phase 2 took. Phase 2 and phase 4 landed together, so phase 2's time was
 never read alone: it is read here beside phase 4's, by the same benchmark (`against-sqlite.mjs` as of this section,
 which adds every note in the number's order), on phase 2's engine, `5b691bb`, and on

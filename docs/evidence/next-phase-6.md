@@ -68,7 +68,7 @@ write's growth is the store's, as the database grows, which no layout of the tex
 new words grew 1.46× (141, 151, 205 µs). The text index's share grows with the corpus, but not because a common term's
 bitmap grows: bounding every bitmap to 1,024 places left it where it was. Blocks would add a layout change and a union
 on every read for nothing measured, so they were reverted, and the roadmap keeps them as an idea whose cause isn't yet
-the one a reading shows. What does grow in a write is for a profile to say (`../roadmap/verification-tooling.md`, stage
+the one a reading shows. What does grow in a write is for a profile to say (`../archive/roadmap/verification-tooling.md`, stage
 6); the bench keeps the message with no text, so a later reading can tell the store's growth from the index's.
 
 ## Ranking: recorded

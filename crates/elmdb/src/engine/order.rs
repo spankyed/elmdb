@@ -1,5 +1,5 @@
-//! A string's place in the order a value index keeps (`docs/roadmap/string-order.md`): its sort key, the bytes the
-//! schema's collator orders it by, as far as the key it is filed under has room for them.
+//! A string's place in the order a value index keeps (`docs/archive/roadmap/string-order.md`): its sort key, the bytes
+//! the schema's collator orders it by, as far as the key it is filed under has room for them.
 //!
 //! Sort keys compare by their bytes as the collator compares their strings, and have no bound a key could hold, so
 //! one is cut as it is made: the collator hands its bytes to a sink that keeps the first `room` of them and refuses
@@ -344,7 +344,7 @@ fn kept(r: &impl Read, entity_type: &str, index: &str) -> Result<Option<super::e
     }
 }
 
-/// One unit of the build of an index's order (`docs/roadmap/string-order.md`, A stale sort key is never read),
+/// One unit of the build of an index's order (`docs/archive/roadmap/string-order.md`, A stale sort key is never read),
 /// answering where the build is after it, and whether it began one.
 ///
 /// A build is begun under a marker of this elmdb's stamp, not whole, and its number the sequence this unit commits
@@ -663,9 +663,9 @@ mod tests {
     use crate::engine::{collator, keys};
     use crate::format::key::Part;
 
-    /// The collations the cut was read in (`docs/roadmap/string-order.md`, the third reading): the root's, locales
-    /// that tailor it, one that reads its accents backwards, and ones that order digits as numbers, capitals first, a
-    /// phone book and pinyin
+    /// The collations the cut was read in (`docs/archive/roadmap/string-order.md`, the third reading): the root's,
+    /// locales that tailor it, one that reads its accents backwards, and ones that order digits as numbers, capitals
+    /// first, a phone book and pinyin
     const COLLATIONS: [&str; 11] = [
         "root",
         "sv",

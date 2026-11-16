@@ -1,7 +1,7 @@
 # Design
 
 elmdb is an embedded database for Node.js and Electron, written in Rust on LMDB. It holds typed entities, their attributes
-and the relations between them, keeps value, text and vector indexes in the same transaction as the data, runs a read
+and the relations between them, keeps value, text, trigram, vector and rank indexes in the same transaction as the data, runs a read
 as one plan and a write as one batch, and reports what every commit changed.
 
 It knows no application. Its first user is apack, whose EARS engine runs on it; apack's entity types, relation kinds and
@@ -11,8 +11,9 @@ This document is what every "should elmdb do X?" is checked against. The others:
 
 - [schema.md](schema.md): the schema: types, fields, relations, indexes, and how a schema changes.
 - [engine.md](engine.md): the operations and the protocol.
-- [search.md](search.md): text and vector indexes, and search as plan steps.
+- [search.md](search.md): text, trigram and vector indexes, and search as plan steps.
 - [format.md](format.md): the key layout, values, format versions and upgrades.
+- [filesystems.md](filesystems.md): the filesystems a database is supported on, and what the tests establish of each.
 - [testing.md](testing.md): what proves it correct.
 - [roadmap.md](../roadmap.md): what is built, and what waits on what.
 - [background.md](../background.md): why elmdb exists.
@@ -35,8 +36,8 @@ This document is what every "should elmdb do X?" is checked against. The others:
 7. **Formats are explicit.** Every database records its format, and an open refuses one it can't read. The format is
    1, edited in place, until a release has users, and a database crosses an edit by a dump and a load; from then on an
    upgrade is a Rust function from one format to the next, run on a copy, never on open (`format.md`, Versions).
-8. **The engine owns collation.** String order is declared once (icu4x's root collation), so a sort means the same
-   wherever it runs.
+8. **The engine owns collation.** String order is declared once, in the schema's `collation` (icu4x's root collation,
+   or a locale's), so a sort means the same wherever it runs.
 9. **Reads and writes block; a promise is for work measured to hold the event loop.** A write answers at the call: what
    it made and what it refused are known there, and a read after it sees it, which a caller's code depends on. A
    write of a few operations is short, about 38 µs for a `set` committed alone and about 107 µs for a `create`,
@@ -60,9 +61,13 @@ This document is what every "should elmdb do X?" is checked against. The others:
   nested read transactions inside a write transaction), reported to OpenLDAP and listed in `format.md`. heed's
   `heed3` variant, on stock `mdb.master3` (LMDB 1.0), is the path to LMDB 1.0 once it is released and the crates below
   support it.
-- **roaring** bitmaps for sets of entities, as a search joins them and a trigram index keeps them, **charabia** for tokenizing, **levenshtein_automata**
-  for fuzzy terms, **hannoy** for approximate nearest neighbours on LMDB, **zstd** for stored values and **leiden-rs**
-  for communities.
+- **roaring** bitmaps for sets of entities, as a search joins them and a trigram index keeps them, **charabia** for
+  tokenizing, **rust-stemmers** for stems, **levenshtein_automata** for fuzzy terms, **regex** and **regex-syntax**
+  for patterns and what a trigram index narrows them by, **hannoy** for approximate nearest neighbours on LMDB,
+  **zstd** for stored values and **leiden-rs** for communities.
+- **icu4x** (`icu_collator`) for collation, each of its crates pinned to an exact version (`Cargo.toml`;
+  `cargo xtask check-icu-exact`): a sort key is the collator's output, so an order of strings is filed under a stamp
+  of the collator that made it (`engine.md`, An order of strings).
 - **rmp** for values in Rust, under the value spec in `format.md`; callers encode with any msgpack implementation that
   meets it (apack uses msgpackr).
 - **napi-rs** for the Node binding. N-API is ABI-stable, so an Electron or Node upgrade needs no rebuild.
@@ -78,7 +83,7 @@ One product name, with the host language as the suffix:
 |---|---|---|
 | `elmdb` | (none) | the engine and its Rust API |
 | `elmdb-node` | `elmdb` | the N-API binding |
-| `elmdb-cli` | (none) | the `elmdb` command: `inspect`, `check`, `backup`, `dump`, `load` |
+| `elmdb-cli` | (none) | the `elmdb` command: `inspect`, `check`, `backup`, `dump`, `load`, `acknowledge-restore` |
 
 Another host follows the pattern (`elmdb-py`). A new crate needs a reason, such as independent reuse or compile time;
 otherwise it is a module.
@@ -92,6 +97,8 @@ Each word means one thing, in the code, the docs and the errors:
 | **database** | one directory holding one LMDB environment, opened by one `Database` |
 | **schema** | what the caller declares: **types**, their **fields**, **relation kinds**, **rank indexes**, and each type's **short code** prefix |
 | **entity**, **attribute**, **relation** | a typed row, one field's value on it, an edge of a kind between two entities |
+| **role** | a name the schema declares that entities are granted and a plan filters by |
+| **place** | an entity's number in the order entities were made, which its type's rows and its indexes' entries are filed by |
 | **index** | derived data kept for a type's fields, `value`, `text`, `trigram` or `vector`, or a **rank index** over a graph |
 | **plan** | a read, compiled: a start, steps, a terminal |
 | **batch** | a write, compiled: one unit's operations |
@@ -100,14 +107,17 @@ Each word means one thing, in the code, the docs and the errors:
 | **tracked read** | a read whose key ranges are filed under a token, which each commit that writes into them names |
 | **sequence** | a commit's number, only increasing: what orders a change set against a batch's result |
 | **watch** | a plan re-run when a commit changes what it read: a tracked read and its re-run |
+| **checkpoint** | a reader's place among the commits, written in the unit that holds what it derived up to there |
 | **primary**, **derived** | the truth, and what is rebuilt from it |
 
 Not used: core, layer, adapter, plugin, store (for a database), record store. "Addon" means only Node's `.node` file.
+`store` is the name of one Rust module, the engine's hold on LMDB (its transactions, the gate, the syncs), and of
+nothing a caller sees.
 
 ## Conventions
 
-- **Rust modules are named by the vocabulary:** `schema`, `format`, and in `engine`: `plan`, `batch`, `unit`, `values`,
-  `text`, `trigram`, `vector`, `ranks`, `changes`, `watch`, `admin`.
+- **Rust modules are named by the vocabulary:** `schema`, `format`, `store` (above), and in `engine`: `plan`, `batch`,
+  `unit`, `values`, `text`, `trigram`, `vector`, `ranks`, `changes`, `watch`, `admin`.
 - **Operation names say what they do.** `get` may answer nothing, `find` searches and may answer an empty list, `read`
   runs a plan; a name never says who may call it or which database it acts on (the caller holds the `Database`).
 - **The plain name blocks.** `read`, `write`, `check`, `rebuild` and `backup` answer on the calling thread, and the
@@ -119,7 +129,7 @@ Not used: core, layer, adapter, plugin, store (for a database), record store. "A
 - **Errors are one Rust enum of stable `SCREAMING_CASE` codes**, each with a message naming the fix; the TypeScript is
   generated. A code is never reused for another meaning.
 - **Units of measure are in the name:** `syncIdleMs`, `mapSizeBytes`.
-- **Every key prefix is declared in one table** (`format.md`), marked primary or derived.
+- **Every key prefix is declared in one table** (`format.md`), marked primary, derived or meta.
 
 ## The boundary with apack
 

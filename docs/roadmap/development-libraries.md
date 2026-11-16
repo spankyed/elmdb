@@ -5,7 +5,8 @@ stage 3 was evaluated and declined (2026-10-30), each with its record below; sta
 (2026-10-30, [its record](../evidence/loom-unit-reservation.md)); stage 5 is built and kept behind a feature that is off
 by default (2026-10-30, [its record](../evidence/diagnostics.md)); stage 6, the graph algorithms, was evaluated:
 PageRank and components declined and written in elmdb, Leiden through leiden-rs (2026-10-31).
-The commands are in `../architecture/testing.md`, Repeatable maintenance measurements. Not yet benchmarked: the private
+The commands are in `../architecture/testing.md`: Repeatable maintenance measurements for stage 2, Concurrency
+models for stage 4 and Diagnostics for stage 5. Not yet benchmarked: the private
 value-index emission and the spill sorter on their own, whose combined cost the public rebuild cases measure.
 
 ## Purpose and scope
@@ -56,7 +57,10 @@ Built. The six hand-declared kernel32 functions are windows-sys's: `CreateEventW
 `GetModuleHandleExW` in the binding's process claim (`elmdb-node/src/process.rs`), and `MoveFileExW`,
 `GetFileAttributesW` and `SetFileAttributesW` in backup publication (`store/backup.rs`), with their numeric flags,
 attributes and `ERROR_ALREADY_EXISTS` named by it. windows-sys 0.61.2 was already in the lockfile through other
-dependencies, so no crate was added; the features are the four the binding's calls need and the one backup's do.
+dependencies, so no crate was added; the features were the four the binding's calls need and the one backup's do.
+Since then the engine declares four (`crates/elmdb/Cargo.toml`): the registry's, for the boot's volatile key
+(`store/boot.rs`), and threading and security, for the wake's named event (`store/wake.rs`), beside the file
+system's.
 `GetLastError` still follows `CreateEventW` immediately, the claim's handle is still owned by `OwnedHandle`, and the
 pinned module and the attribute clearing are unchanged.
 
@@ -77,8 +81,9 @@ Acceptance:
 - Retain the recovery workload harness for populated replacement, peak RSS, scratch space and disk growth. Criterion
   measurements do not substitute for those resource measurements.
 
-The same operations are counted in instructions too, which don't move with the machine's load
-(`verification-tooling.md`, stage 7).
+Built (2026-10-27): `crates/elmdb/benches/maintenance.rs`, and since `benches/reads.rs` for the reads. CI's `heap`
+job and `cargo xtask pre-push` run each as a smoke test, and no timing gates a merge. The same operations are counted
+in instructions too, which don't move with the machine's load (`../archive/roadmap/verification-tooling.md`, stage 7).
 
 ## 3. Typed Unix filesystem operations
 
@@ -110,7 +115,10 @@ itself, and what rustix offers each:
 
 Descriptor-relative opens, ownership checks, no-follow handling and file locking are LMDB's and tempfile's, not code
 of elmdb's own, and the read-only mount refusal is LMDB's error with elmdb's reader registration. Nothing here would
-lose unsafe code or gain clearer ownership by moving, so rustix isn't a dependency of elmdb's own.
+lose unsafe code or gain clearer ownership by moving, so rustix isn't a dependency of elmdb's own. The engine has
+since come to make more Unix calls through `libc`, none of them weighed here: a FIFO and its wake (`store/wake.rs`),
+the boot's identity (`store/boot.rs`) and, on macOS, LMDB's write semaphore, read beside a writer's file lock
+(`store/writers.rs`).
 
 ## 4. Concurrency model checking
 
@@ -133,8 +141,9 @@ Built (2026-10-30): the slot is `store/unit_slot.rs`, its primitives `crate::syn
 command, bounds and what the model leaves out are in `../architecture/testing.md`, Concurrency models. Kept: the
 historical race and a release that wakes no waiter each failed the model on a disposable copy, and the production change
 is one small type the store calls instead of a lock and a condition variable
-([record](../evidence/loom-unit-reservation.md)). Watch teardown and close coordination are modelled by stage 8 of
-[verification tooling](verification-tooling.md#8-randomized-concurrency-testing), on the same primitives.
+([record](../evidence/loom-unit-reservation.md)). Watch teardown is modelled by stage 8 of
+[verification tooling](../archive/roadmap/verification-tooling.md#8-randomized-concurrency-testing), on the same primitives. Close
+coordination is `database.rs`'s and has no model: `cargo xtask check-sync` lists the file as unmodelled, with why.
 
 ## 5. Structured operational diagnostics
 
@@ -187,7 +196,8 @@ modularity, parallelism that can be turned off, a compatible licence, and what i
   functions, a `resolution`, a `seed` into a `StdRng`, and rayon behind a default feature, whose parallel moves are
   compiled out without it. Kept, at `=0.8.1` with no default features (no CLI, rayon or graph adapters). It brings
   rand 0.9 (beside elmdb's 0.10), rand_chacha, getrandom 0.3 and rustc-hash 2, and copies the graph into its own
-  CSR: about 764 bytes an entity at five edges, measured, which the heap test holds to 1,024.
+  CSR: about 764 bytes an entity at five edges, measured (2026-10-30), which the heap test holds to 1,024.
+  `cargo xtask check-leiden-serial` fails when the dependency tree holds rayon through it.
 - **fa-leiden-cd 0.1.0** and **single-clustering 0.7.0**: non-standard licences. **clust-libreville-rs 0.1.1**:
   days old, below the two-week floor.
 

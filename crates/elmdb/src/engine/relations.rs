@@ -339,6 +339,12 @@ pub(super) fn same_key(a: &[Value], b: &[Value]) -> bool {
     a.len() == b.len() && a.iter().zip(b).all(|(x, y)| values::same(x, y))
 }
 
+/// How a refusal of two edges with one identity names the identity beyond the ends: nothing for a kind with no key, and
+/// " with the same" and the key's fields for one with a key
+pub(super) fn identity_beyond_ends(def: &RelationDef) -> String {
+    if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) }
+}
+
 /// The edge of `kind` from `source` to `target` holding `key` other than `except`: the one a link to that identity
 /// updates, and the one a move onto it would duplicate
 pub(super) fn with_identity(
@@ -534,8 +540,7 @@ pub fn update(
     };
     if let Some(other) = other {
         // Two edges with one identity would leave a link to it no single edge to update
-        let identity =
-            if def.key.is_empty() { String::new() } else { format!(" with the same {}", def.key.join(", ")) };
+        let identity = identity_beyond_ends(&def);
         return Err(Error::new(
             ErrorCode::DuplicateEdge,
             format!(

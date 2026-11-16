@@ -1,6 +1,8 @@
 # EARS in elmdb's repository
 
-Status: planned, 2026-11-14, revised 2026-11-15; nothing is built. This is the sixth draft: five independent reads,
+Status: planned, 2026-11-14, revised 2026-11-15, and phase 0's list of what changed read again on 2026-11-16; nothing
+is built here, and in apack one step of phase 0 is: its specs' child processes open in their parent's mode (apack's
+`618983142a`, 2026-11-16). This is the sixth draft: five independent reads,
 each against both repositories, changed the five before it (What the reviews changed, at the end).
 
 EARS, the entity-attribute-relation system, is the fluent TypeScript API over an elmdb database: what a program
@@ -273,7 +275,7 @@ Opened by having both halves in one repository, each to be decided on a reading,
      The host's `backup` stays as it is too: it blocks at the pin and on `main` alike, and moving it to `backupAsync` is
      a decision of its own, with the rollback copy an import takes before it replaces a database in view (the host's
      `backup/index.ts`). apack calls neither the binding's `check` nor its `rebuild` today. What else changed between
-     the pin and `main` at `66af015` (2026-11-15), read from the commits that touched the binding's declarations, its
+     the pin and `main` at `2029f9c` (2026-11-16), read from the commits that touched the binding's declarations, its
      protocol or `docs/architecture` (`git log --first-parent 4b67670..<the new pin> -- crates/elmdb-node/index.d.ts
      crates/elmdb-node/protocol docs/architecture`, run again at the move):
      - a change set's `created` and `destroyed` mean something else for an id destroyed and made again, and
@@ -285,7 +287,16 @@ Opened by having both halves in one repository, each to be decided on a reading,
        still being built (`INDEX_BUILDING`);
      - text ranking was rebuilt, which moves hit order and scores, and strings the collation holds equal are ordered
        by their bytes (#138), which moves ties;
-     - `PANICKED`, `RESTORE_PENDING`, `SYNC_BEHIND` and `MODE_MISMATCH` are new codes;
+     - `PANICKED`, `RESTORE_PENDING`, `SYNC_BEHIND`, `MODE_MISMATCH`, `NO_LISTENER` and `DATABASE_MISMATCH` are new
+       codes. apack meets neither of the last two: it calls no `readAsync`, and `DATABASE_MISMATCH` arises only in the
+       Rust API. Its error table lists them as passed through;
+     - `readAsync` answers what `read` would have answered at its call (#159), rejects a tracked read with
+       `NO_LISTENER` while no `hearBuilderCommits` listener is registered, and tells that listener of a commit that
+       wrote into a tracked one before it was filed; apack registers the listener (`engine.ts`) and calls no
+       `readAsync`, so meets none of it;
+     - an open whose data file's meta pages can't be read to check its record is refused with `IO`, and a sync that
+       can't read its commit's meta page fails the waits on it with `IO` (#162); apack calls no `durable()`, so meets
+       it only at an open, on a disk that fails;
      - the grouped mode keeps its last synced commit, holding a read transaction at it so that no writer reuses its
        pages, and writes that commit's meta page to a record beside the data file (`synced`), from which an open
        restores the commit after a power loss (#145); a sync that fails flushing the data or the record refuses every
@@ -302,9 +313,9 @@ Opened by having both halves in one repository, each to be decided on a reading,
        with `SYNC_BEHIND` once that sync has failed, and `waitForIndexBuilds` throws `SYNC_BEHIND` or `READERS_FULL`
        when the builder is held (#151);
      - a writable open in another mode than a live writer's is refused with `MODE_MISMATCH` (#156), which apack's specs
-       that open a database with `syncs: false` beside a child process opening it with the defaults meet (`apack-ears`'
-       `watch.spec.ts` and `writers-converge.spec.ts`, the SDK's `projections-converge.spec.ts`), a refusal that a child
-       opening with `syncs: false` too clears; each writable open holds `grouped.lock`, `ordered.lock` or
+       that open a database with `syncs: false` beside a child process no longer meet: since apack's `618983142a`
+       (2026-11-16) those children open with `syncs: false`, the parent's mode (`apack-ears`' `watch.spec.ts` and
+       `writers-converge.spec.ts`, the SDK's `projections-converge.spec.ts`); each writable open holds `grouped.lock`, `ordered.lock` or
        `unsynced.lock` beside `data.mdb`; under `syncEachCommit` or `syncs: false`, a writable open syncs the record it
        reads, or writes one and syncs the directory where there is none, as apack's temporary databases do on their
        empty directories, and the first in its mode over an existing data file syncs that file too, as `apack-ears`'

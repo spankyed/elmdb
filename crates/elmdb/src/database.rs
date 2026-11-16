@@ -413,6 +413,17 @@ impl Database {
                 }
             }
         };
+        // Refused before the schema's lock is waited for, which a check on another thread holds for its whole run: a
+        // close beside an open unit answers at once. Asked again under the lock, for a unit begun meanwhile
+        if self
+            .store
+            .lock()
+            .expect("the store slot's lock is never poisoned")
+            .as_ref()
+            .is_some_and(|s| s.unit_is_open())
+        {
+            return Ok(false);
+        }
         let (taken, running) = {
             // Held while the builder is told to stop and the store is taken, so a schema change can't start a builder
             // after; released before either is waited for. At exit it is waited for until the deadline: on Windows the
@@ -840,6 +851,40 @@ mod tests {
 
         let read_only = Database::open(dir.path(), OpenOptions { read_only: true, ..quiet() }).unwrap();
         assert_eq!(read_only.schema(), Some(note_schema(Some("body"))));
+    }
+
+    #[test]
+    fn a_close_beside_an_open_unit_is_refused_without_waiting_for_a_check_on_another_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            Arc::new(Database::open(dir.path(), OpenOptions { schema: Some(note_schema(None)), ..quiet() }).unwrap());
+        let unit = db.begin().unwrap();
+        // A check holds the schema's lock for reading for its whole run, as this thread holds it
+        let (held, holding) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let checker = {
+            let schema = Arc::clone(&db.engine_schema);
+            std::thread::spawn(move || {
+                let _reading = schema.read();
+                held.send(()).unwrap();
+                let _ = released.recv_timeout(Duration::from_secs(10));
+            })
+        };
+        holding.recv().unwrap();
+        let (answered, answer) = std::sync::mpsc::channel();
+        let closer = {
+            let db = Arc::clone(&db);
+            std::thread::spawn(move || {
+                let _ = answered.send(db.close().map_err(|error| error.code));
+            })
+        };
+        let answer = answer.recv_timeout(Duration::from_secs(10));
+        release.send(()).unwrap();
+        checker.join().unwrap();
+        closer.join().unwrap();
+        assert_eq!(answer.expect("the close waited for the check before it was refused"), Err(ErrorCode::UnitOpen));
+        drop(unit);
+        db.close().unwrap();
     }
 
     #[test]

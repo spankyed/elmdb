@@ -32,10 +32,12 @@ Text and vector indexes are named indexes on a type, beside its value indexes (`
 }
 ```
 
-- **Text:** fields with weights, and an analyzer (charabia's tokenizing, which handles many languages; identifiers
-  split on camelCase, snake_case, paths and codes like `THR-12`; case and accents folded; stemming optional).
-- **Vector:** the fields it is computed from and how text is split into chunks, dimensions, metric, storage precision,
-  and the model, recorded with each vector. Changing the model makes every vector pending again.
+- **Text:** fields with weights, and an analyzer: `standard` (charabia's tokenizing, built with its Latin segmenters alone; identifiers split on camelCase,
+  snake_case, paths and codes like `THR-12`; case and accents folded; with `stem`, each word's stem in one of eighteen
+  languages) or `exact` (the whole value, case folded).
+- **Vector:** the fields it is computed from and how text is split into chunks, dimensions (at most 4096), metric
+  (`cosine` or `l2`), storage precision (`f32`), and the model, recorded with each vector. Changing the model makes
+  every vector pending again.
 
 ## Methods
 
@@ -96,7 +98,10 @@ snapshot as a search when it needs to say that search is incomplete.
 - **Fields**: a `string` field, a list of strings, or an `any` field, whose value is text when it is one of those.
   A list's elements are positions apart enough that no phrase spans two. A term longer than 128 bytes isn't held.
 - **The query**: words, all of which match unless `any`; `"a phrase"`, adjacent in one field; `-word`, which leaves
-  out what holds the word as typed and nothing it only starts or is an edit from; `field:word`; `a OR b`. The last word matches the terms it starts with `prefix`, and in a stemming index the stems of the words as
+  out what holds the word as typed and nothing it only starts or is an edit from, and `-"a phrase"`, which leaves out
+  what holds the phrase; `field:word`, where the index has a field of that name; `a OR b`. The `fields` option searches
+  only those of the index's fields. The last word matches the terms it starts with `prefix`, the 64 most held of them
+  (`MAX_PREFIX_TERMS`), so one letter typed doesn't match the dictionary, and in a stemming index the stems of the words as
   written it starts, since a stem need not start as its word does (`runni` starts `running`, held as `run`); a word of
   five letters or more also matches a term an edit away, nine or more two, unless `fuzzy: false`; one longer than the
   longest term by more than two is within two edits of none, and takes none. The word itself outranks both: each of a
@@ -105,8 +110,9 @@ snapshot as a search when it needs to say that search is incomplete.
   with the bytes read can match it seeks past them all, so a dictionary of names sharing their first letters (ids,
   paths) is skipped rather than read (`docs/evidence/next-phase-6.md`).
 - **Ranking**: BM25F (k1 1.2, b 0.75), each field's frequency and length counted at its weight, then a recency decay
-  when asked: a score halved every `halfLife` milliseconds the field's time is before `now`. Ties keep the query's
-  order. A match's frequencies are read from its terms' places and its lengths from the lengths by place, so scoring
+  when asked: a score halved every `halfLife` milliseconds the field's time is before `now`. Ties keep the order of
+  the set searched: after other steps, the order those steps handed their entities on in; after a type start, the
+  types' order in the plan and then creation order. A match's frequencies are read from its terms' places and its lengths from the lengths by place, so scoring
   it reads no key of its own; a phrase's candidates read their documents for positions, and a recency decay reads
   its field of every match.
 - **As a plan step**: `search` after a type start reads the terms' places, less the trash for a live plan; after
@@ -178,8 +184,10 @@ snapshot as a search when it needs to say that search is incomplete.
   never flushes graph writes outside the savepoint undo log. Additional scoring is proportional to that
   index's pending changes in the query scope, rather than every stored embedding.
 - **Reads**: `near` (score `1 / (1 + distance)`, an entity once by its nearest chunk), `like` (an entity's own
-  embedding), `hybrid` (reciprocal rank fusion of the text ranking and the vector ranking, k = 60), each among what
-  the steps before it reached and ended by `hits`; `pendingEmbeddings`.
+  embedding, its first chunk's, the entity itself left out), `hybrid` (reciprocal rank fusion of the text ranking and
+  the vector ranking, with the constant 60, refused `INDEX_BUILDING` while its text index is built), each answering
+  the `k` best (10 when none is given) among what the steps before it reached and ended by `hits`;
+  `pendingEmbeddings`.
 
 ## The order it was built in
 

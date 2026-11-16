@@ -2,7 +2,8 @@
 
 Status: designed, 2026-10-28. Set reads and explicit grouping are built and settled; reads without a decode and units
 that span an `await` are designed here, each with the reading that would trigger it (`../evidence/next-phase-10.md`,
-The JavaScript boundary).
+Incremental views and the boundary). Built since, and not part of this design: a read, a check, a rebuild and a backup
+each have a form on a thread of the pool that answers a promise (`../architecture/design.md`, principle 9).
 
 ## Where it stands
 

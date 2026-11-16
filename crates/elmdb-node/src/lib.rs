@@ -60,34 +60,48 @@ fn answer<'env>(env: &Env, bytes: &[u8]) -> Result<BufferSlice<'env>, Code> {
 
 #[napi(object)]
 pub struct OpenOptions {
-    /// Open existing files without writing: every write is refused, and the stored schema is used
+    /// Opens existing files and refuses every write (`READ_ONLY`). The stored schema is used, and a `schema` that
+    /// differs from it is refused (`SCHEMA_CHANGE_REFUSED`). Of the database's data it writes only to make a restore a
+    /// power loss or a failed sync left owed, and is refused (`RESTORE_PENDING`) where it can't
     pub read_only: Option<bool>,
     /// The schema, as the canonical JSON `docs/architecture/schema.md` describes; a schema that differs from the stored one
     /// changes it
     #[napi(ts_type = "Schema")]
     pub schema: Option<serde_json::Value>,
-    /// Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory
+    /// Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory. With
+    /// `syncEachCommit` it chooses the mode the database is written in, and a writable open in another mode than a
+    /// process that has the database open for writing is refused (`MODE_MISMATCH`)
     pub syncs: Option<bool>,
     /// Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
     /// sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default, where
     /// commits are synced in groups, a moment after they return
     pub sync_each_commit: Option<bool>,
+    /// Group commit syncs once writes have paused for this many milliseconds: 100 by default. A whole number, as the
+    /// next is, or refused (`VALUE_INVALID`)
     pub sync_idle_ms: Option<f64>,
+    /// Group commit syncs no later than this many milliseconds after the first commit not yet synced: 1000 by default
     pub sync_interval_ms: Option<f64>,
+    /// The map's size at open: by default twice the data file, and 64 MiB at least. A whole number of 1 at least, or
+    /// refused (`VALUE_INVALID`), and a multiple of the system's page size, or refused by LMDB's binding (`IO`)
     pub map_size_bytes: Option<f64>,
 }
 
-/// What `purge` deletes
+/// What `purge` deletes: one of a type's entities, a field of a type, a relation kind's relations, or a role
 #[napi(object)]
 pub struct PurgeTarget {
+    /// The removed type whose entities go, or with `field` the type the field is of
     #[napi(js_name = "type")]
     pub entity_type: Option<String>,
+    /// The removed field, of `type`
     pub field: Option<String>,
+    /// The removed relation kind whose relations go
     pub relation_kind: Option<String>,
+    /// The removed role, which goes from every entity holding it
     pub role: Option<String>,
 }
 
-/// A commit the index builder made
+/// A commit that wrote into tracked reads, as the listener of `hearBuilderCommits` hears it: its sequence and those
+/// reads' tokens
 #[napi(object)]
 pub struct BuilderCommit {
     pub sequence: f64,
@@ -188,7 +202,11 @@ impl Database {
 
 #[napi]
 impl Database {
-    /// Opens the database at `path`, creating it unless `readOnly`
+    /// Opens the database at `path`, creating it unless `readOnly`. Refused where the path is open in this process
+    /// already (`ALREADY_OPEN`), in a process another copy of the binding has opened a database in
+    /// (`ALREADY_LOADED`), read-only where there is no database (`NO_DATABASE`), in another mode than a process that
+    /// has it open for writing (`MODE_MISMATCH`), and where a restore is owed that this open can't make
+    /// (`RESTORE_PENDING`)
     #[napi(factory)]
     pub fn open(env: Env, path: String, options: Option<OpenOptions>) -> Result<Self, Code> {
         guarded("Database.open", || {
@@ -223,16 +241,19 @@ impl Database {
         })
     }
 
+    /// The directory the database was opened at
     #[napi(getter)]
     pub fn path(&self) -> Result<String, Code> {
         self.unrefused("Database.path", || Ok(self.inner.path().display().to_string()))
     }
 
+    /// Whether the database was opened read-only
     #[napi(getter)]
     pub fn read_only(&self) -> Result<bool, Code> {
         self.unrefused("Database.readOnly", || Ok(self.inner.is_read_only()))
     }
 
+    /// Whether the database is still open: false once `close` has closed it
     #[napi(getter)]
     pub fn is_open(&self) -> Result<bool, Code> {
         self.unrefused("Database.isOpen", || Ok(self.inner.is_open()))
@@ -249,7 +270,8 @@ impl Database {
     }
 
     /// Changes the open database's schema as opening with it would, answering each change and what was done about it.
-    /// Refused while a unit is open, in a read-only database, and for a change opening refuses
+    /// Refused while a unit is open (`UNIT_OPEN`), and with `SCHEMA_CHANGE_REFUSED` for a schema that differs from
+    /// the stored one in a read-only database, and for a change opening refuses
     #[napi(ts_args_type = "schema: Schema", ts_return_type = "SchemaChange[]")]
     pub fn set_schema(&self, schema: serde_json::Value) -> Result<serde_json::Value, Code> {
         self.guarded("Database.setSchema", || {
@@ -283,8 +305,9 @@ impl Database {
     }
 
     /// Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
-    /// once it has committed. `durable` commits it with a sync. Refused while a unit is open (`UNIT_OPEN`): writes go
-    /// through the unit then
+    /// once it has committed. `durable` commits it with a sync, and where that sync fails throws `NOT_DURABLE`: the
+    /// commit has landed, so the batch isn't to be written again. Refused while a unit is open (`UNIT_OPEN`): writes
+    /// go through the unit then
     #[napi]
     pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
         self.guarded("Database.write", || {
@@ -299,10 +322,13 @@ impl Database {
         self.guarded("Database.read", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
     }
 
-    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop: msgpack bytes of a `Reads`, and a
-    /// promise of msgpack bytes of its `Answers`, what `read` would have answered at the call. Its snapshot is the last
-    /// commit as it is at the call, and a write made after the call is never in its answer. A tracked read that a commit wrote into before it was filed is told to the listener of
-    /// `hearBuilderCommits`, once its promise has settled, and is refused (`NO_LISTENER`) while there is none
+    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop: msgpack bytes of a `Reads`, and
+    /// a promise of msgpack bytes of its `Answers`, what `read` would have answered at the call. Its snapshot is the
+    /// last commit as it is at the call, and a write made after the call is never in its answer. A tracked read that a
+    /// commit wrote into before it was filed is told to the listener of `hearBuilderCommits`, once its promise has
+    /// settled. elmdb's refusals of the read reject the promise: `NO_LISTENER` for a tracked read asked while there is
+    /// no such listener, and `CLOSED` when the database closes before it runs. Once sixteen snapshots are held for
+    /// reads still waiting, a read asked at a commit that holds none runs at the call, on this thread
     #[napi(ts_return_type = "Promise<Buffer>")]
     pub fn read_async<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.readAsync", || {
@@ -337,8 +363,8 @@ impl Database {
     /// Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
     /// those reads' tokens: a write's result names its own, and nothing else tells of a builder's. It is called too once
     /// a tracked `readAsync` has settled, for the last commit since its call that wrote into what it read, which no
-    /// commit's result could name, the read not being filed yet. There is one listener, a second being refused, which
-    /// keeps no process alive, and closing the database drops it
+    /// commit's result could name, the read not being filed yet. There is one listener, a second being refused
+    /// (`ALREADY_LISTENING`), which keeps no process alive, and closing the database drops it
     #[napi(ts_args_type = "listener: (commit: { sequence: number; touched: number[] }) => void")]
     pub fn hear_builder_commits(
         &self,
@@ -363,7 +389,7 @@ impl Database {
     }
 
     /// Tells `listener` of commits other processes make as soon as each lands, which `committedElsewhere` then answers, a
-    /// second being refused. It keeps no process alive, and closing the database drops it
+    /// second being refused (`ALREADY_LISTENING`). It keeps no process alive, and closing the database drops it
     #[napi(ts_args_type = "listener: () => void")]
     pub fn hear_commits_elsewhere(&self, listener: napi::bindgen_prelude::Function<'_, (), ()>) -> Result<(), Code> {
         self.guarded("Database.hearCommitsElsewhere", || {
@@ -381,7 +407,8 @@ impl Database {
         })
     }
 
-    /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it
+    /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it:
+    /// until it does (`adoptReplacement`), its commits are refused (`DATA_REPLACED`)
     #[napi]
     pub fn replaced_elsewhere(&self) -> Result<Option<f64>, Code> {
         self.guarded("Database.replacedElsewhere", || {
@@ -414,8 +441,10 @@ impl Database {
         self.guarded("Database.sequence", || self.inner.sequence().map(|n| n as f64).map_err(to_js))
     }
 
-    /// Opens a unit that stays open across calls until it is committed or aborted; while it is, a write or a rebuild
-    /// outside it is refused (`UNIT_OPEN`), and writes go through the unit
+    /// Opens a unit that stays open across calls until it is committed or aborted, and writes go through it. While it
+    /// is open, what would write or wait outside it is refused (`UNIT_OPEN`): a write, a rebuild, a second `begin`,
+    /// `setSchema`, `purge`, a rename, `reset`, `replaceWith`, `bulkLoad`, `close`, and `waitForIndexBuilds` once the
+    /// index builder has started
     #[napi]
     pub fn begin(&self) -> Result<Unit, Code> {
         self.guarded("Database.begin", || {
@@ -478,7 +507,8 @@ impl Database {
         })
     }
 
-    /// Every value index of every declared type: whether it is built, and why it couldn't be when a build failed
+    /// Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when
+    /// a build failed
     #[napi(ts_return_type = "IndexStatus[]")]
     pub fn index_status(&self) -> Result<serde_json::Value, Code> {
         self.guarded("Database.indexStatus", || {
@@ -516,14 +546,18 @@ impl Database {
         })
     }
 
-    /// Blocks until every index waiting to be built is built or has failed, or answers what holds a build up while the
-    /// builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again after a pause to wait on
+    /// Blocks until every index waiting to be built is built, throwing `INDEX_BUILD_FAILED` when a build failed, or
+    /// throws what holds a build up while the builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again
+    /// after a pause to wait on. Refused with a unit open once the database has started its index builder
+    /// (`UNIT_OPEN`): commit or abort it, then wait
     #[napi]
     pub fn wait_for_index_builds(&self) -> Result<(), Code> {
         self.guarded("Database.waitForIndexBuilds", || self.inner.wait_for_index_builds().map_err(to_js))
     }
 
-    /// Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }`
+    /// Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }`. A
+    /// name the schema still declares is refused (`SCHEMA_CHANGE_REFUSED`), as the call is while a unit is open
+    /// (`UNIT_OPEN`)
     #[napi]
     pub fn purge(&self, what: PurgeTarget) -> Result<(), Code> {
         self.guarded("Database.purge", || {
@@ -544,16 +578,22 @@ impl Database {
         })
     }
 
+    /// Renames a type to one the schema declares, rewriting its entities' ids and the relations and declared `ref`
+    /// fields naming them, in one durable unit. Refused while a unit is open (`UNIT_OPEN`)
     #[napi]
     pub fn rename_type(&self, from: String, to: String) -> Result<(), Code> {
         self.guarded("Database.renameType", || self.inner.rename_type(&from, &to).map_err(to_js))
     }
 
+    /// Moves a field's values, on every entity of a type, to another name the type declares, in one durable unit.
+    /// Refused while a unit is open (`UNIT_OPEN`)
     #[napi]
     pub fn rename_field(&self, entity_type: String, from: String, to: String) -> Result<(), Code> {
         self.guarded("Database.renameField", || self.inner.rename_field(&entity_type, &from, &to).map_err(to_js))
     }
 
+    /// Moves every relation of a kind to another kind the schema declares, in one durable unit. Refused while a unit
+    /// is open (`UNIT_OPEN`)
     #[napi]
     pub fn rename_relation(&self, from: String, to: String) -> Result<(), Code> {
         self.guarded("Database.renameRelation", || self.inner.rename_relation(&from, &to).map_err(to_js))
@@ -586,7 +626,7 @@ impl Database {
     }
 
     /// What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
-    /// each value index, its sizes
+    /// each value index, and its sizes
     #[napi(ts_return_type = "Stats")]
     pub fn stats(&self) -> Result<serde_json::Value, Code> {
         self.guarded("Database.stats", || {
@@ -603,7 +643,8 @@ impl Database {
     }
 
     /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
-    /// the database is closed
+    /// the database is closed. It resolves at once where nothing is owed: with `syncs: false`, under `syncEachCommit`,
+    /// and in a read-only database
     #[napi(ts_return_type = "Promise<void>")]
     pub fn durable<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.durable", || {
@@ -615,7 +656,8 @@ impl Database {
         })
     }
 
-    /// Syncs what is owed and releases the environment; closing a closed database does nothing
+    /// Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a
+    /// unit is open (`UNIT_OPEN`): commit or abort it, then close
     #[napi]
     pub fn close(&self) -> Result<(), Code> {
         self.unrefused("Database.close", || self.inner.close().map_err(to_js))
@@ -848,6 +890,7 @@ impl Unit {
         })
     }
 
+    /// Whether the unit is still open: false once it has committed, aborted, or been ended by a panic
     #[napi(getter)]
     pub fn is_open(&self) -> Result<bool, Code> {
         // A unit of a handle that panicked has ended, whether or not a call has reached it since

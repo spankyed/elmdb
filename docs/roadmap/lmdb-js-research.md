@@ -1,7 +1,19 @@
 # Research plan: lessons from lmdb-js
 
-Status: planned, 2026-10-26. The initial survey was read-only. This document schedules research and design decisions,
-not production implementation, and does not reopen completed remediation.
+Status: planned, 2026-10-26, and read again on 2026-11-16, when other work had overtaken parts of it. The initial
+survey was read-only. This document schedules research and design decisions, not production implementation, and does
+not reopen completed remediation. Where each workstream stands:
+
+- **L01** is closed: idle snapshots are released on a bound (`../archive/goals/goal-idle-snapshot-retention.md`, done
+  2026-10-30; `../evidence/idle-snapshot-retention.md`).
+- **L02**'s reads are done (`../archive/roadmap/read-allocation-codec.md`, 2026-10-29); its writes are not started.
+- **L03**, cold reads, is not started. A read has a form on a thread of the pool, `readAsync`
+  (`../architecture/engine.md`, Reads: plans).
+- **L04**: values are compressed with zstd from 256 bytes (`../evidence/next-phase-8.md`); the comparison with LZ4 is
+  not started.
+- **L05**'s stale readers are done (`../evidence/reader-recovery.md`); its coverage matrix is not started.
+- **L06**: explicit async writes are decided against, since a write blocks and answers at its call
+  (`../architecture/design.md`, principle 9); caching and conditional writes are not started.
 
 ## Purpose and relationship to other work
 
