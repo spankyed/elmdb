@@ -216,10 +216,13 @@ impl Tracks {
 /// The most commits noted for a tracked read waiting to be filed, past which they stand for one that wrote everything
 pub(crate) const MOST_NOTED: usize = 256;
 
-/// What the commits since a tracked read's call wrote, each by its sequence: `None` for one not known key by key
+/// The keys a commit wrote, shared by every read it is noted for: `None` when they aren't known key by key
+type Written = Option<Arc<HashSet<Vec<u8>>>>;
+
+/// What the commits since a tracked read's call wrote, each by its sequence
 struct Since {
     token: u32,
-    commits: Vec<(u64, Option<Arc<HashSet<Vec<u8>>>>)>,
+    commits: Vec<(u64, Written)>,
 }
 
 /// A tracked read asked at a call, to be filed once it has run (`Database::read_at_call`). It is noted before its

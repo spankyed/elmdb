@@ -1640,9 +1640,7 @@ impl Store {
             commit.stop_at_exit(deadline.saturating_duration_since(Instant::now()));
         }
         self.idle.stop_at_exit(deadline);
-        // mutant-skip: delete self.calls.close_before\(deadline\) in Store::close_at_exit
-        // Tried until the deadline, where the drop's close would wait for a thread gone holding the lock; with every
-        // thread alive, as in a test, the drop's close ends the same transactions
+        // Tried until the deadline, where the drop's close would wait for a thread gone holding the lock
         self.calls.close_before(deadline);
         drop(self);
         synced
