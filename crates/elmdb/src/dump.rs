@@ -170,6 +170,7 @@ pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
     let sequence = match rest.len() {
         0 => 0,
         8 => u64::from_le_bytes(rest.try_into().expect("8 bytes")),
+        1..8 => return Err(invalid("it ends inside its last commit's sequence")),
         _ => return Err(invalid("it holds bytes after its load count and sequence")),
     };
     if !loads.is_empty() {
@@ -308,9 +309,8 @@ mod tests {
         let again = root.path().join("again.dump");
         dump(&db, &again).unwrap();
         let (again, first) = (std::fs::read(again).unwrap(), std::fs::read(path).unwrap());
-        let sequence = |bytes: &[u8]| u64::from_le_bytes(bytes[bytes.len() - 8..].try_into().unwrap());
+        // All but the last commit's sequence, which is the loaded database's (`engine/tests/changed.rs` holds it)
         assert_eq!(again[..again.len() - 8], first[..first.len() - 8], "the same schema and loads");
-        assert!(sequence(&again) > sequence(&first), "the loaded database's commits come after the dumped one's");
         assert!(db.check().unwrap().is_clean());
     }
 
@@ -361,7 +361,11 @@ mod tests {
                 _ => broken.push(0),
             }
             std::fs::write(&bad, broken).unwrap();
-            assert_eq!(load(&bad, &target).unwrap_err().code, ErrorCode::WrongFormat, "{kind}");
+            let refused = load(&bad, &target).unwrap_err();
+            assert_eq!(refused.code, ErrorCode::WrongFormat, "{kind}");
+            if kind == "truncated" {
+                assert!(refused.message.contains("ends inside its last commit's sequence"), "{refused}");
+            }
             assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "{kind}: staging cleaned up");
         }
         assert_eq!(load(&path, &target).unwrap().entities, 1100);

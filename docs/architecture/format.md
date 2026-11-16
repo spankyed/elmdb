@@ -117,8 +117,10 @@ and a load by the build after it. That is how our databases are converted once, 
   none), then each load as a u32 length and its msgpack with named fields, then a u32 `0xFFFFFFFF`, a u64 load
   count and a u64 sequence, the dumped database's last commit's, all little-endian. A load numbers its commits past
   that sequence, in a commit that tells a reader from before it to start over (`engine.md`, changedSince), so no
-  position read from the dumped database is answered from the new numbering. A file that ends after the count, as a
-  build before the sequence makes it, loads with none to number past.
+  position read from the dumped database at or before the dump is answered from the new numbering. One read from it
+  after the dump, were it written to since, could be. A file that ends after the count, as a build before the
+  sequence makes it, loads with none to number past; a dump with the sequence doesn't load into such a build, which
+  reads no bytes after the count.
 - The loads, in the order a load applies them: each entity in the order it was made, with every field it holds, the
   engine's own (`shortCode`, `trashedAt`, ...) among them; each relation in the order it was made, under its id; each
   embedding (`p/q`); each sequence (`p/s`), last, so a numbering goes on where it was.
@@ -140,7 +142,8 @@ and a load by the build after it. That is how our databases are converted once, 
   An abruptly killed process can leave an unpublished `.elmdb-load-*` directory. A retry starts new private staging
   and never adopts the partial database. Remove abandoned staging only after confirming its owner has stopped and
   coordinating exclusive destination ownership; preserve unrelated files.
-- A load of a dump, dumped again, is byte-identical to it.
+- A load of a dump, dumped again, is byte-identical to it but for the last commit's sequence, which is the loaded
+  database's and comes after the dumped one's.
 
 The dump version is the file's, not the stored format's: it moves only when `Load` does.
 
