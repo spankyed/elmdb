@@ -563,8 +563,9 @@ sequence the database opened at, until a caller says it read it: the open's repo
 (`db.openReport.restored`, `{ sequence }`), cleared by `acknowledgeRestore()`, and the command's error stream, cleared
 by `elmdb acknowledge-restore`. The open that restores reads the sequence once LMDB has opened the file, before any
 write, and writes it into the record's notice, which held the commit until then; a read-only open on a filesystem it
-can't write leaves that to the next open, and reports the restore without it. The report's `notBorneOut` says the record
-named another file than this one, which was opened as it is.
+can't write leaves that to the next open, and reports the restore without it, and a writable open that can't write it
+is refused, the restore having been made and recorded, so the next open writes it in. The report's `notBorneOut` says
+the record named another file than this one, which was opened as it is.
 A process's death leaves its commits to the OS,
 which holds them: a database another process has open, or whose record is of this boot, opens at its newest commit. A
 sync that fails as it reads or flushes the record, or flushes the data, is final: the process refuses every commit after
