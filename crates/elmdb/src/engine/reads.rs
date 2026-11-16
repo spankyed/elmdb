@@ -4494,14 +4494,18 @@ impl Stages {
             // A stage visits what the stage before handed it, and what it read from the store itself
             let received = if at == 0 { 0 } else { self.kept[at - 1].get() };
             let graphed = graph[at];
+            // A stage's `edges` are its graph's, or the ones a `similar` read: one key, written once, so a stage that
+            // did both answers its graph's
+            let edges = graphed.map(|g| g.edges).or(compared[at].map(|(_, _, edges)| edges));
             let extra = match graphed {
                 None => 0,
                 Some(Graphed { weight, rounds, cycles, .. }) => {
-                    2 + u32::from(weight.is_some()) + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
+                    1 + u32::from(weight.is_some()) + 2 * u32::from(rounds.is_some()) + u32::from(cycles.is_some())
                 }
             };
             let extra = extra
-                + if compared[at].is_some() { 3 } else { 0 }
+                + u32::from(edges.is_some())
+                + if compared[at].is_some() { 2 } else { 0 }
                 + u32::from(errors[at].is_some())
                 + u32::from(building[at])
                 + u32::from(wants[at].is_some())
@@ -4517,11 +4521,15 @@ impl Stages {
                 w.str("index");
                 w.str(index);
             }
-            if let Some(Graphed { nodes, edges, weight, rounds, cycles }) = graphed {
+            if let Some(Graphed { nodes, .. }) = graphed {
                 w.str("nodes");
                 w.uint(nodes as u64);
+            }
+            if let Some(edges) = edges {
                 w.str("edges");
                 w.uint(edges as u64);
+            }
+            if let Some(Graphed { weight, rounds, cycles, .. }) = graphed {
                 if let Some(weight) = weight {
                     w.str("weight");
                     rmp::encode::write_f64(w.0, weight).expect("a Vec");
@@ -4569,13 +4577,11 @@ impl Stages {
                 w.str("within");
                 w.uint(within);
             }
-            if let Some((neighbours, candidates, edges)) = compared[at] {
+            if let Some((neighbours, candidates, _)) = compared[at] {
                 w.str("neighbours");
                 w.uint(neighbours as u64);
                 w.str("candidates");
                 w.uint(candidates as u64);
-                w.str("edges");
-                w.uint(edges as u64);
             }
             w.str("visited");
             w.uint(received + self.read[at].get());
