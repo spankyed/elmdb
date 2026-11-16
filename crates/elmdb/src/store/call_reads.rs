@@ -237,6 +237,11 @@ impl<T: AtCommit> CallReads<T> {
 }
 
 impl<T: AtCommit> Ticket<T> {
+    /// Whether the read was asked of `reads`
+    pub(crate) fn of(&self, reads: &Arc<CallReads<T>>) -> bool {
+        Arc::ptr_eq(&self.reads, reads)
+    }
+
     /// Runs the read on a transaction of the commit it was asked at, unless a growth ran it first, handing `retire` the
     /// transactions its commit no longer needs once it was the last of the commit's reads, for the idle cache. `hold`
     /// takes the gate for reading: a read uses a transaction only while the gate is held, so a growth, which holds it
