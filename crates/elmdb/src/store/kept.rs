@@ -551,9 +551,12 @@ impl Kept {
         let past = match self.kept_from_reuse(pinned) {
             Ok(Some((kept, file))) => beyond(kept, file, self.bound.load(Relaxed)),
             Ok(None) => return self.past.load(Relaxed),
-            // What the pin keeps can't be read, and no sync can take the meta page to move it either: taken as past
-            // the bound, so a write waits for a sync, and is refused if that fails too, rather than growing the file
-            // for as long as the read fails. A sync that succeeds moves the pin, and the new one asks again
+            // The meta page couldn't be taken: it doesn't read, or the second read transaction `take_meta` begins
+            // couldn't begin. A sync takes it the same way, beginning that transaction while it holds its pin's, so no
+            // sync can move the pin either: taken as past the bound, so a write waits for a sync, and is refused if
+            // that fails too, rather than growing the file for as long as this lasts. A sync that succeeds moves the
+            // pin, and the new one asks again. Where the walk's own transaction can't begin, the last answer stands,
+            // as it does for a full reader table, which refuses a sync too
             Err(_) => true,
         };
         // An answer for a pin that has moved since is no answer: the new pin asks again. Kept under the state, which
