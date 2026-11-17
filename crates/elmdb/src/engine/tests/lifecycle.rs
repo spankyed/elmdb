@@ -255,6 +255,32 @@ fn a_replace_with_in_another_process_refuses_commits_here_as_a_reset_does() {
     write(&db, vec![A_TASK("Task-3")]).unwrap();
 }
 
+/// No build commits over rows another process replaced, and the builder lets go of such work without failing it:
+/// a wait for the builds says so, with a builder or without, where it would answer that all is built
+#[test]
+fn a_wait_for_the_builds_is_refused_while_a_replacement_elsewhere_is_not_adopted() {
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    {
+        let db = open(&source);
+        write(&db, vec![A_TASK("Task-copied")]).unwrap();
+        db.close().unwrap();
+    }
+    let db = open(&dir);
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    drop(db.builder().take());
+    replace_elsewhere(&dir, &source);
+    let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::DataReplaced, "with no builder");
+    // And with one, given an index to build that it can't commit
+    let index = db.index_status().unwrap().into_iter().find(|index| index.entity_type.is_some()).unwrap();
+    let work = crate::engine::Work::Index { entity_type: index.entity_type.unwrap(), index: index.index };
+    db.builders().unwrap().expect("a writable database starts builders").queue(vec![work]);
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::DataReplaced, "with a builder");
+    assert!(db.adopt_replacement(epoch).unwrap());
+    db.wait_for_index_builds().unwrap();
+}
+
 #[test]
 fn a_unit_stamps_only_what_it_wrote_after_a_write_refused_for_a_replacement() {
     use crate::engine::changed::Position;

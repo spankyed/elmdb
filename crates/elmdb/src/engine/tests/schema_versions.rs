@@ -297,6 +297,8 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
     let error = db.set_schema(schema("b")).unwrap_err();
     assert_eq!(error.code, ErrorCode::Io);
     assert!(error.message.contains("refreshing index state also failed"));
+    let kept = db.builder().as_ref().map(|builder| builder.pending());
+    assert!(kept.is_some_and(|kept| !kept.is_empty()), "the change kept the queue, which a wait would else read");
     db.wait_for_index_builds().unwrap();
     assert!(db.index_status().unwrap().iter().all(|index| index.built));
     assert_eq!(db.schema(), Some(schema("a")));

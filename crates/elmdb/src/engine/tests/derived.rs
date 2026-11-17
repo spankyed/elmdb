@@ -320,6 +320,36 @@ fn rebuilding_one_index_refuses_one_the_schema_doesnt_declare() {
     assert!(db.check().unwrap().is_clean());
 }
 
+/// A database can be left with an index unbuilt and no builder: by a close at exit that gives up, which leaves its
+/// builder stopped and queues nothing again. A wait for the builds then takes up what is unbuilt, where it would
+/// answer that nothing waits to be built
+#[test]
+fn a_wait_for_the_builds_takes_up_what_no_builder_was_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let indexes = json!({ "one": { "kind": "value", "fields": ["kind"], "unique": true } });
+    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+    let note = |id: &str, kind: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "kind": kind } });
+    write(&db, vec![note("Note-1", "same"), note("Note-2", "same")]).unwrap();
+    // Two notes of one kind: the build of a unique index over it fails, and leaves the index unbuilt
+    db.set_schema(Schema::from_json(&notes(base_fields(), indexes)).unwrap()).unwrap();
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
+    let built = || db.index_status().unwrap().iter().find(|s| s.index == "one").unwrap().built;
+    assert!(!built());
+    let held = db.store().unwrap();
+    assert!(!db.close_at_exit(std::time::Duration::from_millis(5)).unwrap(), "given up on for the store held");
+    drop(held);
+    assert!(db.builder().is_none(), "the close left no builder");
+    // Still unbuildable, the wait says so again
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
+    // And once it can be built, with no builder again, the wait builds it
+    write(&db, vec![json!({ "op": "set", "id": "Note-2", "fields": { "kind": "other" } })]).unwrap();
+    drop(db.builder().take());
+    assert!(!built());
+    db.wait_for_index_builds().unwrap();
+    assert!(built());
+    assert!(db.check().unwrap().is_clean());
+}
+
 #[test]
 fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     let dir = tempfile::tempdir().unwrap();

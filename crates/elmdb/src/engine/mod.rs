@@ -463,6 +463,19 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     Ok(unbuilt)
 }
 
+/// Refuses a wait for the index builds while another process has replaced every row and this handle hasn't adopted
+/// that (`DATA_REPLACED`): the builder lets go of work it can't commit over such rows, so nothing would be built
+fn builds_can_commit(store: &Store) -> Result<()> {
+    match store.replaced_elsewhere()? {
+        None => Ok(()),
+        Some(_) => Err(Error::new(
+            ErrorCode::DataReplaced,
+            "Another process replaced every row in this database, and no index build commits until this handle has \
+             taken that: adopt the replacement, or open the database again, then wait for the builds",
+        )),
+    }
+}
+
 /// Read pending index work without committing marker repairs while a caller is reporting a refused mutation.
 pub(crate) fn remaining_indexes(store: &Store, schema: &EngineSchema) -> Result<IndexList> {
     failure_point!(INDEX_REFRESH, Error::new(ErrorCode::Io, "injected index refresh failure"));
@@ -675,14 +688,28 @@ impl Database {
     /// the builder started for it, which is another thread's. Refused the same in any listener while a schema
     /// change or a close has the builder stopped and the next not started: either may be waiting for the listener.
     ///
+    /// With no builder, what is unbuilt is read from the database and queued, so an answer that nothing is left to
+    /// build is one the database gives, and builds no one was left are taken up. That read is refused as any is
+    /// (`SCHEMA_CHANGED`, `READERS_FULL`). A read-only database builds nothing and answers at once.
+    ///
+    /// Refused while another process's replacement of every row is not adopted (`DATA_REPLACED`): no build commits
+    /// over rows that are gone, and adopting the replacement queues what it left unbuilt.
+    ///
     /// A schema change stops the builder and starts another for what is left: a wait under way goes on to that one,
     /// and answers for the schema the database holds when it returns. A close stops it for good, and the wait is
     /// told so (`CLOSED`), as it is of a database closed before it
     pub fn wait_for_index_builds(&self) -> Result<()> {
+        /// What the builder's slot holds
+        enum Found {
+            Builder(builder::Waiter),
+            /// Nothing, a schema change or a close having taken the builder and not yet finished
+            Change,
+            Neither,
+        }
         let waiter = loop {
             let store = self.store()?;
             // Taken out of the slot, which stays free while this waits: a schema change or a close stops the builder
-            let waiter = {
+            let found = {
                 let slot = self.builder();
                 match slot.as_ref() {
                     // On the builder's own thread, in a listener one of its commits delivered to, the builds wait for
@@ -694,11 +721,28 @@ impl Database {
                              wait for them after it has",
                         ));
                     }
-                    Some(builder) => Some(builder.waiter()),
-                    // No builder, and no change that took one away and is still to start the next: nothing waits
-                    // to be built
-                    None if !self.replacing.in_progress() => return Ok(()),
-                    None => None,
+                    Some(builder) => Found::Builder(builder.waiter()),
+                    None if self.replacing.in_progress() => Found::Change,
+                    None => Found::Neither,
+                }
+            };
+            // No builder, and no change that took one away and is still to start the next. What is unbuilt is read
+            // rather than taken to be nothing: a close that gave up may have queued none of it again, and a schema
+            // change that failed part way, or a build stopped by one, left it to no one. It is queued, as an open
+            // queues it, which starts the builder this then waits on. A read-only database builds nothing
+            let waiter = match found {
+                Found::Builder(waiter) => Some(waiter),
+                Found::Change => None,
+                Found::Neither => {
+                    let Some(builders) = self.builders_of(Arc::clone(&store))? else { return Ok(()) };
+                    builds_can_commit(&store)?;
+                    // The schema's read is let go before the builders queue, which reads it too
+                    let owed = remaining_indexes(&store, &self.schema_guard())?;
+                    if owed.is_empty() {
+                        return Ok(());
+                    }
+                    builders.queue(owed);
+                    continue;
                 }
             };
             if store.unit_is_open() {
@@ -748,7 +792,8 @@ impl Database {
         };
         let failures = waiter.failures();
         if failures.is_empty() {
-            return Ok(());
+            // The builder lets go of work it can't commit over rows another process replaced, and fails nothing
+            return builds_can_commit(&*self.store()?);
         }
         let named: Vec<String> = failures
             .iter()

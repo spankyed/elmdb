@@ -541,9 +541,9 @@ struct AppliedSchema {
 }
 
 /// The schema changes and closes in progress that have taken the builder from its slot to stop it. Each leaves the
-/// slot empty until it ends, with builds still owed that the builder it starts or queues for then takes up, and a
-/// wait for the index builds that found the slot empty would answer that nothing is left to build. It waits here
-/// for them to end instead
+/// slot empty until it ends, with builds still owed that the builder it starts or queues for then takes up. A wait
+/// for the index builds that finds the slot empty waits here for them to end, rather than start a builder the
+/// change would only stop again
 #[derive(Default)]
 pub(crate) struct Replacing {
     /// How many are in progress

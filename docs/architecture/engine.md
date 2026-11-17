@@ -148,7 +148,11 @@ index's are, so read part way it would answer from the entities filed so far and
 out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller to make again; with `INDEX_BUILD_FAILED`, naming
 each, when a build failed; while a unit is open, once the database has started its index builder (`UNIT_OPEN`),
 since a build waits for the unit to end; and in a listener running on the builder's thread (`CALLBACK_ACTIVE`). With
-no builder started, it answers at once. A schema change stops the builder and starts another for what the schema it
+no builder started, it reads what is unbuilt: nothing, and it answers at once; something, left by a close at exit
+that gave up or a schema change that failed part way, and it queues that and waits for it. That read is refused as
+any is (`SCHEMA_CHANGED`, `READERS_FULL`). While another process's replacement of every row is not adopted the wait
+is refused (`DATA_REPLACED`), since no build commits over rows that are gone. A read-only database builds nothing,
+and answers at once whatever is unbuilt, which `indexStatus` says. A schema change stops the builder and starts another for what the schema it
 leaves has to build: a wait under way goes on to that one, and one asked for between the two waits for the second, so
 its answer is for the schema the database holds as it returns. A close stops the builder with builds left for the next
 open, and a wait under way is told `CLOSED`, as one asked of a closed database is; where the close gives up, the wait
