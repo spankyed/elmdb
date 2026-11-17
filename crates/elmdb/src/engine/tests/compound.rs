@@ -1862,7 +1862,7 @@ fn a_write_that_stamps_the_entity_is_held_to_the_time_it_leaves_in_an_index_hold
     // With the first task's tag at the first task's time, the second holds what the first does
     assert_eq!(at(vec![tagged("t")], 1000.0), Err(ErrorCode::Unique));
     // Stamped with another time by the same write, it never does: the tag beside the time it had is a pair the task
-    // only passes through. A single field's write stamps it the same way, a list's among them
+    // only passes through. A single field's write stamps it the same way: a merge, here
     assert_eq!(at(vec![tagged("t")], 2000.0), Ok(()));
     assert_eq!(
         at(vec![json!({ "op": "upsert", "type": "Task", "id": id(0), "fields": { "tag": "v" } })], 2000.0),
@@ -1872,7 +1872,10 @@ fn a_write_that_stamps_the_entity_is_held_to_the_time_it_leaves_in_an_index_hold
         at(vec![json!({ "op": "upsert", "type": "Task", "id": id(1), "fields": { "tag": "v" } })], 3000.0),
         Ok(())
     );
-    assert_eq!(at(vec![json!({ "op": "append", "id": id(0), "field": "tags", "value": "x" })], 4000.0), Ok(()));
-    assert_eq!(at(vec![json!({ "op": "append", "id": id(1), "field": "tags", "value": "x" })], 5000.0), Ok(()));
+    let merged = |task: usize| json!({ "op": "merge", "id": id(task), "field": "tags", "value": { "x": 1 } });
+    assert_eq!(at(vec![merged(0)], 4000.0), Ok(()));
+    assert_eq!(at(vec![tagged("w")], 4000.0), Ok(()));
+    assert_eq!(at(vec![merged(1)], 5000.0), Ok(()));
+    assert_eq!(at(vec![merged(1)], 4000.0), Err(ErrorCode::Unique), "the map the first task holds, at its time");
     assert!(db.check().unwrap().is_clean());
 }

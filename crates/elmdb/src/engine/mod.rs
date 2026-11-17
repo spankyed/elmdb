@@ -714,14 +714,13 @@ impl Database {
             // this thread: for the builder it stopped, whose commit delivered to the listener running here, or for
             // what the operation the listener is called from holds
             let await_change = || -> Result<()> {
-                if watch::in_callback(&self.tracks) {
+                if !self.replacing.ended(!watch::in_callback(&self.tracks)) {
                     return Err(Error::new(
                         ErrorCode::CallbackActive,
                         "A schema change or a close is under way, which a listener running on this thread may keep \
                          from ending, and the index builds wait for it: wait for them after the listener returns",
                     ));
                 }
-                self.replacing.await_end();
                 Ok(())
             };
             let Some(waiter) = waiter else {

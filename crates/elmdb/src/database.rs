@@ -570,12 +570,17 @@ impl Replacing {
         *self.changes() > 0
     }
 
-    /// Blocks until no change is in progress
-    pub(crate) fn await_end(&self) {
+    /// Blocks until no change is in progress, and answers that none is. With `wait` false it waits for nothing,
+    /// and answers whether none was
+    pub(crate) fn ended(&self, wait: bool) -> bool {
         let mut changes = self.changes();
         while *changes > 0 {
+            if !wait {
+                return false;
+            }
             changes = self.ended.wait(changes).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+        true
     }
 }
 
