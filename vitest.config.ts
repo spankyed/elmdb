@@ -16,7 +16,7 @@ export default defineConfig({
     testTimeout: 0,
     hookTimeout: 0,
     // A worker exits when its vitest does, rather than running on orphaned
-    setupFiles: ['../apack-testing/src/vitest-exit-with-parent.ts', '../apack-testing/src/vitest-progress-guard.ts'],
+    setupFiles: ['../apack-testing/src/vitest-exit-with-parent.ts', '../apack-testing/src/vitest-progress-guard.ts', '../apack-testing/src/vitest-git-config.ts'],
     // Test files run in parallel: each worker's tests create their own EARS engines, each on a database of its own
     fileParallelism: true,
     benchmark: { include: ['bench/**/*.bench.ts'] },
