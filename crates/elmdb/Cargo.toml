@@ -52,6 +52,10 @@ tempfile.workspace = true
 fail.workspace = true
 # Text indexes (`docs/architecture/search.md`): tokenizing and normalizing, the posting lists, fuzzy terms, and stemming
 charabia.workspace = true
+# What charabia tokenizes by, held to their versions (`cargo xtask check-exact`)
+unicode-normalization.workspace = true
+whatlang.workspace = true
+finl_unicode.workspace = true
 roaring.workspace = true
 regex.workspace = true
 regex-syntax.workspace = true

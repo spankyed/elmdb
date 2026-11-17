@@ -735,3 +735,34 @@ fn an_entity_destroyed_and_made_again_under_its_id_is_read_as_changed_and_not_as
     let changed = since(&db, &from(cursor), 100);
     assert_eq!((changed.ids, changed.destroyed), (vec![], vec!["Task-1".to_owned()]));
 }
+
+#[test]
+fn a_reader_from_before_a_dump_is_told_after_its_load_to_start_over_and_no_later_write_is_behind_its_position() {
+    // A load makes a new database of a dump's primary data. A position read from the dumped database means nothing in
+    // the new one's numbering: its reader is told to start over, and the new database's commits come after it, so no
+    // write after the load is behind it
+    let (dir, loaded, scratch) =
+        (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let path = scratch.path().join("dump");
+    let position = {
+        let db = open(&dir);
+        for i in 0..20 {
+            write(&db, vec![task(&format!("Task-{i}"))]).unwrap();
+        }
+        crate::dump::dump(&db, &path).unwrap();
+        let read = since(&db, &from(0), 100);
+        assert!(read.done && read.complete);
+        db.close().unwrap();
+        read.next
+    };
+    crate::dump::load(&path, loaded.path()).unwrap();
+    let db = open(&loaded);
+    assert!(!since(&db, &position, 100).complete, "a reader from the dumped database is told to start over");
+    write(&db, vec![task("Task-after")]).unwrap();
+    assert!(db.sequence().unwrap() > position.sequence, "the loaded database's commits come after the dump's");
+    let later = since(&db, &position, 100);
+    assert!(
+        !later.complete || later.ids.contains(&"Task-after".to_owned()),
+        "a write after the load is not behind the old reader's position"
+    );
+}
