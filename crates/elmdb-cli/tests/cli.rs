@@ -122,4 +122,10 @@ fn every_command_says_a_power_loss_restored_the_database_until_it_is_acknowledge
     assert!(!out.contains("Restored"), "said again once acknowledged: {out}");
     let (_, out) = elmdb(&["acknowledge-restore", lost]);
     assert!(out.contains("No restore to acknowledge"), "{out}");
+    // It writes, and takes a directory with no database for a mistake rather than making one there
+    let nothing = dir.path().join("nothing");
+    let (code, out) = elmdb(&["acknowledge-restore", nothing.to_str().unwrap()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("NO_DATABASE"), "{out}");
+    assert!(!nothing.exists(), "a database was made where there was none");
 }

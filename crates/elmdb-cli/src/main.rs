@@ -35,6 +35,14 @@ fn read_only(dir: &PathBuf) -> elmdb::Result<Database> {
     told(Database::open(dir, OpenOptions { read_only: true, ..Default::default() })?)
 }
 
+/// An existing database, opened to write. A writable open makes a database where there is none, which a command given a
+/// mistyped directory must not do, so a read-only open goes first: it refuses a directory that holds none
+/// (`NO_DATABASE`), and closes before the writable one opens
+fn existing(dir: &PathBuf) -> elmdb::Result<Database> {
+    Database::open(dir, OpenOptions { read_only: true, ..Default::default() })?.close()?;
+    told(Database::open(dir, OpenOptions::default())?)
+}
+
 /// The database, its open having said on the error stream what its caller is to hear: a restore no caller has said it
 /// read, which every open reports until one does, and a record that named another file
 fn told(db: Database) -> elmdb::Result<Database> {
@@ -82,7 +90,7 @@ fn run(command: Command) -> elmdb::Result<bool> {
             Ok(true)
         }
         Command::AcknowledgeRestore { dir } => {
-            let db = told(Database::open(&dir, OpenOptions::default())?)?;
+            let db = existing(&dir)?;
             let had = db.open_report().restored.is_some();
             db.acknowledge_restore()?;
             db.close()?;
