@@ -166,9 +166,12 @@ cargo run -p elmdb-cli -- check DIR  # also: inspect, rebuild, backup, dump, loa
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
 
-elmdb statically links LMDB, which is under [the OpenLDAP Public License](LICENSE-OPENLDAP). A binary that includes
-elmdb, such as the npm package's `.node` files or the `elmdb` command, includes LMDB, so redistributing it means
-complying with that license too: carry `LICENSE-OPENLDAP`, which holds LMDB's copyright statements and the license.
+A binary of elmdb also holds the code it is built from, each under its own license: LMDB, under
+[the OpenLDAP Public License](LICENSE-OPENLDAP), zstd, under BSD-3-Clause, the Rust standard library and the crates
+elmdb depends on. Redistributing one means complying with those licenses too. The npm package carries their texts and
+notices beside its `.node` files: the crates' in `THIRD-PARTY-NOTICES`, the Rust standard library's in
+`COPYRIGHT-rust-library.html`, and LMDB's alone in `LICENSE-OPENLDAP`. The `elmdb` command owes the same notices for
+what it is built from.
 
 Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in this work, as defined in
 the Apache-2.0 license, is dual-licensed as above, without any additional terms or conditions.

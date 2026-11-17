@@ -118,6 +118,10 @@ jobs:
       - name: prove reader recovery assertions reject broken implementations
         run: python3 scripts/check-reader-recovery.py
       - run: cargo xtask check-generated
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - run: cargo xtask check-notices
       - run: cargo xtask check-one-lmdb
       - run: cargo xtask check-exact
       - run: cargo xtask check-diagnostics-off
