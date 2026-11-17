@@ -16,8 +16,12 @@ const { Client } = require('../client.js');
 /** @type {{ Packr: new (options: object) => { pack(value: unknown): Buffer, unpack(bytes: Buffer): unknown } }} */
 const { Packr } = require('msgpackr');
 
-const objects = new Packr({ useRecords: false, mapsAsObjects: true });
-const maps = new Packr({ useRecords: false, mapsAsObjects: false });
+// As `Codec` asks: plain msgpack, and a 64-bit integer a number where one holds it exactly. msgpackr's declarations
+// leave out the `'auto'` its decoder takes, so the options are passed as a plain object
+/** @type {object} */
+const exactly = { useRecords: false, int64AsType: 'auto' };
+const objects = new Packr({ ...exactly, mapsAsObjects: true });
+const maps = new Packr({ ...exactly, mapsAsObjects: false });
 /** @type {import('../client.js').Codec} */
 const codec = {
   pack: (value) => objects.pack(value),
