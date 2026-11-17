@@ -116,8 +116,8 @@ and a load by the build after it. That is how our databases are converted once, 
 
 - The file: the 8 bytes `ELMDBDMP`, a u32 dump version (1), a u32 length and the schema's canonical JSON (length 0:
   none), then each load as a u32 length and its msgpack with named fields, then a u32 `0xFFFFFFFF`, a u64 load
-  count and a u64 sequence, the dumped database's last commit's, all little-endian. A load numbers its commits past
-  that sequence, in a commit that tells a reader from before it to start over (`engine.md`, changedSince), so no
+  count and a u64 sequence, the dumped database's last commit's, all little-endian. A load's last commit is numbered
+  past that sequence, and tells a reader from before it to start over (`engine.md`, changedSince), so no
   position read from the dumped database at or before the dump is answered from the new numbering. One read from it
   after the dump, were it written to since, could be. A file that ends after the count, as a build before the
   sequence makes it, loads with none to number past; a dump with the sequence doesn't load into such a build, which

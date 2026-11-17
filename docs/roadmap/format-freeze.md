@@ -9,9 +9,9 @@ the freeze locks, and orders the work.
 - `m/format` holds 1, and an open refuses any other (`WRONG_FORMAT`; `check_stamp`, `store/mod.rs`). Format 1 is edited
   in place until a release has users. From that release's tag it is locked, and every change to the stored layout
   bumps it and ships an upgrade (`../architecture/format.md`, Versions).
-- A dump holds the schema and the primary data as loads, and names no key or stored value (dump version 1,
-  `dump.rs`). Its footer holds the dumped database's last commit sequence, which a load numbers its commits past, so
-  a `changedSince` position read at or before the dump is told to start over (`../architecture/format.md`, Dumps). It
+- A dump holds the schema and the primary data as loads, and names no key or stored value (dump version 1, `dump.rs`).
+  Its footer holds the dumped database's last commit sequence, and a load's last commit is numbered past it, so a
+  `changedSince` position read at or before the dump is told to start over (`../architecture/format.md`, Dumps). It
   doesn't hold the other meta keys: the replacement count (`m/epoch`), the tombstones (`l/d`) or the checkpoints
   (`l/k`).
 - On 2026-11-16 the repository has no tag, and its packages are at 0.0.0.
@@ -46,8 +46,8 @@ The costs:
 
 - The last 0.9 build's `elmdb dump` stays installable for as long as a format 1 database is to be moved.
 - A load builds every derived key again, as a `rebuild()` does.
-- A reader that follows the database by sequence starts over: a load numbers its commits past the dumped
-  database's, and marks its last commit as one that replaced every type whole (`changed::replaced`, as a reset
+- A reader that follows the database by sequence starts over: a load's last commit is numbered past the dumped
+  database's, and marked as one that replaced every type whole (`changed::replaced`, as a reset
   does). A reader that keeps its place in a checkpoint loses it, since a dump holds none. So before the lock, a dump
   carries the checkpoints too. The dump stays version 1, edited in place as the format is while no release has
   users.
@@ -91,19 +91,20 @@ toolchain brings:
 | vector | `d/qc`, `d/qp`, `d/qi`, `d/qm`, `d/qj`, `d/qn`, and the graph databases | hannoy |
 | rank | `d/ra`, `d/rk`, `d/rq`, `d/rs` | nothing |
 
-Today `d/xb` holds `true`: an index is built or it isn't. The crates above are required at exact versions
-(`INDEXED`, `cargo xtask check-exact`), so no `cargo update` takes a new release of one unasked. Taking one on purpose
+Today `d/xb` holds `true`: an index is built or it isn't. The crates above, but for charabia's matching crates, are
+required at exact versions (`INDEXED`, `cargo xtask check-exact`), so no `cargo update` takes a new release of one
+unasked. Taking one on purpose
 changes what an index holds all the same:
 
 - **A tokenizer release that splits or stems a word differently:** a query no longer finds the terms the index holds
   for it, and `check()` reports a sound database as differing.
 - **A hannoy release that lays out its graph differently:** reads misread a graph the release before built.
 
-The design takes from `d/xob`, the marker of an order of strings (`string-order.md`). A write consults that marker
-before it files, and one of another stamp is deleted and nothing is filed (`order::filing`). Its keys sit under a
-build, so no write mixes two layouts. A marker of `true` gives none of that: a write keeps an index's keys whether or
-not it is built, and reads what is stored to do it (`text::file` decodes `d/fd`), and a build files from the first
-place without clearing first (`build_index`, `engine/builder.rs`). So:
+The design takes from `d/xob`, the marker of an order of strings (`../archive/roadmap/string-order.md`). A write
+consults that marker before it files, and one of another stamp is deleted and nothing is filed (`order::filing`). Its
+keys sit under a build, so no write mixes two layouts. A marker of `true` gives none of that: a write keeps an index's
+keys whether or not it is built, and reads what is stored to do it (`text::file` decodes `d/fd`), and a build files from
+the first place without clearing first (`build_index`, `engine/builder.rs`). So:
 
 1. **Each index has a marker of its layout:** `[number, hash, state]`.
    - `number` is elmdb's layout number for the index's kind.

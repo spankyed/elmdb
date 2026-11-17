@@ -103,8 +103,8 @@ for it:
 
 ## Later, each its own decision
 
-- LMDB 1.0 through `heed3`, crossed by a dump and a load, once hannoy runs on heed3 and heed3's LMDB is a 1.0 release: page checksums
-  and encryption (`roadmap/format-freeze.md`).
+- LMDB 1.0 through `heed3`, crossed by a dump and a load, once hannoy runs on heed3 and heed3's LMDB is a 1.0 release:
+  encryption and incremental backup (`roadmap/format-freeze.md`).
 - Scratch files with a configured placement and quota, reclaimed after a hard exit (`elmdb-check-*` directories a SIGKILL
   leaves; `architecture/engine.md`, Recovery resources).
 - `NOT_DURABLE` naming the tokens its commit touched, so a caller invalidates those rather than every watch.
