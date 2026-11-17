@@ -672,40 +672,82 @@ impl Database {
     /// (`UNIT_OPEN`): a build waits for the unit to end, and a unit open on the calling thread never would. Refused
     /// on the thread of the builder it would wait for (`CALLBACK_ACTIVE`), by a listener one of its commits
     /// delivered to: those builds go on once the listener returns. A listener that changed the schema waits for
-    /// the builder started for it, which is another thread's
+    /// the builder started for it, which is another thread's. Refused the same in any listener while a schema
+    /// change or a close has the builder stopped and the next not started: either may be waiting for the listener.
+    ///
+    /// A schema change stops the builder and starts another for what is left: a wait under way goes on to that one,
+    /// and answers for the schema the database holds when it returns. A close stops it for good, and the wait is
+    /// told so (`CLOSED`), as it is of a database closed before it
     pub fn wait_for_index_builds(&self) -> Result<()> {
-        // Taken out of the slot, which stays free while this waits: a schema change or a close stops the builder
-        let Some((waiter, here)) = self.builder().as_ref().map(|builder| (builder.waiter(), builder.on_its_thread()))
-        else {
-            return Ok(());
+        let waiter = loop {
+            let store = self.store()?;
+            // Taken out of the slot, which stays free while this waits: a schema change or a close stops the builder
+            let waiter = {
+                let slot = self.builder();
+                match slot.as_ref() {
+                    // On the builder's own thread, in a listener one of its commits delivered to, the builds wait for
+                    // the listener to return: the wait would be for itself
+                    Some(builder) if builder.on_its_thread() => {
+                        return Err(Error::new(
+                            ErrorCode::CallbackActive,
+                            "A listener is running on the builder's thread, and the builds wait for it to return: \
+                             wait for them after it has",
+                        ));
+                    }
+                    Some(builder) => Some(builder.waiter()),
+                    // No builder, and no change that took one away and is still to start the next: nothing waits
+                    // to be built
+                    None if !self.replacing.in_progress() => return Ok(()),
+                    None => None,
+                }
+            };
+            if store.unit_is_open() {
+                return Err(Error::new(
+                    ErrorCode::UnitOpen,
+                    "A unit is open, and an index build waits for it to end: commit or abort it, then wait for the \
+                     builds",
+                ));
+            }
+            // Let go of before the wait: a close waits for every hold on the store but its own
+            drop(store);
+            // Waits for the schema change or the close that has the builder stopped to end. It may be waiting for
+            // this thread: for the builder it stopped, whose commit delivered to the listener running here, or for
+            // what the operation the listener is called from holds
+            let await_change = || -> Result<()> {
+                if watch::in_callback(&self.tracks) {
+                    return Err(Error::new(
+                        ErrorCode::CallbackActive,
+                        "A schema change or a close is under way, which a listener running on this thread may keep \
+                         from ending, and the index builds wait for it: wait for them after the listener returns",
+                    ));
+                }
+                self.replacing.await_end();
+                Ok(())
+            };
+            let Some(waiter) = waiter else {
+                await_change()?;
+                continue;
+            };
+            // Held up by what refused its work with nothing made, the builder waits it out: told so, the caller tries
+            // again
+            if let Some(held) = waiter.wait() {
+                return Err(Error::new(
+                    held.code,
+                    format!(
+                        "The index builds wait for what refused their last write, and go on once it passes: call this \
+                         again after a pause to wait on. What refused it: {}",
+                        held.message
+                    ),
+                ));
+            }
+            if !waiter.stopped() {
+                break waiter;
+            }
+            // Stopped with builds left, by a change that the next pass finds ended: a schema change's builder to
+            // wait on, a close that gave up with the builds queued again, or the database closed
+            await_change()?;
         };
-        // On the builder's own thread, in a listener one of its commits delivered to, the builds wait for the
-        // listener to return: the wait would be for itself
-        if here {
-            return Err(Error::new(
-                ErrorCode::CallbackActive,
-                "A listener is running on the builder's thread, and the builds wait for it to return: wait for them \
-                 after it has",
-            ));
-        }
-        if self.store()?.unit_is_open() {
-            return Err(Error::new(
-                ErrorCode::UnitOpen,
-                "A unit is open, and an index build waits for it to end: commit or abort it, then wait for the builds",
-            ));
-        }
-        // Held up by what refused its work with nothing made, the builder waits it out: told so, the caller tries again
-        if let Some(held) = waiter.wait() {
-            return Err(Error::new(
-                held.code,
-                format!(
-                    "The index builds wait for what refused their last write, and go on once it passes: call this again \
-                     after a pause to wait on. What refused it: {}",
-                    held.message
-                ),
-            ));
-        }
-        let failures = self.builder().as_ref().map(Builder::failures).unwrap_or_default();
+        let failures = waiter.failures();
         if failures.is_empty() {
             return Ok(());
         }

@@ -2819,6 +2819,33 @@ fn a_close_that_leaves_the_database_open_leaves_its_builder_s_commits_heard() {
     assert_eq!(Arc::strong_count(&listener), 1, "a close that closes drops whoever is listening");
 }
 
+/// A close that gives up has stopped the builder, and queues again what was left to build. A wait for the builds
+/// asked for before it has waits for that: answered then, it would say built of what no builder was building
+#[test]
+fn a_wait_for_the_builds_asked_for_as_a_close_gives_up_waits_for_what_it_queues_again() {
+    use std::rc::Rc;
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(open_with(&dir, schema("out", true)));
+    write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (tell, told) = mpsc::channel();
+    let told = Rc::new(told);
+    let (waiting, answered) = (Arc::clone(&db), Rc::clone(&told));
+    crate::failpoints::run_once_here(crate::failpoints::points::CLOSE_GAVE_UP, move || {
+        std::thread::spawn(move || tell.send(waiting.wait_for_index_builds()).unwrap());
+        let early = answered.recv_timeout(Duration::from_millis(200));
+        assert!(early.is_err(), "answered {early:?} before the close had queued what is left to build");
+    });
+    let held = db.store().unwrap();
+    assert!(!db.close_within(Some(Duration::from_millis(5))).unwrap());
+    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::CLOSE_GAVE_UP));
+    drop(held);
+    told.recv_timeout(Duration::from_secs(4)).expect("the wait went on once the close had given up").unwrap();
+    db.close().unwrap();
+}
+
 #[test]
 fn a_close_stops_a_builder_started_after_it_stopped_the_first() {
     let dir = tempfile::tempdir().unwrap();

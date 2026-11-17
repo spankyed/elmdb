@@ -148,8 +148,12 @@ index's are, so read part way it would answer from the entities filed so far and
 out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller to make again; with `INDEX_BUILD_FAILED`, naming
 each, when a build failed; while a unit is open, once the database has started its index builder (`UNIT_OPEN`),
 since a build waits for the unit to end; and in a listener running on the builder's thread (`CALLBACK_ACTIVE`). With
-no builder started, it answers at once. A tracked read and a watch are told by the commit that
-ends the build (below, Change sets and watch).
+no builder started, it answers at once. A schema change stops the builder and starts another for what the schema it
+leaves has to build: a wait under way goes on to that one, and one asked for between the two waits for the second, so
+its answer is for the schema the database holds as it returns. A close stops the builder with builds left for the next
+open, and a wait under way is told `CLOSED`, as one asked of a closed database is; where the close gives up, the wait
+goes on to the builds it queues again. A tracked read and a watch are told
+by the commit that ends the build (below, Change sets and watch).
 
 A plan is a scope, a start, steps and a terminal, and holds at most 256 steps (`MAX_STEPS`, `engine/reads.rs`): each
 step is a frame of the walk that pulls ids through the steps before it, and one past that is refused
@@ -777,7 +781,9 @@ in either order. `db.sequence` is the last commit's.
   The listener of the builder's commits is such a callback, run on the builder's thread, and a close it asks for
   is refused the same way: a close waits for the store that thread holds. So is a wait for the index builds asked
   for on the thread of the builder it would wait for, which would wait for the listener asking; a listener that
-  changed the schema waits for the builder started for it. The listener is let go of inside the callback too, so
+  changed the schema waits for the builder started for it. A wait any listener asks for while a schema change or a
+  close made elsewhere has the builder stopped is refused too: the change waits for the builder's thread, and so for a
+  listener running on it, and the wait would wait for the change. The listener is let go of inside the callback too, so
   the last of a database it held closes nothing that waits for the builder's thread: the environment is let go of
   as that thread ends. One that panics is heard no more, and the builder goes on. A schema change made by a listener on that thread,
   a watch's or the builder's commits', stops the builder without waiting for it, there being no other thread to
@@ -974,7 +980,7 @@ detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
 A code names what went wrong, not the call that met it, so one failure met by two calls is one code. `CALLBACK_ACTIVE`
 is a call that waits for what a listener of the database is called from, made by that listener: a `close`, from a
 watch's listener or the listener of the builder's commits, and a `waitForIndexBuilds` on the thread of the builder it
-would wait for. Either would wait for itself, and either is made after the listener returns (above, Change sets and
+would wait for, or in any listener while a schema change or a close has that builder stopped. Either would wait for itself, and either is made after the listener returns (above, Change sets and
 watch). Both are calls of the Rust API: the binding has no watch, and hands each of the builder's commits to its
 JavaScript listener on the main thread, after the builder has gone on, so from JavaScript neither arises.
 

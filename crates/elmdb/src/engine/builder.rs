@@ -363,6 +363,17 @@ impl Waiter {
     pub fn wait(&self) -> Option<crate::Error> {
         self.0.wait()
     }
+
+    /// Whether the builder was told to stop, by a schema change or a close: what it had left is then another
+    /// builder's, or no one's
+    pub fn stopped(&self) -> bool {
+        self.0.stopping()
+    }
+
+    /// The builds that failed, of the builder waited on
+    pub fn failures(&self) -> Vec<IndexFailure> {
+        self.0.lock().failures.clone()
+    }
 }
 
 impl Drop for Builder {

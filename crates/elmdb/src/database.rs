@@ -2,7 +2,7 @@
 //! (`docs/architecture/engine.md`, Opening).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::time::Duration;
@@ -86,6 +86,8 @@ pub struct Database {
     report: OpenReport,
     /// Builds the indexes that wait for it; none in a read-only database
     builder: Arc<Mutex<Option<crate::engine::Builder>>>,
+    /// The schema changes and closes that have taken the builder from its slot and not yet finished
+    pub(crate) replacing: Replacing,
     /// The tracked reads' read sets, and the database's watches
     pub(crate) tracks: crate::engine::watch::SharedTracks,
     /// Held by a rebuild from before it makes room in the map until its commit has been delivered: rebuilds asked on
@@ -186,6 +188,7 @@ impl Database {
             schema: RwLock::new(schema),
             report,
             builder: Arc::new(Mutex::new(builder)),
+            replacing: Replacing::default(),
             tracks,
             rebuilding: Default::default(),
         })
@@ -228,6 +231,9 @@ impl Database {
         // the database take them, and would wait on this thread as it waits on theirs. One started meanwhile, by a
         // commit that left it work, stops the same way; a unit begun meanwhile refuses the change as it does any write
         let mut interrupted = Vec::new();
+        // From before a builder is taken until the one for the schema held after is in the slot: a wait for the
+        // index builds that finds the slot empty between the two waits for this change to end
+        let replacing = self.replacing.begin();
         loop {
             let running = self.builder().take();
             let Some(mut builder) = running else { break };
@@ -261,6 +267,8 @@ impl Database {
             builder.queue(unbuilt);
             *self.builder() = Some(builder);
         }
+        // Ended before the change's commit is delivered: a listener it tells may wait for the builds
+        drop(replacing);
         drop(current);
         let AppliedSchema { report, commit, .. } = applied?;
         if let Some(commit) = commit {
@@ -424,7 +432,7 @@ impl Database {
         {
             return Ok(false);
         }
-        let (taken, running) = {
+        let (taken, running, replacing) = {
             // Held while the builder is told to stop and the store is taken, so a schema change can't start a builder
             // after; released before either is waited for. At exit it is waited for until the deadline: on Windows the
             // exit handlers run after every other thread was ended, and one ended holding the schema for reading (a
@@ -449,11 +457,14 @@ impl Database {
                 Some(store) if store.unit_is_open() => return Ok(false),
                 Some(_) => {}
             }
+            // Until the close returns: one that gives up queues what is left to build again, and a wait for the
+            // builds that finds the slot empty before then waits for that
+            let replacing = self.replacing.begin();
             let running = self.builder().take();
             if let Some(builder) = &running {
                 builder.tell_to_stop();
             }
-            (slot.take(), running)
+            (slot.take(), running, replacing)
         };
         stop(running);
         let Some(mut store) = taken else { return Ok(true) };
@@ -470,6 +481,10 @@ impl Database {
                     let left = deadline.map_or(std::time::Duration::ZERO, |deadline| {
                         deadline.saturating_duration_since(std::time::Instant::now())
                     });
+                    // The close can no longer give up, and whoever waits for it is told the database is closed.
+                    // Ended before the store closes, which waits for its own threads: a listener one of them runs
+                    // may be among those waiting
+                    drop(replacing);
                     let closed = if at_exit { store.close_at_exit(left) } else { store.close() };
                     return closed.map(|()| true);
                 }
@@ -479,6 +494,7 @@ impl Database {
                         let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
                         synced?;
+                        run_point!(CLOSE_GAVE_UP);
                         // The database stays open with its builder stopped: what is left to build is queued again,
                         // as an open queues it, or a read of an unbuilt index would be told to wait for no one
                         // A close that gave up answers that it did: what keeps the builds from being queued, another
@@ -522,6 +538,55 @@ struct AppliedSchema {
     report: OpenReport,
     unbuilt: Vec<crate::engine::Work>,
     commit: Option<crate::store::Commit>,
+}
+
+/// The schema changes and closes in progress that have taken the builder from its slot to stop it. Each leaves the
+/// slot empty until it ends, with builds still owed that the builder it starts or queues for then takes up, and a
+/// wait for the index builds that found the slot empty would answer that nothing is left to build. It waits here
+/// for them to end instead
+#[derive(Default)]
+pub(crate) struct Replacing {
+    /// How many are in progress
+    changes: Mutex<usize>,
+    ended: Condvar,
+}
+
+impl Replacing {
+    fn changes(&self) -> std::sync::MutexGuard<'_, usize> {
+        // A count: whatever panicked holding it left it whole
+        self.changes.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Begins a change, which ends when what this answers is dropped. Begun before the builder is taken from its
+    /// slot, so whoever finds the slot empty with none in progress knows no change emptied it
+    pub(crate) fn begin(&self) -> Replace<'_> {
+        *self.changes() += 1;
+        Replace(self)
+    }
+
+    /// Whether a change is in progress. Asked with the builder's slot held, it says whether an empty slot is one a
+    /// change is still to fill
+    pub(crate) fn in_progress(&self) -> bool {
+        *self.changes() > 0
+    }
+
+    /// Blocks until no change is in progress
+    pub(crate) fn await_end(&self) {
+        let mut changes = self.changes();
+        while *changes > 0 {
+            changes = self.ended.wait(changes).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
+}
+
+/// A change in progress (`Replacing`), ended when dropped
+pub(crate) struct Replace<'a>(&'a Replacing);
+
+impl Drop for Replace<'_> {
+    fn drop(&mut self) {
+        *self.0.changes() -= 1;
+        self.0.ended.notify_all();
+    }
 }
 
 /// The builder over `schema`, whose chunks commit as writes do
