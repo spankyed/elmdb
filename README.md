@@ -159,7 +159,7 @@ Needs Rust, which `rust-toolchain.toml` pins, Node, and [cargo-nextest](https://
 ```sh
 npm ci && npm run build && npm test  # the binding and its tests
 cargo nextest run --workspace        # the Rust suites
-cargo run -p elmdb-cli -- check DIR  # also: inspect, backup, dump, load, acknowledge-restore
+cargo run -p elmdb-cli -- check DIR  # also: inspect, rebuild, backup, dump, load, acknowledge-restore
 ```
 
 ## License

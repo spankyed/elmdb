@@ -96,7 +96,8 @@ no format as damaged (`CORRUPTED`).
 
 **The format is 1 until a release has users** (apack's `docs/archive/plans/storage-format-one.md`). Until then a change to the
 stored layout edits format 1 in place: the number doesn't move, and no upgrade step is written. A change to derived data
-needs nothing, `rebuild()` building it from primary data. A derived tag a layout stops writing under is retired
+needs nothing, `rebuild()` building it from primary data (`elmdb rebuild <dir>` for a database on disk, which
+refuses a directory that holds none rather than making one). A derived tag a layout stops writing under is retired
 (`Prefix::RETIRED`, `d/fp` so far): no prefix takes it again, and a `rebuild()` of everything clears what a database
 still holds under it. The databases that exist are their developers', reset or
 converted once on a copy (Dumps, below). The accepted cost is that a build may misread a database from before an
