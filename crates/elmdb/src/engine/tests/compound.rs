@@ -1833,6 +1833,8 @@ fn a_write_of_several_fields_of_an_index_is_held_to_the_key_of_the_values_it_lea
     };
     db.bulk_load(&[load(&a, "short")]).unwrap();
     assert_eq!(found(&a, json!("short")), vec![id(0)]);
+    db.bulk_load(&[load("open", &b)]).unwrap();
+    assert_eq!(found("open", json!(b)), vec![id(0)]);
     assert_eq!(db.bulk_load(&[load(&a, &b)]).unwrap_err().code, ErrorCode::ValueInvalid);
     assert!(db.check().unwrap().is_clean());
 }
