@@ -409,7 +409,8 @@ fn a_dump_and_a_load_each_write_something_new_and_a_damaged_dump_or_a_failed_loa
     // An id longer than LMDB's keys can hold fails the load, which leaves no database behind and can run again
     let failing = work.path().join("failing.dump");
     let mut file = bytes.clone();
-    let end = file.len() - 12;
+    // Before the end marker, the load count and the last commit's sequence
+    let end = file.len() - 20;
     let long = rmp_serde::to_vec_named(&Load::Entity {
         id: format!("Task-{}", "x".repeat(600)),
         fields: BTreeMap::new(),
@@ -419,12 +420,13 @@ fn a_dump_and_a_load_each_write_something_new_and_a_damaged_dump_or_a_failed_loa
     let mut framed = (long.len() as u32).to_le_bytes().to_vec();
     framed.extend(long);
     file.splice(end..end, framed);
-    let count = u64::from_le_bytes(file[file.len() - 8..].try_into().unwrap()) + 1;
-    let at = file.len() - 8;
-    file[at..].copy_from_slice(&count.to_le_bytes());
+    let at = file.len() - 16;
+    let count = u64::from_le_bytes(file[at..at + 8].try_into().unwrap()) + 1;
+    file[at..at + 8].copy_from_slice(&count.to_le_bytes());
     std::fs::write(&failing, &file).unwrap();
     let target = work.path().join("c");
-    assert!(crate::dump::load(&failing, &target).is_err());
+    // Refused for the id, not for the file: a footer misread would be WRONG_FORMAT
+    assert_eq!(crate::dump::load(&failing, &target).unwrap_err().code, crate::ErrorCode::ValueInvalid);
     assert!(!target.join("data.mdb").exists(), "a failed load leaves no database behind");
     crate::dump::load(&path, &target).expect("the target takes a second load");
 }

@@ -656,6 +656,7 @@ dependencies = [
  "criterion",
  "dhat",
  "fail",
+ "finl_unicode",
  "getrandom 0.4.3",
  "gungraun",
  "hannoy",
@@ -698,6 +699,8 @@ dependencies = [
  "thiserror",
  "tracing",
  "ts-rs",
+ "unicode-normalization",
+ "whatlang",
  "windows-sys 0.61.2",
  "zstd",
 ]

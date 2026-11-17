@@ -492,7 +492,7 @@ suite calls.
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
 Its jobs there: `checks` (on Node 23: format, clippy with and without the `diagnostics` feature, the workspace's suite,
 the engine's with `diagnostics`, the doc tests); `heap` (the maintenance heap bound and the benchmarks' smoke runs);
-`repo` (on Node 23: `cargo xtask check-generated`, `check-one-lmdb`, `check-icu-exact`, `check-diagnostics-off`,
+`repo` (on Node 23: `cargo xtask check-generated`, `check-one-lmdb`, `check-exact`, `check-diagnostics-off`,
 `check-leiden-serial`, `check-sync`, `check-commits` and `check-mutant-exclusions`; the binding's build, typecheck and
 suite; the read profile; SQLite's comparison at 2,000 notes; the read-only mount, idle-reader, reader-recovery,
 process-claim and publication scripts under `scripts/`; and that the generated loader and declarations are
