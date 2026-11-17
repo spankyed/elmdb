@@ -52,6 +52,6 @@
   },
   "dependencies": {
     "elmdb": "file:../../vendor/elmdb/crates/elmdb-node",
-    "msgpackr": "^1.11.9"
+    "msgpackr": "^2.1.4"
   }
 }

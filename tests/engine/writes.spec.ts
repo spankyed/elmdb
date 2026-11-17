@@ -461,6 +461,12 @@ describe('rows', () => {
     holds(warned.query('Task').where('n', 1).pickAll()[0]!.meta);
   });
 
+  it('a string holding a lone surrogate is stored with U+FFFD in its place, since msgpack strings are UTF-8', () => {
+    const id = e.create('Task').set('title', 'caf\ud800').id();
+    expect(e.getAttr(id, 'title')).toBe('caf�');
+    expect(e.getRow(id)!.title).toBe('caf�');
+  });
+
   it('a schema naming a type __proto__ is refused for that name, which the database holds PascalCase', () => {
     // A computed key, since a literal's `__proto__:` sets the prototype
     const rules = { ['__proto__']: { required: ['title'], indexes: ['title'] } };
