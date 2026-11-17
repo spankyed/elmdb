@@ -88,7 +88,7 @@ One product name, with the host language as the suffix:
 |---|---|---|
 | `elmdb` | (none) | the engine and its Rust API |
 | `elmdb-node` | `elmdb` | the N-API binding |
-| `elmdb-cli` | (none) | the `elmdb` command: `inspect`, `check`, `backup`, `dump`, `load`, `acknowledge-restore` |
+| `elmdb-cli` | (none) | the `elmdb` command: `inspect`, `check`, `rebuild`, `backup`, `dump`, `load`, `acknowledge-restore` |
 
 Another host follows the pattern (`elmdb-py`). A new crate needs a reason, such as independent reuse or compile time;
 otherwise it is a module.

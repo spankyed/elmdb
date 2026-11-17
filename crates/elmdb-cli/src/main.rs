@@ -1,4 +1,4 @@
-//! The `elmdb` command: inspect, check, back up, dump and load databases. Each opens the database itself, so the app
+//! The `elmdb` command: inspect, check, rebuild, back up, dump and load databases. Each opens the database itself, so the app
 //! that holds one open must close it first, except for `inspect`, `check`, `backup` and `dump`, which open it read-only.
 
 use std::path::PathBuf;
@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use elmdb::{Database, OpenOptions};
 
 #[derive(Parser)]
-#[command(name = "elmdb", version, about = "Inspect, check, back up, dump and load elmdb databases")]
+#[command(name = "elmdb", version, about = "Inspect, check, rebuild, back up, dump and load elmdb databases")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -21,6 +21,9 @@ enum Command {
     Inspect { dir: PathBuf },
     /// Compares derived data with primary data and every row with the schema's rules; exits 1 when it finds anything
     Check { dir: PathBuf },
+    /// Deletes every index's derived data and writes what primary data derives, in one durable unit: what a database
+    /// an older elmdb built needs once its format changed derived data in place. Opens the database to write
+    Rebuild { dir: PathBuf },
     /// A compacted copy of a database into a new directory
     Backup { dir: PathBuf, target: PathBuf },
     /// A database's schema and primary data into a new file, which `load` makes a database of again
@@ -33,6 +36,14 @@ enum Command {
 
 fn read_only(dir: &PathBuf) -> elmdb::Result<Database> {
     told(Database::open(dir, OpenOptions { read_only: true, ..Default::default() })?)
+}
+
+/// An existing database, opened to write. A writable open makes a database where there is none, which a command given a
+/// mistyped directory must not do, so a read-only open goes first: it refuses a directory that holds none
+/// (`NO_DATABASE`), and closes before the writable one opens
+fn existing(dir: &PathBuf) -> elmdb::Result<Database> {
+    Database::open(dir, OpenOptions { read_only: true, ..Default::default() })?.close()?;
+    told(Database::open(dir, OpenOptions::default())?)
 }
 
 /// The database, its open having said on the error stream what its caller is to hear: a restore no caller has said it
@@ -65,6 +76,13 @@ fn run(command: Command) -> elmdb::Result<bool> {
             println!("{}", serde_json::to_string_pretty(&report).expect("a report serializes"));
             Ok(report.is_clean())
         }
+        Command::Rebuild { dir } => {
+            let db = existing(&dir)?;
+            db.rebuild(None)?;
+            db.close()?;
+            println!("Rebuilt every index of {}", dir.display());
+            Ok(true)
+        }
         Command::Backup { dir, target } => {
             let db = read_only(&dir)?;
             db.backup(&target)?;
@@ -82,7 +100,7 @@ fn run(command: Command) -> elmdb::Result<bool> {
             Ok(true)
         }
         Command::AcknowledgeRestore { dir } => {
-            let db = told(Database::open(&dir, OpenOptions::default())?)?;
+            let db = existing(&dir)?;
             let had = db.open_report().restored.is_some();
             db.acknowledge_restore()?;
             db.close()?;

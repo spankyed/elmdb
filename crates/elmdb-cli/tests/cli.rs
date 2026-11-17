@@ -122,4 +122,73 @@ fn every_command_says_a_power_loss_restored_the_database_until_it_is_acknowledge
     assert!(!out.contains("Restored"), "said again once acknowledged: {out}");
     let (_, out) = elmdb(&["acknowledge-restore", lost]);
     assert!(out.contains("No restore to acknowledge"), "{out}");
+    // It writes, and takes a directory with no database for a mistake rather than making one there
+    let nothing = dir.path().join("nothing");
+    let (code, out) = elmdb(&["acknowledge-restore", nothing.to_str().unwrap()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("NO_DATABASE"), "{out}");
+    assert!(!nothing.exists(), "a database was made where there was none");
+}
+
+/// Deletes every type's count (`d/c`): derived data that differs from what primary data derives, as an elmdb whose
+/// format changed derived data in place leaves a database an older one built (`docs/architecture/format.md`, Versions)
+fn without_counts(path: &std::path::Path) -> usize {
+    use heed::types::Bytes;
+    // SAFETY: LMDB requires that one process not open an environment twice; the database at `path` is closed, and this
+    // is the one environment open on it, dropped before the function returns
+    let env = unsafe { heed::EnvOpenOptions::new().max_dbs(8).open(path) }.unwrap();
+    let db: heed::Database<Bytes, Bytes> = env
+        .open_databases_and_commit(env.read_txn().unwrap(), |opener, rtxn| -> heed::Result<_> {
+            Ok(heed::CommitOrAbort::<_, ()>::Commit(opener.open_database(rtxn, Some(elmdb::format::DB_NAME))?))
+        })
+        .unwrap()
+        .unwrap_commit()
+        .unwrap();
+    let mut wtxn = env.write_txn().unwrap();
+    let prefix = elmdb::format::Prefix::Count.key();
+    let keys: Vec<Vec<u8>> =
+        db.prefix_iter(&wtxn, prefix.as_bytes()).unwrap().map(|entry| entry.unwrap().0.to_vec()).collect();
+    for key in &keys {
+        db.delete(&mut wtxn, key).unwrap();
+    }
+    wtxn.commit().unwrap();
+    keys.len()
+}
+
+#[test]
+fn rebuilds_derived_data_that_differs_from_what_primary_data_derives() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db");
+    let schema = elmdb::schema::Schema::from_json(&json!({
+        "$schema": elmdb::schema::SCHEMA_LANGUAGE,
+        "types": { "Note": { "fields": { "title": { "type": "string" } } } }
+    }))
+    .unwrap();
+    {
+        let db = Database::open(&path, OpenOptions { schema: Some(schema), ..Default::default() }).unwrap();
+        let batch: Batch = serde_json::from_value(
+            json!({ "ops": [{ "op": "create", "type": "Note", "id": "Note-1", "fields": { "title": "t" } }] }),
+        )
+        .unwrap();
+        db.write(&batch, true).unwrap();
+        db.close().unwrap();
+    }
+    assert!(without_counts(&path) > 0, "the database held a count to delete");
+    let p = path.to_str().unwrap();
+    let (code, out) = elmdb(&["check", p]);
+    assert_eq!(code, 1, "the missing count is a difference: {out}");
+    assert!(out.contains("\"differences\": [\n    {"), "{out}");
+
+    let (code, out) = elmdb(&["rebuild", p]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("Rebuilt every index of"), "{out}");
+    let (code, out) = elmdb(&["check", p]);
+    assert_eq!(code, 0, "the rebuilt database checks clean: {out}");
+
+    // It writes, and takes a directory with no database for a mistake rather than making one there
+    let nothing = dir.path().join("nothing");
+    let (code, out) = elmdb(&["rebuild", nothing.to_str().unwrap()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("NO_DATABASE"), "{out}");
+    assert!(!nothing.exists(), "a database was made where there was none");
 }
