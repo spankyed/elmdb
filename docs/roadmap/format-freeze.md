@@ -10,8 +10,10 @@ the freeze locks, and orders the work.
   in place until a release has users. From that release's tag it is locked, and every change to the stored layout
   bumps it and ships an upgrade (`../architecture/format.md`, Versions).
 - A dump holds the schema and the primary data as loads, and names no key or stored value (dump version 1,
-  `dump.rs`). It doesn't hold the meta keys: not the last commit's sequence (`m/sequence`), the replacement count
-  (`m/epoch`), the tombstones (`l/d`) or the checkpoints (`l/k`).
+  `dump.rs`). Its footer holds the dumped database's last commit sequence, which a load numbers its commits past, so
+  a `changedSince` position read at or before the dump is told to start over (`../architecture/format.md`, Dumps). It
+  doesn't hold the other meta keys: the replacement count (`m/epoch`), the tombstones (`l/d`) or the checkpoints
+  (`l/k`).
 - On 2026-11-16 the repository has no tag, and its packages are at 0.0.0.
 - elmdb is on heed 0.23, whose LMDB is upstream `mdb.master` (0.9) with ITS#10395. A data file records LMDB's data
   version: 1 for 0.9, 3 for 1.0 (`../evidence/phase-1.md`), and each LMDB refuses the other's file
@@ -44,11 +46,11 @@ The costs:
 
 - The last 0.9 build's `elmdb dump` stays installable for as long as a format 1 database is to be moved.
 - A load builds every derived key again, as a `rebuild()` does.
-- What a dump leaves out today breaks a reader that follows the database by sequence. A position or checkpoint from
-  before the load would be read against a new numbering. So before the lock, a dump carries the checkpoints and the
-  last sequence. A load then numbers its commits past that sequence, and marks its last commit as one that replaced
-  every type whole (`changed::replaced`, as a reset does), so a `changedSince` position from before it is answered
-  incomplete and starts over. The dump stays version 1, edited in place as the format is while no release has users.
+- A reader that follows the database by sequence starts over: a load numbers its commits past the dumped
+  database's, and marks its last commit as one that replaced every type whole (`changed::replaced`, as a reset
+  does). A reader that keeps its place in a checkpoint loses it, since a dump holds none. So before the lock, a dump
+  carries the checkpoints too. The dump stays version 1, edited in place as the format is while no release has
+  users.
 - The move is of a database no one writes from the dump on. A position taken from the old database after the dump,
   were it written to, could be past the load's last sequence and answered complete from the new numbering. Nothing
   in a position names its database.
@@ -84,13 +86,14 @@ toolchain brings:
 |---|---|---|
 | value | `d/x`, `d/xp`, `d/xw`, `d/xwp`, `d/xu`, `d/xup`, `d/xl`, `d/xlp` | nothing |
 | an order of strings | `d/xo`, under its marker `d/xob` | icu4x's collator, already in the marker's stamp |
-| text | `d/ft`, `d/fb`, `d/fd`, `d/fl`, `d/fs`, `d/fw` | charabia and rust-stemmers, and what charabia builds on: unicode-normalization, whatlang, aho-corasick, fst |
+| text | `d/ft`, `d/fb`, `d/fd`, `d/fl`, `d/fs`, `d/fw` | charabia and rust-stemmers; what charabia normalizes, detects a language and segments by (unicode-normalization, whatlang, finl_unicode); and its matching crates, aho-corasick and slice-group-by |
 | trigram | `d/g` | the toolchain's Unicode version, through `char::to_lowercase` (`engine/trigram.rs`) |
 | vector | `d/qc`, `d/qp`, `d/qi`, `d/qm`, `d/qj`, `d/qn`, and the graph databases | hannoy |
 | rank | `d/ra`, `d/rk`, `d/rq`, `d/rs` | nothing |
 
-Today `d/xb` holds `true`: an index is built or it isn't. The crates above are caret requirements in `Cargo.toml`, so
-`cargo update` can take a new release of any of them, and so can a crate that depends on elmdb.
+Today `d/xb` holds `true`: an index is built or it isn't. The crates above are required at exact versions
+(`INDEXED`, `cargo xtask check-exact`), so no `cargo update` takes a new release of one unasked. Taking one on purpose
+changes what an index holds all the same:
 
 - **A tokenizer release that splits or stems a word differently:** a query no longer finds the terms the index holds
   for it, and `check()` reports a sound database as differing.
@@ -105,9 +108,9 @@ place without clearing first (`build_index`, `engine/builder.rs`). So:
 1. **Each index has a marker of its layout:** `[number, hash, state]`.
    - `number` is elmdb's layout number for the index's kind.
    - `hash` covers the exact versions of what shapes it, and the output for a few probe strings, as `order::stamp_of`
-     has them for a collator. The crates are listed as the order's `CRATES` lists icu4x's, required at exact
-     versions, and `cargo xtask check-icu-exact` grows to check them against the lockfile. The probes catch what no
-     version records.
+     has them for a collator. The versions are those `INDEXED` holds exactly (`cargo xtask check-exact`), as the
+     order's `CRATES` lists icu4x's. The probes catch what no version records, such as charabia's matching crates,
+     which it requires as ranges.
    - `state` is clearing, building or built.
    - Value, text, trigram and vector indexes keep it in `d/xb`, written through a new helper in place of the seven
      places that write `true` today.
@@ -219,9 +222,9 @@ Milestone 0.3's gate asks the same of the protocol and the error codes. Those ar
    - A build's unit stops when another build has started the index over between its units, and its index isn't
      marked built.
    - An open queues a marker of its own layout left clearing or building, and the builder finishes it.
-   - The xtask fails on a caret requirement of a crate the table names.
-3. **What a dump carries.** A load keeps the checkpoints, and a `changedSince` position from before the dump is told to
-   start over, not answered from the new numbering.
+   - A crate in `INDEXED` at another version gives another hash, and its indexes are started over.
+3. **What a dump carries.** A `changedSince` position read at or before the dump starts over (built,
+   `../architecture/format.md`, Dumps). Left: a load keeps the checkpoints.
 4. **The fixture and its test**, shown failing once on a mutated copy that changes a primary key's encoding.
 5. **The lock:** `format.md`'s Versions names the tag of the first release with users. The tag is the owner's.
 
