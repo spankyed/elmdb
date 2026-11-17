@@ -4,8 +4,8 @@
 //!
 //! The file: the 8 bytes `ELMDBDMP`, a u32 dump version (1), a u32 length and the schema's canonical JSON (length 0:
 //! none), then each load as a u32 length and its msgpack (`Load`, with named fields), then a u32 `0xFFFFFFFF`, a u64
-//! load count and a u64: the sequence of the dumped database's last commit, which a load numbers its commits past. A
-//! file that ends after the count loads with no sequence to number past. Integers are little-endian.
+//! load count and a u64: the sequence of the dumped database's last commit, which a load's last commit is numbered
+//! past. A file that ends after the count loads with no sequence to number past. Integers are little-endian.
 
 use std::io::{BufWriter, Read as _, Write as _};
 use std::path::Path;
@@ -96,7 +96,7 @@ pub fn dump(db: &Database, target: &Path) -> Result<DumpReport> {
 }
 
 /// Reads the dump at `dump` into a new database at `target`, held to the dump's schema, builds its derived data, and
-/// numbers its commits past the dumped database's, telling a reader from that one to start over
+/// numbers its last commit past the dumped database's, telling a reader from that one to start over
 pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
     if target.join("data.mdb").exists() {
         return Err(Error::new(

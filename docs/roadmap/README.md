@@ -21,6 +21,7 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [The JavaScript boundary](javascript-boundary.md) | Designed: lazy rows that decode a field when read, and optimistic units that can span an `await` |
 | [Per-type dictionaries](value-dictionaries.md) | Designed, not to build on today's data: small values compressed with a dictionary trained per type |
 | [A power loss that tears no file](synced-commit.md) | Built, phases 1 to 5, but for phase 5's steps by hand on each platform: the grouped mode keeps the last synced commit, its pages by a read transaction LMDB gives no writer the pages of and its meta page by a record beside the data, so a database is opened at that commit after a power loss, or a sync that failed, where its file could be no commit's |
+| [Freezing format 1](format-freeze.md) | Designed: format 1 stays on LMDB 0.9, edited in place with no bump; the lock holds primary and meta keys and values, the derived keys of no index, and the dump; each index records its layout, and one of another is thrown away and built again |
 | [The text index at scale](text-index-at-scale.md) | Built: fuzzy terms by seeking, a term's places in blocks with their counts, lengths held by place, and ranking read from the two. Designed from readings at a million notes: a commit notes the place it changed and the builder files it |
 
 ## Where the code lives

@@ -104,7 +104,8 @@ in-place change rather than refuse it; the answer is the same reset, or a dump m
 
 **From the first release with users** (its tag is the condition), format 1 is locked: every later change to the stored
 layout bumps the format and ships an upgrade, a Rust function from one format to the next, run on a copy and never on
-open. This section then names the tag.
+open. This section then names the tag. What the lock is to hold, and how each index's recorded layout keeps the index's derived
+data out of it, is designed in `../roadmap/format-freeze.md`.
 
 ## Dumps
 
@@ -115,8 +116,8 @@ and a load by the build after it. That is how our databases are converted once, 
 
 - The file: the 8 bytes `ELMDBDMP`, a u32 dump version (1), a u32 length and the schema's canonical JSON (length 0:
   none), then each load as a u32 length and its msgpack with named fields, then a u32 `0xFFFFFFFF`, a u64 load
-  count and a u64 sequence, the dumped database's last commit's, all little-endian. A load numbers its commits past
-  that sequence, in a commit that tells a reader from before it to start over (`engine.md`, changedSince), so no
+  count and a u64 sequence, the dumped database's last commit's, all little-endian. A load's last commit is numbered
+  past that sequence, and tells a reader from before it to start over (`engine.md`, changedSince), so no
   position read from the dumped database at or before the dump is answered from the new numbering. One read from it
   after the dump, were it written to since, could be. A file that ends after the count, as a build before the
   sequence makes it, loads with none to number past; a dump with the sequence doesn't load into such a build, which
@@ -173,7 +174,9 @@ to move aside (`store/record.rs`).
 
 ## LMDB
 
-elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch.
+elmdb runs on heed's LMDB: upstream `mdb.master` plus one patch. Its files record LMDB's data version 1, and LMDB
+1.0's record 3; neither opens the other's. Format 1 is on this LMDB; a move to 1.0 would be crossed by a dump
+from the last build on 0.9 and a load into the first on 1.0 (`../roadmap/format-freeze.md`).
 
 | Patch | What | Upstream |
 |---|---|---|

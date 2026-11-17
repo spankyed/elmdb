@@ -16,7 +16,7 @@ waiting on a trigger below, which add to them and reorder nothing.
 | 5 | Ranges, ordered reads and a cursor that seeks | `orderBy` and `limit 10` on an indexed field visit about ten entities, and a page costs the same wherever its cursor is | built for booleans, numbers, the engine's times and strings: ten of a million notes read for their first ten, fifty for a page of fifty near either order's end, and a string's order read from the keys its index keeps in the collation's order (`archive/roadmap/string-order.md`, phases 1 to 4; `evidence/million-notes.md`) |
 | 6 | Vector builds off the commit path | one embedding a commit costs within twice a batch's; a commit of one takes under 2 ms at 100,000 vectors | open |
 | 7 | Typed answers and a thin client | answers are generated as the rest of the protocol is, and a test decodes each into its type | built: a write's answer is generated (`Written`, `protocol/Written.ts`), and so is every answer a read or a plan gives (`Answers` and `Answer`, `engine/answer.rs`, generated as `protocol/Answer.ts`), which the binding's declarations name. `engine/tests/answers.rs` makes a read of each of the 24 kinds and `answer::conforms` holds its bytes to its type, every key and none more, as it holds every read the crate's own tests make; `schema-types.test.mjs` decodes a write and a read of 15 kinds into their generated types (`architecture/testing.md`, The binding). The thin client, `elmdb/client.js`, takes and answers those types over the caller's msgpack codec, decoding exactly an answer that may hold `__proto__` (`architecture/design.md`, The boundary with apack; `client.test.mjs`) |
-| 8 | Format 1 frozen | databases and dumps of every tag open and pass `check()` in CI; the move to LMDB 1.0 is decided first | open |
+| 8 | Format 1 frozen | databases and dumps of every tag open and pass `check()` in CI; the move to LMDB 1.0 is decided first | designed (`roadmap/format-freeze.md`): format 1 stays on LMDB 0.9, edited in place with no bump; index-derived data stays out of the lock, each index recording its layout and one of another thrown away and built again. Not built |
 | 9 | Release and supply chain | prebuilt binaries for the seven targets; `cargo-deny` and an audit in CI; the `$schema` URL resolves | open |
 | 10 | A benchmark against SQLite, committed | bytes per note, search and rebuild at a million notes are read for each release | the benchmark is built (`architecture/testing.md`, Against SQLite) and read at a million notes on six days from 2026-11-10 to 2026-11-15 (`evidence/million-notes.md`); no release is tagged, so none is a release's reading |
 
@@ -50,9 +50,11 @@ one of several values, a value other than one, or either of two filters, so a ca
 answers, or filters in JavaScript.
 
 The benchmark comes first, out of its milestone, since it is what the gates below are read from. The indexes' layout
-at a million notes is designed in `roadmap/text-index-at-scale.md` and changes derived keys, so it is built before the
-format is frozen: its first step, a term's places in blocks and ranking read from them, is built. Change 6 waits for
-that design's journal, since a vector index's journal outliving its commit is the same design.
+at a million notes is designed in `roadmap/text-index-at-scale.md`, and its first step, a term's places in blocks and
+ranking read from them, is built. Its journal changes only keys under an index, which the freeze leaves to each index's
+recorded layout (`roadmap/format-freeze.md`), so it can land after the freeze once indexes record theirs; its last
+step moves a type's entities in creation order, which the freeze locks.
+Change 6 waits for that design's journal, since a vector index's journal outliving its commit is the same design.
 
 ## Built
 
@@ -101,7 +103,8 @@ for it:
 
 ## Later, each its own decision
 
-- LMDB 1.0 through `heed3`, once released and supported by hannoy: page checksums and encryption.
+- LMDB 1.0 through `heed3`, crossed by a dump and a load, once hannoy runs on heed3 and heed3's LMDB is a 1.0 release:
+  encryption and incremental backup (`roadmap/format-freeze.md`).
 - Scratch files with a configured placement and quota, reclaimed after a hard exit (`elmdb-check-*` directories a SIGKILL
   leaves; `architecture/engine.md`, Recovery resources).
 - `NOT_DURABLE` naming the tokens its commit touched, so a caller invalidates those rather than every watch.
