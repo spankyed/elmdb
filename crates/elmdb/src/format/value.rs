@@ -6,6 +6,9 @@ use crate::error::{Error, ErrorCode, Result};
 /// msgpack's timestamp extension, how a JavaScript `Date` encodes: the one extension a value may hold
 pub const TIMESTAMP_EXTENSION: i8 = -1;
 
+/// The extension msgpackr writes its records as unless told `useRecords: false`, which a refusal names as the fix
+const MSGPACKR_RECORD_EXTENSION: i8 = 0x72;
+
 /// The deepest a value nests: arrays and maps inside each other. Deeper is refused rather than walked
 pub const MAX_DEPTH: usize = 256;
 
@@ -62,7 +65,12 @@ fn walk(bytes: &mut &[u8], depth: usize) -> std::result::Result<(), String> {
         let ext = take_slice(n + 1, bytes)?;
         let t = ext[0] as i8;
         if t != TIMESTAMP_EXTENSION {
-            return Err(format!("it holds extension type {t}, and the only one allowed is the timestamp (-1)"));
+            let fix = if t == MSGPACKR_RECORD_EXTENSION {
+                ": it is msgpackr's record, which `useRecords: false` leaves out"
+            } else {
+                ""
+            };
+            return Err(format!("it holds extension type {t}, and the only one allowed is the timestamp (-1){fix}"));
         }
         Ok(())
     };
@@ -202,7 +210,11 @@ mod tests {
         let refused = |value: Value| decode(&bytes(&value)).unwrap_err();
         let e = refused(Value::Ext(1, vec![1]));
         assert_eq!(e.code, ErrorCode::ValueInvalid);
-        assert!(e.message.contains("extension type 1"), "{}", e.message);
+        assert!(e.message.contains("extension type 1,"), "{}", e.message);
+        assert!(!e.message.contains("useRecords"), "{}", e.message);
+        // msgpackr's records, which its default writes: the refusal names the option that leaves them out
+        let record = refused(Value::Ext(0x72, vec![0x40, 0x91]));
+        assert!(record.message.contains("extension type 114") && record.message.contains("`useRecords: false`"));
         assert!(refused(Value::Map(vec![(1.into(), Value::Nil)])).message.contains("a map key is a number"));
         assert!(refused(Value::Array(vec![Value::from(f64::NAN)])).message.contains("isn't finite"));
         let mut trailing = bytes(&Value::Nil);
