@@ -309,3 +309,5 @@ main!(library_benchmark_groups = keys, maintenance, read, write, graphs, rank_dr
 fn main() {
     eprintln!("The instruction counts run under Valgrind, on Linux: docs/architecture/testing.md, Instruction counts");
 }
+
+// A probe: no change to the code, to run the full tier on main as it is
