@@ -73,8 +73,10 @@ A value is msgpack bytes, written by the caller and stored as given:
   ignores entry order but preserves each entry's multiplicity;
 - `nil`, booleans, integers, floats, strings, binary, arrays and maps whose keys are strings, and of the extension
   types only msgpack's timestamp (type −1, how a JavaScript `Date` encodes); a write holding any other extension is
-  refused (`VALUE_INVALID`), as is a float that isn't finite and a value that nests deeper than 256
-  (`format/value.rs`). apack's stored values hold no extension at all (`docs/evidence/phase-1.md`);
+  refused (`VALUE_INVALID`), naming msgpackr's `useRecords: false` for the extension its records are written as, and so
+  are a float that isn't finite, a string that isn't UTF-8 and a value that nests deeper than 256 (`format/value.rs`).
+  A string that isn't UTF-8 is what a short JavaScript string holding a lone surrogate encodes to in msgpackr before
+  2.1.4; a write refuses it, as it would otherwise decode as binary where a string was written. apack's stored values hold no extension at all (`docs/evidence/phase-1.md`);
 - the engine decodes a value only where it must: to index it, to check a required field, to filter by it, to extract
   text.
 
