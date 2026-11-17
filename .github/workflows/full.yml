@@ -94,6 +94,19 @@ jobs:
           tool: gungraun-runner@0.20.0
       - run: python3 -B scripts/test-callgrind.py
       - run: python3 scripts/diagnostics-overhead.py
+      - name: probe (what the two binaries hold, and what Valgrind reads of them)
+        if: always()
+        run: |
+          set +e
+          for b in $(ls target/release/deps/instructions-* | grep -v '\.d$'); do
+            echo "=== $b"; ls -la "$b"; file "$b"
+            echo "symbols: $(nm "$b" 2>&1 | wc -l)  wrappers: $(nm -C "$b" 2>&1 | grep -c __gungraun_wrapper_mod)  build_rank: $(nm -C "$b" 2>&1 | grep -c 'builder::build_rank')"
+            nm -C "$b" 2>&1 | grep __gungraun_wrapper_mod | head -8
+            readelf -S -W "$b" | grep -E 'symtab|strtab|debug_|\.text' | head -20
+            readelf -h "$b" | grep -E 'Type|Entry|Number of section'
+            valgrind --tool=callgrind -v --collect-atstart=no '--toggle-collect=*::__gungraun_wrapper_mod::*' --callgrind-out-file=/tmp/probe.out "$b" --gungraun-run d:d:000000 00000 00000 00001 2>&1 | grep -v '^--[0-9]*-- REDIR' | head -60
+            grep -E '^(summary|totals)' /tmp/probe.out
+          done
         env:
           GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
       # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
