@@ -1872,6 +1872,11 @@ fn a_write_that_stamps_the_entity_is_held_to_the_time_it_leaves_in_an_index_hold
         at(vec![json!({ "op": "upsert", "type": "Task", "id": id(1), "fields": { "tag": "v" } })], 3000.0),
         Ok(())
     );
+    let stamped = |task: usize| super::row(&db, &id(task)).unwrap()["updatedAt"].clone();
+    assert_eq!((stamped(0), stamped(1)), (json!(2000), json!(3000)), "an upsert that writes a field stamps the task");
+    // And one that writes none leaves its time
+    assert_eq!(at(vec![json!({ "op": "upsert", "type": "Task", "id": id(1) })], 3500.0), Ok(()));
+    assert_eq!(stamped(1), json!(3000));
     let merged = |task: usize| json!({ "op": "merge", "id": id(task), "field": "tags", "value": { "x": 1 } });
     assert_eq!(at(vec![merged(0)], 4000.0), Ok(()));
     assert_eq!(at(vec![tagged("w")], 4000.0), Ok(()));
