@@ -35,7 +35,8 @@ pub fn decode(bytes: &[u8]) -> Result<rmpv::Value> {
 }
 
 /// Steps over one value's bytes, marker by marker, refusing what the spec doesn't hold: a marker msgpack reserves, a
-/// map key that isn't a string, an extension but the timestamp, and a number that isn't finite
+/// map key that isn't a string, a string that isn't UTF-8, an extension but the timestamp, and a number that isn't
+/// finite
 fn walk(bytes: &mut &[u8], depth: usize) -> std::result::Result<(), String> {
     use rmp::Marker;
     if depth > MAX_DEPTH {
@@ -49,6 +50,18 @@ fn walk(bytes: &mut &[u8], depth: usize) -> std::result::Result<(), String> {
         Ok(value)
     };
     let skip = |n: usize, bytes: &mut &[u8]| take_slice(n, bytes).map(|_| ());
+    // msgpack's strings are UTF-8. One that isn't would decode as bytes where a string was written, and a lone
+    // surrogate in a JavaScript string is what writes one (msgpackr before 2.1.4, for short strings)
+    let string = |n: usize, bytes: &mut &[u8]| -> std::result::Result<(), String> {
+        let text = take_slice(n, bytes)?;
+        std::str::from_utf8(text).map(|_| ()).map_err(|e| {
+            format!(
+                "it holds a string that isn't UTF-8 from its byte {}: write it as UTF-8, a lone surrogate as U+FFFD, or \
+                 bytes as binary",
+                e.valid_up_to()
+            )
+        })
+    };
     let items = |n: usize, bytes: &mut &[u8]| (0..n).try_for_each(|_| walk(bytes, depth + 1));
     let entries = |n: usize, bytes: &mut &[u8]| -> std::result::Result<(), String> {
         for _ in 0..n {
@@ -96,16 +109,28 @@ fn walk(bytes: &mut &[u8], depth: usize) -> std::result::Result<(), String> {
                 not_finite()
             }
         }
-        Marker::FixStr(n) => skip(usize::from(n), bytes),
-        Marker::Str8 | Marker::Bin8 => {
+        Marker::FixStr(n) => string(usize::from(n), bytes),
+        Marker::Str8 => {
+            let n = take(1, bytes)? as usize;
+            string(n, bytes)
+        }
+        Marker::Str16 => {
+            let n = take(2, bytes)? as usize;
+            string(n, bytes)
+        }
+        Marker::Str32 => {
+            let n = take(4, bytes)? as usize;
+            string(n, bytes)
+        }
+        Marker::Bin8 => {
             let n = take(1, bytes)? as usize;
             skip(n, bytes)
         }
-        Marker::Str16 | Marker::Bin16 => {
+        Marker::Bin16 => {
             let n = take(2, bytes)? as usize;
             skip(n, bytes)
         }
-        Marker::Str32 | Marker::Bin32 => {
+        Marker::Bin32 => {
             let n = take(4, bytes)? as usize;
             skip(n, bytes)
         }
@@ -221,5 +246,38 @@ mod tests {
         trailing.push(0xc0);
         assert!(decode(&trailing).unwrap_err().message.contains("1 bytes follow"));
         assert_eq!(decode(&[0xc1]).unwrap_err().code, ErrorCode::ValueInvalid);
+    }
+
+    #[test]
+    fn refuses_a_string_that_isnt_utf8_at_every_length_and_as_a_key() {
+        // A lone surrogate as a JavaScript encoder writes it short: `a\u{d800}`, its surrogate as three bytes no UTF-8
+        // holds
+        let lone = [b'a', 0xed, 0xa0, 0x80];
+        let str_of = |len: usize, header: &[u8]| {
+            let mut out = header.to_vec();
+            out.extend(std::iter::repeat_n(b'x', len - lone.len()));
+            out.extend(lone);
+            out
+        };
+        for bytes in [
+            str_of(4, &[0xa4]),
+            str_of(40, &[0xd9, 40]),
+            str_of(300, &[0xda, 0x01, 0x2c]),
+            str_of(70_000, &[0xdb, 0x00, 0x01, 0x11, 0x70]),
+        ] {
+            let e = validate(&bytes).unwrap_err();
+            assert_eq!(e.code, ErrorCode::ValueInvalid);
+            assert!(e.message.contains("isn't UTF-8 from its byte"), "{}", e.message);
+        }
+        // As a map's key, and inside a list
+        assert!(validate(&[0x81, 0xa4, b'a', 0xed, 0xa0, 0x80, 0xc0]).is_err());
+        assert!(validate(&[0x91, 0xa4, b'a', 0xed, 0xa0, 0x80]).is_err());
+        // The same bytes as binary are bytes, and a string of every width that is UTF-8 is taken
+        assert!(validate(&[0xc4, 4, b'a', 0xed, 0xa0, 0x80]).is_ok());
+        assert!(validate(&[0xc5, 0, 4, b'a', 0xed, 0xa0, 0x80]).is_ok());
+        assert!(validate(&[0xc6, 0, 0, 0, 4, b'a', 0xed, 0xa0, 0x80]).is_ok());
+        for text in ["", "café", &"é".repeat(40), &"x".repeat(300), &"x".repeat(70_000)] {
+            assert_eq!(decode(&bytes(&Value::from(text))).unwrap(), Value::from(text), "{}", text.len());
+        }
     }
 }

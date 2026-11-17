@@ -395,6 +395,30 @@ fn refuses_a_value_its_field_doesnt_take_and_a_field_its_type_doesnt_declare() {
 }
 
 #[test]
+fn refuses_a_string_that_isnt_utf8_whatever_field_holds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // A batch whose string is `aXYZ`, its last three bytes made the lone surrogate a JavaScript encoder can write
+    let with_lone_surrogate = |entity_type: &str, field: &str| {
+        let mut bytes = rmp_serde::to_vec_named(&batch(vec![
+            json!({ "op": "create", "type": entity_type, "fields": { field: "aXYZ" } }),
+        ]))
+        .unwrap();
+        let at = bytes.windows(5).position(|w| w == [0xa4, b'a', b'X', b'Y', b'Z']).expect("the string's bytes");
+        bytes[at + 2..at + 5].copy_from_slice(&[0xed, 0xa0, 0x80]);
+        bytes
+    };
+    // A string field, which would otherwise have been told it got bytes, and a field of any type, which would have
+    // stored it as bytes
+    for (entity_type, field) in [("Doc", "title"), ("Bag", "anything")] {
+        let e = db.write_bytes(&with_lone_surrogate(entity_type, field), false).unwrap_err();
+        assert_eq!(e.code, ErrorCode::ValueInvalid, "{entity_type}.{field}: {}", e.message);
+        assert!(e.message.contains("a string that isn't UTF-8 from its byte 1"), "{}", e.message);
+    }
+    assert_eq!(db.stats().unwrap().types.values().map(|t| t.live).sum::<u64>(), 0, "nothing was written");
+}
+
+#[test]
 fn upsert_creates_with_the_id_when_none_has_it_and_writes_the_row_when_one_does() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
