@@ -166,5 +166,9 @@ cargo run -p elmdb-cli -- check DIR  # also: inspect, rebuild, backup, dump, loa
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
 
+elmdb statically links LMDB, which is under [the OpenLDAP Public License](LICENSE-OPENLDAP). A binary that includes
+elmdb, such as the npm package's `.node` files or the `elmdb` command, includes LMDB, so redistributing it means
+complying with that license too: carry `LICENSE-OPENLDAP`, which holds LMDB's copyright statements and the license.
+
 Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in this work, as defined in
 the Apache-2.0 license, is dual-licensed as above, without any additional terms or conditions.
