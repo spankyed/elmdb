@@ -563,7 +563,8 @@ The operations:
   `SHORT_CODE_IN_USE`; a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that
   would pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
   (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
-  (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
+  (`VALUE_INVALID`), a time that isn't a finite number, the batch's `now`, a create's `createdAt` or `updatedAt` or a
+  trash's `at` (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or an edge
   moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
   to an entity it creates later. A relation moved by `updateRelation` is held to its kind's rules as an edge at its new

@@ -205,6 +205,44 @@ fn takes_the_id_and_times_a_row_brings() {
 }
 
 #[test]
+fn refuses_a_time_that_isnt_a_finite_number_and_stores_none_of_its_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let create = |created_at: Option<f64>, updated_at: Option<f64>| Op::Create {
+        entity_type: "Task".into(),
+        id: Some("Task-2".into()),
+        fields: Default::default(),
+        short_code: None,
+        created_at,
+        updated_at,
+    };
+    let set = || op(json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } }));
+    let batches = [
+        ("the batch's time", Batch { ops: vec![set()], now: Some(f64::NAN) }),
+        ("the batch's time, infinite", Batch { ops: vec![set()], now: Some(f64::INFINITY) }),
+        ("createdAt", Batch { ops: vec![create(Some(f64::NAN), None)], now: Some(1000.0) }),
+        ("updatedAt", Batch { ops: vec![create(None, Some(f64::NEG_INFINITY))], now: Some(1000.0) }),
+        (
+            "a trash's time",
+            Batch { ops: vec![Op::Trash { id: "Task-1".into(), at: Some(f64::NAN) }], now: Some(1000.0) },
+        ),
+    ];
+    for (what, batch) in &batches {
+        let refused = db.write(batch, false).expect_err(what);
+        assert_eq!(refused.code, ErrorCode::ValueInvalid, "{what}: {}", refused.message);
+        assert!(refused.message.contains("finite"), "{what}: {}", refused.message);
+        // In a unit too, which goes on with nothing of the batch in it
+        let mut unit = db.begin().unwrap();
+        assert_eq!(unit.write(batch).expect_err(what).code, ErrorCode::ValueInvalid, "{what}");
+        unit.commit(false).unwrap();
+    }
+    assert_eq!(row(&db, "Task-1").unwrap(), json!({ "createdAt": 1000, "shortCode": "TSK-1", "updatedAt": 1000 }));
+    assert!(row(&db, "Task-2").is_none());
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
 fn refuses_the_engines_fields_and_types_an_unknown_type_an_id_in_use_and_one_naming_another_type() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

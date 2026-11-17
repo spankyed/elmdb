@@ -167,6 +167,7 @@ fn now_ms() -> f64 {
 }
 
 fn apply_all(t: &mut Txn<'_, '_>, batch: &Batch) -> Result<BatchResult> {
+    apply::finite_time("The batch's `now`", batch.now)?;
     let mut results = Vec::with_capacity(batch.ops.len());
     for op in &batch.ops {
         results.push(apply::apply(t, op)?);

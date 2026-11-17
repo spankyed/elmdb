@@ -75,6 +75,7 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             Ok(OpResult::Done)
         }
         Op::Trash { id, at } => {
+            finite_time("trash: `at`", *at)?;
             existing(t, id)?;
             if !entities::record(t, id)?.is_some_and(|r| r.trashed) {
                 let at = at.unwrap_or(t.now);
@@ -172,6 +173,18 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
                 super::vector::Embedded::Stale => Ok(OpResult::Stale),
             }
         }
+    }
+}
+
+/// Refuses a time that isn't a finite number (`VALUE_INVALID`): the value spec holds none. A batch decoded from
+/// bytes is refused one as it is decoded; one built in Rust is first checked here
+pub(super) fn finite_time(what: &str, time: Option<f64>) -> Result<()> {
+    match time {
+        Some(time) if !time.is_finite() => Err(Error::new(
+            ErrorCode::ValueInvalid,
+            format!("{what} is {time}, and a time is a finite number of milliseconds since the epoch"),
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -367,6 +380,8 @@ fn create(
 ) -> Result<OpResult> {
     let def = type_def(t, entity_type, "create")?.clone();
     let quoted = format!("\"{entity_type}\"");
+    finite_time(&format!("create({quoted}): `createdAt`"), created_at)?;
+    finite_time(&format!("create({quoted}): `updatedAt`"), updated_at)?;
     for (name, value) in fields {
         check_value(t, entity_type, name, value, "create")?;
     }
