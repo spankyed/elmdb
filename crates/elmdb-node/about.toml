@@ -1,0 +1,173 @@
+# cargo-about's configuration for THIRD-PARTY-NOTICES, the licenses and notices of the crates the npm package's .node
+# files are built from. `cargo xtask notices` writes the file and `cargo xtask check-notices` fails when it is stale;
+# both pass the targets from package.json's `napi.targets`, so a dependency only one platform builds is listed. The
+# default features are the ones read: the package is built with them.
+
+# The licenses any dependency may be under, in the order one is chosen from a choice such as `MIT OR Apache-2.0`. A
+# dependency under another fails the notices, so its license is read before it ships; a license only one crate needs is
+# accepted for that crate alone, below.
+accepted = ["MIT", "Apache-2.0", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "Unicode-DFS-2016"]
+
+# Build scripts and tests run on the machine that builds the package; nothing of theirs is in a .node file
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# A clarification names what a crate's declared license leaves out, each file held to its checksum: a new version
+# whose file differs fails the notices, and `notices` with it, until the clarification is read again. A checksum covers
+# its file, or the part of it between `start` and `end`; it says nothing of the crate's other files.
+
+# lmdb-master-sys declares Apache-2.0, its Rust bindings' license, but compiles LMDB's mdb.c and midl.c into the
+# binary too: they are under the OpenLDAP Public License, with LMDB's copyright statements, and mdb.c holds code derived
+# from Martin Hedenfalk's btree.c under ISC.
+[lmdb-master-sys]
+accepted = ["OLDAP-2.8"]
+
+[lmdb-master-sys.clarify]
+license = "Apache-2.0 AND OLDAP-2.8 AND ISC"
+
+[[lmdb-master-sys.clarify.files]]
+path = "lmdb/libraries/liblmdb/LICENSE"
+license = "OLDAP-2.8"
+checksum = "310fe25c858a9515fc8c8d7d1f24a67c9496f84a91e0a0e41ea9975b1371e569"
+
+[[lmdb-master-sys.clarify.files]]
+path = "lmdb/libraries/liblmdb/COPYRIGHT"
+license = "OLDAP-2.8"
+checksum = "3c87f63656b6a12fda225b6f798c547fe89e3404f499e890b445761eb310fd4f"
+
+[[lmdb-master-sys.clarify.files]]
+path = "lmdb/libraries/liblmdb/midl.c"
+license = "OLDAP-2.8"
+start = "Copyright 2000-2021 The OpenLDAP Foundation."
+end = "All rights reserved."
+checksum = "16c89becc1889c8c24a5a0b1e1e795ff83ec4e188720b1a15e0f9c99d465adae"
+
+[[lmdb-master-sys.clarify.files]]
+path = "lmdb/libraries/liblmdb/mdb.c"
+license = "ISC"
+start = "Copyright (c) 2009, 2010 Martin Hedenfalk"
+end = "PERFORMANCE OF THIS SOFTWARE."
+checksum = "e302571743666b83ea2722bf903e47d17363a011010981a8aa1f5a4078dca6b7"
+
+# rust-stemmers' stemmers are generated from Snowball's algorithms, under Snowball's BSD-3-Clause license, beside the
+# crate's own MIT
+[rust-stemmers.clarify]
+license = "MIT AND BSD-3-Clause"
+
+[[rust-stemmers.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "e46379f1aba07707c23fab8733d3441e9df981b1543046e0317b2036f8fdaef8"
+
+[[rust-stemmers.clarify.files]]
+path = "algorithms/LICENSE"
+license = "BSD-3-Clause"
+checksum = "ea2879fe94b4b2e6b3c6fb18b3bf265f9ff162637e5e1ac21fabc43d8cf34961"
+
+# regex-syntax's Unicode tables are derived from Unicode's data, under its license
+[regex-syntax.clarify]
+license = "(MIT OR Apache-2.0) AND Unicode-DFS-2016"
+
+[[regex-syntax.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "6485b8ed310d3f0340bf1ad1f47645069ce4069dcc6bb46c7d5c6faf41de1fdb"
+
+[[regex-syntax.clarify.files]]
+path = "LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+
+[[regex-syntax.clarify.files]]
+path = "src/unicode_tables/LICENSE-UNICODE"
+license = "Unicode-DFS-2016"
+checksum = "74db5baf44a41b1000312c673544b3374e4198af5605c7f9080a402cec42cfa3"
+
+# futures-channel's mpsc queue is derived from Dmitry Vyukov's, under BSD-2-Clause. The binding reaches it through
+# napi's futures; whether the linker keeps it in a .node file or not, it is listed.
+[futures-channel]
+accepted = ["BSD-2-Clause"]
+
+[futures-channel.clarify]
+license = "(MIT OR Apache-2.0) AND BSD-2-Clause"
+
+[[futures-channel.clarify.files]]
+path = "LICENSE-MIT"
+license = "MIT"
+checksum = "6652c868f35dfe5e8ef636810a4e576b9d663f3a17fb0f5613ad73583e1b88fd"
+
+[[futures-channel.clarify.files]]
+path = "LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "275c491d6d1160553c32fd6127061d7f9606c3ea25abfad6ca3f6ed088785427"
+
+[[futures-channel.clarify.files]]
+path = "src/mpsc/queue.rs"
+license = "BSD-2-Clause"
+start = "Copyright (c) 2010-2011 Dmitry Vyukov"
+end = "policies, either expressed or implied, of Dmitry Vyukov."
+checksum = "8982be7e032ab245da96855a73c509e7e24834e849c398f980ac1e50f0b34186"
+
+# elmdb's license files are the repository's, two directories up from its crate
+[elmdb.clarify]
+license = "MIT OR Apache-2.0"
+
+[[elmdb.clarify.files]]
+path = "../../LICENSE-MIT"
+license = "MIT"
+checksum = "4eb4e32db6202b8f69f20d72654a29f3cee90b3154375df820b3c47805061e1c"
+
+[[elmdb.clarify.files]]
+path = "../../LICENSE-APACHE"
+license = "Apache-2.0"
+checksum = "1e02ee38d54daa90e27e8b3b89edfa3bb169543211c0eeccc522fb4f655a114e"
+
+# libm's LICENSE.txt holds its copyright and the notices of musl and the math code it derives from, which cargo-about
+# doesn't recognize as a license file
+[libm.clarify]
+license = "MIT"
+
+[[libm.clarify.files]]
+path = "LICENSE.txt"
+license = "MIT"
+checksum = "3823dda7cf046602f4b4e77ec8e227863dc4736037cc85bb33d9f19febe16bb7"
+
+# windows-sys and windows-link name their license files in lower case, which cargo-about doesn't find, and so would
+# drop Microsoft's copyright
+[windows-sys.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-sys.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-sys.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+[windows-link.clarify]
+license = "MIT OR Apache-2.0"
+
+[[windows-link.clarify.files]]
+path = "license-mit"
+license = "MIT"
+checksum = "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+
+[[windows-link.clarify.files]]
+path = "license-apache-2.0"
+license = "Apache-2.0"
+checksum = "c16f8dcf1a368b83be78d826ea23de4079fe1b4469a0ab9ee20563f37ff3d44b"
+
+# steppe gives its license only as a file, `license-file` in its manifest, which is WTFPL
+[steppe]
+accepted = ["WTFPL"]
+
+[steppe.clarify]
+license = "WTFPL"
+
+[[steppe.clarify.files]]
+path = "LICENSE"
+license = "WTFPL"
+checksum = "936229d520bd99626660daf9cadf2d3b9e73ba1889d6262f0e536349ac978019"

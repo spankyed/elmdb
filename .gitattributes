@@ -1,0 +1,4 @@
+# `cargo xtask check-notices` compares these byte for byte with what `cargo xtask notices` writes, whose line endings
+# are \n on every platform
+crates/elmdb-node/THIRD-PARTY-NOTICES text eol=lf
+crates/elmdb-node/COPYRIGHT-rust-library.html text eol=lf

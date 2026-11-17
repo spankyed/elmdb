@@ -492,11 +492,11 @@ suite calls.
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
 Its jobs there: `checks` (on Node 23: format, clippy with and without the `diagnostics` feature, the workspace's suite,
 the engine's with `diagnostics`, the doc tests); `heap` (the maintenance heap bound and the benchmarks' smoke runs);
-`repo` (on Node 23: `cargo xtask check-generated`, `check-one-lmdb`, `check-exact`, `check-diagnostics-off`,
-`check-leiden-serial`, `check-sync`, `check-commits` and `check-mutant-exclusions`; the binding's build, typecheck and
-suite; the read profile; SQLite's comparison at 2,000 notes; the read-only mount, idle-reader, reader-recovery,
-process-claim and publication scripts under `scripts/`; and that the generated loader and declarations are
-committed); and `loom` and `shuttle` (Concurrency models).
+`repo` (on Node 23: `cargo xtask check-generated`, `check-notices`, `check-one-lmdb`, `check-exact`,
+`check-diagnostics-off`, `check-leiden-serial`, `check-sync`, `check-commits` and `check-mutant-exclusions`; the
+binding's build, typecheck and suite; the read profile; SQLite's comparison at 2,000 notes; the read-only mount,
+idle-reader, reader-recovery, process-claim and publication scripts under `scripts/`; and that the generated loader and
+declarations are committed); and `loom` and `shuttle` (Concurrency models).
 Every pull request, draft or ready for review, also runs the fast tier's platforms, macOS arm64 and Windows x64. A
 pull request ready for review runs the full tier as well (`.github/workflows/full.yml`), which completes the matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running

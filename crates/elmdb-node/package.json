@@ -19,7 +19,12 @@
     "client.js",
     "client.d.ts",
     "protocol/",
-    "*.node"
+    "*.node",
+    "LICENSE-MIT",
+    "LICENSE-APACHE",
+    "LICENSE-OPENLDAP",
+    "THIRD-PARTY-NOTICES",
+    "COPYRIGHT-rust-library.html"
   ],
   "engines": {
     "node": ">=22.17.0"

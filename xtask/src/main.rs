@@ -2,6 +2,11 @@
 //!
 //! - `generate`: writes the TypeScript declarations of the protocol's types into `crates/elmdb-node/protocol/`.
 //! - `check-generated`: fails when what `generate` would write differs from what is committed.
+//! - `notices`: writes the npm package's notices into `crates/elmdb-node/`: `THIRD-PARTY-NOTICES`, the licenses and
+//!   notices of the crates its `.node` files are built from, with cargo-about (`CARGO_ABOUT`) and the configuration and
+//!   template beside it; the Rust standard library's, from the toolchain; and copies of the repository's license files.
+//! - `check-notices`: fails when what `notices` would write differs from what is committed, or when package.json's
+//!   `files` leaves one of those files out of the package.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
 //! - `check-exact`: fails unless every ICU crate the lockfile holds, and each crate whose output an index stores
 //!   (`INDEXED`), is a dependency of `elmdb` required at exactly the locked version, so whoever builds elmdb builds the
@@ -47,6 +52,8 @@ fn main() -> ExitCode {
         Some("generate") => generate::write(&generated_dir()),
         Some("compare") => compare::compare(&workspace_root(), &std::env::args().skip(2).collect::<Vec<_>>()),
         Some("check-generated") => check_generated(),
+        Some("notices") => write_notices(&workspace_root()),
+        Some("check-notices") => check_notices(&workspace_root()),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
         Some("check-exact") => check_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
@@ -70,12 +77,13 @@ fn main() -> ExitCode {
                     ("serial Leiden", &|| check_leiden_serial(&root)),
                     ("crate::sync", &|| check_sync(&root)),
                     ("one place commits", &|| check_commits(&root)),
+                    ("third-party notices", &|| check_notices(&root)),
                     ("mutant exclusions", &|| check_mutant_exclusions(&root)),
                 ],
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
+            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
                 .to_owned(),
         ),
     };
@@ -482,6 +490,139 @@ fn workspace_root() -> PathBuf {
 
 fn generated_dir() -> PathBuf {
     workspace_root().join("crates/elmdb-node/protocol")
+}
+
+/// The cargo-about release the notices are written with: another may render the same licenses differently, so
+/// `check-notices` would fail on a file nothing changed
+const CARGO_ABOUT: &str = "0.9.3";
+
+/// The repository's license files, which the npm package carries copies of beside its .node files
+const PACKAGED_LICENSES: [&str; 3] = ["LICENSE-MIT", "LICENSE-APACHE", "LICENSE-OPENLDAP"];
+
+/// The crates' licenses and notices, which cargo-about writes from `about.toml` and `about.hbs`
+const CRATE_NOTICES: &str = "THIRD-PARTY-NOTICES";
+
+/// The Rust standard library's notices, the pinned toolchain's own `share/doc/rust/COPYRIGHT-library.html`
+const RUST_LIBRARY_NOTICES: &str = "COPYRIGHT-rust-library.html";
+
+/// Everything `notices` writes into the npm package, by file name: the crates' notices, the Rust standard library's,
+/// and the copies of the repository's license files. All of it is read before anything is written, so a run that fails
+/// leaves the committed files as they were, and the notices' line endings are `\n` whatever the platform's, as
+/// `.gitattributes` keeps them in a checkout, since `check-notices` compares bytes.
+fn notices(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let node = root.join("crates/elmdb-node");
+    let read = |path: &Path| std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()));
+    let mut files = vec![(CRATE_NOTICES.to_owned(), crate_notices(root, &node)?)];
+    let sysroot = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("rustc didn't run: {e}"))?;
+    if !sysroot.status.success() {
+        return Err(format!("rustc --print sysroot failed:\n{}", String::from_utf8_lossy(&sysroot.stderr)));
+    }
+    let sysroot = PathBuf::from(String::from_utf8_lossy(&sysroot.stdout).trim());
+    let rust_library = read(&sysroot.join("share/doc/rust/COPYRIGHT-library.html"))?;
+    files.push((
+        RUST_LIBRARY_NOTICES.to_owned(),
+        String::from_utf8_lossy(&rust_library).replace("\r\n", "\n").into_bytes(),
+    ));
+    for name in PACKAGED_LICENSES {
+        files.push((name.to_owned(), read(&root.join(name))?));
+    }
+    Ok(files)
+}
+
+/// cargo-about's rendering of `about.hbs`: it reads the binding's dependency tree from the lockfile, without the
+/// network, for each target the npm package ships for, so a dependency only one platform builds is listed, with line
+/// endings made `\n`, as some crates' license files have `\r\n`. It fails on a dependency whose license it can't
+/// establish or that `about.toml` doesn't accept, and so does this on any warning: cargo-about only warns of a
+/// clarification whose file no longer matches its checksum, and drops it, which would write lmdb-master-sys's notices
+/// without LMDB's license.
+fn crate_notices(root: &Path, node: &Path) -> Result<Vec<u8>, String> {
+    let version = Command::new(env!("CARGO"))
+        .args(["about", "--version"])
+        .output()
+        .map_err(|e| format!("cargo about didn't run: {e}"))?;
+    let version = String::from_utf8_lossy(&version.stdout);
+    if version.split_whitespace().last() != Some(CARGO_ABOUT) {
+        return Err(format!(
+            "The notices are written with cargo-about {CARGO_ABOUT}, and this machine has {}; install it with \
+             `cargo install --locked --features cli cargo-about@{CARGO_ABOUT}`",
+            if version.trim().is_empty() { "none" } else { version.trim() }
+        ));
+    }
+    let manifest = node.join("package.json");
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?)
+            .map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let targets: Vec<&str> = package["napi"]["targets"]
+        .as_array()
+        .ok_or_else(|| format!("{} has no napi.targets", manifest.display()))?
+        .iter()
+        .map(|target| target.as_str().ok_or_else(|| format!("a napi target in {} isn't a string", manifest.display())))
+        .collect::<Result<_, _>>()?;
+    let rendered = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let out = rendered.path().join(CRATE_NOTICES);
+    let mut command = Command::new(env!("CARGO"));
+    command.args(["about", "generate", "--frozen", "--fail", "--manifest-path"]);
+    command.arg(node.join("Cargo.toml")).arg("--config").arg(node.join("about.toml"));
+    for target in targets {
+        command.args(["--target", target]);
+    }
+    let output = command
+        .arg("--output-file")
+        .arg(&out)
+        .arg(node.join("about.hbs"))
+        .current_dir(root)
+        .output()
+        .map_err(|e| format!("cargo about didn't run: {e}"))?;
+    let log = String::from_utf8_lossy(&output.stderr);
+    if !output.status.success() || log.contains("WARN") || log.contains("ERROR") {
+        return Err(format!(
+            "cargo about failed or warned; it reads the crates offline, which `cargo fetch --locked` fetches:\n{log}"
+        ));
+    }
+    let text = std::fs::read_to_string(&out).map_err(|e| format!("{}: {e}", out.display()))?;
+    Ok(text.replace("\r\n", "\n").into_bytes())
+}
+
+fn write_notices(root: &Path) -> Result<(), String> {
+    let node = root.join("crates/elmdb-node");
+    for (name, contents) in notices(root)? {
+        std::fs::write(node.join(&name), contents).map_err(|e| format!("{name}: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Fails when a file `notices` writes differs from the npm package's, or when the package's `files` doesn't list it,
+/// which leaves it out of the package
+fn check_notices(root: &Path) -> Result<(), String> {
+    let node = root.join("crates/elmdb-node");
+    let manifest = node.join("package.json");
+    let package: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).map_err(|e| format!("{}: {e}", manifest.display()))?)
+            .map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let listed: Vec<&str> =
+        package["files"].as_array().map(|files| files.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+    let mut stale = Vec::new();
+    for (name, contents) in notices(root)? {
+        if std::fs::read(node.join(&name)).ok().as_deref() != Some(contents.as_slice()) {
+            stale.push(format!("crates/elmdb-node/{name} differs from what `cargo xtask notices` writes"));
+        }
+        if !listed.contains(&name.as_str()) {
+            stale.push(format!("{} doesn't list {name} in its files, so npm leaves it out", manifest.display()));
+        }
+    }
+    if stale.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "The npm package's notices are stale; run `cargo xtask notices`, and list what it writes in package.json's \
+             files, and commit:\n  {}",
+            stale.join("\n  ")
+        ))
+    }
 }
 
 fn check_generated() -> Result<(), String> {
