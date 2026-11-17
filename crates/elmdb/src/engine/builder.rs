@@ -192,7 +192,10 @@ impl Core {
             if let Err(e) = build(&work, &|| self.stopping())
                 && e.code != ErrorCode::DataReplaced
             {
-                self.lock().failures.push(IndexFailure { work: work.clone(), message: e.message });
+                // The work's one failure: a build that fails again says why it failed last
+                let mut state = self.lock();
+                state.failures.retain(|failure| failure.work != work);
+                state.failures.push(IndexFailure { work: work.clone(), message: e.message });
             }
             let mut state = self.lock();
             if state.stopping {
@@ -463,7 +466,9 @@ fn chunks(
 
 /// Builds a type's index over the entities that predate it, a chunk at a time, the last chunk marking it built. A read
 /// that had no answer while it was built (`INDEX_BUILDING`, a text index's) read that marker to be refused, so the
-/// commit that writes it is the one that tells it to read again
+/// commit that writes it is the one that tells it to read again. An index found built is left as it is: work is
+/// queued by whoever finds it owed, an open, a schema change, a close that gave up, a wait for the builds, and two
+/// of them may queue one index
 fn build_index(
     store: &Store,
     core: &Core,
@@ -473,7 +478,14 @@ fn build_index(
     stopping: &dyn Fn() -> bool,
 ) -> crate::Result<()> {
     let mut after = 0;
+    let mut asked = false;
     chunks(store, core, stopping, || {
+        // Asked once, before the first chunk, which would otherwise walk every entity to file it where it is
+        if !std::mem::replace(&mut asked, true)
+            && store.read(|txn, db| Ok(db.get(txn, &super::keys::index_built(entity_type, index))?.is_some()))?
+        {
+            return Ok(true);
+        }
         // The cursor moves only once its chunk commits: a chunk refused leaves it where it was
         let mut next = None;
         let done = commits(&mut |t| {

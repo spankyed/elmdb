@@ -272,7 +272,7 @@ fn a_wait_for_the_builds_is_refused_while_a_replacement_elsewhere_is_not_adopted
     replace_elsewhere(&dir, &source);
     let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
     assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::DataReplaced, "with no builder");
-    // And with one, given an index to build that it can't commit
+    // And with one, which has nothing to fail: the index it is given is built
     let index = db.index_status().unwrap().into_iter().find(|index| index.entity_type.is_some()).unwrap();
     let work = crate::engine::Work::Index { entity_type: index.entity_type.unwrap(), index: index.index };
     db.builders().unwrap().expect("a writable database starts builders").queue(vec![work]);

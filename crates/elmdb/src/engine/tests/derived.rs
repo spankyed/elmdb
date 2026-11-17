@@ -339,14 +339,27 @@ fn a_wait_for_the_builds_takes_up_what_no_builder_was_left() {
     assert!(!db.close_at_exit(std::time::Duration::from_millis(5)).unwrap(), "given up on for the store held");
     drop(held);
     assert!(db.builder().is_none(), "the close left no builder");
-    // Still unbuildable, the wait says so again
-    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
+    // Still unbuildable, the wait says so again; and of a builder that fails it a second time, once
+    let failed = || {
+        let failed = db.wait_for_index_builds().unwrap_err();
+        assert_eq!(failed.code, ErrorCode::IndexBuildFailed);
+        assert_eq!(failed.message.matches("Note's index one").count(), 1, "{}", failed.message);
+    };
+    failed();
+    let one = || crate::engine::Work::Index { entity_type: "Note".into(), index: "one".into() };
+    db.builders().unwrap().expect("a writable database starts builders").queue(vec![one()]);
+    failed();
     // And once it can be built, with no builder again, the wait builds it
     write(&db, vec![json!({ "op": "set", "id": "Note-2", "fields": { "kind": "other" } })]).unwrap();
     drop(db.builder().take());
     assert!(!built());
     db.wait_for_index_builds().unwrap();
     assert!(built());
+    // Queued again built, as two that found it owed queue it, it is left as it is: no chunk is committed
+    let sequence = db.sequence().unwrap();
+    db.builders().unwrap().expect("a writable database starts builders").queue(vec![one()]);
+    db.wait_for_index_builds().unwrap();
+    assert_eq!(db.sequence().unwrap(), sequence);
     assert!(db.check().unwrap().is_clean());
 }
 
