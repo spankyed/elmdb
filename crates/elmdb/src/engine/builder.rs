@@ -481,23 +481,16 @@ fn build_index(
     index: &str,
     stopping: &dyn Fn() -> bool,
 ) -> crate::Result<()> {
-    let mut after = 0;
-    let mut asked = false;
     chunks(store, core, stopping, || {
-        // Asked once, before the first chunk, which would otherwise walk every entity to file it where it is
-        if !std::mem::replace(&mut asked, true)
-            && store.read(|txn, db| Ok(db.get(txn, &super::keys::index_built(entity_type, index))?.is_some()))?
-        {
+        // Asked before each chunk: a built index makes no unit, whose commit would be heard and say nothing. One
+        // built since the last chunk was built by a rebuild, a replacement or another process's builder, and is
+        // theirs
+        if store.read(|txn, db| Ok(db.get(txn, &super::keys::index_built(entity_type, index))?.is_some()))? {
             return Ok(true);
         }
-        // The cursor moves only once its chunk commits: a chunk refused leaves it where it was
-        let mut next = None;
-        let done = commits(&mut |t| {
-            next = build_chunk(t, entity_type, index, after, CHUNK)?;
-            Ok(next.is_none())
-        })?;
-        after = next.unwrap_or(after);
-        Ok(done)
+        // Where the build has reached is the store's, written by the chunk that reached it: a chunk refused
+        // leaves it where it was, and whatever replaces the rows takes it away (`derive::build_chunk`)
+        commits(&mut |t| build_chunk(t, entity_type, index, CHUNK))
     })
 }
 

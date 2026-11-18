@@ -363,6 +363,234 @@ fn a_wait_for_the_builds_takes_up_what_no_builder_was_left() {
     assert!(db.check().unwrap().is_clean());
 }
 
+/// A build has a place it has reached, from one chunk to the next. `replace_with` puts other rows under it, and
+/// leaves unbuilt an index those rows can't be filed in: a build that went on from the place would pass the rows
+/// behind it and mark the index built. The place goes with the rows, and the build begins at the first
+#[test]
+fn a_build_under_way_as_every_row_is_replaced_doesnt_go_on_from_the_place_it_had_reached() {
+    use crate::engine::unit::{Txn, UnitState};
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let note = |id: &str, kind: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "kind": kind } });
+    // The source holds two notes of one kind, which no unique index over the kind files
+    {
+        let db = with_schema(&source, notes(base_fields(), json!({}))).unwrap();
+        write(&db, vec![note("Note-1", "same"), note("Note-2", "same"), note("Note-3", "c")]).unwrap();
+        db.close().unwrap();
+    }
+    let declared = notes(base_fields(), json!({ "one": { "kind": "value", "fields": ["kind"], "unique": true } }));
+    let db = with_schema(&dir, declared.clone()).unwrap();
+    // Notes at places past every place of the source's
+    let tag = |id: &str| json!({ "op": "create", "type": "Tag", "id": id });
+    write(&db, (0..8).map(|at| tag(&format!("Tag-{at}"))).collect()).unwrap();
+    write(&db, vec![note("Note-a", "a"), note("Note-b", "b"), note("Note-c", "c"), note("Note-d", "d")]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let built = || db.index_status().unwrap().iter().find(|s| s.index == "one").unwrap().built;
+    // A build of the index, as the builder runs it: a chunk a unit, each from the place the last reached
+    let schema = Schema::from_json(&declared).unwrap();
+    let chunk = || -> crate::Result<bool> {
+        db.store().unwrap().write(
+            |txn, store| {
+                let mut state = UnitState::new(false);
+                let mut t = Txn { txn, db: store, state: &mut state, schema: &schema, now: 0.0 };
+                crate::engine::derive::build_chunk(&mut t, "Note", "one", 2)
+            },
+            false,
+        )
+    };
+    damage(&db, |txn, main| Ok(main.delete(txn, &keys::index_built("Note", "one")).map(|_| ())?));
+    assert!(!built());
+    assert!(!chunk().unwrap(), "two of the four notes are built, and two are left");
+    // Every row replaced, by rows the index can't be built over: the replacement leaves it unbuilt
+    db.replace_with(source.path()).unwrap();
+    assert!(!built(), "two notes of one kind");
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
+    // The build goes on: from the first note, the place it had reached having gone with the rows it was among
+    let ended = loop {
+        match chunk() {
+            Ok(false) => {}
+            ended => break ended,
+        }
+    };
+    assert_eq!(ended.map_err(|refused| refused.code), Err(ErrorCode::Unique), "it met the two notes of one kind");
+    assert!(!built());
+    assert_eq!(ids_where(&db, "kind", json!("same")).0, json!(["Note-1", "Note-2"]));
+    // What the replacement brought is what `check` says of it: derived data as primary data derives it, and two
+    // notes holding one value of a unique index
+    let report = db.check().unwrap();
+    assert!(report.differences.is_empty() && report.violations.len() == 1, "{report:?}");
+}
+
+/// A rebuild of everything, which a rename runs too, leaves unbuilt an index its rows can't be filed in, as a
+/// replacement does, with the rows where they were: the place a build had reached goes all the same
+#[test]
+fn a_build_under_way_as_everything_is_rebuilt_doesnt_go_on_from_the_place_it_had_reached() {
+    use crate::engine::maintenance::Load;
+    use crate::engine::unit::{Txn, UnitState};
+    let dir = tempfile::tempdir().unwrap();
+    let declared = notes(base_fields(), json!({ "one": { "kind": "value", "fields": ["kind"], "unique": true } }));
+    let db = with_schema(&dir, declared.clone()).unwrap();
+    let note = |id: &str, kind: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "kind": kind } });
+    write(&db, vec![note("Note-1", "a"), note("Note-2", "b"), note("Note-3", "c"), note("Note-4", "d")]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let built = || db.index_status().unwrap().iter().find(|s| s.index == "one").unwrap().built;
+    let schema = Schema::from_json(&declared).unwrap();
+    let chunk = || -> crate::Result<bool> {
+        db.store().unwrap().write(
+            |txn, store| {
+                let mut state = UnitState::new(false);
+                let mut t = Txn { txn, db: store, state: &mut state, schema: &schema, now: 0.0 };
+                crate::engine::derive::build_chunk(&mut t, "Note", "one", 2)
+            },
+            false,
+        )
+    };
+    damage(&db, |txn, main| Ok(main.delete(txn, &keys::index_built("Note", "one")).map(|_| ())?));
+    assert!(!chunk().unwrap(), "two of the four notes are built, and two are left");
+    // The two notes behind that place given one kind, by a load, which a unique index takes as given
+    let same = Load::Entity { id: "Note-2".into(), fields: [("kind".to_owned(), "a".into())].into(), trashed: false };
+    db.bulk_load(&[same]).unwrap();
+    db.rebuild(None).unwrap();
+    assert!(!built(), "two notes of one kind");
+    let ended = loop {
+        match chunk() {
+            Ok(false) => {}
+            ended => break ended,
+        }
+    };
+    assert_eq!(ended.map_err(|refused| refused.code), Err(ErrorCode::Unique), "it met the two notes of one kind");
+    assert!(!built());
+}
+
+/// A rename rebuilds everything, and the type renamed is no longer one any index is said to be built or unbuilt
+/// for: the place a build had reached under its name goes with every other, where it would wait for a type renamed
+/// back
+#[test]
+fn a_rename_leaves_no_place_a_build_had_reached() {
+    use crate::engine::unit::{Txn, UnitState};
+    let dir = tempfile::tempdir().unwrap();
+    let mut declared = notes(base_fields(), json!({ "byKind": { "kind": "value", "fields": ["kind"] } }));
+    declared["types"]["Memo"] = declared["types"]["Note"].clone();
+    declared["types"]["Tag"]["fields"]["of"]["to"] = json!(["Note", "Memo"]);
+    let db = with_schema(&dir, declared.clone()).unwrap();
+    let kinds = (0..5)
+        .map(|at| json!({ "op": "create", "type": "Note", "id": format!("Note-{at}"), "fields": { "kind": "k" } }));
+    write(&db, kinds.collect()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let schema = Schema::from_json(&declared).unwrap();
+    damage(&db, |txn, main| Ok(main.delete(txn, &keys::index_built("Note", "byKind")).map(|_| ())?));
+    let done = db.store().unwrap().write(
+        |txn, store| {
+            let mut state = UnitState::new(false);
+            let mut t = Txn { txn, db: store, state: &mut state, schema: &schema, now: 0.0 };
+            crate::engine::derive::build_chunk(&mut t, "Note", "byKind", 2)
+        },
+        false,
+    );
+    assert!(!done.unwrap());
+    let places = || db.snapshot(|s| s.scan(&Prefix::IndexReached.key().to_vec())).unwrap().len();
+    assert_eq!(places(), 1);
+    db.rename_type("Note", "Memo").unwrap();
+    assert_eq!(places(), 0, "of the type renamed, and of every other");
+    db.wait_for_index_builds().unwrap();
+    assert!(db.check().unwrap().is_clean());
+}
+
+/// An index removed from the schema goes with its entries, and the place a build of it had reached with them: one
+/// declared again is built from the first note, by the builder, which keeps no place of its own
+#[test]
+fn an_index_removed_part_built_and_declared_again_is_built_from_the_first_entity() {
+    use crate::engine::unit::{Txn, UnitState};
+    let dir = tempfile::tempdir().unwrap();
+    let declared = notes(base_fields(), json!({ "byKind": { "kind": "value", "fields": ["kind"] } }));
+    let db = with_schema(&dir, declared.clone()).unwrap();
+    let note =
+        |at: usize| json!({ "op": "create", "type": "Note", "id": format!("Note-{at}"), "fields": { "kind": "k" } });
+    write(&db, (0..5).map(note).collect()).unwrap();
+    write(&db, vec![json!({ "op": "create", "type": "Note", "id": "Note-other", "fields": { "kind": "j" } })]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // A build two notes in, as a close leaves one
+    let schema = Schema::from_json(&declared).unwrap();
+    damage(&db, |txn, main| Ok(main.delete(txn, &keys::index_built("Note", "byKind")).map(|_| ())?));
+    let done = db.store().unwrap().write(
+        |txn, store| {
+            let mut state = UnitState::new(false);
+            let mut t = Txn { txn, db: store, state: &mut state, schema: &schema, now: 0.0 };
+            crate::engine::derive::build_chunk(&mut t, "Note", "byKind", 2)
+        },
+        false,
+    );
+    assert!(!done.unwrap());
+    let reached = || db.snapshot(|s| s.get(&keys::index_reached("Note", "byKind"))).unwrap();
+    assert!(reached().is_some());
+    db.set_schema(Schema::from_json(&notes(base_fields(), json!({}))).unwrap()).unwrap();
+    assert_eq!(reached(), None, "gone with the index");
+    db.set_schema(Schema::from_json(&declared).unwrap()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let (ids, visited) = ids_where(&db, "kind", json!("k"));
+    assert_eq!(ids.as_array().map(Vec::len), Some(5), "every note is filed: {ids}");
+    assert_eq!(visited, 5, "read from the index: a walk of the rows visits the sixth note too");
+    assert!(db.check().unwrap().is_clean());
+}
+
+/// As above, with an entity whose values make a longer key than the store holds: marked built, the index answers a
+/// read of those values with no entity, where an index left unbuilt has the rows walked
+#[test]
+fn a_build_under_way_as_every_row_is_replaced_leaves_no_entity_out_of_an_index_it_marks_built() {
+    use crate::engine::unit::{Txn, UnitState};
+    let (dir, source) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut fields = base_fields();
+    fields["other"] = json!({ "type": "string", "optional": true });
+    let long = "x".repeat(256);
+    let note = |id: &str, title: &str, other: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "title": title, "other": other } });
+    {
+        let db = with_schema(&source, notes(fields.clone(), json!({}))).unwrap();
+        write(&db, vec![note("Note-1", &long, &long), note("Note-2", "t", "o")]).unwrap();
+        db.close().unwrap();
+    }
+    let declared = notes(fields.clone(), json!({ "pair": { "kind": "value", "fields": ["title", "other"] } }));
+    let db = with_schema(&dir, declared.clone()).unwrap();
+    let tag = |id: &str| json!({ "op": "create", "type": "Tag", "id": id });
+    write(&db, (0..8).map(|at| tag(&format!("Tag-{at}"))).collect()).unwrap();
+    write(&db, vec![note("Note-a", "a", "a"), note("Note-b", "b", "b"), note("Note-c", "c", "c")]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    let built = || db.index_status().unwrap().iter().find(|s| s.index == "pair").unwrap().built;
+    let schema = Schema::from_json(&declared).unwrap();
+    let chunk = || -> crate::Result<bool> {
+        db.store().unwrap().write(
+            |txn, store| {
+                let mut state = UnitState::new(false);
+                let mut t = Txn { txn, db: store, state: &mut state, schema: &schema, now: 0.0 };
+                crate::engine::derive::build_chunk(&mut t, "Note", "pair", 2)
+            },
+            false,
+        )
+    };
+    damage(&db, |txn, main| Ok(main.delete(txn, &keys::index_built("Note", "pair")).map(|_| ())?));
+    assert!(!chunk().unwrap(), "two built, one left");
+    db.replace_with(source.path()).unwrap();
+    assert!(!built(), "a note whose pair is too long a key");
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
+    let ended = loop {
+        match chunk() {
+            Ok(false) => {}
+            ended => break ended,
+        }
+    };
+    assert_eq!(ended.map_err(|refused| refused.code), Err(ErrorCode::ValueInvalid), "it met the note too long a key");
+    let both: crate::engine::plan::Plan = serde_json::from_value(json!({
+        "start": { "from": "types", "types": ["Note"] },
+        "steps": [{ "step": "where", "field": "title", "value": long }, { "step": "where", "field": "other", "value": long }],
+        "terminal": { "answer": "ids" }
+    }))
+    .unwrap();
+    let (bytes, visited) = db.snapshot(|s| crate::engine::reads::run_counted(s, &both)).unwrap();
+    let answer: Json = serde_json::to_value(rmpv::decode::read_value(&mut &bytes[..]).unwrap()).unwrap();
+    assert_eq!(answer["ids"], json!(["Note-1"]));
+    assert_eq!(visited.entities, 2, "the rows walked, the index being unbuilt");
+    assert!(!built());
+    assert!(db.check().unwrap().is_clean());
+}
+
 #[test]
 fn a_rebuild_leaves_unbuilt_a_value_index_a_build_couldnt_finish() {
     let dir = tempfile::tempdir().unwrap();
@@ -1892,7 +2120,7 @@ fn chunked_index_build_resumes_across_mutations_and_reopening() {
             )
             .unwrap();
     }
-    fn chunk(db: &Database, after: u64) -> Option<u64> {
+    fn chunk(db: &Database) -> bool {
         let store = db.store().unwrap();
         let schema = db.engine_schema();
         store
@@ -1903,7 +2131,6 @@ fn chunked_index_build_resumes_across_mutations_and_reopening() {
                         &mut Txn { txn, db: d, state: &mut state, schema: &schema, now: 0.0 },
                         "Task",
                         "a",
-                        after,
                         3,
                     )
                 },
@@ -1919,7 +2146,12 @@ fn chunked_index_build_resumes_across_mutations_and_reopening() {
     )
     .unwrap();
     clear(&db);
-    let mut after = chunk(&db, 0).unwrap();
+    let reached = |db: &Database| {
+        let place = db.snapshot(|s| s.get(&keys::index_reached("Task", "a"))).unwrap();
+        place.map(|place| crate::engine::values::decode(&place).unwrap().as_u64().unwrap())
+    };
+    assert!(!chunk(&db));
+    let mut after = reached(&db).expect("a chunk that isn't the last leaves the place it reached");
     write(
         &db,
         vec![
@@ -1931,13 +2163,16 @@ fn chunked_index_build_resumes_across_mutations_and_reopening() {
         ],
     )
     .unwrap();
-    while let Some(next) = chunk(&db, after) {
+    while !chunk(&db) {
+        let next = reached(&db).unwrap();
         assert!(next > after);
         after = next;
     }
+    assert_eq!(reached(&db), None, "the last chunk marks the index built, and leaves no place");
+    assert!(chunk(&db) && reached(&db).is_none(), "a chunk of a built index builds nothing");
     assert!(db.check().unwrap().is_clean());
     clear(&db);
-    assert!(chunk(&db, 0).is_some());
+    assert!(!chunk(&db));
     db.close().unwrap();
     let reopened = Database::open(dir.path(), OpenOptions { syncs: false, ..Default::default() }).unwrap();
     reopened.wait_for_index_builds().unwrap();

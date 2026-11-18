@@ -872,7 +872,11 @@ unit is open.
   unbuilt, and `indexStatus()` names them. Each chunk seeks after its last entity sequence in both live/trash
   ranges and sorts only their bounded candidates: at most 2 × (chunk size + 1) rows in temporary storage. Cursor
   visits grow linearly at fixed chunk size; sorting costs O(chunk size × log(chunk size)) per chunk. Closing stops
-  a build between chunks, and the next open finishes it.
+  a build between chunks, and the next open finishes it from the place it reached. That place is kept in the store
+  (`d/xbr`), written by the chunk that reached it, and goes with whatever replaces the index's entries or says whether
+  it is built: a rebuild, a rename, a replacement of every row. A build after one of them begins at the first entity,
+  since a place among the rows it had passed says nothing of the rows now there: gone on from, it would pass rows
+  the index can't be built over and mark it built.
 - `purge(what)`: deletes what a removed declaration left: a type's entities, a field of a type, a relation kind's
   relations, a role, which goes from every entity holding it, a removed type's kept entities included. It refuses a name
   the schema still declares (`SCHEMA_CHANGE_REFUSED`). It refuses one of the engine's own fields too
