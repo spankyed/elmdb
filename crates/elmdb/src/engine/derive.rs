@@ -259,8 +259,8 @@ fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<(
     Ok(())
 }
 
-/// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers, which record what
-/// was built rather than following from primary data
+/// The derived prefixes `derive` answers for, and so `check` compares: all but the index markers and the place a
+/// build has reached, which record what was built rather than following from primary data
 const COMPARED: [Prefix; 27] = [
     Prefix::Live,
     Prefix::Changed,
@@ -752,7 +752,10 @@ pub fn build_chunk(t: &mut Txn<'_, '_>, entity_type: &str, name: &str, limit: us
         Some(place) => values::decode(&place)?.as_u64().ok_or_else(|| {
             Error::new(
                 ErrorCode::Corrupted,
-                format!("The place the build of {entity_type}.{name} reached doesn't read"),
+                format!(
+                    "The place the build of {entity_type}.{name} reached doesn't read: rebuild() takes it away and \
+                     builds the index"
+                ),
             )
         })?,
         None => 0,

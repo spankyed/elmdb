@@ -479,7 +479,8 @@ fn build_index(
 ) -> crate::Result<()> {
     chunks(store, core, stopping, || {
         // Asked before each chunk: a built index makes no unit, whose commit would be heard and say nothing. One
-        // built since the last chunk was built by a rebuild or a replacement, and is theirs
+        // built since the last chunk was built by a rebuild, a replacement or another process's builder, and is
+        // theirs
         if store.read(|txn, db| Ok(db.get(txn, &super::keys::index_built(entity_type, index))?.is_some()))? {
             return Ok(true);
         }

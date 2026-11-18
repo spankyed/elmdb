@@ -149,8 +149,15 @@ Each is a pull request, with its gate.
 
 ## Not decided
 
-- **Whether `reset`, `replace_with` and `adopt_replacement` begin a change too.** Decided since, and not by a change
-  beginning. A build of an index kept the place it had reached in a variable of the builder's, and went on from it
+- **Whether the thread should hold the store at all.** Taking it for each piece of work would let a close stop
+  joining, and the wait in `close_as` for the store's other holders would cover the builder with them. It changes
+  what a close at exit leaves running, so it is left out of phase 3 until that is read on Windows.
+- **A failure of work whose index the new schema still declares.** Today a schema change starts a builder with no
+  failures, so an index that couldn't be built is tried again. The design keeps that: a change empties the failures.
+
+## Decided since
+
+- **Whether `reset`, `replace_with` and `adopt_replacement` begin a change too.** They don't. A build of an index kept the place it had reached in a variable of the builder's, and went on from it
   over rows a `replace_with` or a rename had put there: an index those rows couldn't be filed in was marked built,
   and one such answered a read with no entity (`engine/tests/derived.rs`, the two tests of a build under way as every
   row is replaced). The place is now the store's (`d/xbr`, `../architecture/format.md`), deleted by whatever says
@@ -160,11 +167,6 @@ Each is a pull request, with its gate.
   finds every node joined. Under this design that leaves the count to schedule by, not to be correct by: work of an
   earlier generation is let go of so that it isn't listed as failed, and would be refused or harmless if it ran.
   The two races #182 left are a wait's, not a build's, and stay with invariant 4.
-- **Whether the thread should hold the store at all.** Taking it for each piece of work would let a close stop
-  joining, and the wait in `close_as` for the store's other holders would cover the builder with them. It changes
-  what a close at exit leaves running, so it is left out of phase 3 until that is read on Windows.
-- **A failure of work whose index the new schema still declares.** Today a schema change starts a builder with no
-  failures, so an index that couldn't be built is tried again. The design keeps that: a change empties the failures.
 
 ## What this is not
 
