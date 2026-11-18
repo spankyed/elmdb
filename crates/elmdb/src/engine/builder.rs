@@ -131,7 +131,11 @@ impl Core {
     }
 
     /// Blocks until every queued index is built or has failed, or the builder stops, or is held up by what it waits
-    /// out, which this answers
+    /// out, which this answers. Work put off (`later`) is not waited for, by decision: it is the build of an order
+    /// that another elmdb's writes keep ending, begun again after a wait of up to `ORDER_PUT_OFF_MOST`, and may be
+    /// ended again as often. Its index is built and every read of it answers, sorting where it would have read the
+    /// order, so nothing a caller waits for the builds to have is missing, and waiting would hold it for minutes, or
+    /// for as long as the other elmdb writes
     fn wait(&self) -> Option<crate::Error> {
         let mut state = self.lock();
         while (!state.queue.is_empty() || state.busy) && !state.stopping && state.held.is_none() {

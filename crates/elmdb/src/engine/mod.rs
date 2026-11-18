@@ -695,6 +695,11 @@ impl Database {
     /// Refused while another process's replacement of every row is not adopted (`DATA_REPLACED`): no build commits
     /// over rows that are gone, and adopting the replacement queues what it left unbuilt.
     ///
+    /// The order a value index keeps of its strings is waited for as an index is, but for a build of it that was
+    /// put off: one another elmdb's writes ended, which this builder begins again after a wait that doubles
+    /// (`docs/architecture/engine.md`, Reads). The index is built and a read of it answers meanwhile, sorting what
+    /// it would have read in order, and `index_status` says the order isn't one to read (`ordered`).
+    ///
     /// A schema change stops the builder and starts another for what is left: a wait under way goes on to that one,
     /// and answers for the schema the database holds when it returns. A close stops it for good, and the wait is
     /// told so (`CLOSED`), as it is of a database closed before it
