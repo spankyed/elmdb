@@ -532,8 +532,8 @@ These are required checks configured by the workflow, not a claim that a particu
 Filesystem support requirements and the limits of this platform coverage are in [filesystems.md](filesystems.md).
 
 Five workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
-or its test, as no required check (Power loss). `release.yml` runs on a tag, and on a pull request that changes it or
-its smoke (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
+or its test, as no required check (Power loss). `release.yml` runs on a tag, each Monday, and on a pull request that
+changes what a release is built from (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
 `mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
 LMDB (`scripts/lmdb-upstream.py`). `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
 and so is `models.yml` (Concurrency models).
@@ -542,18 +542,28 @@ and so is `models.yml` (Concurrency models).
 
 A tag `v<version>` starts `.github/workflows/release.yml`, and the tag is the owner's. It fails unless the tag names
 the version the workspace's `Cargo.toml` and the binding's `package.json` both hold. It builds the binding for each of
-`package.json`'s seven `napi.targets` on a runner of that OS and architecture: the glibc Linux binaries with napi-rs's
-cross toolchain, against glibc 2.17, which a check of the binary's symbols holds it to, and the musl ones in Alpine. It
-packs all seven into one npm package, `elmdb-<version>.tgz`, whose loader takes the binary named for the platform it
+`package.json`'s seven `napi.targets` on a runner of that OS and architecture:
+
+- the glibc Linux binaries in manylinux_2_28 (AlmaLinux 8), so they need no glibc past 2.28, which Node 22's own Linux
+  builds need too. A check of each binary's undefined symbols fails on one versioned past 2.28, and on one with no
+  version that isn't Node's (`napi_`), which is what a binary compiled against newer headers than its C library leaves:
+  a build with napi-rs's cross toolchain left `__isoc23_strtol` in LMDB's code, and failed to load on glibc 2.35;
+- the musl ones in Alpine;
+- the Windows one with the C runtime linked in (`+crt-static`), as Node's own is. A check of its imports fails on the
+  Visual C++ redistributable's `VCRUNTIME140.dll`, which a dynamically linked build needs and many machines lack.
+
+It packs all seven into one npm package, `elmdb-<version>.tgz`, whose loader takes the binary named for the platform it
 runs on, with the notices `check-notices` holds to the lockfile, and writes each target's CycloneDX SBOM with
 cargo-cyclonedx, `elmdb.<platform>.cdx.json`. Then, on each target, `scripts/release-smoke.mjs` installs the package
-into an empty project on the Node floor, on the oldest OS release a runner offers (Ubuntu 22.04, macOS 14, Windows
-Server 2022; Alpine for musl), and runs a database through it: a text search, a rank and `check()`. On a tag it drafts a
-GitHub release holding the package, the SBOMs and `SHA256SUMS`, and fails if the tag already has one. Publishing the
-draft is the owner's, and nothing goes to npm.
+into an empty project on Node 22.17.0 and runs a database through it: a text search, a rank and `check()`. The glibc
+targets install in AlmaLinux 8, at glibc 2.28, and the musl ones in Alpine; macOS on macOS 15 and Windows on Windows
+Server 2022. On a tag it drafts a GitHub release holding the package, the SBOMs and `SHA256SUMS`. A tag whose release is
+published fails; a draft left by a run that failed is made again. Publishing the draft is the owner's, and nothing goes
+to npm.
 
-A pull request that changes the workflow or its smoke runs everything but the version check and the draft, and keeps
-the package and SBOMs as the run's artifacts; so does a dispatch, on any branch.
+A pull request that changes the workflow, its smoke, the binding's package, the root package's tooling or the toolchain
+runs everything but the version check and the draft, and keeps the package and SBOMs as the run's artifacts; so do a
+dispatch, on any branch, and a run each Monday on main.
 
 What an SBOM lists is what Cargo builds that target's binary from. LMDB appears as `lmdb-master-sys`, the crate that
 compiles it, and the Rust standard library not at all; both are credited in the package's notices.
