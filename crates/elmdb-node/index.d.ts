@@ -160,7 +160,9 @@ export declare class Database {
    * throws what holds a build up while the builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again
    * after a pause to wait on. Refused with a unit open once the database has started its index builder
    * (`UNIT_OPEN`): commit or abort it, then wait. Throws `CLOSED` on a closed database, and `DATA_REPLACED` while
-   * another process's replacement of every row is not adopted
+   * another process's replacement of every row is not adopted. It doesn't wait for the order of an index's
+   * strings where another elmdb's writes ended its build: reads sort meanwhile, and `indexStatus` answers
+   * `ordered: false`
    */
   waitForIndexBuilds(): void
   /**

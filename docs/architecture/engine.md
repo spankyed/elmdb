@@ -156,7 +156,13 @@ and answers at once whatever is unbuilt, which `indexStatus` says. A schema chan
 leaves has to build: a wait under way goes on to that one, and one asked for between the two waits for the second, so
 its answer is for the schema the database holds as it returns. A close stops the builder with builds left for the next
 open, and a wait under way is told `CLOSED`, as one asked of a closed database is; where the close gives up, the wait
-goes on to the builds it queues again. A tracked read and a watch are told
+goes on to the builds it queues again. The order a value index keeps of its
+strings is waited for with its index, but for a build of it that was put off (above, An order of strings is kept beside the
+index's entries): one that another elmdb's writes ended, which the builder begins again after a wait that doubles, to ten
+minutes at most. That is decided, not left over. Nothing is refused for such an order: the index is built, a read
+sorts what it would have read in order and says so (`sorted: "building"`), and `indexStatus` answers `ordered: false`.
+Waiting for it would hold the caller for as long as the builder waits, and for as long as the other elmdb goes on
+writing, to speed up reads that already answer. A tracked read and a watch are told
 by the commit that ends the build (below, Change sets and watch).
 
 A plan is a scope, a start, steps and a terminal, and holds at most 256 steps (`MAX_STEPS`, `engine/reads.rs`): each
