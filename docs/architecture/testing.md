@@ -533,7 +533,7 @@ Filesystem support requirements and the limits of this platform coverage are in 
 
 Five workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
 or its test, as no required check (Power loss). `release.yml` runs on a tag, each Monday, and on a pull request that
-changes what a release is built from (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
+changes the binding's package or the workspace's build configuration (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
 `mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
 LMDB (`scripts/lmdb-upstream.py`). `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
 and so is `models.yml` (Concurrency models).
@@ -546,8 +546,9 @@ the version the workspace's `Cargo.toml` and the binding's `package.json` both h
 
 - the glibc Linux binaries in manylinux_2_28 (AlmaLinux 8), so they need no glibc past 2.28, which Node 22's own Linux
   builds need too. A check of each binary's undefined symbols fails on one versioned past 2.28, and on one with no
-  version that isn't Node's (`napi_`), which is what a binary compiled against newer headers than its C library leaves:
-  a build with napi-rs's cross toolchain left `__isoc23_strtol` in LMDB's code, and failed to load on glibc 2.35;
+  version that isn't Node's (`napi_`, `node_api_`), which is what a binary compiled against newer headers than its C
+  library leaves: a build with napi-rs's cross toolchain left `__isoc23_strtol` in LMDB's code, and failed to load on
+  Ubuntu 22.04's glibc 2.35 (run 44370951746, 2026-11-18);
 - the musl ones in Alpine;
 - the Windows one with the C runtime linked in (`+crt-static`), as Node's own is. A check of its imports fails on the
   Visual C++ redistributable's `VCRUNTIME140.dll`, which a dynamically linked build needs and many machines lack.
@@ -558,11 +559,12 @@ cargo-cyclonedx, `elmdb.<platform>.cdx.json`. Then, on each target, `scripts/rel
 into an empty project on Node 22.17.0 and runs a database through it: a text search, a rank and `check()`. The glibc
 targets install in AlmaLinux 8, at glibc 2.28, and the musl ones in Alpine; macOS on macOS 15 and Windows on Windows
 Server 2022. On a tag it drafts a GitHub release holding the package, the SBOMs and `SHA256SUMS`. A tag whose release is
-published fails; a draft left by a run that failed is made again. Publishing the draft is the owner's, and nothing goes
+published fails, and so does one whose draft holds every file the run would upload; a draft missing one, which a run
+that failed while uploading leaves, is made again. Publishing the draft is the owner's, and nothing goes
 to npm.
 
-A pull request that changes the workflow, its smoke, the binding's package, the root package's tooling or the toolchain
-runs everything but the version check and the draft, and keeps the package and SBOMs as the run's artifacts; so do a
+A pull request that changes the workflow, its smoke, the binding's package, manifest, build script or loader, the
+workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs everything but the version check and the draft, and keeps the package and SBOMs as the run's artifacts; so do a
 dispatch, on any branch, and a run each Monday on main.
 
 What an SBOM lists is what Cargo builds that target's binary from. LMDB appears as `lmdb-master-sys`, the crate that

@@ -18,8 +18,9 @@ name: release
 #   4. on a tag, drafts a GitHub release holding the package, the SBOMs and `SHA256SUMS`. Publishing the draft is the
 #      owner's; nothing is published to npm.
 #
-# A pull request that changes this workflow, its smoke, the binding's package or the toolchain runs steps 1 to 3 and
-# keeps what they made as the run's artifacts, as do a dispatch on any branch and each Monday's run on main, which
+# A pull request that changes this workflow, its smoke, the binding's package, manifest, build script or loader, the
+# workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs steps 1 to 3
+# and keeps what they made as the run's artifacts, as do a dispatch on any branch and each Monday's run on main, which
 # catches what a dependency's change broke before a tag does. None checks the version or drafts a release, and none
 # gates a merge.
 on:
@@ -30,7 +31,12 @@ on:
       - .github/workflows/release.yml
       - scripts/release-smoke.mjs
       - crates/elmdb-node/package.json
+      - crates/elmdb-node/Cargo.toml
       - crates/elmdb-node/build.rs
+      - crates/elmdb-node/index.js
+      - Cargo.toml
+      - Cargo.lock
+      - .cargo/config.toml
       - package.json
       - package-lock.json
       - rust-toolchain.toml
@@ -90,7 +96,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      # No Rust cache: a tag's run reads only its own tag's caches and main's, so it would never hit one, and each
+      # No Rust cache: four of the seven builds run in containers, which a cache on the runner doesn't reach, and each
       # release build saved would push out the caches ci.yml's runs on main read
       #
       # As platforms.yml: on Windows, @napi-rs/cli's build times out on its own filesystem-reconciliation lock, so
@@ -102,6 +108,7 @@ jobs:
         env:
           RUSTFLAGS: -C target-feature=+crt-static
         run: |
+          rustup toolchain install
           rustup show active-toolchain
           cargo build -p elmdb-node --release --locked
           cp target/release/elmdb_node.dll crates/elmdb-node/elmdb.win32-x64-msvc.node
@@ -122,6 +129,7 @@ jobs:
           node-version: 22.17.0
       - if: runner.os == 'macOS'
         run: |
+          rustup toolchain install
           rustup show active-toolchain
           npm ci --no-audit --no-fund
           npm run build -- --target ${{ matrix.target }} -- --locked
@@ -137,6 +145,7 @@ jobs:
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             export PATH="$HOME/.cargo/bin:$PATH"
             git config --global --add safe.directory /w
+            rustup toolchain install
             rustup show active-toolchain
             cargo build -p elmdb-node --release --locked
           '
@@ -163,6 +172,7 @@ jobs:
             export PATH="$HOME/.cargo/bin:$PATH"
             export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc
             git config --global --add safe.directory /w
+            rustup toolchain install
             rustup show active-toolchain
             npm ci --no-audit --no-fund
             npm run build -- --target ${{ matrix.target }} -- --locked
@@ -307,8 +317,9 @@ jobs:
         working-directory: out
         run: sha256sum -- * | tee SHA256SUMS
       # **A release is written once.** A tag whose release is published fails here, rather than replacing files
-      # someone may have downloaded and checked against its sums. A draft, which no one but the owner sees, is one a
-      # run before failed to finish, and is made again
+      # someone may have downloaded and checked against its sums, and so does one whose draft holds every file this run
+      # would upload, which the owner may be reviewing. A draft missing one of them is what a run that failed while
+      # uploading leaves, which no one but the owner sees, and is made again
       - name: Draft ${{ github.ref_name }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -318,6 +329,12 @@ jobs:
           if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2> /dev/null); then
             if [ "$draft" != true ]; then
               echo "::error::$GITHUB_REF_NAME already has a published release; a release is never replaced"
+              exit 1
+            fi
+            held=$(gh release view "$GITHUB_REF_NAME" --json assets --jq '.assets[].name' | sort)
+            wanted=$(cd out && find . -maxdepth 1 -type f -exec basename {} \; | sort)
+            if [ -z "$(comm -13 <(echo "$held") <(echo "$wanted"))" ]; then
+              echo "::error::$GITHUB_REF_NAME's draft already holds every file; delete the draft to draft it again"
               exit 1
             fi
             gh release delete "$GITHUB_REF_NAME" --yes
