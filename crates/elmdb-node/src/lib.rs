@@ -549,7 +549,8 @@ impl Database {
     /// Blocks until every index waiting to be built is built, throwing `INDEX_BUILD_FAILED` when a build failed, or
     /// throws what holds a build up while the builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again
     /// after a pause to wait on. Refused with a unit open once the database has started its index builder
-    /// (`UNIT_OPEN`): commit or abort it, then wait
+    /// (`UNIT_OPEN`): commit or abort it, then wait. Throws `CLOSED` on a closed database, and `DATA_REPLACED` while
+    /// another process's replacement of every row is not adopted
     #[napi]
     pub fn wait_for_index_builds(&self) -> Result<(), Code> {
         self.guarded("Database.waitForIndexBuilds", || self.inner.wait_for_index_builds().map_err(to_js))

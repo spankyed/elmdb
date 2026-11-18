@@ -115,6 +115,8 @@ pub(crate) mod points {
     pub const SCHEMA_BUILDER_STOPPED: &str = "database::schema_builder_stopped";
     /// Runs once a close has stopped the builder and taken the store, before it waits for the store's other holders
     pub const CLOSE_TAKEN: &str = "database::close_taken";
+    /// Runs once a close that gives up has put the store back, before it queues again what is left to build
+    pub const CLOSE_GAVE_UP: &str = "database::close_gave_up";
     /// Runs before a load publishes its staged database
     pub const LOAD_PUBLISH: &str = "dump::before_load_publish";
     /// A load's sync fails after its database is published

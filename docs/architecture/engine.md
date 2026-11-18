@@ -148,8 +148,16 @@ index's are, so read part way it would answer from the entities filed so far and
 out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller to make again; with `INDEX_BUILD_FAILED`, naming
 each, when a build failed; while a unit is open, once the database has started its index builder (`UNIT_OPEN`),
 since a build waits for the unit to end; and in a listener running on the builder's thread (`CALLBACK_ACTIVE`). With
-no builder started, it answers at once. A tracked read and a watch are told by the commit that
-ends the build (below, Change sets and watch).
+no builder started, it reads what is unbuilt: nothing, and it answers at once; something, left by a close at exit
+that gave up or a schema change that failed part way, and it queues that and waits for it. That read is refused as
+any is (`SCHEMA_CHANGED`, `READERS_FULL`). While another process's replacement of every row is not adopted the wait
+is refused (`DATA_REPLACED`), since no build commits over rows that are gone. A read-only database builds nothing,
+and answers at once whatever is unbuilt, which `indexStatus` says. A schema change stops the builder and starts another for what the schema it
+leaves has to build: a wait under way goes on to that one, and one asked for between the two waits for the second, so
+its answer is for the schema the database holds as it returns. A close stops the builder with builds left for the next
+open, and a wait under way is told `CLOSED`, as one asked of a closed database is; where the close gives up, the wait
+goes on to the builds it queues again. A tracked read and a watch are told
+by the commit that ends the build (below, Change sets and watch).
 
 A plan is a scope, a start, steps and a terminal, and holds at most 256 steps (`MAX_STEPS`, `engine/reads.rs`): each
 step is a frame of the walk that pulls ids through the steps before it, and one past that is refused
@@ -563,12 +571,16 @@ The operations:
   `SHORT_CODE_IN_USE`; a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that
   would pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
   (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
-  (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
+  (`VALUE_INVALID`), a time that isn't a finite number, the batch's `now`, a create's `createdAt` or `updatedAt` or a
+  trash's `at` (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or an edge
   moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
   to an entity it creates later. A relation moved by `updateRelation` is held to its kind's rules as an edge at its new
   ends, its edge as it was counting for nothing: one turned round closes no cycle through itself. A write of several
-  fields of one unique index is held to the values it leaves, not to those the entity passes through field by field.
+  fields of one value index, `updatedAt` counted where the write stamps it, files the entity under the values it
+  leaves, once, and is held to those: not to the values
+  the entity passes through field by field, which another entity may hold in a unique index, or which may make a
+  longer key than the store holds.
 - **The result** carries each operation's answer (an entity's id, code and whether it was created; a relation's id and
   whether it was linked; a label; `stale`), and the commit's change set.
 
@@ -773,7 +785,9 @@ in either order. `db.sequence` is the last commit's.
   The listener of the builder's commits is such a callback, run on the builder's thread, and a close it asks for
   is refused the same way: a close waits for the store that thread holds. So is a wait for the index builds asked
   for on the thread of the builder it would wait for, which would wait for the listener asking; a listener that
-  changed the schema waits for the builder started for it. The listener is let go of inside the callback too, so
+  changed the schema waits for the builder started for it. A wait any listener asks for while a schema change or a
+  close made elsewhere has the builder stopped is refused too: the change waits for the builder's thread, and so for a
+  listener running on it, and the wait would wait for the change. The listener is let go of inside the callback too, so
   the last of a database it held closes nothing that waits for the builder's thread: the environment is let go of
   as that thread ends. One that panics is heard no more, and the builder goes on. A schema change made by a listener on that thread,
   a watch's or the builder's commits', stops the builder without waiting for it, there being no other thread to
@@ -970,7 +984,7 @@ detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
 A code names what went wrong, not the call that met it, so one failure met by two calls is one code. `CALLBACK_ACTIVE`
 is a call that waits for what a listener of the database is called from, made by that listener: a `close`, from a
 watch's listener or the listener of the builder's commits, and a `waitForIndexBuilds` on the thread of the builder it
-would wait for. Either would wait for itself, and either is made after the listener returns (above, Change sets and
+would wait for, or in any listener while a schema change or a close has that builder stopped. Either would wait for itself, and either is made after the listener returns (above, Change sets and
 watch). Both are calls of the Rust API: the binding has no watch, and hands each of the builder's commits to its
 JavaScript listener on the main thread, after the builder has gone on, so from JavaScript neither arises.
 

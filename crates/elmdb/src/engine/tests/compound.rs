@@ -1805,3 +1805,82 @@ fn a_filter_is_refused_as_its_stage_refuses_it_whichever_index_is_read() {
     let steps = json!([role("nobody"), limit(0), is("owner", json!(7))]);
     assert_eq!(code(steps).unwrap()["ids"], json!([]));
 }
+
+#[test]
+fn a_write_of_several_fields_of_an_index_is_held_to_the_key_of_the_values_it_leaves() {
+    let (_dir, db) = open();
+    // Two strings an index has entries for, whose pair is a longer key than the store holds
+    let (a, b) = ("a".repeat(256), "b".repeat(256));
+    write(&db, vec![task(0, json!({ "status": a, "n": 1 }))]);
+    // `n` is written before `status`: beside the status the task had, it is a pair no key holds, which the task only
+    // passes through
+    let both =
+        |status: &str, n: &str| json!({ "op": "set", "id": id(0), "fields": { "m": n, "n": n, "status": status } });
+    write(&db, vec![both("open", &b)]);
+    let found = |status: &str, n: Json| visited(&db, plan("live", json!([is("status", json!(status)), is("n", n)]))).0;
+    assert_eq!(found("open", json!(b)), vec![id(0)], "filed under the pair it was left with");
+    assert_eq!(found(&a, json!(1)), Vec::<String>::new(), "and no longer under the one it had");
+    // The pair a write leaves is held to the limit, and a refused write leaves the task filed as it was
+    let refused = super::refused(&db, vec![both(&a, &b)]);
+    assert_eq!(refused.code, ErrorCode::ValueInvalid);
+    assert!(refused.message.contains("Task.statusN"), "{}", refused.message);
+    assert_eq!(found("open", json!(b)), vec![id(0)]);
+    // A load of an entity there already writes its fields as one write too
+    let load = |status: &str, n: &str| crate::engine::maintenance::Load::Entity {
+        id: id(0),
+        fields: [("n", n), ("status", status)].map(|(name, value)| (name.to_owned(), value.into())).into(),
+        trashed: false,
+    };
+    db.bulk_load(&[load(&a, "short")]).unwrap();
+    assert_eq!(found(&a, json!("short")), vec![id(0)]);
+    db.bulk_load(&[load("open", &b)]).unwrap();
+    assert_eq!(found("open", json!(b)), vec![id(0)]);
+    assert_eq!(db.bulk_load(&[load(&a, &b)]).unwrap_err().code, ErrorCode::ValueInvalid);
+    assert!(db.check().unwrap().is_clean());
+}
+
+#[test]
+fn a_write_that_stamps_the_entity_is_held_to_the_time_it_leaves_in_an_index_holding_it() {
+    let (_dir, db) = open_with(json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": { "Task": {
+            "fields": { "tag": { "type": "string", "optional": true }, "tags": { "type": "any", "optional": true } },
+            "indexes": {
+                "onceTagTime": { "kind": "value", "fields": ["tag", "updatedAt"], "unique": true },
+                "onceTagsTime": { "kind": "value", "fields": ["tags", "updatedAt"], "unique": true }
+            }
+        } }
+    }));
+    // Two tasks stamped at one time, 1000, which every write here is made at but the last
+    let made = |at: usize, tag: &str| json!({ "op": "create", "type": "Task", "id": id(at), "fields": { "tag": tag } });
+    write(&db, vec![made(0, "t"), made(1, "u")]);
+    let at = |ops: Vec<Json>, now: f64| {
+        let ops = ops.into_iter().map(super::op).collect();
+        db.write(&crate::engine::batch::Batch { ops, now: Some(now) }, false).map(|_| ()).map_err(|e| e.code)
+    };
+    let tagged = |tag: &str| json!({ "op": "set", "id": id(1), "fields": { "tag": tag } });
+    // With the first task's tag at the first task's time, the second holds what the first does
+    assert_eq!(at(vec![tagged("t")], 1000.0), Err(ErrorCode::Unique));
+    // Stamped with another time by the same write, it never does: the tag beside the time it had is a pair the task
+    // only passes through. A single field's write stamps it the same way: a merge, here
+    assert_eq!(at(vec![tagged("t")], 2000.0), Ok(()));
+    assert_eq!(
+        at(vec![json!({ "op": "upsert", "type": "Task", "id": id(0), "fields": { "tag": "v" } })], 2000.0),
+        Ok(())
+    );
+    assert_eq!(
+        at(vec![json!({ "op": "upsert", "type": "Task", "id": id(1), "fields": { "tag": "v" } })], 3000.0),
+        Ok(())
+    );
+    let stamped = |task: usize| super::row(&db, &id(task)).unwrap()["updatedAt"].clone();
+    assert_eq!((stamped(0), stamped(1)), (json!(2000), json!(3000)), "an upsert that writes a field stamps the task");
+    // And one that writes none leaves its time
+    assert_eq!(at(vec![json!({ "op": "upsert", "type": "Task", "id": id(1) })], 3500.0), Ok(()));
+    assert_eq!(stamped(1), json!(3000));
+    let merged = |task: usize| json!({ "op": "merge", "id": id(task), "field": "tags", "value": { "x": 1 } });
+    assert_eq!(at(vec![merged(0)], 4000.0), Ok(()));
+    assert_eq!(at(vec![tagged("w")], 4000.0), Ok(()));
+    assert_eq!(at(vec![merged(1)], 5000.0), Ok(()));
+    assert_eq!(at(vec![merged(1)], 4000.0), Err(ErrorCode::Unique), "the map the first task holds, at its time");
+    assert!(db.check().unwrap().is_clean());
+}

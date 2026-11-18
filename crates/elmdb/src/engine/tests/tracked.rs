@@ -1030,6 +1030,101 @@ fn a_wait_for_the_builds_on_the_builder_s_thread_is_refused() {
     db.close().unwrap();
 }
 
+/// A listener of the builder's commits that stays in its call until `gone` says the builder was taken from the
+/// database, by a schema change or a close made on another thread, which waits for the builder's thread and so for
+/// the listener. `asks` is then handed the database, on that thread, and its answer comes back once the listener
+/// was called
+fn asked_as_the_builder_is_waited_for<T: Send + 'static>(
+    db: &Arc<Database>,
+    asks: impl Fn(&Database) -> T + Send + Sync + 'static,
+) -> std::sync::mpsc::Receiver<T> {
+    use std::time::{Duration, Instant};
+    let (start, started) = std::sync::mpsc::channel();
+    let (tell, told) = std::sync::mpsc::channel();
+    let tell = Mutex::new(Some((start, tell)));
+    let weak = Arc::downgrade(db);
+    db.hear_builder_commits(Some(Arc::new(move |_, _| {
+        let Some((start, tell)) = tell.lock().unwrap().take() else { return };
+        let db = weak.upgrade().unwrap();
+        start.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while db.builder().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        tell.send(asks(&db)).unwrap();
+    })))
+    .unwrap();
+    link_all(db);
+    started.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
+    told
+}
+
+/// A schema change made on another thread waits for the builder's thread, and so for a listener one of its commits
+/// delivered to. A wait for the builds that listener asks for meanwhile would wait for the change, which waits for
+/// the listener: it is refused, as one asked for on the thread of the builder the database has
+#[test]
+fn a_wait_for_the_builds_by_a_listener_a_schema_change_waits_for_is_refused() {
+    use std::time::Duration;
+    let (_dir, db, schema, top) = ranked_tasks();
+    db.read(&reads(vec![top], Some(7))).unwrap();
+    let told = asked_as_the_builder_is_waited_for(&db, |db| db.wait_for_index_builds().map_err(|refused| refused.code));
+    assert_eq!(db.set_schema(schema(1e-8)).unwrap().len(), 1, "the tolerance changed");
+    assert_eq!(told.recv_timeout(Duration::from_secs(4)).unwrap(), Err(crate::ErrorCode::CallbackActive));
+    // And on any other thread it waits for the builder the change started
+    db.wait_for_index_builds().unwrap();
+    db.close().unwrap();
+}
+
+/// A schema change stops the builder a wait is under way on, and starts another. The wait goes on to that one: it
+/// doesn't answer when the first stops, with the change not yet made
+#[test]
+fn a_wait_for_the_builds_under_way_goes_on_past_the_builder_a_schema_change_stops() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    let (_dir, db, schema, top) = ranked_tasks();
+    db.read(&reads(vec![top], Some(7))).unwrap();
+    // The builder is kept at work, in its listener, until the change has taken it
+    let returned = asked_as_the_builder_is_waited_for(&db, |_| ());
+    let (tell, told) = std::sync::mpsc::channel();
+    let waiting = Arc::clone(&db);
+    std::thread::spawn(move || tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap());
+    // Long enough for the wait to be under way on the builder the change then stops
+    std::thread::sleep(Duration::from_millis(50));
+    let told = Rc::new(told);
+    let answered = Rc::clone(&told);
+    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED, move || {
+        let early = answered.recv_timeout(Duration::from_millis(200));
+        assert!(early.is_err(), "answered {early:?} as its builder stopped, with the change's not started");
+    });
+    assert_eq!(db.set_schema(schema(1e-8)).unwrap().len(), 1, "the tolerance changed");
+    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED));
+    returned.recv_timeout(Duration::from_secs(4)).unwrap();
+    assert_eq!(told.recv_timeout(Duration::from_secs(4)).unwrap(), Ok(()));
+    db.close().unwrap();
+}
+
+/// A close stops the builder for good, with builds left that the next open takes up. A wait for the builds under
+/// way is told the database is closed, as one asked for after the close is: answered as if they were built, it
+/// would say so of builds that weren't
+#[test]
+fn a_wait_for_the_builds_a_close_ends_is_told_the_database_is_closed() {
+    use std::time::Duration;
+    let (_dir, db, _, top) = ranked_tasks();
+    db.read(&reads(vec![top], Some(7))).unwrap();
+    // The builder is kept at work, in its listener, until the close has taken it
+    let returned = asked_as_the_builder_is_waited_for(&db, |_| ());
+    let (tell, told) = std::sync::mpsc::channel();
+    let waiting = Arc::clone(&db);
+    std::thread::spawn(move || tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap());
+    // Long enough for the wait to be under way on the builder the close then stops; one that starts after the close
+    // is told the same
+    std::thread::sleep(Duration::from_millis(50));
+    db.close().unwrap();
+    returned.recv_timeout(Duration::from_secs(4)).unwrap();
+    assert_eq!(told.recv_timeout(Duration::from_secs(4)).unwrap(), Err(crate::ErrorCode::Closed));
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, crate::ErrorCode::Closed);
+}
+
 /// The listener of the builder's commits is let go of on the builder's thread, when it was taken away as it ran.
 /// What it held may be the last of the database, whose close, there, waits for the store that thread holds: it is
 /// refused as any close the listener asks for is, and the environment is let go of as the thread ends

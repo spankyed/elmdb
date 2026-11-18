@@ -32,7 +32,8 @@ pub enum ErrorCode {
     SchemaChangeRefused,
     /// Another process changed the stored schema; close and reopen the handle before reading or writing
     SchemaChanged,
-    /// Another process replaced every row; a commit is refused until this handle adopts that (`adopt_replacement`)
+    /// Another process replaced every row; a commit, and a wait for the index builds, is refused until this handle
+    /// adopts that (`adopt_replacement`)
     DataReplaced,
     /// The files hold something other than an elmdb database
     NotADatabase,

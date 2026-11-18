@@ -208,37 +208,41 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
     Ok(())
 }
 
-/// Writes several fields of one entity as one write does, each as `put_field` writes it. A unique index over more than
-/// one of them is held to the values the write leaves: checked at each field it would be held to values the entity
-/// only passes through, with the fields before written and those after not yet, and refuse a write for values another
-/// entity holds that this one never ends on
+/// Writes several fields of one entity as one write does, each as `put_field` writes it. A value index over more than
+/// one of them is held to the values the write leaves, and the entity refiled in it once, after the last: refiled at
+/// each field it would be held to values the entity only passes through, with the fields before written and those
+/// after not yet. Such values can be a longer key than the store holds, or another entity's in a unique index, and
+/// either would refuse a write that leaves neither
 pub fn put_fields(t: &mut Txn<'_, '_>, id: &str, fields: &[(String, Value)]) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
-    let written = |index: &ValueIndex| {
+    // Whether the write writes more than one of an index's fields
+    let spans = |index: &ValueIndex| {
         // mutant-skip: replace == with != in put_fields
-        // Either counts in an index the write writes one field of, or none. Checked once the write's other fields
-        // are in, the first is held to the values of its own that its field's write would have held it to, and the
-        // second holds nothing new to check: only which of two refusals a write is given tells them from the code
-        index.fields.iter().filter(|f| fields.iter().any(|(name, _)| name == *f)).count()
+        // Either counts more than one field in every index the write writes more than one field of. Where they
+        // differ, the index is one the write writes one field of or none: refiled once after the fields rather than
+        // at its field, or not at all, it is left filed the same and held to the same values, and only the reads
+        // the write makes, and which of two refusals it is given, tell the two apart
+        let written = index.fields.iter().filter(|f| fields.iter().any(|(name, _)| name == *f)).count();
+        written > 1
     };
-    let spanning: Vec<ValueIndex> = if t.state.unchecked {
-        Vec::new()
-    } else {
-        // mutant-skip: replace > with >= in put_fields (as above)
-        value_indexes(t.schema(), &entity_type).into_iter().filter(|i| i.unique && written(i) > 1).collect()
-    };
+    let spanning: Vec<ValueIndex> = value_indexes(t.schema(), &entity_type).into_iter().filter(spans).collect();
     let held = |t: &Txn<'_, '_>, index: &ValueIndex| -> Result<Vec<Option<Value>>> {
         index.fields.iter().map(|f| get(t, id, f)).collect()
     };
     let before: Vec<Vec<Option<Value>>> = spanning.iter().map(|index| held(t, index)).collect::<Result<_>>()?;
-    t.state.unique_deferred = spanning.iter().map(|index| index.name.clone()).collect();
+    t.state.refiled_after = spanning.iter().map(|index| index.name.clone()).collect();
     let put = fields.iter().try_for_each(|(name, value)| put_field(t, id, name, value));
-    // Cleared whatever came of the writes: a unit goes on after a refused batch, its next write checked as every one is
-    t.state.unique_deferred.clear();
+    // Cleared whatever came of the writes: a unit goes on after a refused batch, its next write refiled as every one is
+    t.state.refiled_after.clear();
     put?;
+    // A write of one field, or of fields no index holds two of, reads nothing more than its fields' writes do
+    if spanning.is_empty() {
+        return Ok(());
+    }
+    let Some(seq) = record(t, id)?.map(|r| r.seq) else { return Ok(()) };
     for (index, before) in spanning.iter().zip(&before) {
         let after = held(t, index)?;
-        check_unique(t, &entity_type, index, id, before, &after)?;
+        refile(t, id, &entity_type, index, before, &after, seq, false)?;
     }
     Ok(())
 }
@@ -648,7 +652,7 @@ fn check_unique(
 /// Refiles the entity at `seq` (none for one not stored) in each of its type's value indexes that covers `field`, as
 /// its value goes from `before` to `after`, refusing a value a unique index holds for another entity (`UNIQUE`,
 /// `SHORT_CODE_IN_USE`). An entity that is `going`, each of its fields removed as it is destroyed, is filed nowhere
-/// after
+/// after. An index a write of several of its fields refiles the entity in once, after them, is left as it is
 fn reindex(
     t: &mut Txn<'_, '_>,
     id: &str,
@@ -659,8 +663,10 @@ fn reindex(
     going: bool,
 ) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
-    let indexes: Vec<ValueIndex> =
-        value_indexes(t.schema(), &entity_type).into_iter().filter(|i| i.fields.iter().any(|f| f == field)).collect();
+    let indexes: Vec<ValueIndex> = value_indexes(t.schema(), &entity_type)
+        .into_iter()
+        .filter(|i| i.fields.iter().any(|f| f == field) && !t.state.refiled_after.contains(&i.name))
+        .collect();
     if indexes.is_empty() {
         return Ok(());
     }
@@ -678,81 +684,99 @@ fn reindex(
                 values_after.push(other);
             }
         }
-        if index.unique && !t.state.unchecked && !t.state.unique_deferred.contains(&index.name) {
-            check_unique(t, &entity_type, &index, id, &values_before, &values_after)?;
+        refile(t, id, &entity_type, &index, &values_before, &values_after, seq, going)?;
+    }
+    Ok(())
+}
+
+/// Refiles the entity at `seq` in one value index, as the values of the index's fields go from `values_before` to
+/// `values_after`: what `reindex` does for each index of a field, and `put_fields` once for an index it writes
+/// several fields of. Refuses a value a unique index holds for another entity, and values whose key is longer than
+/// the store holds (`VALUE_INVALID`)
+#[allow(clippy::too_many_arguments)]
+fn refile(
+    t: &mut Txn<'_, '_>,
+    id: &str,
+    entity_type: &str,
+    index: &ValueIndex,
+    values_before: &[Option<Value>],
+    values_after: &[Option<Value>],
+    seq: u64,
+    going: bool,
+) -> Result<()> {
+    if index.unique && !t.state.unchecked {
+        check_unique(t, entity_type, index, id, values_before, values_after)?;
+    }
+    let was = index.files(values_before);
+    let mut now = index.files(values_after);
+    // An entity that is going is filed nowhere besides its entries, which its fields take with them
+    if going {
+        now.others.clear();
+    }
+    // Filed as it was: a field written with what it held, or one that changes nothing the index files
+    if was == now {
+        return Ok(());
+    }
+    // The keys in their order, each side's once: an entity under many tuples costs their sorting, not their square.
+    // An entity just made is filed nowhere besides its entries until its fields are written (`file_without`),
+    // and one being destroyed is taken out as the first of an index's fields goes: taking it out from where it
+    // isn't changes nothing
+    let (had, has) = (was.entry_keys(entity_type, &index.name), now.entry_keys(entity_type, &index.name));
+    let (had_others, has_others) = (was.other_keys(entity_type, &index.name), now.other_keys(entity_type, &index.name));
+    // The order the index keeps of its strings (`order.rs`) has a key for each string an entry is for, there
+    // while the entry holds a place, and one for the entity under each string with no key of its own. So the
+    // entries of strings this write files the entity under or takes it out from, by their keys
+    let strings = |filed: &Filed, other: &BTreeSet<Vec<u8>>| -> BTreeMap<Vec<u8>, Vec<Part>> {
+        let of_strings = filed.entries.iter().filter(|parts| matches!(parts.last(), Some(Part::String(_))));
+        let keyed = of_strings.map(|parts| (keys::index_range(entity_type, &index.name, parts), parts.clone()));
+        keyed.filter(|(key, _)| !other.contains(key)).collect()
+    };
+    let (lost, gained) = match index.accounts() {
+        true => (strings(&was, &has), strings(&now, &had)),
+        false => Default::default(),
+    };
+    // A write that files a string or takes one out reads the order's marker, and files under it or ends it
+    let order = match lost.is_empty() && gained.is_empty() && was.unplaced == now.unplaced {
+        true => None,
+        false => match super::order::filing(t, entity_type, &index.name)? {
+            Some(build) => Some((build, super::order::running(&t.schema.collation)?)),
+            None => None,
+        },
+    };
+    let key_of = |order: &Option<(u64, std::rc::Rc<super::order::Running>)>, parts: Option<&Vec<Part>>| {
+        let (build, running) = order.as_ref()?;
+        super::order::string_key(&running.collator, entity_type, &index.name, *build, parts?)
+    };
+    for key in had.difference(&has).chain(had_others.difference(&has_others)) {
+        // The string's key goes with the last place its entry held. What it held is known without a read: a
+        // unit that rolls this back has the entry again, and so the key, whether or not a build had put it yet
+        if places::unfile(t, key.clone(), seq)?
+            && let Some(gone) = key_of(&order, lost.get(key))
+        {
+            t.del_over(&gone, Some(&[]))?;
         }
-        let was = index.files(&values_before);
-        let mut now = index.files(&values_after);
-        // An entity that is going is filed nowhere besides its entries, which its fields take with them
-        if going {
-            now.others.clear();
+    }
+    for key in has.difference(&had).chain(has_others.difference(&had_others)) {
+        // What makes a key too long is a value the index holds
+        key_fits(key, id, entity_type, &index.name)?;
+        // And comes with the first: there was none, the entry having held no place
+        if places::file(t, key.clone(), seq)?
+            && let Some(came) = key_of(&order, gained.get(key))
+        {
+            t.put_over(&came, &[], None)?;
         }
-        // Filed as it was: a field written with what it held, or one that changes nothing the index files
-        if was == now {
-            continue;
-        }
-        // The keys in their order, each side's once: an entity under many tuples costs their sorting, not their square.
-        // An entity just made is filed nowhere besides its entries until its fields are written (`file_without`),
-        // and one being destroyed is taken out as the first of an index's fields goes: taking it out from where it
-        // isn't changes nothing
-        let (had, has) = (was.entry_keys(&entity_type, &index.name), now.entry_keys(&entity_type, &index.name));
-        let (had_others, has_others) =
-            (was.other_keys(&entity_type, &index.name), now.other_keys(&entity_type, &index.name));
-        // The order the index keeps of its strings (`order.rs`) has a key for each string an entry is for, there
-        // while the entry holds a place, and one for the entity under each string with no key of its own. So the
-        // entries of strings this write files the entity under or takes it out from, by their keys
-        let strings = |filed: &Filed, other: &BTreeSet<Vec<u8>>| -> BTreeMap<Vec<u8>, Vec<Part>> {
-            let of_strings = filed.entries.iter().filter(|parts| matches!(parts.last(), Some(Part::String(_))));
-            let keyed = of_strings.map(|parts| (keys::index_range(&entity_type, &index.name, parts), parts.clone()));
-            keyed.filter(|(key, _)| !other.contains(key)).collect()
+    }
+    if let Some((build, running)) = &order {
+        let filing = super::order::Filing { build: *build, running: std::rc::Rc::clone(running) };
+        let places_of = |filed: &Filed| -> BTreeSet<Vec<u8>> {
+            filing.of_places(entity_type, &index.name, &filed.unplaced, seq).collect()
         };
-        let (lost, gained) = match index.accounts() {
-            true => (strings(&was, &has), strings(&now, &had)),
-            false => Default::default(),
-        };
-        // A write that files a string or takes one out reads the order's marker, and files under it or ends it
-        let order = match lost.is_empty() && gained.is_empty() && was.unplaced == now.unplaced {
-            true => None,
-            false => match super::order::filing(t, &entity_type, &index.name)? {
-                Some(build) => Some((build, super::order::running(&t.schema.collation)?)),
-                None => None,
-            },
-        };
-        let key_of = |order: &Option<(u64, std::rc::Rc<super::order::Running>)>, parts: Option<&Vec<Part>>| {
-            let (build, running) = order.as_ref()?;
-            super::order::string_key(&running.collator, &entity_type, &index.name, *build, parts?)
-        };
-        for key in had.difference(&has).chain(had_others.difference(&has_others)) {
-            // The string's key goes with the last place its entry held. What it held is known without a read: a
-            // unit that rolls this back has the entry again, and so the key, whether or not a build had put it yet
-            if places::unfile(t, key.clone(), seq)?
-                && let Some(gone) = key_of(&order, lost.get(key))
-            {
-                t.del_over(&gone, Some(&[]))?;
-            }
+        let (had_places, has_places) = (places_of(&was), places_of(&now));
+        for key in had_places.difference(&has_places) {
+            t.del(key)?;
         }
-        for key in has.difference(&had).chain(has_others.difference(&had_others)) {
-            // What makes a key too long is a value the index holds
-            key_fits(key, id, &entity_type, &index.name)?;
-            // And comes with the first: there was none, the entry having held no place
-            if places::file(t, key.clone(), seq)?
-                && let Some(came) = key_of(&order, gained.get(key))
-            {
-                t.put_over(&came, &[], None)?;
-            }
-        }
-        if let Some((build, running)) = &order {
-            let filing = super::order::Filing { build: *build, running: std::rc::Rc::clone(running) };
-            let places_of = |filed: &Filed| -> BTreeSet<Vec<u8>> {
-                filing.of_places(&entity_type, &index.name, &filed.unplaced, seq).collect()
-            };
-            let (had_places, has_places) = (places_of(&was), places_of(&now));
-            for key in had_places.difference(&has_places) {
-                t.del(key)?;
-            }
-            for key in has_places.difference(&had_places) {
-                t.put(key, &[])?;
-            }
+        for key in has_places.difference(&had_places) {
+            t.put(key, &[])?;
         }
     }
     Ok(())

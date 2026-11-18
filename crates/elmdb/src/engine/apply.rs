@@ -22,10 +22,8 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
         Op::Set { id, fields, touch } => {
             existing(t, id)?;
             let checked = check_fields(t, id, fields, "set")?;
-            entities::put_fields(t, id, &checked)?;
-            if *touch && !checked.is_empty() {
-                stamp(t, id)?;
-            }
+            let touch = *touch && !checked.is_empty();
+            entities::put_fields(t, id, &stamped(t, checked, touch))?;
             Ok(OpResult::Done)
         }
         Op::Append { id, field, value, touch } => {
@@ -77,6 +75,7 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
             Ok(OpResult::Done)
         }
         Op::Trash { id, at } => {
+            finite_time("trash: `at`", *at)?;
             existing(t, id)?;
             if !entities::record(t, id)?.is_some_and(|r| r.trashed) {
                 let at = at.unwrap_or(t.now);
@@ -177,8 +176,30 @@ pub fn apply(t: &mut Txn<'_, '_>, op: &Op) -> Result<OpResult> {
     }
 }
 
+/// Refuses a time that isn't a finite number (`VALUE_INVALID`): the value spec holds none. A batch decoded from
+/// bytes is refused one as it is decoded; one built in Rust is first checked here
+pub(super) fn finite_time(what: &str, time: Option<f64>) -> Result<()> {
+    match time {
+        Some(time) if !time.is_finite() => Err(Error::new(
+            ErrorCode::ValueInvalid,
+            format!("{what} is {time}, and a time is a finite number of milliseconds since the epoch"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn number(n: f64) -> Value {
     if n.fract() == 0.0 && n.abs() < 9_007_199_254_740_992.0 { Value::from(n as i64) } else { Value::from(n) }
+}
+
+/// The fields a write writes, with `updatedAt` at the batch's time after them when it stamps the entity: written as
+/// one write (`entities::put_fields`), so an index over a field and `updatedAt` files the entity once, under the
+/// values the write leaves
+fn stamped(t: &Txn<'_, '_>, mut fields: Vec<(String, Value)>, touch: bool) -> Vec<(String, Value)> {
+    if touch {
+        fields.push((field::UPDATED_AT.to_owned(), number(t.now)));
+    }
+    fields
 }
 
 /// Stamps the entity's `updatedAt` with the batch's time
@@ -305,10 +326,7 @@ fn check_fields(
 /// Writes one field after checking it, and stamps `updatedAt` when `touch`
 fn write_field(t: &mut Txn<'_, '_>, id: &str, name: &str, value: Value, touch: bool, via: &str) -> Result<OpResult> {
     check_value(t, ids::type_of(id), name, &value, via)?;
-    entities::put_field(t, id, name, &value)?;
-    if touch {
-        stamp(t, id)?;
-    }
+    entities::put_fields(t, id, &stamped(t, vec![(name.to_owned(), value)], touch))?;
     Ok(OpResult::Done)
 }
 
@@ -362,6 +380,8 @@ fn create(
 ) -> Result<OpResult> {
     let def = type_def(t, entity_type, "create")?.clone();
     let quoted = format!("\"{entity_type}\"");
+    finite_time(&format!("create({quoted}): `createdAt`"), created_at)?;
+    finite_time(&format!("create({quoted}): `updatedAt`"), updated_at)?;
     for (name, value) in fields {
         check_value(t, entity_type, name, value, "create")?;
     }
@@ -478,9 +498,7 @@ fn upsert(
         ));
     }
     let checked = check_fields(t, id, fields, "upsert")?;
-    entities::put_fields(t, id, &checked)?;
-    if !checked.is_empty() {
-        stamp(t, id)?;
-    }
+    let touch = !checked.is_empty();
+    entities::put_fields(t, id, &stamped(t, checked, touch))?;
     Ok(OpResult::Entity { id: id.to_owned(), short_code: held, created: false })
 }

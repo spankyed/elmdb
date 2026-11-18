@@ -122,9 +122,11 @@ pub fn load(t: &mut Txn<'_, '_>, loads: &[Load]) -> Result<()> {
                     Some(_) => None,
                     None => Some(entities::insert(t, id)?),
                 };
-                for (name, value) in fields {
-                    entities::put_field(t, id, name, value)?;
-                }
+                // As one write, so an index over several of the fields files the entity once, under the values the
+                // load leaves
+                let written: Vec<(String, rmpv::Value)> =
+                    fields.iter().map(|(name, value)| (name.clone(), value.clone())).collect();
+                entities::put_fields(t, id, &written)?;
                 if let Some(made) = made {
                     entities::file_without(t, id, made.seq, |name| {
                         fields.get(name).is_some_and(|value| !value.is_nil())

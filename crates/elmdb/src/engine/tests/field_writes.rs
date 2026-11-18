@@ -32,6 +32,11 @@ fn schema() -> Schema {
 
 /// The reads one `put_field` of `field` makes on an entity that holds every field already, in a unit with a savepoint
 fn reads_of(field: &str, value: &str) -> u64 {
+    reads_in(|t| entities::put_field(t, "Task-a", field, &value.into()))
+}
+
+/// The reads `writes` makes on an entity that holds every field already, in a unit with a savepoint
+fn reads_in(writes: impl Fn(&mut Txn<'_, '_>) -> crate::Result<()>) -> u64 {
     let dir = tempfile::tempdir().unwrap();
     let schema = schema();
     let db =
@@ -51,7 +56,7 @@ fn reads_of(field: &str, value: &str) -> u64 {
                 let mut state = UnitState::new(false);
                 state.savepoint();
                 let mut t = Txn { txn, db: store, state: &mut state, schema: &schema, now: 0.0 };
-                entities::put_field(&mut t, "Task-a", field, &value.into())?;
+                writes(&mut t)?;
                 reads = state.reads.get();
                 Ok(())
             },
@@ -73,4 +78,13 @@ fn a_field_write_reads_what_it_replaces_and_what_its_indexes_need_and_nothing_tw
     // for the two terms it loses and the two it gains, their places. The term it keeps, as often as it held it, is read
     // nowhere
     assert_eq!(reads_of("body", "other words entirely"), 9);
+    // Written as a write of several fields is (`put_fields`), a field costs what it costs alone, and two that no
+    // index holds both of cost what each does: nothing is read for an index to be refiled after them
+    let fields = |fields: &[(&str, &str)]| -> Vec<(String, rmpv::Value)> {
+        fields.iter().map(|(name, value)| ((*name).to_owned(), (*value).into())).collect()
+    };
+    let one = fields(&[("status", "done")]);
+    assert_eq!(reads_in(|t| entities::put_fields(t, "Task-a", &one)), 5);
+    let two = fields(&[("note", "changed"), ("status", "done")]);
+    assert_eq!(reads_in(|t| entities::put_fields(t, "Task-a", &two)), 6);
 }
