@@ -2,7 +2,7 @@
 from pathlib import Path
 import tempfile
 
-from callgrind import allocator_instructions, grew_most
+from callgrind import allocator_instructions, grew_most, linked_for_valgrind
 
 FILE = """# callgrind format
 events: Ir Dr Dw
@@ -43,3 +43,7 @@ with tempfile.TemporaryDirectory() as scratch:
     assert allocator_instructions(scratch) == 0
     assert "no Callgrind files" in grew_most(scratch, "off")
 print("ok")
+
+# The link Valgrind reads follows whatever flags the environment holds, and leaves the rest of it as it is
+assert linked_for_valgrind({"A": "b"}) == {"A": "b", "RUSTFLAGS": "-C link-arg=-Wl,-z,norelro"}
+assert linked_for_valgrind({"RUSTFLAGS": "--cfg x"})["RUSTFLAGS"] == "--cfg x -C link-arg=-Wl,-z,norelro"

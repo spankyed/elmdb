@@ -13,6 +13,8 @@ import subprocess
 import sys
 import tempfile
 
+from callgrind import linked_for_valgrind
+
 BENCH = "crates/elmdb/benches/instructions.rs"
 BASELINE = "base"
 
@@ -22,7 +24,7 @@ root = Path.cwd()
 # target, so HEAD's build is incremental
 home = Path(os.environ.get("GUNGRAUN_HOME") or tempfile.mkdtemp(prefix="instruction-counts-"))
 home.mkdir(parents=True, exist_ok=True)
-env = {**os.environ, "GUNGRAUN_HOME": str(home), "CARGO_TARGET_DIR": str(root / "target")}
+env = linked_for_valgrind({**os.environ, "GUNGRAUN_HOME": str(home), "CARGO_TARGET_DIR": str(root / "target")})
 
 
 def bench(cwd, *args):
