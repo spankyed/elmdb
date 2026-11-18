@@ -24,6 +24,12 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 | [Freezing format 1](format-freeze.md) | Designed: format 1 stays on LMDB 0.9, edited in place with no bump; the lock holds primary and meta keys and values, the derived keys of no index, and the dump; each index records its layout, and one of another is thrown away and built again |
 | [The text index at scale](text-index-at-scale.md) | Built: fuzzy terms by seeking, a term's places in blocks with their counts, lengths held by place, and ranking read from the two. Designed from readings at a million notes: a commit notes the place it changed and the builder files it |
 
+## How the engine is put together
+
+- [One builder for a database's life](single-builder.md): designed, not built. The index builder is stopped and
+  started at every schema change, which eleven defects came from; one handed each new schema, modelled first, and what
+  that deletes.
+
 ## Where the code lives
 
 - [EARS in elmdb's repository](ears.md): planned, not built. apack's `@apackdev/ears`, the fluent TypeScript API over
