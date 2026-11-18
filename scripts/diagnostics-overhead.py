@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 
-from callgrind import allocator_instructions, grew_most
+from callgrind import allocator_instructions, grew_most, linked_for_valgrind
 from instruction_gates import FLOOR, GATED, SHARE, allowed_growth, undeclared_or_missing
 
 BASELINE = "off"
@@ -28,7 +28,7 @@ root = Path.cwd()
 # `GUNGRAUN_HOME`, when set, names the directory the runs write, which CI keeps on a failure
 home = Path(os.environ.get("GUNGRAUN_HOME") or tempfile.mkdtemp(prefix="diagnostics-overhead-"))
 home.mkdir(parents=True, exist_ok=True)
-env = {**os.environ, "GUNGRAUN_HOME": str(home), "CARGO_TARGET_DIR": str(root / "target")}
+env = linked_for_valgrind({**os.environ, "GUNGRAUN_HOME": str(home), "CARGO_TARGET_DIR": str(root / "target")})
 
 
 def bench(*args):
