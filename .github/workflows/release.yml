@@ -105,10 +105,13 @@ jobs:
           rustup show active-toolchain
           cargo build -p elmdb-node --release --locked
           cp target/release/elmdb_node.dll crates/elmdb-node/elmdb.win32-x64-msvc.node
-          vswhere=$(cygpath -u 'C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe')
-          dumpbin=$(cygpath -u "$("$vswhere" -latest -products '*' -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | head -1)")
-          imports=$("$dumpbin" /dependents crates/elmdb-node/elmdb.win32-x64-msvc.node)
+          # The runner image's LLVM reads the import table; an empty one means the read failed, not that it imports nothing
+          imports=$("/c/Program Files/LLVM/bin/llvm-objdump.exe" -p crates/elmdb-node/elmdb.win32-x64-msvc.node | grep 'DLL Name' | sort -u)
           echo "$imports"
+          if ! grep -qi 'kernel32' <<< "$imports"; then
+            echo "::error::elmdb.win32-x64-msvc.node's imports weren't read"
+            exit 1
+          fi
           if grep -qiE 'vcruntime|msvcp' <<< "$imports"; then
             echo "::error::elmdb.win32-x64-msvc.node loads the Visual C++ redistributable, which many Windows machines lack"
             exit 1
