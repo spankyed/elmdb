@@ -601,6 +601,9 @@ setup, fixture and answer check outside the count, the maintenance ones at 1k en
 doesn't move with the machine either: the benchmark allocates through a counter that only moves forward, since glibc's
 `malloc` costs what the heap's shape makes it and that follows the CPU. So a count here leaves out what an allocator
 costs, and an allocation shows at its few fixed instructions; real memory and time are the heap tests' and Criterion's.
+The benchmark is linked without RELRO (`crates/elmdb/build.rs`): with it the binary has two writable segments, which
+are mapped as one where the first ends on a page boundary, and Valgrind 3.22 then reads none of the binary's symbols
+and counts nothing in any case. Which binary that happens to follows its size, not what changed in it.
 Each setup also lets go of the read it leaves cached, whose 100 ms would otherwise make a count follow how long the setup
 took. The `instruction determinism` workflow (`gh workflow run instruction-determinism.yml`), dispatched after a change of
 that allocator, the toolchain, Valgrind or the runner image, runs the benchmark on eight runners and fails when they
