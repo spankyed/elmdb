@@ -11,6 +11,20 @@ import re
 # The benchmark's allocator (`benches/instructions.rs`), named so that it can be counted
 ALLOCATOR = "bump_allocation"
 
+# Callgrind counts from a function it finds by name, so Valgrind has to read the benchmark binary's symbols. It reads
+# them once it has seen a mapping for each of the binary's writable segments, and the linker makes two, the first
+# read-only after relocation (RELRO). Where the first ends on a page boundary the two are mapped as one, Valgrind 3.22
+# waits for a second that never comes, reads no symbols and counts nothing in any case. Whether it ends there follows
+# the binary's size, so any change to the engine can bring it. Without RELRO there is one writable segment; binding
+# stays eager, so nothing in what is counted changes
+ONE_WRITABLE_SEGMENT = "-C link-arg=-Wl,-z,norelro"
+
+
+def linked_for_valgrind(env):
+    """`env` with the benchmark linked so that Valgrind reads its symbols, after whatever flags it holds"""
+    flags = f"{env.get('RUSTFLAGS', '')} {ONE_WRITABLE_SEGMENT}".strip()
+    return {**env, "RUSTFLAGS": flags}
+
 
 def _files(directory, suffix):
     ending = f".out.{suffix}" if suffix else ".out"

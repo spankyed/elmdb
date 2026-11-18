@@ -13,13 +13,13 @@ import subprocess
 import sys
 import tempfile
 
-from callgrind import allocator_instructions
+from callgrind import allocator_instructions, linked_for_valgrind
 from instruction_gates import GATED, allowed_growth, undeclared_or_missing
 
 
 def run(out):
     home = Path(os.environ.get("GUNGRAUN_HOME") or tempfile.mkdtemp(prefix="instruction-determinism-"))
-    env = {**os.environ, "GUNGRAUN_HOME": str(home)}
+    env = linked_for_valgrind({**os.environ, "GUNGRAUN_HOME": str(home)})
     subprocess.run(["cargo", "bench", "-p", "elmdb", "--bench", "instructions", "--", "--save-summary=json"], env=env,
                    check=True)
     cases = {}
