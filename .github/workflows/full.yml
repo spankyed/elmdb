@@ -104,7 +104,10 @@ jobs:
             nm -C "$b" 2>&1 | grep __gungraun_wrapper_mod | head -8
             readelf -S -W "$b" | grep -E 'symtab|strtab|debug_|\.text' | head -20
             readelf -h "$b" | grep -E 'Type|Entry|Number of section'
-            valgrind --tool=callgrind -v --collect-atstart=no '--toggle-collect=*::__gungraun_wrapper_mod::*' --callgrind-out-file=/tmp/probe.out "$b" --gungraun-run d:d:000000 00000 00000 00001 2>&1 | grep -v '^--[0-9]*-- REDIR' | head -60
+            readelf -l -W "$b" | sed -n '1,40p'
+            readelf -S -W "$b" | sed -n '1,45p'
+            valgrind --tool=callgrind -v --collect-atstart=no '--toggle-collect=*::__gungraun_wrapper_mod::*' --callgrind-out-file=/tmp/probe.out "$b" --gungraun-run d:d:000000 00000 00000 00001 2>&1 | grep -E 'Reading syms|Collected|mapping|warning|WARNING' | head -20
+            valgrind --tool=callgrind -d -d --collect-atstart=no '--toggle-collect=*::__gungraun_wrapper_mod::*' --callgrind-out-file=/tmp/probe2.out "$b" --gungraun-run d:d:000000 00000 00000 00001 2>&1 | grep -i -E 'di_notify|debuginfo|rx_map|rw_map|instructions-|acquire|discard' | head -40
             grep -E '^(summary|totals)' /tmp/probe.out
           done
         env:
