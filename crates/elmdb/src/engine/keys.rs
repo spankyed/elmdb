@@ -251,6 +251,14 @@ pub fn index_built(entity_type: &str, index: &str) -> Vec<u8> {
     })
 }
 
+/// The place a build of an index of a type has reached: held with the index's entries, so that whatever replaces
+/// them, or says whether the index is built, takes it away with them (`derive::build_chunk`)
+pub fn index_reached(entity_type: &str, index: &str) -> Vec<u8> {
+    with(Prefix::IndexReached, |w| {
+        w.string(entity_type).string(index);
+    })
+}
+
 /// An edge out of `entity` (`outward`) or into it, of a kind, at the relation's place
 pub fn edge(outward: bool, entity: &str, kind: &str, seq: u64) -> Vec<u8> {
     with(if outward { Prefix::Out } else { Prefix::In }, |w| {

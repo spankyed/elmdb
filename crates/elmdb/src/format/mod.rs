@@ -58,6 +58,8 @@ pub enum Prefix {
     IndexPlaces,
     /// `d/xb type index` → that a value index is built
     IndexBuilt,
+    /// `d/xbr type index` → the place a build of the index has reached, while it is unbuilt
+    IndexReached,
     /// `d/xw type index values` → the places of the type's entities without a value in a value index's last field,
     /// which is missing or null, under what its fields before that one hold: laid out as `d/x` is
     IndexWithout,
@@ -138,7 +140,7 @@ pub enum Prefix {
 }
 
 impl Prefix {
-    pub const ALL: [Prefix; 45] = [
+    pub const ALL: [Prefix; 46] = [
         Prefix::Value,
         Prefix::Entity,
         Prefix::Relation,
@@ -152,6 +154,7 @@ impl Prefix {
         Prefix::Index,
         Prefix::IndexPlaces,
         Prefix::IndexBuilt,
+        Prefix::IndexReached,
         Prefix::IndexWithout,
         Prefix::IndexWithoutPlaces,
         Prefix::IndexUnordered,
@@ -202,6 +205,7 @@ impl Prefix {
             Prefix::Index => "d/x",
             Prefix::IndexPlaces => "d/xp",
             Prefix::IndexBuilt => "d/xb",
+            Prefix::IndexReached => "d/xbr",
             Prefix::IndexWithout => "d/xw",
             Prefix::IndexWithoutPlaces => "d/xwp",
             Prefix::IndexUnordered => "d/xu",

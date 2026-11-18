@@ -317,6 +317,7 @@ pub(crate) fn drop_index_data(
             }
             db.delete(txn, &keys::order_marker(entity_type, index))?;
             db.delete(txn, &keys::index_built(entity_type, index))?;
+            db.delete(txn, &keys::index_reached(entity_type, index))?;
         }
     }
     Ok(())
@@ -448,7 +449,7 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     for work in empty {
         match work {
             Work::Index { entity_type, index } => {
-                t.put(&keys::index_built(&entity_type, &index), &values::encode(&true.into()))?;
+                derive::mark(t, &entity_type, &index, true)?;
                 // Built with nothing in it, a value index's order is whole with it, of no key: the writes that
                 // fill the one keep the other from here
                 let declared = entities::value_indexes(t.schema, &entity_type).into_iter().find(|i| i.name == index);

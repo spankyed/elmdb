@@ -169,6 +169,15 @@ pub fn is_built(r: &impl Read, entity_type: &str, index: &str) -> Result<bool> {
     r.contains(&keys::index_built(entity_type, index))
 }
 
+/// Says whether an index is built, and takes away the place a build of it had reached. The two go together: an
+/// index said to be built, or unbuilt, was filed or left by something other than the build that reached that place,
+/// over rows that may not be the ones it passed, so a build after it begins at the first
+pub(super) fn mark(t: &mut Txn<'_, '_>, entity_type: &str, index: &str, built: bool) -> Result<()> {
+    t.del(&keys::index_reached(entity_type, index))?;
+    let marker = keys::index_built(entity_type, index);
+    if built { t.put(&marker, &values::encode(&true.into())) } else { t.del(&marker) }
+}
+
 /// Emits what every derived key should hold: each type's live and trashed ranges and its count, every built index's
 /// entries, and every relation's edges
 fn derive_into(r: &impl Read, mut emit: impl FnMut(Vec<u8>, Vec<u8>) -> Result<()>) -> Result<()> {
@@ -609,7 +618,7 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                 }
                 vector::flush(t)?;
             }
-            t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+            mark(t, entity_type, name, true)?;
         }
         None => {
             for prefix in COMPARED {
@@ -618,6 +627,8 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             // Every order's marker with its keys: an index built below has its order whole under a build of this
             // unit's, and one left unbuilt has neither
             t.clear_prefix(&Prefix::IndexOrderBuilt.key().to_vec())?;
+            // And the place every build had reached, over entries that are no longer there
+            t.clear_prefix(&Prefix::IndexReached.key().to_vec())?;
             // What an earlier layout left under a tag nothing reads now
             for retired in Prefix::retired() {
                 t.clear_prefix(&retired)?;
@@ -632,9 +643,8 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
             for (ty, of) in &by_type {
                 let value: Vec<ValueIndex> = value_indexes(t.schema, ty);
                 for index in index_names(t.schema, ty) {
-                    let marker = keys::index_built(ty, &index);
                     let Some(found) = value.iter().find(|i| i.name == index) else {
-                        t.put(&marker, &values::encode(&true.into()))?;
+                        mark(t, ty, &index, true)?;
                         continue;
                     };
                     let mut holders = BTreeMap::new();
@@ -647,9 +657,9 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                         index_others_into(t, ty, found, of, |key, e| entities::key_fits(&key, &e.id, ty, &found.name))
                     });
                     match buildable {
-                        Ok(()) => t.put(&marker, &values::encode(&true.into()))?,
+                        Ok(()) => mark(t, ty, &index, true)?,
                         Err(e) if matches!(e.code, ErrorCode::Unique | ErrorCode::ValueInvalid) => {
-                            t.del(&marker)?;
+                            mark(t, ty, &index, false)?;
                             let mut fallback = places::Sorting::new()?;
                             let mut fits = |key: Vec<u8>, e: &Entity| {
                                 if entities::key_fits(&key, &e.id, ty, &found.name).is_ok() {
@@ -723,10 +733,41 @@ fn build_rows(t: &Txn<'_, '_>, entity_type: &str, after: u64, limit: usize) -> R
     Ok((candidates, visited))
 }
 
-/// Builds one index of a type over the entities after place `after`, at most `limit` of them, answering the last
-/// place built or `None` when the whole type is done (and the marker written). Refuses an entry a unique index holds
-/// for another entity (`UNIQUE`), which leaves the index unbuilt
-pub fn build_chunk(
+/// One chunk of an index's build: at most `limit` of the type's entities, from the place the build has reached,
+/// answering whether the whole type is done (and the index marked built). Refuses an entry a unique index holds for
+/// another entity (`UNIQUE`), which leaves the index unbuilt.
+///
+/// The place reached is kept in the store (`keys::index_reached`), written by the chunk that reached it and read by
+/// the next, and not by whoever runs the chunks. A place is one among the rows a build has passed, and means nothing
+/// over others: a replacement of every row, a rebuild or a rename leaves the index unbuilt where its rows can't be
+/// filed, and a build that went on from a place it had kept would pass those rows and mark it built. Each of them
+/// takes the place away with the entries it replaces (`mark`), so the build after it begins at the first row,
+/// whichever process made the change. A build a close stopped goes on from its place at the next open
+pub fn build_chunk(t: &mut Txn<'_, '_>, entity_type: &str, name: &str, limit: usize) -> Result<bool> {
+    if is_built(t, entity_type, name)? {
+        return Ok(true);
+    }
+    let reached = keys::index_reached(entity_type, name);
+    let after = match t.get(&reached)? {
+        Some(place) => values::decode(&place)?.as_u64().ok_or_else(|| {
+            Error::new(
+                ErrorCode::Corrupted,
+                format!("The place the build of {entity_type}.{name} reached doesn't read"),
+            )
+        })?,
+        None => 0,
+    };
+    match build_chunk_after(t, entity_type, name, after, limit)? {
+        Some(last) => {
+            t.put(&reached, &values::encode(&last.into()))?;
+            Ok(false)
+        }
+        None => Ok(true),
+    }
+}
+
+/// `build_chunk` from the place `after`: the last place built, or `None` when the whole type is done
+fn build_chunk_after(
     t: &mut Txn<'_, '_>,
     entity_type: &str,
     name: &str,
@@ -744,7 +785,7 @@ pub fn build_chunk(
             }
             vector::flush(t)?;
             if done {
-                t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+                mark(t, entity_type, name, true)?;
                 return Ok(None);
             }
             return Ok(Some(last));
@@ -755,7 +796,7 @@ pub fn build_chunk(
                 last = *seq;
             }
             if done {
-                t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+                mark(t, entity_type, name, true)?;
                 return Ok(None);
             }
             return Ok(Some(last));
@@ -768,7 +809,7 @@ pub fn build_chunk(
             last = *seq;
         }
         if done {
-            t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+            mark(t, entity_type, name, true)?;
             return Ok(None);
         }
         return Ok(Some(last));
@@ -798,7 +839,7 @@ pub fn build_chunk(
         last = *seq;
     }
     if done {
-        t.put(&keys::index_built(entity_type, name), &values::encode(&true.into()))?;
+        mark(t, entity_type, name, true)?;
         return Ok(None);
     }
     Ok(Some(last))
