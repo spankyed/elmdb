@@ -1,0 +1,271 @@
+name: release
+
+# **A release of elmdb: the npm package with a prebuilt binding for each of its seven targets, and an SBOM of each.**
+# Pushing a tag `v<version>` starts it, and the tag is the owner's (`CLAUDE.md`). The tag must name the version the
+# workspace's `Cargo.toml` and the binding's `package.json` both hold. The run:
+#
+#   1. builds the binding for every target in `package.json`'s `napi.targets`, each on a runner of its own OS and
+#      architecture. The glibc Linux binaries are built against glibc 2.17 (napi-rs's cross toolchain), so they load
+#      on any distribution since; the musl ones in Alpine;
+#   2. packs them into one npm package, `elmdb-<version>.tgz`, with the notices their licenses ask a redistribution to
+#      carry (`cargo xtask notices`), and writes each target's CycloneDX SBOM, `elmdb.<platform>.cdx.json`: every crate
+#      that target's binary is built from, as cargo-cyclonedx reads them from the lockfile, build scripts' dependencies
+#      left out. LMDB is there as `lmdb-master-sys`, the crate that compiles it; the Rust standard library is listed
+#      nowhere, and its notices ship in the package (`COPYRIGHT-rust-library.html`);
+#   3. installs that package into an empty project on each target, on the oldest OS release a runner offers and the
+#      Node floor the package's `engines` names, and runs a database through it (`scripts/release-smoke.mjs`);
+#   4. on a tag, drafts a GitHub release holding the package, the SBOMs and `SHA256SUMS`. Publishing the draft is the
+#      owner's; nothing is published to npm.
+#
+# A pull request that changes this workflow or its smoke runs steps 1 to 3 and keeps what they made as the run's
+# artifacts, as does a dispatch on any branch; neither checks the version or drafts a release. It gates no merge.
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/release-smoke.mjs
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: the version released
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: the tag names the version Cargo.toml and package.json hold
+        run: |
+          cargo=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
+          npm=$(node -p "require('./crates/elmdb-node/package.json').version")
+          if [ "$cargo" != "$npm" ]; then
+            echo "::error::Cargo.toml's workspace version is $cargo and crates/elmdb-node/package.json's is $npm: make them one"
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$cargo" ]; then
+            echo "::error::The tag is $GITHUB_REF_NAME and the version is $cargo: tag v$cargo, or set the version to the tag's"
+            exit 1
+          fi
+          echo "version=$cargo" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ matrix.target }}
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-15, platform: darwin-arm64 }
+          - { target: x86_64-apple-darwin, runner: macos-15-intel, platform: darwin-x64 }
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04, platform: linux-x64-gnu, glibc: '2.17' }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm, platform: linux-arm64-gnu, glibc: '2.17' }
+          - { target: x86_64-unknown-linux-musl, runner: ubuntu-24.04, platform: linux-x64-musl, musl: true }
+          - { target: aarch64-unknown-linux-musl, runner: ubuntu-24.04-arm, platform: linux-arm64-musl, musl: true }
+          - { target: x86_64-pc-windows-msvc, runner: windows-latest, platform: win32-x64-msvc }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        if: ${{ !matrix.musl }}
+        with:
+          node-version: 22.17.0
+      - if: ${{ !matrix.musl }}
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ !matrix.musl }}
+        with:
+          key: release-${{ matrix.target }}
+      # As platforms.yml: on Windows, @napi-rs/cli's build times out on its own filesystem-reconciliation lock, so
+      # cargo builds the binding and it is named as napi's loader expects
+      - if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo build -p elmdb-node --release --locked
+          cp target/release/elmdb_node.dll crates/elmdb-node/elmdb.win32-x64-msvc.node
+      - if: runner.os == 'macOS'
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build -- --target ${{ matrix.target }}
+      # napi-rs's prebuilt gcc toolchain links against glibc 2.17, whatever the runner's own glibc; the check after
+      # it fails on a symbol of a later glibc, which would refuse to load on a system older than the runner
+      - if: matrix.glibc
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build -- --target ${{ matrix.target }} --use-napi-cross
+          newest=$(objdump -T crates/elmdb-node/elmdb.${{ matrix.platform }}.node | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)
+          echo "the binary needs glibc $newest"
+          if [ "$(printf '%s\n' "$newest" "${{ matrix.glibc }}" | sort -V | tail -1)" != "${{ matrix.glibc }}" ]; then
+            echo "::error::elmdb.${{ matrix.platform }}.node needs glibc $newest, past ${{ matrix.glibc }}"
+            exit 1
+          fi
+      # As full.yml's musl job: in Alpine, on the runner's own architecture, where the native gcc links musl binaries
+      - if: matrix.musl
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w -e CARGO_TERM_COLOR -e CARGO_INCREMENTAL=0 node:22.17.0-alpine sh -euc '
+            apk add --no-cache bash curl git build-base
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=gcc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=gcc
+            git config --global --add safe.directory /w
+            rustup show active-toolchain
+            npm ci --no-audit --no-fund
+            npm run build -- --target ${{ matrix.target }}
+          '
+          sudo chown -R "$(id -u):$(id -g)" .
+      - shell: bash
+        run: |
+          ls -l crates/elmdb-node/*.node
+          test -f crates/elmdb-node/elmdb.${{ matrix.platform }}.node
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binding-${{ matrix.platform }}
+          path: crates/elmdb-node/elmdb.${{ matrix.platform }}.node
+          if-no-files-found: error
+
+  pack:
+    name: package and SBOMs
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binding-*
+          merge-multiple: true
+          path: crates/elmdb-node
+      # The notices the package carries are the lockfile's and the toolchain's, as ci.yml's repo job holds them on main
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3,cargo-cyclonedx@0.5.10
+      - run: cargo fetch --locked
+      - run: cargo xtask check-notices
+      # **One package for every target**: napi's loader takes the binary named for the platform it runs on from the
+      # package's own directory, so the package holds all seven and installs with no optional dependency to resolve.
+      # It is the binding's `package.json` unchanged, its `private` included: `npm pack` makes the file, and nothing
+      # here publishes it
+      - name: Pack
+        run: |
+          expected=$(node -e "
+            const { napi } = require('./crates/elmdb-node/package.json');
+            const platforms = { 'aarch64-apple-darwin': 'darwin-arm64', 'x86_64-apple-darwin': 'darwin-x64',
+              'x86_64-unknown-linux-gnu': 'linux-x64-gnu', 'aarch64-unknown-linux-gnu': 'linux-arm64-gnu',
+              'x86_64-unknown-linux-musl': 'linux-x64-musl', 'aarch64-unknown-linux-musl': 'linux-arm64-musl',
+              'x86_64-pc-windows-msvc': 'win32-x64-msvc' };
+            const names = napi.targets.map((target) => {
+              if (!platforms[target]) throw new Error('package.json names ' + target + ', which this workflow does not build');
+              return 'elmdb.' + platforms[target] + '.node';
+            });
+            console.log(names.sort().join('\n'));")
+          held=$(find crates/elmdb-node -maxdepth 1 -name '*.node' -exec basename {} \; | sort)
+          if [ "$expected" != "$held" ]; then
+            echo "::error::The package would hold:"$'\n'"$held"$'\n'"and package.json's targets are:"$'\n'"$expected"
+            exit 1
+          fi
+          mkdir -p out
+          (cd crates/elmdb-node && npm pack --pack-destination ../../out)
+          test -f "out/elmdb-${{ needs.version.outputs.version }}.tgz"
+          tar -tzf "out/elmdb-${{ needs.version.outputs.version }}.tgz" | sort
+      - name: SBOMs
+        run: |
+          for pair in aarch64-apple-darwin:darwin-arm64 x86_64-apple-darwin:darwin-x64 \
+            x86_64-unknown-linux-gnu:linux-x64-gnu aarch64-unknown-linux-gnu:linux-arm64-gnu \
+            x86_64-unknown-linux-musl:linux-x64-musl aarch64-unknown-linux-musl:linux-arm64-musl \
+            x86_64-pc-windows-msvc:win32-x64-msvc; do
+            cargo cyclonedx --format json --spec-version 1.5 --describe binaries --no-build-deps --target "${pair%%:*}"
+            mv crates/elmdb-node/elmdb_node_cdylib.cdx.json "out/elmdb.${pair##*:}.cdx.json"
+          done
+          ls -l out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: out/*
+          if-no-files-found: error
+
+  smoke:
+    name: install on ${{ matrix.platform }}
+    needs: [version, pack]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin-arm64, runner: macos-14 }
+          - { platform: darwin-x64, runner: macos-15-intel }
+          - { platform: linux-x64-gnu, runner: ubuntu-22.04 }
+          - { platform: linux-arm64-gnu, runner: ubuntu-22.04-arm }
+          - { platform: linux-x64-musl, runner: ubuntu-24.04, musl: true }
+          - { platform: linux-arm64-musl, runner: ubuntu-24.04-arm, musl: true }
+          - { platform: win32-x64-msvc, runner: windows-2022 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/release-smoke.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: out
+      - uses: actions/setup-node@v4
+        if: ${{ !matrix.musl }}
+        with:
+          node-version: 22.17.0
+      - if: ${{ !matrix.musl }}
+        shell: bash
+        run: node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz"
+      - if: matrix.musl
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w node:22.17.0-alpine \
+            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz"
+
+  release:
+    name: draft the release
+    if: github.ref_type == 'tag'
+    needs: [version, pack, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: out
+      - name: Sums
+        working-directory: out
+        run: sha256sum -- * | tee SHA256SUMS
+      # **A release is written once.** A tag that already has one fails here, rather than replacing files someone
+      # may have downloaded and checked against its sums
+      - name: Draft ${{ github.ref_name }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            echo "::error::$GITHUB_REF_NAME already has a release; a release is never replaced"
+            exit 1
+          fi
+          prerelease=()
+          case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" out/* --verify-tag --draft "${prerelease[@]}" --title "elmdb $VERSION" \
+            --notes "elmdb $VERSION for Node.js and Electron. \`elmdb-$VERSION.tgz\` is the npm package with the prebuilt binding for macOS (arm64, x64), Linux (x64, arm64; glibc 2.17 and later, and musl) and Windows x64: \`npm install <its URL>\`. Each \`elmdb.<platform>.cdx.json\` is the CycloneDX SBOM of that platform's binary. \`SHA256SUMS\` holds every file's hash."
