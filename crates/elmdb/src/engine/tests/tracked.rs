@@ -1075,6 +1075,34 @@ fn a_wait_for_the_builds_by_a_listener_a_schema_change_waits_for_is_refused() {
     db.close().unwrap();
 }
 
+/// A schema change stops the builder a wait is under way on, and starts another. The wait goes on to that one: it
+/// doesn't answer when the first stops, with the change not yet made
+#[test]
+fn a_wait_for_the_builds_under_way_goes_on_past_the_builder_a_schema_change_stops() {
+    use std::rc::Rc;
+    use std::time::Duration;
+    let (_dir, db, schema, top) = ranked_tasks();
+    db.read(&reads(vec![top], Some(7))).unwrap();
+    // The builder is kept at work, in its listener, until the change has taken it
+    let returned = asked_as_the_builder_is_waited_for(&db, |_| ());
+    let (tell, told) = std::sync::mpsc::channel();
+    let waiting = Arc::clone(&db);
+    std::thread::spawn(move || tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap());
+    // Long enough for the wait to be under way on the builder the change then stops
+    std::thread::sleep(Duration::from_millis(50));
+    let told = Rc::new(told);
+    let answered = Rc::clone(&told);
+    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED, move || {
+        let early = answered.recv_timeout(Duration::from_millis(200));
+        assert!(early.is_err(), "answered {early:?} as its builder stopped, with the change's not started");
+    });
+    assert_eq!(db.set_schema(schema(1e-8)).unwrap().len(), 1, "the tolerance changed");
+    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED));
+    returned.recv_timeout(Duration::from_secs(4)).unwrap();
+    assert_eq!(told.recv_timeout(Duration::from_secs(4)).unwrap(), Ok(()));
+    db.close().unwrap();
+}
+
 /// A close stops the builder for good, with builds left that the next open takes up. A wait for the builds under
 /// way is told the database is closed, as one asked for after the close is: answered as if they were built, it
 /// would say so of builds that weren't
