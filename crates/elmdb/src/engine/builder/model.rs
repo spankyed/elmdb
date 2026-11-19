@@ -630,3 +630,37 @@ fn the_thread_a_close_stops_ends_idle_and_another_takes_what_is_queued() {
         second.join().unwrap();
     });
 }
+
+/// A thread told to stop between two pieces of work ends with neither under way, whichever it was at
+#[test]
+fn a_thread_a_close_stops_between_two_pieces_of_work_ends_idle() {
+    explore(|| {
+        let (core, _) = core();
+        let runner = {
+            let core = Arc::clone(&core);
+            thread::spawn(move || core.run(|_, _| Ok(())))
+        };
+        core.queue([index(), other()]);
+        core.begin_close();
+        runner.join().unwrap();
+        let state = core.lock();
+        assert!(!state.busy && state.active.is_none(), "the thread ended with work under way");
+    });
+}
+
+/// One close may begin as another gives up. The thread stays told to stop, and none may be started, until each
+/// has said what became of the database
+#[test]
+fn a_close_that_gives_up_beside_another_under_way_leaves_the_builder_closing() {
+    explore(|| {
+        let (core, _) = core();
+        core.begin_close();
+        core.begin_close();
+        core.end_close(false);
+        assert!(core.closing() && core.stopping(), "a close under way, and a thread free to start beside it");
+        assert!(matches!(core.waited(false), Waited::Closing));
+        core.end_close(false);
+        assert!(!core.closing() && !core.stopping());
+        assert!(matches!(core.waited(false), Waited::Idle));
+    });
+}

@@ -84,7 +84,7 @@ pub struct Database {
     /// schema that changed while it ran
     engine_schema: Arc<RwLock<Arc<EngineSchema>>>,
     report: OpenReport,
-    /// Builds the indexes that wait for it; none in a read-only database
+    /// The thread that builds the indexes that wait for it, while there is one; none in a read-only database
     builder: Arc<Mutex<Option<crate::engine::Builder>>>,
     /// The index building the thread in `builder` does, which outlives each such thread: its queue, what waits for
     /// it, and what a schema change and a close tell it
@@ -254,7 +254,8 @@ impl Database {
         };
         // Ended before the change's commit is delivered: a listener it tells may wait for the builds
         {
-            match unbuilt {
+            // A read-only database is refused its change above, and builds nothing
+            match unbuilt.filter(|_| !self.read_only) {
                 Some(unbuilt) => {
                     let commits = builder_commits_of(&store, &current, &self.tracks, &self.engine_schema);
                     self.building.end_change(change, Arc::clone(&current), commits, unbuilt);
@@ -503,14 +504,15 @@ impl Database {
                         // The caller's wait is spent: the record's locks are tried, and not waited for
                         let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
-                        synced?;
-                        run_point!(CLOSE_GAVE_UP);
                         if at_exit {
                             // The process is exiting, and its builder's thread was let go of unjoined: nothing more
-                            // is built here, and no wait for the builds waits for it
+                            // is built here, and no wait for the builds waits for it. Said before the sync's answer
+                            // is looked at: a thread started again would run beside the one let go of
                             closing.closed();
+                            synced?;
                             return Ok(false);
                         }
+                        run_point!(CLOSE_GAVE_UP);
                         // The database stays open: what is left to build is queued again, as an open queues it, or
                         // a read of an unbuilt index would be told to wait for no one. The close is said to be over
                         // first, which lets a thread be started for it. A close that gave up answers that it did:
@@ -521,6 +523,8 @@ impl Database {
                             && let Ok(store) = self.store()
                         {
                             // The schema's read is let go before the builders queue, which reads it too
+                            // Where it can't be read nothing is queued, and a wait for the builds reads it again
+                            // itself, with no thread there, and says why it can't
                             let owed = crate::engine::remaining_indexes(&store, &self.engine_schema.read());
                             builders.queue(owed.unwrap_or_default());
                         }

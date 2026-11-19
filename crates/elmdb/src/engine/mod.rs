@@ -706,65 +706,71 @@ impl Database {
     /// when it returns. A close stops the builder's thread, and a wait under way waits for it to say what became of
     /// the database: closed, the wait is told so (`CLOSED`), as it is of a database closed before it; left open by a
     /// close that gave up, it goes on to what that close queues again. After a close at exit that gave up nothing
-    /// more is built, and the wait answers what had failed
+    /// more is built, and the wait answers as it would with nothing left to build, saying only what had failed:
+    /// the one case in which its `Ok` doesn't mean built
     pub fn wait_for_index_builds(&self) -> Result<()> {
-        let store = self.store()?;
-        // On the builder's own thread, in a listener one of its commits delivered to, the builds wait for the
-        // listener to return: the wait would be for itself
-        if self.builder().as_ref().is_some_and(Builder::on_its_thread) {
-            return Err(Error::new(
-                ErrorCode::CallbackActive,
-                "A listener is running on the builder's thread, and the builds wait for it to return: wait for them \
-                 after it has",
-            ));
-        }
-        // A read-only database builds nothing
-        let Some(builders) = self.builders_of(Arc::clone(&store))? else { return Ok(()) };
-        // No thread, and no close that stopped one and is still to say whether the database closed. What is unbuilt
-        // is read rather than taken to be nothing: a schema change that failed part way, or a thread stopped with
-        // work left, left it to no one. It is queued, as an open queues it, which starts the thread this then waits
-        // on
-        if !builders.running() && !self.building.closing() {
-            builds_can_commit(&store)?;
-            // The schema's read is let go before the builders queue, which reads it too
-            let owed = remaining_indexes(&store, &self.schema_guard())?;
-            if owed.is_empty() && !self.building.has_work() {
-                return Ok(());
-            }
-            builders.queue(owed);
-        }
-        if store.unit_is_open() {
-            return Err(Error::new(
-                ErrorCode::UnitOpen,
-                "A unit is open, and an index build waits for it to end: commit or abort it, then wait for the builds",
-            ));
-        }
-        // Let go of before the wait: a close waits for every hold on the store but its own
-        drop(builders);
-        drop(store);
-        // A close under way is waited through, to its closing the database or giving up, but by a listener: the
-        // close may be waiting for this thread, for the builder it stopped, whose commit delivered to the listener
-        // running here, or for what the operation the listener is called from holds
-        match self.building.wait(!watch::in_callback(&self.tracks)) {
-            Waited::Idle => {}
-            // Held up by what refused its work with nothing made, the builder waits it out: told so, the caller
-            // tries again
-            Waited::Held(held) => {
-                return Err(Error::new(
-                    held.code,
-                    format!(
-                        "The index builds wait for what refused their last write, and go on once it passes: call this \
-                         again after a pause to wait on. What refused it: {}",
-                        held.message
-                    ),
-                ));
-            }
-            Waited::Closing => {
+        loop {
+            let store = self.store()?;
+            // On the builder's own thread, in a listener one of its commits delivered to, the builds wait for the
+            // listener to return: the wait would be for itself
+            if self.builder().as_ref().is_some_and(Builder::on_its_thread) {
                 return Err(Error::new(
                     ErrorCode::CallbackActive,
-                    "A close is under way, which a listener running on this thread may keep from ending, and the \
-                     index builds wait for it: wait for them after the listener returns",
+                    "A listener is running on the builder's thread, and the builds wait for it to return: wait for them \
+                     after it has",
                 ));
+            }
+            // A read-only database builds nothing
+            let Some(builders) = self.builders_of(Arc::clone(&store))? else { return Ok(()) };
+            // No thread, and no close that stopped one and is still to say whether the database closed. What is unbuilt
+            // is read rather than taken to be nothing: a schema change that failed part way, or a thread stopped with
+            // work left, left it to no one. It is queued, as an open queues it, which starts the thread this then waits
+            // on
+            if !builders.running() && !self.building.closing() {
+                builds_can_commit(&store)?;
+                // The schema's read is let go before the builders queue, which reads it too
+                let owed = remaining_indexes(&store, &self.schema_guard())?;
+                if owed.is_empty() && !self.building.has_work() {
+                    return Ok(());
+                }
+                builders.queue(owed);
+            }
+            if store.unit_is_open() {
+                return Err(Error::new(
+                    ErrorCode::UnitOpen,
+                    "A unit is open, and an index build waits for it to end: commit or abort it, then wait for the builds",
+                ));
+            }
+            // Let go of before the wait: a close waits for every hold on the store but its own
+            drop(builders);
+            drop(store);
+            // A close under way is waited through, to its closing the database or giving up, but by a listener: the
+            // close may be waiting for this thread, for the builder it stopped, whose commit delivered to the listener
+            // running here, or for what the operation the listener is called from holds
+            match self.building.wait(!watch::in_callback(&self.tracks)) {
+                // Asked again where no thread is building: a close that gave up, and couldn't read what is left to
+                // build, queued nothing, and this reads it, or says why it can't
+                Waited::Idle if !self.building.closing() && !self.builder().is_some() => continue,
+                Waited::Idle => break,
+                // Held up by what refused its work with nothing made, the builder waits it out: told so, the caller
+                // tries again
+                Waited::Held(held) => {
+                    return Err(Error::new(
+                        held.code,
+                        format!(
+                            "The index builds wait for what refused their last write, and go on once it passes: call this \
+                             again after a pause to wait on. What refused it: {}",
+                            held.message
+                        ),
+                    ));
+                }
+                Waited::Closing => {
+                    return Err(Error::new(
+                        ErrorCode::CallbackActive,
+                        "A close is under way, which a listener running on this thread may keep from ending, and the \
+                         index builds wait for it: wait for them after the listener returns",
+                    ));
+                }
             }
         }
         // A close that closed the database ended the wait: said as it is of a database closed before it

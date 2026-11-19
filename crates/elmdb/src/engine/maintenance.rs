@@ -369,6 +369,10 @@ impl Database {
         // takes the epoch and until what the replacement left unbuilt is queued: a wait for the builds asked for
         // between the two would find its work done and answer, with that not yet queued (`Core::wait`). Where
         // nothing is adopted the change is dropped, which hands the builder back the work it took
+        // A read-only handle builds nothing, and what the replacement left unbuilt is none of its business
+        if self.is_read_only() {
+            return store.adopt_replacement(epoch);
+        }
         let change = self.building.begin_change();
         if !store.adopt_replacement(epoch)? {
             return Ok(false);
@@ -377,8 +381,7 @@ impl Database {
         // second read on one thread waits for a writer that is parked, which would be this thread's own wait
         let owed = super::remaining_indexes(&store, &self.schema_guard())?;
         change.end(owed);
-        // A thread for it, where none runs. A read-only handle has no builders, and what it would have queued is
-        // none of its business
+        // A thread for it, where none runs
         if let Some(builders) = self.builders_of(std::sync::Arc::clone(&store))? {
             builders.queue(Vec::new());
         }

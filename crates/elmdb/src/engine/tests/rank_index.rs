@@ -2846,8 +2846,10 @@ fn a_wait_for_the_builds_asked_for_as_a_close_gives_up_waits_for_what_it_queues_
     db.close().unwrap();
 }
 
+/// Work queued as a close waits for the store starts no thread, which would hold the store the close waits for:
+/// it waits in the queue, and goes with a database that closes
 #[test]
-fn a_close_stops_a_builder_started_after_it_stopped_the_first() {
+fn work_queued_as_a_close_waits_for_the_store_starts_no_thread_to_hold_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = open_with(&dir, schema("out", true));
     write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
@@ -2858,6 +2860,31 @@ fn a_close_stops_a_builder_started_after_it_stopped_the_first() {
         builders.queue(vec![crate::engine::Work::Rank { name: "taskRank".into() }]);
     });
     let closed = db.close_within(Some(std::time::Duration::from_secs(3))).unwrap();
-    assert!(closed, "the close waited on a store the builder it left running held");
+    assert!(closed, "the close waited on a store a thread started beside it held");
     assert!(!db.is_open());
+}
+
+/// And is built once a close that gave up has left the database open: by the thread started then
+#[test]
+fn work_queued_as_a_close_waits_for_the_store_is_built_once_the_close_gives_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open_with(&dir, schema("out", true));
+    write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.pause_builder();
+    // An index to build, which the close's own reading of what is left would not queue: its marker is there
+    let lookup = crate::engine::Work::Rank { name: "taskRank".into() };
+    let (builders, queued) = (db.builders().unwrap().expect("a writable database starts builders"), lookup.clone());
+    let building = db.building.clone();
+    crate::failpoints::run_once_here(crate::failpoints::points::CLOSE_TAKEN, move || {
+        builders.queue(vec![queued]);
+        assert!(building.closing() && building.has_work(), "queued, with the close under way");
+    });
+    let held = db.store().unwrap();
+    assert!(!db.close_within(Some(std::time::Duration::from_millis(5))).unwrap());
+    drop(held);
+    assert!(db.builder().is_some(), "the close that gave up started no thread for what was queued as it waited");
+    db.wait_for_index_builds().unwrap();
+    assert!(db.building.pending().is_empty());
+    db.close().unwrap();
 }

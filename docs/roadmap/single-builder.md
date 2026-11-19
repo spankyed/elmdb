@@ -9,13 +9,13 @@ builders and the wait's loop over the slot are gone.
 **The gate of phase 2 was not met, and the work went on.** `database.rs` is shorter outside its tests than at
 367865a, 711 lines against 736, and `engine/mod.rs` by 23, the wait having no loop. `engine/builder.rs` is longer,
 906 against 655: the logic moved into it, where the model is, with `Building`, `Change` and `Closing` and what each
-says of itself. Counted in lines the two files grew by 226. What was wanted of the count was that the part with the
+says of itself. Counted in lines `database.rs` and `engine/builder.rs`, the two the gate named, grew by 226. What was wanted of the count was that the part with the
 defects get smaller and the part with the model hold the rest, which is what happened; lines were the wrong measure
 of it, and the next design should name the thing it wants and not a proxy.
 
 **A close at exit that gives up** leaves the database open with nothing building: its thread is let go of unjoined,
-and no other is started beside it. A wait for the builds answers what had failed and builds nothing, in a process
-that is exiting.
+and no other is started beside it. A wait for the builds builds nothing and answers as it would with nothing left
+to build, saying only what had failed, in a process that is exiting.
 
 The rest of this note is the design as it was written, before it was built.
 

@@ -160,8 +160,9 @@ its answer is for the schema the database holds as it returns. A close stops the
 open, and a wait under way waits for the close to say what became of the database: closed, the wait is told `CLOSED`,
 as one asked of a closed database is; left open by a close that gave up, it goes on to the builds that close queues
 again, for a thread started then. A close at exit that gives up leaves the database open in a process that is
-exiting, with the builder's thread let go of unjoined: nothing more is built there, and a wait answers what had
-failed and starts nothing. The order a value index keeps of its
+exiting, with the builder's thread let go of unjoined: nothing more is built there, and a wait starts nothing and
+answers as it would with nothing left to build, saying only what had failed. It is the one case in which the wait's
+`Ok` doesn't mean built. The order a value index keeps of its
 strings is waited for with its index, but for a build of it that was put off (above, An order of strings is kept beside the
 index's entries): one that another elmdb's writes ended, which the builder begins again after a wait that doubles, to ten
 minutes at most. That is decided, not left over. Nothing is refused for such an order: the index is built, a read

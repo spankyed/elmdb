@@ -94,9 +94,10 @@ struct State {
     /// The changes begun and not ended (`begin_change`): what was queued is gone, and what the change leaves to
     /// build isn't queued yet, so a wait for the builds waits for the change's end
     changing: usize,
-    /// A close has told the thread to stop and hasn't said whether the database closed (`begin_close`): a wait for
-    /// the builds waits for it to say, and work queued meanwhile waits in the queue for a thread
-    closing: bool,
+    /// The closes that have told the thread to stop and haven't said whether the database closed (`begin_close`):
+    /// a wait for the builds waits for each to say, and work queued meanwhile waits in the queue for a thread. A
+    /// count, since one close may begin as another gives up
+    closing: usize,
     /// The database closed, or its builder was stopped for good: nothing more is built, and no one waits
     closed: bool,
 }
@@ -156,19 +157,19 @@ impl Core {
     fn begin_close(&self) {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.stopping = true;
-        state.closing = true;
+        state.closing += 1;
         drop(state);
         self.changed.notify_all();
     }
 
-    /// That the close `begin_close` began closed the database, or gave up and left it open: closed, the builder is
-    /// stopped for good; left open, a thread may be started again for what is queued
+    /// That a close `begin_close` began closed the database, or gave up and left it open: closed, the builder is
+    /// stopped for good; left open, with no other close under way, a thread may be started again for what is queued
     fn end_close(&self, closed: bool) {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.closing = false;
+        state.closing = state.closing.saturating_sub(1);
         if closed {
             state.closed = true;
-        } else if !state.closed {
+        } else if !state.closed && state.closing == 0 {
             state.stopping = false;
         }
         drop(state);
@@ -183,7 +184,7 @@ impl Core {
     /// Whether a thread may not be started: a close is under way, or the builder is stopped for good
     fn closing(&self) -> bool {
         let state = self.lock();
-        state.closing || state.closed
+        state.closing > 0 || state.closed
     }
 
     /// Whether anything is queued or put off
@@ -252,11 +253,11 @@ impl Core {
     /// may itself be waiting for, a listener, is told of it instead
     fn waited(&self, through_a_close: bool) -> Waited {
         let mut state = self.lock();
-        while (!state.queue.is_empty() || state.busy || state.changing > 0 || state.closing)
+        while (!state.queue.is_empty() || state.busy || state.changing > 0 || state.closing > 0)
             && !state.closed
             && state.held.is_none()
         {
-            if state.closing && !through_a_close {
+            if state.closing > 0 && !through_a_close {
                 return Waited::Closing;
             }
             state = self.changed.wait(state).expect("the builder's lock is never poisoned");
