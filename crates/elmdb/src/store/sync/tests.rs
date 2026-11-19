@@ -58,6 +58,11 @@ struct Harness {
     commit: GroupCommit,
 }
 
+/// How long a test waits for a sync that has to start before it goes on: as long as a loaded runner may take to
+/// schedule the worker, since a wait that succeeds costs only what the worker took. At 200 ms, CI's Windows runner
+/// met it once (2026-11-19, `stopping_at_exit_drops_the_syncer_and_stops_the_worker_once_their_locks_come_free`)
+const MUST_START: Duration = Duration::from_secs(5);
+
 impl Harness {
     fn new() -> Self {
         Self::with(false)
@@ -378,7 +383,7 @@ fn stopping_at_exit_waits_on_no_worker() {
     let Harness { commit, started, finish, .. } = Harness::new();
     commit.on_commit();
     drop(commit.durable());
-    started.recv_timeout(Duration::from_millis(200)).expect("a sync started");
+    started.recv_timeout(MUST_START).expect("a sync started");
     commit.on_commit();
     let (stopped, stop) = channel();
     std::thread::spawn(move || {
@@ -406,7 +411,7 @@ fn stopping_at_exit_drops_the_syncer_and_stops_the_worker_once_their_locks_come_
     let Harness { commit, started, finish, .. } = Harness::new();
     commit.on_commit();
     drop(commit.durable());
-    started.recv_timeout(Duration::from_millis(200)).expect("a sync started");
+    started.recv_timeout(MUST_START).expect("a sync started");
     let shared = Arc::clone(&commit.shared);
     let stopping = std::thread::spawn(move || commit.stop_at_exit(Duration::from_secs(5)));
     std::thread::sleep(Duration::from_millis(50));
