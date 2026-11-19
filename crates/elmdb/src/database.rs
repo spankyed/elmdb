@@ -261,16 +261,16 @@ impl Database {
                     let commits = builder_commits_of(&store, &current, &self.tracks, &self.engine_schema);
                     builder.end_change(change, Arc::clone(&current), commits, unbuilt);
                 }
-                (change, _) => {
-                    // No builder was started. A change begun on one a close has since taken ends there, on a
-                    // builder that is stopped
-                    drop(change);
-                    if slot.is_none() && !unbuilt.is_empty() {
+                // No builder was started when the change began, and none since, the schema's lock being held: one is
+                // started for what the change left, where it left anything
+                (_, None) => {
+                    if !unbuilt.is_empty() {
                         let builder = start_builder(&store, &current, &self.tracks, &self.engine_schema);
                         builder.queue(unbuilt);
                         *slot = Some(builder);
                     }
                 }
+                (None, Some(builder)) => builder.queue(unbuilt),
             }
         }
         drop(current);

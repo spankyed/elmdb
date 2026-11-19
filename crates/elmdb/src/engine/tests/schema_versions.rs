@@ -364,6 +364,33 @@ fn a_schema_stored_before_its_canonical_form_grew_a_field_still_opens_and_reads(
     db.read(&reads()).unwrap();
 }
 
+/// A database with nothing to build has no builder, and a schema change starts one only for what it leaves to
+/// build: a wait for the builds would take that up itself, so the builder is asked after, not the index
+#[test]
+fn a_schema_change_starts_a_builder_for_what_it_leaves_and_none_for_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = Schema::from_json(&json!({"$schema":crate::schema::SCHEMA_LANGUAGE, "types":{"Task":{
+        "fields":{"a":{"type":"string"},"b":{"type":"string"}}
+    }}}))
+    .unwrap();
+    let options = OpenOptions { schema: Some(plain), syncs: false, ..Default::default() };
+    let db = Database::open(dir.path(), options).unwrap();
+    assert!(db.builder().is_none(), "nothing to build");
+    // A field's type, which leaves nothing to build over no entities
+    let wider = Schema::from_json(&json!({"$schema":crate::schema::SCHEMA_LANGUAGE, "types":{"Task":{
+        "fields":{"a":{"type":"string"},"b":{"type":"string"},"c":{"type":"string","optional":true}}
+    }}}))
+    .unwrap();
+    db.set_schema(wider).unwrap();
+    assert!(db.builder().is_none(), "a change that left nothing to build started a builder");
+    write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
+    assert!(db.builder().is_none(), "a write that left the builder no work started none");
+    db.set_schema(schema("a")).unwrap();
+    assert!(db.builder().is_some(), "a change that left an index to build started no builder");
+    db.wait_for_index_builds().unwrap();
+    db.close().unwrap();
+}
+
 /// A schema change tells the builder that what it builds to is changing, applies the schema, and then tells it
 /// what that leaves to build. A wait for the builds asked for between the two waits for the second: answered then,
 /// it would say built of an index the builder had not been given
