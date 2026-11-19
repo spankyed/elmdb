@@ -4,7 +4,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{Core, PATIENCE, QUIET, Work};
+use super::{Core, PATIENCE, QUIET, Waited, Work};
 use crate::error::{Error, ErrorCode};
 use crate::store::sync::Clock;
 use crate::sync::Mutex;
@@ -525,5 +525,108 @@ fn a_change_that_was_not_made_keeps_the_failures_and_one_that_was_made_clears_th
         assert!(core.lock().failures.is_empty(), "a change that was made kept a failure of what was built to before");
         core.stop();
         runner.join().unwrap();
+    });
+}
+
+/// A close tells the thread to stop and then says whether the database closed (`Core::begin_close`, `end_close`).
+/// One that gives up leaves the database open with what is left queued for another thread, and a wait that
+/// answered while it was under way would say built of that
+#[test]
+fn a_wait_asked_for_as_a_close_is_under_way_waits_for_what_a_close_that_gives_up_leaves() {
+    explore(|| {
+        let (core, _) = core();
+        let done = Arc::new(AtomicBool::new(false));
+        core.begin_close();
+        let waiter = {
+            let (core, done) = (Arc::clone(&core), Arc::clone(&done));
+            thread::spawn(move || {
+                core.wait();
+                assert!(done.load(Ordering::SeqCst), "the wait answered with what the close left not built");
+            })
+        };
+        core.queue([other()]);
+        core.end_close(false);
+        // The thread started for what was left
+        let runner = {
+            let (core, done) = (Arc::clone(&core), Arc::clone(&done));
+            thread::spawn(move || {
+                core.run(|_, _| {
+                    done.store(true, Ordering::SeqCst);
+                    Ok(())
+                });
+            })
+        };
+        waiter.join().unwrap();
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+#[test]
+fn a_close_that_closes_ends_a_wait_and_one_under_way_is_said_to_a_caller_it_may_wait_for() {
+    explore(|| {
+        let (core, _) = core();
+        core.queue([index()]);
+        core.begin_close();
+        // A listener, which the close may be waiting for
+        assert!(matches!(core.waited(false), Waited::Closing));
+        let waiter = {
+            let core = Arc::clone(&core);
+            thread::spawn(move || assert!(matches!(core.waited(true), Waited::Idle)))
+        };
+        core.end_close(true);
+        waiter.join().unwrap();
+        // Closed, there is nothing to wait for, whatever was queued
+        assert!(matches!(core.waited(false), Waited::Idle));
+    });
+}
+
+/// The thread a close stops ends with no work under way, so the thread started after a close that gave up finds the
+/// builder idle but for what is queued, and whoever waits is woken by that thread's work, not held by the first's
+#[test]
+fn the_thread_a_close_stops_ends_idle_and_another_takes_what_is_queued() {
+    explore(|| {
+        let (core, _) = core();
+        let started = Arc::new(AtomicBool::new(false));
+        let first = {
+            let (core, started) = (Arc::clone(&core), Arc::clone(&started));
+            thread::spawn(move || {
+                core.run(|_, stopping| {
+                    started.store(true, Ordering::SeqCst);
+                    while !stopping() {
+                        thread::yield_now();
+                    }
+                    Ok(())
+                });
+            })
+        };
+        core.queue([index()]);
+        while !started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        core.begin_close();
+        first.join().unwrap();
+        {
+            let state = core.lock();
+            assert!(!state.busy && state.active.is_none(), "the thread ended with work under way");
+        }
+        core.queue([other()]);
+        core.end_close(false);
+        let ran = Arc::new(AtomicBool::new(false));
+        let second = {
+            let (core, ran) = (Arc::clone(&core), Arc::clone(&ran));
+            thread::spawn(move || {
+                core.run(|work, _| {
+                    if *work == other() {
+                        ran.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                });
+            })
+        };
+        core.wait();
+        assert!(ran.load(Ordering::SeqCst), "the wait answered with what was queued for the second thread not built");
+        core.stop();
+        second.join().unwrap();
     });
 }

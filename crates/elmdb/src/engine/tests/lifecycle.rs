@@ -268,7 +268,7 @@ fn a_wait_for_the_builds_is_refused_while_a_replacement_elsewhere_is_not_adopted
     let db = open(&dir);
     write(&db, vec![A_TASK("Task-1")]).unwrap();
     db.wait_for_index_builds().unwrap();
-    drop(db.builder().take());
+    db.pause_builder();
     replace_elsewhere(&dir, &source);
     let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
     assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::DataReplaced, "with no builder");

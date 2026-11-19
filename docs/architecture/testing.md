@@ -415,8 +415,12 @@ that never pause hold it back no longer than the cap. Of a change to what the bu
 change leaves is done; that work under way as it begins is told to stop and is listed neither as done nor as failed;
 that work queued before it never runs after; that the work it leaves, and work queued as it is made, each run once;
 that a change made from within a piece of work leaves that work undone and the thread at what the change left; and
-that a stop ends a wait for a change that hasn't ended. The store, the chunks' units and LMDB are outside
-it, and so are a close and what the builder builds to itself, which `database.rs` hands it; the rank index's own specs and the model harness run the
+that a stop ends a wait for a change that hasn't ended; that work queued as a change is made isn't begun until every
+change has ended; and that a change that wasn't made keeps what had failed. Of a close (`begin_close`, `end_close`),
+it holds that a waiter asked as one is under way returns only once what a close that gave up left is built; that a
+close that closes ends the wait, and one under way is said to a caller it may be waiting for; and that the thread a
+close stops ends with no work under way, so another takes what is queued. The store, the chunks' units and LMDB are
+outside it, and so is what the builder builds to itself, which `database.rs` hands it; the rank index's own specs and the model harness run the
 builder on real threads.
 
 ```sh

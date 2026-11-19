@@ -1011,7 +1011,7 @@ fn a_build_the_builder_begins_again_is_put_off_and_begun_when_its_wait_is_over()
         write(db, ops).unwrap();
     };
     // Nothing is left for the builder once an order is built, and nothing is put off
-    let idle = |db: &Database| db.builder().as_ref().map_or(Vec::new(), |builder| builder.pending()).is_empty();
+    let idle = |db: &Database| db.building.pending().is_empty();
     // The first build this builder begins of the order begins at once
     ended(&db);
     db.wait_for_index_builds().unwrap();

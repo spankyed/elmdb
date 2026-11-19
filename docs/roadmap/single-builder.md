@@ -1,10 +1,23 @@
 # One builder for a database's life
 
-Status: designed 2026-11-18. Phases 1 and 2 are built (2026-11-19): the builder's `Core` has a generation and the
-two operations of a change, modelled under Shuttle, and a schema change tells the one builder and waits for no
-thread. Phase 3, a close that closes the `Core`, is not: a close still takes the builder from its slot and stops it,
-and `Replacing` and the wait's loop are kept for it alone. The rest of this note is the design as it was written,
-before either phase.
+Status: built, 2026-11-19, all three phases. A database has one building from its open until it is dropped
+(`engine::Building`): its queue, its waiters and what it builds to. A schema change and an adoption are changes it is
+told of, a close is one it is told of too, and its thread is started, stopped by a close and started again around
+it. `Replacing`, the builder's being taken and started again at a schema change, the close's loop that stopped later
+builders and the wait's loop over the slot are gone.
+
+**The gate of phase 2 was not met, and the work went on.** `database.rs` is shorter outside its tests than at
+367865a, 711 lines against 736, and `engine/mod.rs` by 23, the wait having no loop. `engine/builder.rs` is longer,
+906 against 655: the logic moved into it, where the model is, with `Building`, `Change` and `Closing` and what each
+says of itself. Counted in lines the two files grew by 226. What was wanted of the count was that the part with the
+defects get smaller and the part with the model hold the rest, which is what happened; lines were the wrong measure
+of it, and the next design should name the thing it wants and not a proxy.
+
+**A close at exit that gives up** leaves the database open with nothing building: its thread is let go of unjoined,
+and no other is started beside it. A wait for the builds answers what had failed and builds nothing, in a process
+that is exiting.
+
+The rest of this note is the design as it was written, before it was built.
 
 The index builder is a thread that builds what a schema declares over the entities that predate it, and drains a
 rank index's pushes (`engine/builder.rs`). Today a database stops its builder and starts another whenever its schema

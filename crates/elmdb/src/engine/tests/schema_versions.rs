@@ -196,13 +196,20 @@ fn a_builder_with_an_earlier_declaration_refuses_before_writing_index_entries() 
     )
     .unwrap();
     change_in_child(dir.path());
-    let mut builder =
-        crate::database::start_builder(&db.store().unwrap(), &db.engine_schema(), &db.tracks, &db.observing_schema());
-    builder.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
-    builder.waiter().wait();
-    let failures = builder.failures();
-    builder.stop();
-    drop(builder);
+    // A building of its own, over this handle's store and the schema it holds, which is the earlier one
+    let building = crate::engine::Building::default();
+    building.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
+    let builder = crate::database::start_builder(
+        &building,
+        &db.store().unwrap(),
+        &db.engine_schema(),
+        &db.tracks,
+        &db.observing_schema(),
+    );
+    assert!(matches!(building.wait(true), crate::engine::Waited::Idle));
+    let failures = building.failures();
+    // With what it built to, which holds the store the close below waits for
+    drop((builder, building));
     assert_eq!(failures.len(), 1);
     assert!(failures[0].message.contains("schema") && failures[0].message.contains("reopen"));
     db.close().unwrap();
@@ -284,13 +291,13 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
             false,
         )
         .unwrap();
-    // A builder with work queued that it hasn't begun, held so by having no thread: a single row's build would
-    // otherwise race the change. The change takes the builder's work as it begins, and must hand it back when it
-    // fails and can't read what is left to build either
+    // Work queued that isn't begun, held so by the building's having no thread: a single row's build would
+    // otherwise race the change. The change takes the work as it begins, and must hand it back when it fails and
+    // can't read what is left to build either
     let lookup = crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() };
-    let builder = crate::database::unstarted_builder(&store, &db.engine_schema(), &db.tracks, &db.observing_schema());
-    builder.queue([lookup.clone()]);
-    *db.builder() = Some(builder);
+    db.pause_builder();
+    db.building.queue([lookup]);
+    assert!(db.builder().is_none());
     crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_RECOVERY, || {
         crate::failpoints::fail_once_here(crate::failpoints::points::INDEX_REFRESH)
     });
@@ -298,10 +305,9 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
     let error = db.set_schema(schema("b")).unwrap_err();
     assert_eq!(error.code, ErrorCode::Io);
     assert!(error.message.contains("refreshing index state also failed"));
-    let kept = db.builder().as_ref().map(|builder| builder.pending());
-    assert_eq!(kept, Some(vec![lookup]), "the change handed back the work it took, which a wait would else read");
-    // And a builder with a thread builds it
-    drop(db.builder().take());
+    // Handed back, it is work for a thread, which the change starts: a wait would else read what is unbuilt and
+    // build it itself, so the thread is what is asked after
+    assert!(db.builder().is_some(), "the change didn't hand back the work it took");
     db.wait_for_index_builds().unwrap();
     assert!(db.index_status().unwrap().iter().all(|index| index.built));
     assert_eq!(db.schema(), Some(schema("a")));
