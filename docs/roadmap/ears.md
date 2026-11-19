@@ -311,7 +311,10 @@ Opened by having both halves in one repository, each to be decided on a reading,
        `data.mdb`;
      - what that read transaction keeps from reuse is bounded: a write past the bound waits for a sync, and is refused
        with `SYNC_BEHIND` once that sync has failed, and `waitForIndexBuilds` throws `SYNC_BEHIND` or `READERS_FULL`
-       when the builder is held (#151);
+       when the builder is held (#151), and since #182 `CLOSED` on a closed database, where it returned, and
+       `DATA_REPLACED` while another process's replacement of every row is not adopted. apack's `admin.waitForIndexBuilds()`
+       passes it through and is called by specs alone, none after a close (read at apack's `master` on 2026-11-19),
+       so the changeset of the pin's move names the two codes and nothing else changes;
      - a writable open in another mode than a live writer's is refused with `MODE_MISMATCH` (#156), which apack's specs
        that open a database with `syncs: false` beside a child process no longer meet: since apack's `618983142a`
        (2026-11-16) those children open with `syncs: false`, the parent's mode (`apack-ears`' `watch.spec.ts` and
