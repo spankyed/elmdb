@@ -531,11 +531,44 @@ These are required checks configured by the workflow, not a claim that a particu
 
 Filesystem support requirements and the limits of this platform coverage are in [filesystems.md](filesystems.md).
 
-Four workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
-or its test, as no required check (Power loss). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
+Five workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
+or its test, as no required check (Power loss). `release.yml` runs on a tag, each Monday, and on a pull request that
+changes the binding's package or the workspace's build configuration (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
 `mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
 LMDB (`scripts/lmdb-upstream.py`). `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
 and so is `models.yml` (Concurrency models).
+
+## Releases
+
+A tag `v<version>` starts `.github/workflows/release.yml`, and the tag is the owner's. It fails unless the tag names
+the version the workspace's `Cargo.toml` and the binding's `package.json` both hold. It builds the binding for each of
+`package.json`'s seven `napi.targets` on a runner of that OS and architecture:
+
+- the glibc Linux binaries in manylinux_2_28 (AlmaLinux 8), so they need no glibc past 2.28, which Node 22's own Linux
+  builds need too. A check of each binary's undefined symbols fails on one versioned past 2.28, and on one with no
+  version that isn't Node's (`napi_`, `node_api_`), which is what a binary compiled against newer headers than its C
+  library leaves: a build with napi-rs's cross toolchain left `__isoc23_strtol` in LMDB's code, and failed to load on
+  Ubuntu 22.04's glibc 2.35 (run 44370951746, 2026-11-18);
+- the musl ones in Alpine;
+- the Windows one with the C runtime linked in (`+crt-static`), as Node's own is. A check of its imports fails on the
+  Visual C++ redistributable's `VCRUNTIME140.dll`, which a dynamically linked build needs and many machines lack.
+
+It packs all seven into one npm package, `elmdb-<version>.tgz`, whose loader takes the binary named for the platform it
+runs on, with the notices `check-notices` holds to the lockfile, and writes each target's CycloneDX SBOM with
+cargo-cyclonedx, `elmdb.<platform>.cdx.json`. Then, on each target, `scripts/release-smoke.mjs` installs the package
+into an empty project on Node 22.17.0 and runs a database through it: a text search, a rank and `check()`. The glibc
+targets install in AlmaLinux 8, at glibc 2.28, and the musl ones in Alpine; macOS on macOS 15 and Windows on Windows
+Server 2022. On a tag it drafts a GitHub release holding the package, the SBOMs and `SHA256SUMS`. A tag whose release is
+published fails, and so does one whose draft holds every file the run would upload; a draft missing one, which a run
+that failed while uploading leaves, is made again. Publishing the draft is the owner's, and nothing goes
+to npm.
+
+A pull request that changes the workflow, its smoke, the binding's package, manifest, build script or loader, the
+workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs everything but the version check and the draft, and keeps the package and SBOMs as the run's artifacts; so do a
+dispatch, on any branch, and a run each Monday on main.
+
+What an SBOM lists is what Cargo builds that target's binary from. LMDB appears as `lmdb-master-sys`, the crate that
+compiles it, and the Rust standard library not at all; both are credited in the package's notices.
 
 Suites the sections above don't name: `store/wait_tests.rs` (what a unit's owner may wait on answers while the unit
 is open; `engine.md`, What waits on what), `engine/algorithms/tests.rs` (the graph algorithms against plain references
