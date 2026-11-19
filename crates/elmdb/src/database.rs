@@ -231,7 +231,8 @@ impl Database {
         // (`engine::builder_commits`). The schema's lock is held from here to the builder's being told what the
         // change left, so no commit queues it work and no close takes it in between, and a wait for the builds
         // asked for meanwhile waits for that (`Core::wait`)
-        let interrupted = self.builder().as_ref().map(crate::engine::Builder::begin_change).unwrap_or_default();
+        let change = self.builder().as_ref().map(crate::engine::Builder::begin_change);
+        let interrupted = change.as_ref().map(|change| change.left().to_vec()).unwrap_or_default();
         run_point!(SCHEMA_CHANGE_BEGUN);
         let mut applied = apply_schema(&store, Some(schema), Some(&current));
         if let Ok(applied) = &applied {
@@ -254,17 +255,22 @@ impl Database {
         // Ended before the change's commit is delivered: a listener it tells may wait for the builds
         {
             let mut slot = self.builder();
-            match slot.as_ref() {
-                Some(builder) => {
+            match (change, slot.as_ref()) {
+                // The builder the change began on: the slot is the schema's lock's to change, which is held
+                (Some(change), Some(builder)) => {
                     let commits = builder_commits_of(&store, &current, &self.tracks, &self.engine_schema);
-                    builder.end_change(Arc::clone(&current), commits, unbuilt);
+                    builder.end_change(change, Arc::clone(&current), commits, unbuilt);
                 }
-                None if !unbuilt.is_empty() => {
-                    let builder = start_builder(&store, &current, &self.tracks, &self.engine_schema);
-                    builder.queue(unbuilt);
-                    *slot = Some(builder);
+                (change, _) => {
+                    // No builder was started. A change begun on one a close has since taken ends there, on a
+                    // builder that is stopped
+                    drop(change);
+                    if slot.is_none() && !unbuilt.is_empty() {
+                        let builder = start_builder(&store, &current, &self.tracks, &self.engine_schema);
+                        builder.queue(unbuilt);
+                        *slot = Some(builder);
+                    }
                 }
-                None => {}
             }
         }
         drop(current);

@@ -1283,9 +1283,14 @@ impl Store {
 
     /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it
     pub(crate) fn replaced_elsewhere(&self) -> Result<Option<u64>> {
-        // Not between a commit of this handle's becoming visible and its epoch being taken (`commit_txn`)
-        let _accounted = self.accounted.lock();
         let stored = self.read(|txn, db| stored_epoch(txn, db))?;
+        if stored == self.epoch.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        // Read between a commit of this handle's becoming visible and its epoch being taken, a replacement made
+        // here is one made elsewhere: the commit holds this until it has taken the epoch (`commit_txn`), so asked
+        // again past it the two agree. Taken after the read, not around it: a commit takes the gate and then this
+        drop(self.accounted.lock());
         Ok((stored != self.epoch.load(Ordering::Acquire)).then_some(stored))
     }
 

@@ -319,7 +319,7 @@ fn a_wait_asked_for_as_a_change_is_made_waits_for_the_work_the_change_leaves() {
                 assert!(done.load(Ordering::SeqCst), "the wait answered with the change's work not done");
             })
         };
-        core.end_change([other()]);
+        core.end_change([other()], true);
         waiter.join().unwrap();
         core.stop();
         runner.join().unwrap();
@@ -350,7 +350,7 @@ fn work_under_way_as_a_change_begins_is_told_to_stop_and_is_neither_done_nor_fai
             thread::yield_now();
         }
         core.begin_change();
-        core.end_change([]);
+        core.end_change([], true);
         assert!(core.wait().is_none());
         assert!(core.lock().failures.is_empty(), "work of what the builder built to before is listed as failed");
         core.stop();
@@ -390,7 +390,7 @@ fn work_queued_before_a_change_is_not_run_after_it() {
         core.queue([other()]);
         core.begin_change();
         release.store(true, Ordering::SeqCst);
-        core.end_change([]);
+        core.end_change([], true);
         core.wait();
         assert_eq!(ran.load(Ordering::SeqCst), 0, "work queued for what the builder built to before ran after");
         core.stop();
@@ -415,7 +415,7 @@ fn the_work_a_change_leaves_and_the_work_queued_as_it_is_made_each_run_once() {
         core.begin_change();
         // A commit that leaves a rank index pushes, landing as the change is made
         core.queue([index()]);
-        core.end_change([other()]);
+        core.end_change([other()], true);
         core.wait();
         let mut runs = runs.lock().unwrap().clone();
         runs.sort_by_key(|work| format!("{work:?}"));
@@ -443,7 +443,7 @@ fn a_change_made_by_the_work_under_way_leaves_it_undone_and_the_thread_at_what_t
                         return Ok(());
                     }
                     within.begin_change();
-                    within.end_change([other()]);
+                    within.end_change([other()], true);
                     assert!(stopping(), "the work under way isn't told to stop by the change it made");
                     Err(Error::new(ErrorCode::SchemaChanged, "what it built to was replaced"))
                 });
@@ -469,5 +469,61 @@ fn a_stop_ends_a_wait_for_a_change_that_has_not_ended() {
         };
         core.stop();
         waiter.join().unwrap();
+    });
+}
+
+/// Work queued as a change is made is for what the change leaves, which the builder isn't told until the change
+/// ends: taken before, it would be built to what the builder built to before
+#[test]
+fn work_queued_as_a_change_is_made_is_not_begun_until_every_change_has_ended() {
+    explore(|| {
+        let (core, _) = core();
+        let ended = Arc::new(AtomicBool::new(false));
+        let runner = {
+            let (core, ended) = (Arc::clone(&core), Arc::clone(&ended));
+            thread::spawn(move || {
+                core.run(|_, _| {
+                    assert!(ended.load(Ordering::SeqCst), "work begun with a change not yet ended");
+                    Ok(())
+                });
+            })
+        };
+        // Two changes at once, a schema change's and an adoption's: the count of them is what the thread waits on
+        core.begin_change();
+        core.begin_change();
+        core.queue([index()]);
+        core.end_change([], true);
+        thread::yield_now();
+        ended.store(true, Ordering::SeqCst);
+        core.end_change([other()], false);
+        core.wait();
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+/// A change that wasn't made leaves what had failed as true as it was, and one that was made leaves none
+#[test]
+fn a_change_that_was_not_made_keeps_the_failures_and_one_that_was_made_clears_them() {
+    explore(|| {
+        let (core, _) = core();
+        let runner = {
+            let core = Arc::clone(&core);
+            thread::spawn(move || core.run(|_, _| Err(Error::new(ErrorCode::Io, "the stand-in fails"))))
+        };
+        core.queue([index()]);
+        core.wait();
+        assert_eq!(core.lock().failures.len(), 1);
+        let left = core.begin_change();
+        assert!(left.is_empty(), "the failed work is neither queued nor under way");
+        core.end_change(left, false);
+        core.wait();
+        assert_eq!(core.lock().failures.len(), 1, "a change that wasn't made forgot a build that failed");
+        core.begin_change();
+        core.end_change([], true);
+        core.wait();
+        assert!(core.lock().failures.is_empty(), "a change that was made kept a failure of what was built to before");
+        core.stop();
+        runner.join().unwrap();
     });
 }

@@ -800,8 +800,9 @@ enum Needs {
     TheDatabase,
 }
 
-/// A schema change or a close made while the builder's thread delivers a commit of its own to a watch: both wait for
-/// that thread to end, and must not hold what its delivery, or its listener, waits for
+/// A schema change or a close made while the builder's thread delivers a commit of its own to a watch. A close
+/// waits for that thread to end, and must not hold what its delivery, or its listener, waits for. A schema change
+/// holds the schema's lock, which the delivery waits for, and so must wait for nothing that thread has
 fn ends_beside_a_builder_s_delivery(action: &'static str, needs: Needs) {
     use std::time::Duration;
     let schema = |tolerance: f64| {
@@ -922,8 +923,9 @@ fn link_all(db: &Database) {
     write(db, links.collect()).unwrap();
 }
 
-/// A schema change stops the builder and waits for its thread to end. Made by a watch's listener on that thread,
-/// which a drain's commit delivered to, it has no one to wait for: the thread ends once the listener returns
+/// A schema change tells the builder and waits for no thread, so one made by a watch's listener on the builder's
+/// thread, which a drain's commit delivered to, is made as any other: the thread goes on to what the change left
+/// once the listener returns
 #[test]
 fn a_listener_on_the_builder_s_thread_changes_the_schema() {
     use std::time::Duration;
@@ -950,7 +952,7 @@ fn a_listener_on_the_builder_s_thread_changes_the_schema() {
         .recv_timeout(Duration::from_secs(4))
         .expect("the change waits for the thread it is made on, or that thread ended without making it");
     assert_eq!(outcome.unwrap(), 1, "the tolerance changed");
-    // The schema is the one given, and the builder started for it builds what the stopped one left
+    // The schema is the one given, and the builder builds what the change left
     assert_eq!(db.schema().unwrap().ranks["taskRank"].tolerance, 1e-8);
     db.wait_for_index_builds().unwrap();
     let report = db.check().unwrap();

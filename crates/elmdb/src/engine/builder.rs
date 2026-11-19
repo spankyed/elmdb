@@ -132,10 +132,11 @@ impl Core {
         self.changed.notify_all();
     }
 
-    /// That what the builder builds to is about to be replaced. What is queued, put off or failed was for what it
-    /// built to until now, and goes; the piece of work the thread is on is told to stop, and is let go of when it
-    /// ends. Whoever waits for the builds waits until `end_change`. Answers the work that goes: what a change that
-    /// can't say what is left to build queues again
+    /// That what the builder builds to is about to be replaced. What is queued or put off was for what it built to
+    /// until now, and goes; the piece of work the thread is on is told to stop, and is let go of when it ends; and
+    /// the thread takes no work until every change begun has ended, since what it would build it to is not yet
+    /// what the change leaves. Whoever waits for the builds waits until `end_change`. Answers the work that goes:
+    /// what a change that wasn't made, or can't say what is left to build, queues again
     fn begin_change(&self) -> Vec<Work> {
         let mut state = self.lock();
         state.generation += 1;
@@ -143,16 +144,20 @@ impl Core {
         let mut left: Vec<Work> = state.active.iter().cloned().collect();
         left.extend(std::mem::take(&mut state.queue));
         left.extend(std::mem::take(&mut state.later).into_iter().map(|(_, work)| work));
-        state.failures.clear();
         self.changed.notify_all();
         left
     }
 
-    /// That the change `begin_change` began is made, or wasn't: `work` is what there is to build now, queued with
-    /// whatever was queued since the change began, a commit's rank index among it
-    fn end_change(&self, work: impl IntoIterator<Item = Work>) {
+    /// That a change `begin_change` began has ended: `work` is what there is to build now, queued with whatever
+    /// was queued since the change began, a commit's rank index among it. One that was `made` leaves no build
+    /// failed: what failed was for what the builder built to before, and is among `work` if it is still to build.
+    /// One that wasn't keeps what had failed, which is as true as it was
+    fn end_change(&self, work: impl IntoIterator<Item = Work>, made: bool) {
         self.queue(work);
         let mut state = self.lock();
+        if made {
+            state.failures.clear();
+        }
         state.changing = state.changing.checked_sub(1).expect("a change ended was begun");
         self.changed.notify_all();
     }
@@ -213,7 +218,10 @@ impl Core {
                             state.queue.push_back(work);
                         }
                     }
-                    if let Some(next) = state.queue.pop_front() {
+                    // None while a change is being made: what the thread would build it to is the change's to say
+                    if state.changing == 0
+                        && let Some(next) = state.queue.pop_front()
+                    {
                         state.busy = true;
                         state.active = Some(next.clone());
                         break (next, state.generation);
@@ -378,23 +386,17 @@ impl Builder {
         Self { core, target: Arc::new(Mutex::new((schema, commits))), store, thread: None }
     }
 
-    /// That the schema is about to change: the builder's work is for the one it had, and goes
-    /// (`Core::begin_change`). Answers that work
-    pub fn begin_change(&self) -> Vec<Work> {
-        self.core.begin_change()
+    /// That what the builder builds to is about to change, its schema or the rows: its work is for what it had,
+    /// and goes (`Core::begin_change`). The change ends when what this answers is ended or dropped
+    pub fn begin_change(&self) -> Change {
+        Change { left: self.core.begin_change(), core: Some(Arc::clone(&self.core)) }
     }
 
-    /// That the schema change is made, or wasn't: the builder builds to `schema` from here, committing through
-    /// `commits`, and `work` is what that leaves to build
-    pub fn end_change(&self, schema: Arc<EngineSchema>, commits: Commits, work: impl IntoIterator<Item = Work>) {
+    /// That the schema change `change` is made, or wasn't: the builder builds to `schema` from here, committing
+    /// through `commits`, and `work` is what that leaves to build. `change` is one this builder began
+    pub fn end_change(&self, change: Change, schema: Arc<EngineSchema>, commits: Commits, work: Vec<Work>) {
         *self.target.lock().expect("the builder's target is never poisoned") = (schema, commits);
-        self.core.end_change(work);
-    }
-
-    /// `end_change` for a change that left the schema alone and replaced the rows: an adoption of another process's
-    /// replacement of every one
-    pub fn end_change_of_rows(&self, work: impl IntoIterator<Item = Work>) {
-        self.core.end_change(work);
+        change.end(work);
     }
 
     pub fn queue(&self, indexes: impl IntoIterator<Item = Work>) {
@@ -454,6 +456,37 @@ impl Builder {
     }
 }
 
+/// A change to what a builder builds to, begun and not ended (`Builder::begin_change`). It holds the builder's
+/// core, and ends on that one whatever builder the database has by then: a close may have taken the one it began
+/// on. Dropped without being ended, a failure or a panic part way, it ends as a change that wasn't made, with the
+/// work it took queued again, so no wait for the builds is left waiting for it
+pub struct Change {
+    core: Option<Arc<Core>>,
+    left: Vec<Work>,
+}
+
+impl Change {
+    /// The work the change took from the builder
+    pub fn left(&self) -> &[Work] {
+        &self.left
+    }
+
+    /// That the change is made, and `work` is what it leaves to build
+    pub fn end(mut self, work: Vec<Work>) {
+        if let Some(core) = self.core.take() {
+            core.end_change(work, true);
+        }
+    }
+}
+
+impl Drop for Change {
+    fn drop(&mut self) {
+        if let Some(core) = self.core.take() {
+            core.end_change(std::mem::take(&mut self.left), false);
+        }
+    }
+}
+
 /// A handle on a builder's progress that outlives the builder: a builder stopped meanwhile ends the wait
 pub struct Waiter(Arc<Core>);
 
@@ -464,8 +497,8 @@ impl Waiter {
         self.0.wait()
     }
 
-    /// Whether the builder was told to stop, by a schema change or a close: what it had left is then another
-    /// builder's, or no one's
+    /// Whether the builder was told to stop, by a close: what it had left is then another builder's, where the
+    /// close gave up, or no one's
     pub fn stopped(&self) -> bool {
         self.0.stopping()
     }
