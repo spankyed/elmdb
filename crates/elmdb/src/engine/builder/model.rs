@@ -656,10 +656,21 @@ fn a_close_that_gives_up_beside_another_under_way_leaves_the_builder_closing() {
         let (core, _) = core();
         core.begin_close();
         core.begin_close();
+        // Whoever waits through a close waits through both
+        let ended = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let (core, ended) = (Arc::clone(&core), Arc::clone(&ended));
+            thread::spawn(move || {
+                assert!(matches!(core.waited(true), Waited::Idle));
+                assert!(ended.load(Ordering::SeqCst), "the wait answered with a close still under way");
+            })
+        };
         core.end_close(false);
         assert!(core.closing() && core.stopping(), "a close under way, and a thread free to start beside it");
         assert!(matches!(core.waited(false), Waited::Closing));
+        ended.store(true, Ordering::SeqCst);
         core.end_close(false);
+        waiter.join().unwrap();
         assert!(!core.closing() && !core.stopping());
         assert!(matches!(core.waited(false), Waited::Idle));
     });
