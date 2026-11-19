@@ -2,7 +2,7 @@
 from pathlib import Path
 import tempfile
 
-from callgrind import allocator_instructions, grew_most, linked_for_valgrind
+from callgrind import allocator_instructions, grew_most, linked_for_valgrind, nothing_counted
 
 FILE = """# callgrind format
 events: Ir Dr Dw
@@ -47,3 +47,8 @@ print("ok")
 # The link Valgrind reads follows whatever flags the environment holds, and leaves the rest of it as it is
 assert linked_for_valgrind({"A": "b"}) == {"A": "b", "RUSTFLAGS": "-C link-arg=-Wl,-z,norelro"}
 assert linked_for_valgrind({"RUSTFLAGS": "--cfg x"})["RUSTFLAGS"] == "--cfg x -C link-arg=-Wl,-z,norelro"
+
+# A run that counted nothing is every case at 0: one case at 0 is that case's, and no case is no run
+assert nothing_counted([0, 0, 0])
+assert not nothing_counted([0, 783, 0])
+assert not nothing_counted([])

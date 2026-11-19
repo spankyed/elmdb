@@ -66,7 +66,11 @@ From the first release with users, format 1 locks:
 - the derived keys that belong to no index: `d/e`, `d/t`, `d/c`, `d/h`, `d/rc`, `d/f`, `d/o`, `d/n` and `d/b`. Plans
   read them for every type and relation kind, and nothing answers in their place while they are built. A change to
   them bumps the format, and its upgrade is a `rebuild()` on a copy;
-- each index's marker, its key and its encoding (below);
+- each index's marker, its key and its encoding (below), and with it the place a build of the index has reached
+  (`d/xbr`), which every writer of the marker deletes. An elmdb from before that key (#189, 2026-11-18) deletes
+  none, so one that rebuilt or removed an index would leave a place for a later elmdb's build to go on from, past
+  rows it never filed. No such elmdb is released, and the lock is what keeps one from being: from the first tag on,
+  an elmdb that says whether an index is built takes its place away;
 - the files beside the data file: the `synced` record and the locks (`format.md`, Beside the data file);
 - the dump file, version 1;
 - LMDB's data version, 1.
