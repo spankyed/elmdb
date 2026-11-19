@@ -18,10 +18,11 @@ name: release
 #   4. on a tag, drafts a GitHub release holding the package, the SBOMs and `SHA256SUMS`. Publishing the draft is the
 #      owner's; nothing is published to npm.
 #
-# A pull request that changes this workflow, its smoke, the binding's package, manifest, build script or loader, the
-# workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs steps 1 to 3
-# and keeps what they made as the run's artifacts, as do a dispatch on any branch and each Monday's run on main, which
-# catches what a dependency's change broke before a tag does. None checks the version or drafts a release, and none
+# A pull request that changes this workflow, its smoke, the binding's package or loader, a crate's manifest or build
+# script, the workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs
+# steps 1 to 3 and keeps what they made as the run's artifacts, as do a dispatch on any branch and each Monday's run on
+# main. A change to Rust source alone, such as one calling a newer libc function, is first built here by that Monday's
+# run or by a tag. None checks the version or drafts a release, and none
 # gates a merge.
 on:
   push:
@@ -31,9 +32,9 @@ on:
       - .github/workflows/release.yml
       - scripts/release-smoke.mjs
       - crates/elmdb-node/package.json
-      - crates/elmdb-node/Cargo.toml
-      - crates/elmdb-node/build.rs
       - crates/elmdb-node/index.js
+      - crates/*/Cargo.toml
+      - crates/*/build.rs
       - Cargo.toml
       - Cargo.lock
       - .cargo/config.toml
@@ -326,7 +327,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.version.outputs.version }}
         run: |
-          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2> /dev/null); then
+          # A release that can't be read is not one that isn't there: only gh's `release not found` is taken as none
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2> view.err); then
             if [ "$draft" != true ]; then
               echo "::error::$GITHUB_REF_NAME already has a published release; a release is never replaced"
               exit 1
@@ -338,6 +340,9 @@ jobs:
               exit 1
             fi
             gh release delete "$GITHUB_REF_NAME" --yes
+          elif ! grep -q 'release not found' view.err; then
+            cat view.err
+            exit 1
           fi
           prerelease=()
           case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac

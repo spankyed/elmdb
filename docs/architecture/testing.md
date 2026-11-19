@@ -563,9 +563,12 @@ published fails, and so does one whose draft holds every file the run would uplo
 that failed while uploading leaves, is made again. Publishing the draft is the owner's, and nothing goes
 to npm.
 
-A pull request that changes the workflow, its smoke, the binding's package, manifest, build script or loader, the
-workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs everything but the version check and the draft, and keeps the package and SBOMs as the run's artifacts; so do a
-dispatch, on any branch, and a run each Monday on main.
+A pull request that changes the workflow, its smoke, the binding's package or loader, a crate's manifest or build
+script, the workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs
+everything but the version check and the draft, and keeps the package and SBOMs as the run's artifacts; so do a
+dispatch, on any branch, and a run each Monday on main. A change to Rust source alone is first built for every target
+by that Monday's run or by a tag. On a tag, a release that can't be read, other than one that isn't there, fails the
+draft rather than counting as none.
 
 What an SBOM lists is what Cargo builds that target's binary from. LMDB appears as `lmdb-master-sys`, the crate that
 compiles it, and the Rust standard library not at all; both are credited in the package's notices.
