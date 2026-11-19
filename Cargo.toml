@@ -13,7 +13,9 @@ repository = "https://github.com/spankyed/elmdb"
 libc = "0.2.191"
 windows-sys = "0.61.2"
 elmdb = { path = "crates/elmdb" }
-heed = "0.23.0"
+# Without heed's default features, which add serde codecs (bincode's, unmaintained, and serde_json's) that nothing
+# here uses: every database is read and written as `heed::types::Bytes`
+heed = { version = "0.23.0", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = { version = "1.0.154", features = ["preserve_order"] }
 sha2 = "0.11.1"

@@ -49,8 +49,10 @@ One run of cargo-deny 0.21.0 on a scratch copy of `origin/main` at `c4f73b6`, 20
 It answered:
 
 - **advisories: one failure.** `bincode` 1.3.3 is marked unmaintained (RUSTSEC-2025-0141): its authors stopped
-  development and call 1.3.3 complete. No vulnerability is reported against it, and no version is patched. It arrives
-  through `heed-types` 0.21, a dependency of heed 0.23, which hannoy 0.3 reaches through heed.
+  development and call 1.3.3 complete. No vulnerability is reported against it, and no version is patched. It arrived
+  through `heed-types` 0.21, by heed's default `serde-bincode` feature, which elmdb's own `heed` dependency turned on
+  and nothing used. Since 2026-11-19 elmdb takes heed without its default features, and `bincode` is in no build, so
+  this failure is gone without an ignore.
 - **licenses: one failure.** `steppe` 0.4.1, through hannoy, declares no license field, and cargo-deny reads its
   `LICENSE` file as WTFPL, which the list didn't allow. It also warned that OLDAP-2.8 was never seen: it reads
   `lmdb-master-sys` as its declared Apache-2.0, and `futures-channel` as its declared `MIT OR Apache-2.0`, without the
@@ -85,12 +87,10 @@ It answered:
    - Bans and sources run in the same job on every pull request, beside `check-notices`.
    - The daily run on `main` is a workflow of its own, `advisories.yml`, which gates nothing and fails like
      `lmdb-upstream.yml` does, with `contents: read`.
-4. **Every exception names its advisory or crate and why.**
-   - `bincode`'s ignore entry says it is unmaintained, not vulnerable, and arrives through heed. cargo-deny warns when
-     an ignore no longer matches anything (`advisory-not-detected`), so the entry can't outlive heed's move away from
-     bincode unnoticed.
-   - `unmaintained = "workspace"` would hide bincode without an entry, since bincode is transitive. The entry is kept
-     because it says why.
+4. **Every exception names its advisory or crate and why.** An advisory is answered by removing the crate where
+   that can be done, as `bincode` was, and by an ignore entry naming the advisory and why only where it can't.
+   cargo-deny warns when an ignore no longer matches anything (`advisory-not-detected`), so no entry outlives its crate
+   unnoticed. `unmaintained = "workspace"` is not used: it would hide a transitive crate's advisory without saying why.
    - Duplicate versions warn and don't fail until the eight above are gone or each is excused, since most come from
      dependencies' own pins.
 5. **The schema language moves under a domain the owner holds, before 0.3.** Two ways, the first recommended.
@@ -123,7 +123,7 @@ It answered:
 2. **`deny.toml` and the checks a merge waits on.**
    - `deny.toml` at the root:
      - `[graph]` targets from `napi.targets`;
-     - `[advisories]` with `bincode`'s ignore and its reason;
+     - `[advisories]`, with no ignore today;
      - `[bans]` with `multiple-versions = "warn"`;
      - `[sources]` denying unknown registries and git sources;
      - no `[licenses]`, and a comment saying `about.toml` owns them and that a bare `cargo deny check` fails.
@@ -151,7 +151,8 @@ Each gate fails once on a mutated copy, never the working tree (`CLAUDE.md`):
   `Cargo.lock` alone doesn't do it: cargo refuses the lockfile with `--locked`, and prunes the entry without it, so
   the sources check never sees one.
 - **Bans:** a copy that bans a crate the tree builds.
-- **Advisories:** a copy without `bincode`'s ignore, which fails on RUSTSEC-2025-0141 as the run above did.
+- **Advisories:** a copy that takes heed with its default features again, which fails on RUSTSEC-2025-0141 as the
+  run above did.
 - **The served schema:** a copy of the check pointed at a file that differs by a byte.
 
 ## When
@@ -165,5 +166,3 @@ Each gate fails once on a mutated copy, never the working tree (`CLAUDE.md`):
 
 - Signing releases, and npm provenance, which need publishing to npm first (`release.yml` publishes nothing).
 - Pinning the release workflow's container images and Node download to digests (the release's own review).
-- What heed's move off `bincode` would take. That is heed's, and cargo-deny reports the ignore once it no longer
-  matches.
