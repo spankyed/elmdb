@@ -541,8 +541,9 @@ impl Building {
 pub struct Closing(Option<Building>);
 
 impl Closing {
-    /// That the close closed the database, or left it open in a process that is exiting: nothing more is built
-    pub fn closed(mut self) {
+    /// That the close closed the database, or is one made in a process that is exiting, whatever becomes of it:
+    /// nothing more is built. Said once; saying it again, or dropping this after, says nothing more
+    pub fn closed(&mut self) {
         if let Some(building) = self.0.take() {
             building.core.end_close(true);
         }

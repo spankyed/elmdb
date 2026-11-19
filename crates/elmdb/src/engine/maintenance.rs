@@ -368,7 +368,8 @@ impl Database {
         // The builder, where one is started, is told that the rows it builds over are changing, before this handle
         // takes the epoch and until what the replacement left unbuilt is queued: a wait for the builds asked for
         // between the two would find its work done and answer, with that not yet queued (`Core::wait`). Where
-        // nothing is adopted the change is dropped, which hands the builder back the work it took
+        // nothing is adopted the change is dropped, which hands the builder back the work it took.
+        //
         // A read-only handle builds nothing, and what the replacement left unbuilt is none of its business
         if self.is_read_only() {
             return store.adopt_replacement(epoch);

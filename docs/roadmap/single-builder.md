@@ -7,7 +7,7 @@ it. `Replacing`, the builder's being taken and started again at a schema change,
 builders and the wait's loop over the slot are gone.
 
 **The gate of phase 2 was not met, and the work went on.** `database.rs` is shorter outside its tests than at
-367865a, 711 lines against 736, and `engine/mod.rs` by 23, the wait having no loop. `engine/builder.rs` is longer,
+367865a, 711 lines against 736, and `engine/mod.rs` by about 20, the wait asking the building where it looped over the slot. `engine/builder.rs` is longer,
 906 against 655: the logic moved into it, where the model is, with `Building`, `Change` and `Closing` and what each
 says of itself. Counted in lines `database.rs` and `engine/builder.rs`, the two the gate named, grew by 226. What was wanted of the count was that the part with the
 defects get smaller and the part with the model hold the rest, which is what happened; lines were the wrong measure

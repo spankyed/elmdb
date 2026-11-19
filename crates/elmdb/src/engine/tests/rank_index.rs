@@ -2872,9 +2872,9 @@ fn work_queued_as_a_close_waits_for_the_store_is_built_once_the_close_gives_up()
     write(&db, (0..3).map(|i| json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect()).unwrap();
     db.wait_for_index_builds().unwrap();
     db.pause_builder();
-    // An index to build, which the close's own reading of what is left would not queue: its marker is there
-    let lookup = crate::engine::Work::Rank { name: "taskRank".into() };
-    let (builders, queued) = (db.builders().unwrap().expect("a writable database starts builders"), lookup.clone());
+    // Work the close's own reading of what is left would not queue: the rank index is built, and owes nothing
+    let rank = crate::engine::Work::Rank { name: "taskRank".into() };
+    let (builders, queued) = (db.builders().unwrap().expect("a writable database starts builders"), rank);
     let building = db.building.clone();
     crate::failpoints::run_once_here(crate::failpoints::points::CLOSE_TAKEN, move || {
         builders.queue(vec![queued]);

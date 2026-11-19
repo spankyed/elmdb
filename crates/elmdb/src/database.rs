@@ -254,7 +254,7 @@ impl Database {
         };
         // Ended before the change's commit is delivered: a listener it tells may wait for the builds
         {
-            // A read-only database is refused its change above, and builds nothing
+            // A read-only database builds nothing, whether its change was refused or changed nothing
             match unbuilt.filter(|_| !self.read_only) {
                 Some(unbuilt) => {
                     let commits = builder_commits_of(&store, &current, &self.tracks, &self.engine_schema);
@@ -445,7 +445,7 @@ impl Database {
         {
             return Ok(false);
         }
-        let (taken, running, closing) = {
+        let (taken, running, mut closing) = {
             // Held while the builder is told to stop and the store is taken, so a schema change can't start a builder
             // after; released before either is waited for. At exit it is waited for until the deadline: on Windows the
             // exit handlers run after every other thread was ended, and one ended holding the schema for reading (a
@@ -478,6 +478,11 @@ impl Database {
             (slot.take(), running, closing)
         };
         stop(running);
+        if at_exit {
+            // The thread was let go of unjoined, and may be running: whatever becomes of this close, a failed sync
+            // or a panic among it, no thread is started beside that one, and the building is said to be over now
+            closing.closed();
+        }
         let Some(mut store) = taken else { return Ok(true) };
         run_point!(CLOSE_TAKEN);
         // An operation that took the store before the close finishes first, and none keeps it long. The slot is free
@@ -504,12 +509,10 @@ impl Database {
                         // The caller's wait is spent: the record's locks are tried, and not waited for
                         let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
+                        synced?;
                         if at_exit {
-                            // The process is exiting, and its builder's thread was let go of unjoined: nothing more
-                            // is built here, and no wait for the builds waits for it. Said before the sync's answer
-                            // is looked at: a thread started again would run beside the one let go of
-                            closing.closed();
-                            synced?;
+                            // The process is exiting: nothing more is built here, which the building was told as
+                            // its thread was let go of
                             return Ok(false);
                         }
                         run_point!(CLOSE_GAVE_UP);
@@ -518,15 +521,20 @@ impl Database {
                         // first, which lets a thread be started for it. A close that gave up answers that it did:
                         // what keeps the builds from being queued, another process's schema or a close beside this
                         // one, is the next operation's to say
-                        drop(closing);
-                        if let Ok(Some(builders)) = self.builders()
-                            && let Ok(store) = self.store()
-                        {
-                            // The schema's read is let go before the builders queue, which reads it too
+                        // Queued while the close is still said to be under way, so that a wait for the builds
+                        // that this close's end wakes finds the work there, and not a moment in which nothing is
+                        // queued and no thread runs. The thread is started once the close is over, which is what
+                        // lets one be
+                        if let Ok(store) = self.store() {
                             // Where it can't be read nothing is queued, and a wait for the builds reads it again
-                            // itself, with no thread there, and says why it can't
+                            // itself, with no thread there, and says why it can't. The schema's read is let go
+                            // at this statement's end, before the builders take it
                             let owed = crate::engine::remaining_indexes(&store, &self.engine_schema.read());
-                            builders.queue(owed.unwrap_or_default());
+                            self.building.queue(owed.unwrap_or_default());
+                        }
+                        drop(closing);
+                        if let Ok(Some(builders)) = self.builders() {
+                            builders.queue(Vec::new());
                         }
                         return Ok(false);
                     }
@@ -801,6 +809,8 @@ mod tests {
         let took = began.elapsed();
         // Bounded, the record being held a minute: what a flush beside a loaded suite takes is no part of the test
         assert!(took < Duration::from_secs(10), "{took:?}, for a wait of 300 ms");
+        // Its sync refused, the close still left nothing building: a thread may have been let go of unjoined
+        assert!(db.building.closing(), "a thread could be started beside one a close at exit let go of");
         drop(held);
         drop(store);
     }
