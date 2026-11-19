@@ -88,6 +88,12 @@ struct State {
     /// What holds the builds up while the builder waits it out, nothing of its work made: a sync behind
     /// (`SYNC_BEHIND`) or a full reader table, which a wait for the builds answers with rather than waiting on
     held: Option<crate::Error>,
+    /// How many times what the builder builds to was replaced: its schema, by a schema change. A piece of work is
+    /// taken in a generation, and one that ends in another is let go of, neither done nor failed
+    generation: u64,
+    /// The changes begun and not ended (`begin_change`): what was queued is gone, and what the change leaves to
+    /// build isn't queued yet, so a wait for the builds waits for the change's end
+    changing: usize,
 }
 
 /// What the thread decides, apart from what doing a piece of work means: its queue, the pause a rank index's drain
@@ -126,6 +132,42 @@ impl Core {
         self.changed.notify_all();
     }
 
+    /// That what the builder builds to is about to be replaced. What is queued, put off or failed was for what it
+    /// built to until now, and goes; the piece of work the thread is on is told to stop, and is let go of when it
+    /// ends. Whoever waits for the builds waits until `end_change`. Answers the work that goes: what a change that
+    /// can't say what is left to build queues again
+    fn begin_change(&self) -> Vec<Work> {
+        let mut state = self.lock();
+        state.generation += 1;
+        state.changing += 1;
+        let mut left: Vec<Work> = state.active.iter().cloned().collect();
+        left.extend(std::mem::take(&mut state.queue));
+        left.extend(std::mem::take(&mut state.later).into_iter().map(|(_, work)| work));
+        state.failures.clear();
+        self.changed.notify_all();
+        left
+    }
+
+    /// That the change `begin_change` began is made, or wasn't: `work` is what there is to build now, queued with
+    /// whatever was queued since the change began, a commit's rank index among it
+    fn end_change(&self, work: impl IntoIterator<Item = Work>) {
+        self.queue(work);
+        let mut state = self.lock();
+        state.changing = state.changing.checked_sub(1).expect("a change ended was begun");
+        self.changed.notify_all();
+    }
+
+    /// The generation as it stands: what a pause within a piece of work is held to
+    fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
+    /// Whether a piece of work taken in `generation` is to stop: the builder stops, or builds to something else
+    fn over(&self, generation: u64) -> bool {
+        let state = self.lock();
+        state.stopping || state.generation != generation
+    }
+
     fn stopping(&self) -> bool {
         self.lock().stopping
     }
@@ -138,7 +180,7 @@ impl Core {
     /// for as long as the other elmdb writes
     fn wait(&self) -> Option<crate::Error> {
         let mut state = self.lock();
-        while (!state.queue.is_empty() || state.busy) && !state.stopping && state.held.is_none() {
+        while (!state.queue.is_empty() || state.busy || state.changing > 0) && !state.stopping && state.held.is_none() {
             state = self.changed.wait(state).expect("the builder's lock is never poisoned");
         }
         state.held.clone()
@@ -153,7 +195,7 @@ impl Core {
     /// Takes the queue's work one piece at a time until stopped, `build` doing each, given whether to stop
     fn run(&self, mut build: impl FnMut(&Work, &dyn Fn() -> bool) -> crate::Result<()>) {
         loop {
-            let work = {
+            let (work, generation) = {
                 let mut state = self.lock();
                 loop {
                     if state.stopping {
@@ -174,7 +216,7 @@ impl Core {
                     if let Some(next) = state.queue.pop_front() {
                         state.busy = true;
                         state.active = Some(next.clone());
-                        break next;
+                        break (next, state.generation);
                     }
                     state.busy = false;
                     self.changed.notify_all();
@@ -190,18 +232,20 @@ impl Core {
                 }
             };
             if let Work::Rank { name } = &work {
-                self.await_quiet(name);
+                self.await_quiet(name, generation);
             }
-            // Work over rows another process has replaced isn't owed any more: adopting that queues what is
-            if let Err(e) = build(&work, &|| self.stopping())
+            let built = build(&work, &|| self.over(generation));
+            let mut state = self.lock();
+            // Work over rows another process has replaced isn't owed any more: adopting that queues what is. Nor is
+            // work for what the builder built to when it was taken: what it failed on may be what replaced that
+            if let Err(e) = built
                 && e.code != ErrorCode::DataReplaced
+                && state.generation == generation
             {
                 // The work's one failure: a build that fails again says why it failed last
-                let mut state = self.lock();
                 state.failures.retain(|failure| failure.work != work);
                 state.failures.push(IndexFailure { work: work.clone(), message: e.message });
             }
-            let mut state = self.lock();
             if state.stopping {
                 return;
             }
@@ -237,14 +281,15 @@ impl Core {
         self.changed.notify_all();
     }
 
-    /// Waits until no commit has left a rank index pushes for `QUIET`, at most `PATIENCE`, or the builder stops. On a
-    /// clock that moves only when a test moves it, the wait is for a wake: a queue, a stop, or the test's tick
-    fn await_quiet(&self, name: &str) {
+    /// Waits until no commit has left a rank index pushes for `QUIET`, at most `PATIENCE`, or the builder stops or
+    /// builds to something other than it did in `generation`. On a clock that moves only when a test moves it, the
+    /// wait is for a wake: a queue, a stop, a change, or the test's tick
+    fn await_quiet(&self, name: &str, generation: u64) {
         let started = self.clock.now();
         let mut state = self.lock();
         loop {
             let now = self.clock.now();
-            if state.stopping || now.saturating_duration_since(started) >= PATIENCE {
+            if state.stopping || state.generation != generation || now.saturating_duration_since(started) >= PATIENCE {
                 return;
             }
             let since = state.queued_at.get(name).map_or(QUIET, |at| now.saturating_duration_since(*at));
@@ -264,8 +309,13 @@ impl Core {
 pub type Commits =
     Arc<dyn Fn(&mut dyn FnMut(&mut Txn<'_, '_>) -> crate::Result<bool>) -> crate::Result<bool> + Send + Sync>;
 
+/// What the builder builds to: the schema, and how its chunks commit under it
+type Target = (Arc<EngineSchema>, Commits);
+
 pub struct Builder {
     core: Arc<Core>,
+    /// What the thread takes each piece of work with, replaced by a schema change (`end_change`)
+    target: Arc<Mutex<Target>>,
     /// Held to wake the thread when it waits for a unit to end and is stopped
     store: Arc<Store>,
     thread: Option<JoinHandle<()>>,
@@ -274,35 +324,77 @@ pub struct Builder {
 impl Builder {
     pub fn start(store: Arc<Store>, schema: Arc<EngineSchema>, commits: Commits) -> Self {
         let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let target = Arc::new(Mutex::new((schema, commits)));
         #[cfg(test)]
         let forged = super::order::forged();
         let thread = {
             let core = Arc::clone(&core);
             let store = Arc::clone(&store);
+            let target = Arc::clone(&target);
             std::thread::Builder::new()
                 .name("elmdb-index".to_owned())
                 .spawn(move || {
                     // A stamp forged by the thread that opened the database is this thread's too
                     #[cfg(test)]
                     super::order::forge(forged);
-                    core.run(|work, stopping| match work {
-                        Work::Index { entity_type, index } => {
-                            build_index(&store, &core, &commits, entity_type, index, stopping)?;
-                            // A value index just built has an order to build
-                            core.queue([Work::Order { entity_type: entity_type.clone(), index: index.clone() }]);
-                            Ok(())
-                        }
-                        Work::Order { entity_type, index } => {
-                            build_order(&store, &schema, &commits, &core, work, entity_type, index, stopping)
-                        }
-                        Work::Rank { name } => {
-                            build_rank(&store, &schema, &core, &commits, name, stopping, &|| core.await_quiet(name))
+                    core.run(|work, stopping| {
+                        // What the builder builds to as the work begins. A schema change replaces it only once it
+                        // has told the builder, so work begun to one schema and gone on under another is work the
+                        // change has told to stop, and whose commits the store refuses
+                        let (schema, commits) = target.lock().expect("the builder's target is never poisoned").clone();
+                        match work {
+                            Work::Index { entity_type, index } => {
+                                build_index(&store, &core, &commits, entity_type, index, stopping)?;
+                                // A value index just built has an order to build
+                                if !stopping() {
+                                    core.queue([Work::Order {
+                                        entity_type: entity_type.clone(),
+                                        index: index.clone(),
+                                    }]);
+                                }
+                                Ok(())
+                            }
+                            Work::Order { entity_type, index } => {
+                                build_order(&store, &schema, &commits, &core, work, entity_type, index, stopping)
+                            }
+                            Work::Rank { name } => {
+                                let taken = core.generation();
+                                build_rank(&store, &schema, &core, &commits, name, stopping, &|| {
+                                    core.await_quiet(name, taken)
+                                })
+                            }
                         }
                     });
                 })
                 .expect("the index thread starts")
         };
-        Self { core, store, thread: Some(thread) }
+        Self { core, target, store, thread: Some(thread) }
+    }
+
+    /// A builder with no thread, whose work stays queued: what a test of who is handed that work holds still
+    #[cfg(test)]
+    pub fn unstarted(store: Arc<Store>, schema: Arc<EngineSchema>, commits: Commits) -> Self {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        Self { core, target: Arc::new(Mutex::new((schema, commits))), store, thread: None }
+    }
+
+    /// That the schema is about to change: the builder's work is for the one it had, and goes
+    /// (`Core::begin_change`). Answers that work
+    pub fn begin_change(&self) -> Vec<Work> {
+        self.core.begin_change()
+    }
+
+    /// That the schema change is made, or wasn't: the builder builds to `schema` from here, committing through
+    /// `commits`, and `work` is what that leaves to build
+    pub fn end_change(&self, schema: Arc<EngineSchema>, commits: Commits, work: impl IntoIterator<Item = Work>) {
+        *self.target.lock().expect("the builder's target is never poisoned") = (schema, commits);
+        self.core.end_change(work);
+    }
+
+    /// `end_change` for a change that left the schema alone and replaced the rows: an adoption of another process's
+    /// replacement of every one
+    pub fn end_change_of_rows(&self, work: impl IntoIterator<Item = Work>) {
+        self.core.end_change(work);
     }
 
     pub fn queue(&self, indexes: impl IntoIterator<Item = Work>) {
@@ -310,12 +402,13 @@ impl Builder {
     }
 
     /// What `wait` needs, held apart from the builder so a caller can wait without holding the slot the builder is
-    /// kept in, which a schema change and a close take to stop it
+    /// kept in, which a schema change takes to tell it and a close to stop it
     pub fn waiter(&self) -> Waiter {
         Waiter(Arc::clone(&self.core))
     }
 
-    /// Work left after stop joins the worker, including an interrupted chunk's index.
+    /// The work the builder has: under way, queued and put off
+    #[cfg(test)]
     pub fn pending(&self) -> Vec<Work> {
         let state = self.core.lock();
         let put_off = state.later.iter().map(|(_, work)| work);

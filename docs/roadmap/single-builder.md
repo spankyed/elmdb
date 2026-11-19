@@ -1,8 +1,10 @@
 # One builder for a database's life
 
-Status: designed 2026-11-18, not built. It is a change to how the engine is put together, with nothing in it a
-consumer sees but fewer wrong answers. It should land before the next change that gives the builder a new kind of
-work.
+Status: designed 2026-11-18. Phases 1 and 2 are built (2026-11-19): the builder's `Core` has a generation and the
+two operations of a change, modelled under Shuttle, and a schema change tells the one builder and waits for no
+thread. Phase 3, a close that closes the `Core`, is not: a close still takes the builder from its slot and stops it,
+and `Replacing` and the wait's loop are kept for it alone. The rest of this note is the design as it was written,
+before either phase.
 
 The index builder is a thread that builds what a schema declares over the entities that predate it, and drains a
 rank index's pushes (`engine/builder.rs`). Today a database stops its builder and starts another whenever its schema

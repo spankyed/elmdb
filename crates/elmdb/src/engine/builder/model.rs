@@ -48,6 +48,11 @@ fn index() -> Work {
     Work::Index { entity_type: "Task".to_owned(), index: "a".to_owned() }
 }
 
+/// Another index, for what a change leaves to build
+fn other() -> Work {
+    Work::Index { entity_type: "Task".to_owned(), index: "b".to_owned() }
+}
+
 #[test]
 fn work_queued_is_run_after_it_was_queued_and_waits_in_the_queue_once() {
     explore(|| {
@@ -284,5 +289,185 @@ fn a_steady_stream_of_commits_is_drained_once_patience_has_passed() {
         }
         core.stop();
         runner.join().unwrap();
+    });
+}
+
+/// What the builder builds to is replaced by a change that begins and ends (`Core::begin_change`, `end_change`), a
+/// schema change's. Between the two nothing is queued, and a wait that answered then would say built of what the
+/// change is about to queue
+#[test]
+fn a_wait_asked_for_as_a_change_is_made_waits_for_the_work_the_change_leaves() {
+    explore(|| {
+        let (core, _) = core();
+        let done = Arc::new(AtomicBool::new(false));
+        let runner = {
+            let (core, done) = (Arc::clone(&core), Arc::clone(&done));
+            thread::spawn(move || {
+                core.run(|work, _| {
+                    if *work == other() {
+                        done.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                });
+            })
+        };
+        core.begin_change();
+        let waiter = {
+            let (core, done) = (Arc::clone(&core), Arc::clone(&done));
+            thread::spawn(move || {
+                core.wait();
+                assert!(done.load(Ordering::SeqCst), "the wait answered with the change's work not done");
+            })
+        };
+        core.end_change([other()]);
+        waiter.join().unwrap();
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+#[test]
+fn work_under_way_as_a_change_begins_is_told_to_stop_and_is_neither_done_nor_failed() {
+    explore(|| {
+        let (core, _) = core();
+        let started = Arc::new(AtomicBool::new(false));
+        let runner = {
+            let (core, started) = (Arc::clone(&core), Arc::clone(&started));
+            thread::spawn(move || {
+                core.run(|_, stopping| {
+                    started.store(true, Ordering::SeqCst);
+                    // As a build goes on a chunk at a time until told to stop, and is then refused its commit by what
+                    // the change stored
+                    while !stopping() {
+                        thread::yield_now();
+                    }
+                    Err(Error::new(ErrorCode::SchemaChanged, "what it built to was replaced"))
+                });
+            })
+        };
+        core.queue([index()]);
+        while !started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        core.begin_change();
+        core.end_change([]);
+        assert!(core.wait().is_none());
+        assert!(core.lock().failures.is_empty(), "work of what the builder built to before is listed as failed");
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+#[test]
+fn work_queued_before_a_change_is_not_run_after_it() {
+    explore(|| {
+        let (core, _) = core();
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+        let ran = Arc::new(AtomicU64::new(0));
+        let runner = {
+            let (core, started, release, ran) =
+                (Arc::clone(&core), Arc::clone(&started), Arc::clone(&release), Arc::clone(&ran));
+            thread::spawn(move || {
+                core.run(|work, _| {
+                    if *work == other() {
+                        ran.fetch_add(1, Ordering::SeqCst);
+                        return Ok(());
+                    }
+                    started.store(true, Ordering::SeqCst);
+                    while !release.load(Ordering::SeqCst) {
+                        thread::yield_now();
+                    }
+                    Ok(())
+                });
+            })
+        };
+        core.queue([index()]);
+        while !started.load(Ordering::SeqCst) {
+            thread::yield_now();
+        }
+        // Queued behind the work under way, for what the builder builds to now
+        core.queue([other()]);
+        core.begin_change();
+        release.store(true, Ordering::SeqCst);
+        core.end_change([]);
+        core.wait();
+        assert_eq!(ran.load(Ordering::SeqCst), 0, "work queued for what the builder built to before ran after");
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+#[test]
+fn the_work_a_change_leaves_and_the_work_queued_as_it_is_made_each_run_once() {
+    explore(|| {
+        let (core, _) = core();
+        let runs = Arc::new(Mutex::new(Vec::new()));
+        let runner = {
+            let (core, runs) = (Arc::clone(&core), Arc::clone(&runs));
+            thread::spawn(move || {
+                core.run(|work, _| {
+                    runs.lock().unwrap().push(work.clone());
+                    Ok(())
+                });
+            })
+        };
+        core.begin_change();
+        // A commit that leaves a rank index pushes, landing as the change is made
+        core.queue([index()]);
+        core.end_change([other()]);
+        core.wait();
+        let mut runs = runs.lock().unwrap().clone();
+        runs.sort_by_key(|work| format!("{work:?}"));
+        assert_eq!(runs, [index(), other()]);
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+/// A schema change made by a listener that a build's commit delivered to runs on the builder's thread, within the
+/// piece of work under way: that work is of what the builder built to before, and the thread goes on to what the
+/// change left
+#[test]
+fn a_change_made_by_the_work_under_way_leaves_it_undone_and_the_thread_at_what_the_change_left() {
+    explore(|| {
+        let (core, _) = core();
+        let ran = Arc::new(AtomicBool::new(false));
+        let runner = {
+            let (core, ran) = (Arc::clone(&core), Arc::clone(&ran));
+            thread::spawn(move || {
+                let within = Arc::clone(&core);
+                core.run(|work, stopping| {
+                    if *work == other() {
+                        ran.store(true, Ordering::SeqCst);
+                        return Ok(());
+                    }
+                    within.begin_change();
+                    within.end_change([other()]);
+                    assert!(stopping(), "the work under way isn't told to stop by the change it made");
+                    Err(Error::new(ErrorCode::SchemaChanged, "what it built to was replaced"))
+                });
+            })
+        };
+        core.queue([index()]);
+        assert!(core.wait().is_none());
+        assert!(ran.load(Ordering::SeqCst), "the wait answered with the change's work not done");
+        assert!(core.lock().failures.is_empty());
+        core.stop();
+        runner.join().unwrap();
+    });
+}
+
+#[test]
+fn a_stop_ends_a_wait_for_a_change_that_has_not_ended() {
+    explore(|| {
+        let (core, _) = core();
+        core.begin_change();
+        let waiter = {
+            let core = Arc::clone(&core);
+            thread::spawn(move || core.wait())
+        };
+        core.stop();
+        waiter.join().unwrap();
     });
 }

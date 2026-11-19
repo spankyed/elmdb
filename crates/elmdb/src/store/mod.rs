@@ -1216,8 +1216,10 @@ impl Store {
         commits::commit(txn, self.kept.as_deref())?;
         accounted.elsewhere |= skipped;
         accounted.through = next;
-        drop(accounted);
+        // The epoch this commit stored is this handle's own before anyone can ask whether another process moved it
+        // (`replaced_elsewhere`): a replacement made here was otherwise, for a moment, one made elsewhere
         self.epoch.store(epoch, Ordering::Release);
+        drop(accounted);
         self.sequence.fetch_max(next, Ordering::AcqRel);
         run_point!(COMMIT_LANDED);
         // LMDB's lock went with the commit, and the writer's hold is kept until this returns (`writers.rs`): still
@@ -1281,6 +1283,8 @@ impl Store {
 
     /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it
     pub(crate) fn replaced_elsewhere(&self) -> Result<Option<u64>> {
+        // Not between a commit of this handle's becoming visible and its epoch being taken (`commit_txn`)
+        let _accounted = self.accounted.lock();
         let stored = self.read(|txn, db| stored_epoch(txn, db))?;
         Ok((stored != self.epoch.load(Ordering::Acquire)).then_some(stored))
     }
