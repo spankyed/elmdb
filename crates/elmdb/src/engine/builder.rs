@@ -1012,9 +1012,9 @@ mod tests {
         assert!(core.lock().held.is_none());
     }
 
-    /// The builder's state as the Shuttle model (`builder/model.rs`) holds it, here on real threads and in the suite
-    /// a mutation run builds, which the model's isn't: each case one rule of `Core`'s, with nothing timed but a
-    /// bound on how long a wait that shouldn't end is given to
+    // The builder's state as the Shuttle model (`builder/model.rs`) holds it, here on real threads and in the suite
+    // a mutation run builds, which the model's isn't: each case one rule of `Core`'s, with nothing timed but a
+    // bound on how long a wait that shouldn't end is given to
 
     fn index(name: &str) -> Work {
         Work::Index { entity_type: "Task".to_owned(), index: name.to_owned() }
