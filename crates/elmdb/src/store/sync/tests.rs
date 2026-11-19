@@ -1,6 +1,8 @@
 //! Which sync each `durable()` waits for, and when the worker syncs on its own. A test finishes or fails every sync
-//! (`ManualSyncer`) and moves time (`ManualClock`), so nothing here depends on how long anything takes. Ported from
-//! apack's `tests/lmdb/durability.spec.ts` and the durability half of `store.spec.ts`.
+//! (`ManualSyncer`) and moves time (`ManualClock`), so what the worker does doesn't depend on how long anything takes;
+//! only when the test sees it does. A test waits up to `MUST_START` for what has to happen, returning as soon as it
+//! has, and watches for `MUST_NOT` for what mustn't. Ported from apack's `tests/lmdb/durability.spec.ts` and the
+//! durability half of `store.spec.ts`.
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -58,10 +60,17 @@ struct Harness {
     commit: GroupCommit,
 }
 
-/// How long a test waits for a sync that has to start before it goes on: as long as a loaded runner may take to
-/// schedule the worker, since a wait that succeeds costs only what the worker took. At 200 ms, CI's Windows runner
-/// met it once (2026-11-19, `stopping_at_exit_drops_the_syncer_and_stops_the_worker_once_their_locks_come_free`)
+/// How long a test waits for what the worker has to do (start a sync, end one, settle a wait) before it fails: as long
+/// as a loaded runner may take to schedule the worker, since a wait that succeeds costs only what the worker took. At
+/// 200 ms, CI's runners met the bound twice on 2026-11-19: Windows in
+/// `stopping_at_exit_drops_the_syncer_and_stops_the_worker_once_their_locks_come_free`, and `aarch64-unknown-linux-musl`,
+/// beside the engine's model test, in `a_sync_queued_behind_a_failed_one_fails_its_caller_though_it_succeeds`
 const MUST_START: Duration = Duration::from_secs(5);
+
+/// How long a test watches for what the worker mustn't do (start a sync, settle a wait) before it goes on. The manual
+/// clock and syncer keep a right worker from doing it however long the test watches, so a stalled runner can't fail
+/// one here. It can only hide a wrong one, whose stray sync a later `sync_started` may then take for the one it awaits
+const MUST_NOT: Duration = Duration::from_millis(50);
 
 impl Harness {
     fn new() -> Self {
@@ -85,14 +94,14 @@ impl Harness {
         Self { commit, started, finish, elapsed }
     }
 
-    /// Whether a sync has started that the test hasn't settled; waits briefly for one to start
+    /// Whether a sync has started that the test hasn't settled, waiting up to `MUST_START` for one
     fn sync_started(&self) -> bool {
-        self.started.recv_timeout(Duration::from_millis(200)).is_ok()
+        self.started.recv_timeout(MUST_START).is_ok()
     }
 
-    /// Asserts no sync starts (a sync the worker would start now would have started within this wait)
+    /// Asserts no sync starts within `MUST_NOT`
     fn no_sync_starts(&self) {
-        assert!(self.started.recv_timeout(Duration::from_millis(50)).is_err(), "a sync started");
+        assert!(self.started.recv_timeout(MUST_NOT).is_err(), "a sync started");
     }
 
     fn finish(&self, outcome: Result<()>) {
@@ -101,24 +110,15 @@ impl Harness {
 
     /// Waits for the worker to finish ending the sync the test just settled
     fn settled(&self) {
-        for _ in 0..200 {
-            if self.commit.shared.lock().running.is_none() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        panic!("the worker never ended the sync");
+        assert!(within(MUST_START, || self.commit.shared.lock().running.is_none()), "the worker never ended the sync");
     }
 
     /// Waits for the worker to finish ending the sync with this id
     fn ended(&self, id: u64) {
-        for _ in 0..400 {
-            if self.commit.shared.lock().finished_through >= id {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        panic!("the worker never ended sync {id}");
+        assert!(
+            within(MUST_START, || self.commit.shared.lock().finished_through >= id),
+            "the worker never ended sync {id}"
+        );
     }
 
     fn advance(&self, by: Duration) {
@@ -148,16 +148,32 @@ impl Harness {
     }
 }
 
-fn outcome(durable: &Durable) -> &'static str {
-    // The worker records an outcome as it ends a sync; give it the moment it takes
-    for _ in 0..40 {
-        match durable.try_result() {
-            Some(Ok(())) => return "resolved",
-            Some(Err(_)) => return "rejected",
-            None => std::thread::sleep(Duration::from_millis(5)),
+/// Whether `done` holds within `wait`, polling it every millisecond, and returning as soon as it does
+fn within(wait: Duration, mut done: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + wait;
+    loop {
+        if done() {
+            return true;
         }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(1));
     }
-    "pending"
+}
+
+/// How a wait that has to settle did, waiting up to `MUST_START` for the worker to record it; "pending" if it didn't
+fn outcome(durable: &Durable) -> &'static str {
+    match within(MUST_START, || durable.try_result().is_some()).then(|| durable.try_result()).flatten() {
+        Some(Ok(())) => "resolved",
+        Some(Err(_)) => "rejected",
+        None => "pending",
+    }
+}
+
+/// Whether a wait that mustn't settle yet stays unsettled for `MUST_NOT`
+fn pending(durable: &Durable) -> bool {
+    !within(MUST_NOT, || durable.try_result().is_some())
 }
 
 fn eio() -> Error {
@@ -235,7 +251,7 @@ fn waits_for_a_sync_begun_after_the_write_and_a_write_during_it_waits_for_the_ne
 
     h.finish(Ok(()));
     assert_eq!(outcome(&first), "resolved");
-    assert_eq!(outcome(&second), "pending", "the first sync finishing is not the second write on disk");
+    assert!(pending(&second), "the first sync finishing is not the second write on disk");
     assert!(h.sync_started(), "the next sync starts once the first ends");
     h.finish(Ok(()));
     assert_eq!(outcome(&second), "resolved");
@@ -286,7 +302,7 @@ fn a_sync_queued_behind_a_failed_one_fails_its_caller_though_it_succeeds() {
     let second = h.commit.durable();
     h.finish(Err(eio()));
     assert_eq!(outcome(&first), "rejected");
-    assert_eq!(outcome(&second), "pending", "the queued sync still runs");
+    assert!(pending(&second), "the queued sync still runs");
     assert!(h.sync_started());
     h.finish(Ok(()));
     assert_eq!(outcome(&second), "rejected", "the second caller's commits are built on what the first sync lost");
@@ -372,7 +388,9 @@ fn a_wait_given_up_on_keeps_no_outcome() {
     drop(h.commit.durable());
     assert!(h.sync_started());
     h.finish(Err(eio()));
-    assert!(h.started.recv_timeout(Duration::from_millis(50)).is_err());
+    // Once the worker has ended the sync, which is when it would record an outcome
+    h.settled();
+    h.no_sync_starts();
     assert!(h.commit.shared.lock().waiting.is_empty(), "the dropped wait's attempt is forgotten");
     h.close_after_failure();
 }
@@ -390,7 +408,7 @@ fn stopping_at_exit_waits_on_no_worker() {
         commit.stop_at_exit(Duration::from_millis(20));
         stopped.send(()).unwrap();
     });
-    assert!(stop.recv_timeout(Duration::from_secs(5)).is_ok(), "the stop waited on the worker");
+    assert!(stop.recv_timeout(MUST_START).is_ok(), "the stop waited on the worker");
     // Let the worker end, as an exiting process would never need it to
     finish.send(Ok(())).unwrap();
 }
@@ -403,7 +421,7 @@ fn stopping_at_exit_drops_the_syncer_and_stops_the_worker_once_their_locks_come_
     commit.stop_at_exit(Duration::from_millis(20));
     assert!(shared.lock().closing, "the worker is told to stop");
     assert!(
-        matches!(started.recv_timeout(Duration::from_secs(5)), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
+        matches!(started.recv_timeout(MUST_START), Err(std::sync::mpsc::RecvTimeoutError::Disconnected)),
         "the syncer is dropped"
     );
 
@@ -425,7 +443,7 @@ fn dropping_group_commit_syncs_what_it_owes() {
     let Harness { commit, started, finish, .. } = Harness::new();
     commit.on_commit();
     let dropping = std::thread::spawn(move || drop(commit));
-    assert!(started.recv_timeout(Duration::from_secs(5)).is_ok(), "the drop syncs the owed commit");
+    assert!(started.recv_timeout(MUST_START).is_ok(), "the drop syncs the owed commit");
     finish.send(Ok(())).unwrap();
     dropping.join().unwrap();
 }
@@ -482,7 +500,8 @@ mod failed_syncs {
             let mut commits = 0u64;
             let mut attempts: Vec<Attempt> = Vec::new();
             let mut waits: Vec<Waiting> = Vec::new();
-            // Records each sync the worker starts, with the commits it covers
+            // Records each sync the worker starts, with the commits it covers. One the worker starts after the pump gives up
+            // is recorded by the next, as starting later than it did, which no check below can fail on
             let pump = |h: &Harness, attempts: &mut Vec<Attempt>, clock: u64| {
                 while h.started.recv_timeout(Duration::from_millis(15)).is_ok() {
                     let running = h.commit.shared.lock().running.expect("a started sync is running");
@@ -516,8 +535,9 @@ mod failed_syncs {
                 pump(&h, &mut attempts, clock);
                 observe(&mut waits, clock);
             }
-            // Let every sync through
-            for _ in 0..64 {
+            // Let every sync through, until every wait has settled
+            let deadline = Instant::now() + MUST_START;
+            while Instant::now() < deadline {
                 clock += 1;
                 if let Some(a) = attempts.last_mut().filter(|a| a.finished.is_none()) {
                     h.finish(Ok(()));
@@ -546,11 +566,13 @@ mod failed_syncs {
                 }
             }
             let last = h.commit.durable();
-            for _ in 0..8 {
-                if h.started.recv_timeout(Duration::from_millis(15)).is_ok() {
+            // Lets through each sync it waits on
+            within(MUST_START, || {
+                if h.started.try_recv().is_ok() {
                     h.finish(Ok(()));
                 }
-            }
+                last.try_result().is_some()
+            });
             let failed = attempts.iter().any(|a| a.finished.is_some_and(|(_, good)| !good));
             prop_assert_eq!(outcome(&last), if failed { "rejected" } else { "resolved" });
             if failed { h.close_after_failure() } else { h.close() }
