@@ -1136,6 +1136,37 @@ fn a_wait_for_the_builds_under_way_as_a_close_gives_up_goes_on_to_what_it_queues
     db.close().unwrap();
 }
 
+/// A thread told to stop is waited for until the piece of work it is on ends: here a listener of its commits, which
+/// it delivers to within that work. Let go of before, it would hold the store a close goes on to take
+#[test]
+fn a_thread_stopped_is_waited_for_until_the_work_it_is_on_ends() {
+    use std::time::Duration;
+    let (_dir, db, _, top) = ranked_tasks();
+    db.read(&reads(vec![top], Some(7))).unwrap();
+    let (start, started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let held = Mutex::new(Some((start, released)));
+    db.hear_builder_commits(Some(Arc::new(move |_, _| {
+        let Some((start, released)) = held.lock().unwrap().take() else { return };
+        start.send(()).unwrap();
+        released.recv_timeout(Duration::from_secs(8)).expect("the listener is let go");
+    })))
+    .unwrap();
+    link_all(&db);
+    started.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
+    let (tell, told) = std::sync::mpsc::channel();
+    let pausing = Arc::clone(&db);
+    let pauser = std::thread::spawn(move || {
+        pausing.pause_builder();
+        tell.send(()).unwrap();
+    });
+    assert!(told.recv_timeout(Duration::from_millis(200)).is_err(), "the thread was let go of before its work ended");
+    release.send(()).unwrap();
+    told.recv_timeout(Duration::from_secs(4)).expect("the stop waited past the work's end");
+    pauser.join().unwrap();
+    db.close().unwrap();
+}
+
 /// A close stops the builder for good, with builds left that the next open takes up. A wait for the builds under
 /// way is told the database is closed, as one asked for after the close is: answered as if they were built, it
 /// would say so of builds that weren't

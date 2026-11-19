@@ -589,6 +589,43 @@ fn a_build_under_way_as_every_row_is_replaced_leaves_no_entity_out_of_an_index_i
     assert!(db.check().unwrap().is_clean());
 }
 
+/// A close that gives up queues again what is left to build, read as it gives up. Where that read is refused, it
+/// queues nothing, and a wait for the builds woken by its end finds no thread and nothing queued: it reads what is
+/// left itself, and builds it, where it would answer that all is built
+#[test]
+fn a_wait_woken_by_a_close_that_gave_up_and_queued_nothing_reads_what_is_left_itself() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        with_schema(&dir, notes(base_fields(), json!({ "byKind": { "kind": "value", "fields": ["kind"] } }))).unwrap(),
+    );
+    let note = |id: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "kind": "k" } });
+    write(&db, vec![note("Note-1"), note("Note-2")]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // The index unbuilt, and no thread to build it
+    db.pause_builder();
+    damage(&db, |txn, main| Ok(main.delete(txn, &keys::index_built("Note", "byKind")).map(|_| ())?));
+    let built = |db: &Database| db.index_status().unwrap().iter().find(|s| s.index == "byKind").unwrap().built;
+    assert!(!built(&db));
+    let (tell, told) = std::sync::mpsc::channel();
+    let waiting = Arc::clone(&db);
+    crate::failpoints::run_once_here(crate::failpoints::points::CLOSE_GAVE_UP, move || {
+        // A wait under way through the close, which the close's end wakes
+        std::thread::spawn(move || tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap());
+        std::thread::sleep(Duration::from_millis(100));
+        // And the close's own reading of what is left, refused
+        crate::failpoints::fail_once_here(crate::failpoints::points::INDEX_REFRESH);
+    });
+    let held = db.store().unwrap();
+    assert!(!db.close_within(Some(Duration::from_millis(5))).unwrap());
+    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::CLOSE_GAVE_UP));
+    drop(held);
+    assert_eq!(told.recv_timeout(Duration::from_secs(8)), Ok(Ok(())));
+    assert!(built(&db), "the wait answered with the index unbuilt");
+    db.close().unwrap();
+}
+
 /// A close at exit that gives up leaves the database open in a process that is exiting, its builder's thread let go
 /// of unjoined. Nothing more is built there: a wait for the builds answers, and starts no thread beside that one
 #[test]

@@ -1012,6 +1012,158 @@ mod tests {
         assert!(core.lock().held.is_none());
     }
 
+    /// The builder's state as the Shuttle model (`builder/model.rs`) holds it, here on real threads and in the suite
+    /// a mutation run builds, which the model's isn't: each case one rule of `Core`'s, with nothing timed but a
+    /// bound on how long a wait that shouldn't end is given to
+
+    fn index(name: &str) -> Work {
+        Work::Index { entity_type: "Task".to_owned(), index: name.to_owned() }
+    }
+
+    /// Runs `core` on a thread of its own, `build` doing each piece of work
+    fn running(
+        core: &Arc<Core>,
+        build: impl FnMut(&Work, &dyn Fn() -> bool) -> crate::Result<()> + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        let core = Arc::clone(core);
+        std::thread::spawn(move || core.run(build))
+    }
+
+    #[test]
+    fn a_change_moves_the_generation_on_and_work_taken_before_it_is_to_stop() {
+        let core = Core::new(Box::new(SystemClock));
+        assert_eq!(core.generation(), 0);
+        assert!(!core.over(0));
+        core.begin_change();
+        assert_eq!(core.generation(), 1);
+        assert!(core.over(0), "work of the generation before isn't told to stop");
+        assert!(!core.over(1), "work of the generation as it stands is told to stop");
+        core.begin_change();
+        assert_eq!(core.generation(), 2);
+        // And stopping tells work of any generation
+        core.stop();
+        assert!(core.over(2));
+    }
+
+    #[test]
+    fn closes_are_counted_and_the_thread_stays_stopped_until_each_has_said() {
+        let core = Core::new(Box::new(SystemClock));
+        core.begin_close();
+        core.begin_close();
+        core.end_close(false);
+        assert!(core.closing() && core.lock().stopping, "a close under way, and a thread free to start beside it");
+        core.end_close(false);
+        assert!(!core.closing() && !core.lock().stopping);
+        // One that closes stops it for good, and another that then gives up starts nothing
+        core.begin_close();
+        core.begin_close();
+        core.end_close(true);
+        core.end_close(false);
+        assert!(core.closing() && core.lock().stopping);
+    }
+
+    #[test]
+    fn a_wait_that_may_not_wait_through_a_close_is_told_of_one_and_of_nothing_else() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        // Work with no thread: a wait waits, and isn't told of a close that isn't there
+        core.queue([index("a")]);
+        let (tell, told) = std::sync::mpsc::channel();
+        let waiting = Arc::clone(&core);
+        let waiter = std::thread::spawn(move || tell.send(matches!(waiting.waited(false), Waited::Idle)).unwrap());
+        assert!(told.recv_timeout(Duration::from_millis(200)).is_err(), "the wait answered with work queued");
+        core.stop();
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)), Ok(true), "a builder stopped for good is waited for");
+        waiter.join().unwrap();
+        // A close under way is said to it at once
+        let core = Core::new(Box::new(SystemClock));
+        core.begin_close();
+        assert!(matches!(core.waited(false), Waited::Closing));
+    }
+
+    #[test]
+    fn a_builder_stopped_for_good_is_held_up_by_nothing() {
+        let core = Core::new(Box::new(SystemClock));
+        core.hold(Some(refused(ErrorCode::SyncBehind)));
+        assert!(matches!(core.waited(true), Waited::Held(_)));
+        core.stop();
+        assert!(matches!(core.waited(true), Waited::Idle), "a closed builder answered what held it up");
+    }
+
+    #[test]
+    fn a_failure_is_listed_once_for_its_generation_and_cleared_by_a_build_that_ends_built() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let runs = Arc::new(std::sync::Mutex::new(Vec::<&str>::new()));
+        let plan = Arc::clone(&runs);
+        let within = Arc::clone(&core);
+        let runner = running(&core, move |work, _| {
+            let Work::Index { index, .. } = work else { unreachable!() };
+            let mut plan = plan.lock().unwrap();
+            let what = plan.remove(0);
+            drop(plan);
+            assert!(what.starts_with(index.as_str()), "{index} ran where {what} was planned");
+            match what {
+                "a fails" | "b fails" => Err(refused(ErrorCode::Io)),
+                "c replaced" => Err(refused(ErrorCode::DataReplaced)),
+                "c changes" => {
+                    // A schema change made from within the work, which then fails as its commit is refused
+                    within.begin_change();
+                    within.end_change([], false);
+                    Err(refused(ErrorCode::SchemaChanged))
+                }
+                _ => Ok(()),
+            }
+        });
+        let ran = |plan: &[&'static str], work: &[&str]| {
+            runs.lock().unwrap().extend_from_slice(plan);
+            core.queue(work.iter().map(|name| index(name)));
+            assert!(matches!(core.waited(true), Waited::Idle));
+            let mut failed: Vec<String> = core
+                .lock()
+                .failures
+                .iter()
+                .map(|failure| match &failure.work {
+                    Work::Index { index, .. } => index.clone(),
+                    _ => unreachable!(),
+                })
+                .collect();
+            failed.sort();
+            failed
+        };
+        assert_eq!(ran(&["a fails", "b fails"], &["a", "b"]), ["a", "b"]);
+        assert_eq!(ran(&["a fails"], &["a"]), ["a", "b"], "a failure listed twice, or another's taken away");
+        // Of work not failed before, so that one listed would show
+        assert_eq!(ran(&["c replaced"], &["c"]), ["a", "b"], "work over rows replaced elsewhere listed as failed");
+        assert_eq!(ran(&["c changes"], &["c"]), ["a", "b"], "a failure of the generation before listed");
+        assert_eq!(ran(&["a built"], &["a"]), ["b"], "a build that ended built still listed as failed");
+        core.stop();
+        runner.join().unwrap();
+    }
+
+    #[test]
+    fn work_that_ends_as_the_builder_is_stopped_leaves_what_had_failed_and_nothing_under_way() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let first = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let within = Arc::clone(&core);
+        let runner = running(&core, move |_, _| {
+            if first.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(refused(ErrorCode::Io));
+            }
+            // A close that tells the thread to stop as this work ends, which said nothing of the build: it ends
+            // having made it part way
+            within.begin_close();
+            Ok(())
+        });
+        core.queue([index("a")]);
+        assert!(matches!(core.waited(true), Waited::Idle));
+        assert_eq!(core.lock().failures.len(), 1);
+        // Two pieces, the thread told to stop as the first ends
+        core.queue([index("a"), index("b")]);
+        runner.join().unwrap();
+        let state = core.lock();
+        assert_eq!(state.failures.len(), 1, "a build stopped part way cleared what had failed");
+        assert!(!state.busy && state.active.is_none(), "the thread ended with work under way");
+    }
+
     #[test]
     fn a_build_of_an_order_begun_again_is_put_off_once_and_twice_as_long_each_time() {
         let start = Instant::now();
