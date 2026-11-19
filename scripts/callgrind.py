@@ -16,8 +16,24 @@ ALLOCATOR = "bump_allocation"
 # read-only after relocation (RELRO). Where the first ends on a page boundary the two are mapped as one, Valgrind 3.22
 # waits for a second that never comes, reads no symbols and counts nothing in any case. Whether it ends there follows
 # the binary's size, so any change to the engine can bring it. Without RELRO there is one writable segment; binding
-# stays eager, so nothing in what is counted changes
+# stays eager, so nothing in what is counted changes. It is a way round Valgrind 3.22, Ubuntu 24.04's: when the
+# runner's Valgrind is another, build without it on a binary laid out so and see whether `NOTHING_COUNTED` is met
 ONE_WRITABLE_SEGMENT = "-C link-arg=-Wl,-z,norelro"
+
+# What a script says when every case of a run counted 0: one cause, and not one a case's own count shows
+NOTHING_COUNTED = (
+    "Valgrind counted no instruction in any case of a run, so it read none of the benchmark binary's symbols and never "
+    "found the function Callgrind counts from. The binary ran: its callgrind log lacks `Reading syms from` for it "
+    "(`valgrind -v`). Seen where the binary's two writable segments met on a page boundary and were mapped as one "
+    "(`readelf -l`: two `LOAD` segments flagged `RW`, the second's address a multiple of 0x1000), which "
+    "`linked_for_valgrind` links round: check that the run was built with it"
+)
+
+
+def nothing_counted(counts):
+    """Whether a run counted nothing at all: every case 0, of at least one case"""
+    counts = list(counts)
+    return bool(counts) and all(count == 0 for count in counts)
 
 
 def linked_for_valgrind(env):

@@ -19,7 +19,7 @@ import subprocess
 import sys
 import tempfile
 
-from callgrind import allocator_instructions, grew_most, linked_for_valgrind
+from callgrind import NOTHING_COUNTED, allocator_instructions, grew_most, linked_for_valgrind, nothing_counted
 from instruction_gates import FLOOR, GATED, SHARE, allowed_growth, undeclared_or_missing
 
 BASELINE = "off"
@@ -50,6 +50,10 @@ for summary in sorted(home.rglob("summary.json")):
 
 seen = {row[0] for row in rows}
 failures = undeclared_or_missing(seen)
+# Said once, before the cases each say it of themselves: every case reading 0 has one cause, and it isn't theirs
+for counts in ([row[2] for row in rows if row[2] is not None], [row[3] for row in rows]):
+    if nothing_counted(counts):
+        failures.append(NOTHING_COUNTED)
 lines = ["| Operation | Without | With, nothing collecting | Change | Bound |", "|---|---:|---:|---:|---|"]
 for function, given, old, new, directory in rows:
     if old is None:
