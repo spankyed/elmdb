@@ -4,7 +4,8 @@
   "description": "The tooling that builds and tests elmdb's binding (crates/elmdb-node) and EARS (packages/ears), kept out of the packages it builds so that a project linking either installs none of it",
   "workspaces": [
     "crates/elmdb-node",
-    "packages/ears"
+    "packages/ears",
+    "packages/typescript-floor"
   ],
   "scripts": {
     "build": "npm run build:binding && npm run build:ears",

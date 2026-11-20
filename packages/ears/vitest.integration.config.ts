@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig, mergeConfig } from 'vitest/config';
 import fast from './vitest.config.ts';
 
@@ -10,5 +11,8 @@ export default mergeConfig({ ...fast, test: shared }, defineConfig({
   test: {
     include: ['tests/**/*.integration.spec.ts'],
     exclude: ['**/node_modules/**'],
+    // The oldest TypeScript EARS supports, which a consumer of the packed package compiles with beside the current one
+    // (`tests/_support/packed.ts`): the floor's workspace, `packages/typescript-floor`, installs it
+    env: { EARS_TYPESCRIPT_FLOOR: fileURLToPath(new URL('../typescript-floor/node_modules/typescript', import.meta.url)) },
   },
 }));

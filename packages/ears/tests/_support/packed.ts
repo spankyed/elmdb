@@ -59,7 +59,11 @@ export function compilers(): Record<'current' | 'floor', string> {
   }
   const { version } = JSON.parse(fs.readFileSync(path.join(floor, 'package.json'), 'utf8')) as { version: string };
   if (!version.startsWith('5.7.')) throw new Error(`EARS_TYPESCRIPT_FLOOR is TypeScript ${version}, not the floor, 5.7`);
-  return { current: path.join(packageDirOf('typescript'), 'bin', 'tsc'), floor: path.join(floor, 'bin', 'tsc') };
+  const current = packageDirOf('typescript');
+  // The floor installed where this package resolves `typescript` would be checked twice, as both compilers
+  const currentVersion = (JSON.parse(fs.readFileSync(path.join(current, 'package.json'), 'utf8')) as { version: string }).version;
+  if (currentVersion === version) throw new Error(`${MANIFEST.name} resolves TypeScript ${version}, the floor, as its current compiler`);
+  return { current: path.join(current, 'bin', 'tsc'), floor: path.join(floor, 'bin', 'tsc') };
 }
 
 /** Where `name` is installed for this package: Node's lookup, up the `node_modules` directories from here */
