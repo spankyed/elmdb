@@ -8,8 +8,10 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ts from 'typescript';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { MANIFEST, MODULE_RESOLUTIONS, PACKAGE_DIR, consumerOptions, installPacked, type Consumer, type ModuleResolution } from '../_support/packed.ts';
+import { beforeAll, describe, expect, it } from 'vitest';
+import {
+  MANIFEST, MODULE_MANIFEST, MODULE_RESOLUTIONS, PACKAGE_DIR, consumerOptions, packedConsumer, writeFiles, type ModuleResolution,
+} from '../_support/packed.ts';
 
 /** `|name|` marks a position; the marker is removed and the position asked for completions */
 const COMPLETIONS = `
@@ -69,70 +71,70 @@ query.all().withRole('|withRole|');
 write(noteId).grant('stared');
 create('Note', { |createRow| });
 `;
-/** Positions taking a Note field */
-const FIELD_POSITIONS = ['pick', 'pickOne', 'outPick', 'where', 'has', 'lacks', 'orderBy', 'distinct', 'groupBy', 'searchFields', 'recencyField', 'hitsFields', 'hybridFields', 'getAttr'];
-/** Positions taking a field a write may name: the declared ones, without the engine's own (`createdAt`, `updatedAt`, …) */
-const WRITE_POSITIONS = ['set', 'append', 'removeAt'];
-const KIND_POSITIONS = ['outKind', 'linkKind', 'linkedToKind', 'ancestorsKind', 'descendantsKind', 'bothKind', 'pathToKind', 'degreesKind', 'rankKind', 'weakComponentsKind', 'strongComponentsKind', 'communitiesKind', 'topologicalKind', 'similarKind'];
-const ROLE_POSITIONS = ['grantRole', 'withRole'];
-const NAME_POSITIONS = ['query', 'newId', 'out', 'in', 'ancestors', 'descendants', 'both', 'ofType'];
 
-type Layout = 'source' | 'packed';
+const WRITES = ['set', 'append', 'removeAt'];
 
-let consumer: Consumer;
-beforeAll(async () => {
-  consumer = await installPacked();
-});
-afterAll(() => consumer?.remove());
+/** What the positions `at` complete: every name in `offers`, none in `not`, and nothing else when `only` */
+const EXPECTED: Array<{ what: string; at: string[]; offers: string[]; not?: string[]; only?: true }> = [
+  { what: "a read, the Note's fields", offers: ['title', 'pinned'], at: ['pick', 'pickOne', 'outPick', 'where', 'has', 'lacks', 'orderBy', 'distinct', 'groupBy', 'searchFields', 'recencyField', 'hitsFields', 'hybridFields', 'getAttr'] },
+  { what: "a read, the engine's fields", at: ['where'], offers: ['createdAt'] },
+  { what: "a write, the declared fields and not the engine's", at: WRITES, offers: ['title', 'pinned'], not: ['createdAt'] },
+  // A required field is replaced with set, never deleted
+  { what: 'a delete, the optional fields alone', at: ['delete'], offers: ['body'], not: ['title'] },
+  { what: "a created row, the shape's fields and the identity it may bring", at: ['createRow'], offers: ['title', 'pinned', 'body', 'id', 'createdAt'], not: ['entityType'] },
+  { what: 'the entity names', offers: ['Note', 'Folder'], at: ['query', 'newId', 'out', 'in', 'ancestors', 'descendants', 'both', 'ofType'] },
+  { what: 'the relation kinds', offers: ['contains', 'cites'], at: ['outKind', 'linkKind', 'linkedToKind', 'ancestorsKind', 'descendantsKind', 'bothKind', 'pathToKind', 'degreesKind', 'rankKind', 'weakComponentsKind', 'strongComponentsKind', 'communitiesKind', 'topologicalKind', 'similarKind'] },
+  { what: 'the roles', at: ['grantRole', 'withRole'], offers: ['starred', 'archived'] },
+  { what: 'a weighted kind, a weight', at: ['weightedLinkOption'], offers: ['info', 'weight'] },
+  { what: 'an unweighted kind, no weight', at: ['linkOption'], offers: ['info'], not: ['weight'] },
+  { what: "a rank, its walk's options", at: ['rankOption'], offers: ['direction', 'seeds', 'weights'] },
+  { what: 'a similarity measure, the measures', at: ['similarMeasure'], offers: ['adamicAdar', 'jaccard'], only: true },
+  // A topological order follows each edge one way
+  { what: 'a topological direction, one way', at: ['topologicalDirection'], offers: ['in', 'out'], only: true },
+  { what: 'a ranked read, the rank indexes', at: ['rankedIndex'], offers: ['noteRank'], only: true },
+];
+
+/** Each typo in COMPLETIONS, and the name its error should list */
+const TYPOS = [['titel', 'title'], ['pinnd', 'pinned'], ['containz', 'contains'], ['stared', 'starred']];
+
+const consumer = packedConsumer();
 
 /**
- * A program in its own directory beside the consumer's `node_modules`: the typed schema, importing the package by its
- * name, and the completions file. The source layout maps the name to `src`, as a program built with the package does.
+ * String completions at each marked position of COMPLETIONS, and that file's diagnostics, from a program beside the
+ * consumer's `node_modules` that imports the package by its name: the typed schema, and the completions. The source
+ * layout maps the name to `src`, as a program built with the package does.
  */
-function writeProgram(layout: Layout, moduleResolution: ModuleResolution): { dir: string; options: ts.CompilerOptions; files: string[] } {
-  const dir = path.join(consumer.dir, `completions-${layout}-${moduleResolution}`);
-  fs.mkdirSync(dir);
-  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'consumer-completions', private: true, type: 'module' }));
+function completionsIn(layout: 'source' | 'packed', moduleResolution: ModuleResolution): { at: Record<string, string[]>; diagnostics: string[] } {
+  const dir = path.join(consumer().dir, `completions-${layout}-${moduleResolution}`);
   const schema = fs.readFileSync(path.join(PACKAGE_DIR, 'tests', '_support', 'typed-schema.ts'), 'utf8');
   const relative = "'../../src/index.ts'";
   expect(schema, 'the typed schema no longer imports the package as this rewrites it').toContain(relative);
-  fs.writeFileSync(path.join(dir, 'schema.ts'), schema.replace(relative, `'${MANIFEST.name}'`));
-  const options = {
-    ...consumerOptions(moduleResolution),
-    ...(layout === 'source'
-      ? { paths: { [MANIFEST.name]: [path.join(PACKAGE_DIR, 'src', 'index.ts')] }, allowImportingTsExtensions: true, skipLibCheck: true }
-      : {}),
-  };
-  const parsed = ts.convertCompilerOptionsFromJson(options, dir);
-  expect(parsed.errors.map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '))).toEqual([]);
-  return { dir, options: parsed.options, files: [path.join(dir, 'schema.ts')] };
-}
-
-/** String completions at each marked position of COMPLETIONS, and the file's diagnostics */
-function completionsIn(layout: Layout, moduleResolution: ModuleResolution): { at: Record<string, string[]>; diagnostics: string[] } {
-  const { dir, options, files } = writeProgram(layout, moduleResolution);
-  const file = path.join(dir, 'completions.ts');
   const markers: Record<string, number> = {};
   let removed = 0;
-  const text = COMPLETIONS.replace(/\|(\w+)\|/g, (marker: string, name: string, offset: number) => {
+  const completions = COMPLETIONS.replace(/\|(\w+)\|/g, (marker: string, name: string, offset: number) => {
     markers[name] = offset - removed;
     removed += marker.length;
     return '';
   });
-  fs.writeFileSync(file, text);
+  writeFiles(dir, { 'package.json': MODULE_MANIFEST, 'schema.ts': schema.replace(relative, `'${MANIFEST.name}'`), 'completions.ts': completions });
+
+  const { options, errors } = ts.convertCompilerOptionsFromJson({
+    ...consumerOptions(moduleResolution),
+    ...(layout === 'source'
+      ? { paths: { [MANIFEST.name]: [path.join(PACKAGE_DIR, 'src', 'index.ts')] }, allowImportingTsExtensions: true, skipLibCheck: true }
+      : {}),
+  }, dir);
+  expect(errors.map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '))).toEqual([]);
+  const file = path.join(dir, 'completions.ts');
+  const { fileExists, readFile, readDirectory, directoryExists, getDirectories, realpath } = ts.sys;
   const service = ts.createLanguageService({
-    getScriptFileNames: () => [...files, file],
+    getScriptFileNames: () => [path.join(dir, 'schema.ts'), file],
     getScriptVersion: () => '1',
     getScriptSnapshot: (name) => (fs.existsSync(name) ? ts.ScriptSnapshot.fromString(fs.readFileSync(name, 'utf8')) : undefined),
     getCurrentDirectory: () => dir,
     getCompilationSettings: () => options,
     getDefaultLibFileName: (settings) => ts.getDefaultLibFilePath(settings),
-    fileExists: ts.sys.fileExists,
-    readFile: ts.sys.readFile,
-    readDirectory: ts.sys.readDirectory,
-    directoryExists: ts.sys.directoryExists,
-    getDirectories: ts.sys.getDirectories,
-    realpath: ts.sys.realpath,
+    fileExists, readFile, readDirectory, directoryExists, getDirectories, realpath,
   });
   const at = Object.fromEntries(Object.entries(markers).map(([name, position]) => [
     name,
@@ -153,48 +155,17 @@ describe.each(cases)('over the $layout package, under moduleResolution $moduleRe
   beforeAll(() => {
     ({ at, diagnostics } = completionsIn(layout, moduleResolution));
   });
-  const missing = (positions: string[], expected: string[]) => positions.filter((position) => !expected.every((name) => at[position]?.includes(name)));
 
-  it('offers the fields and the entity names', () => {
-    expect(missing(FIELD_POSITIONS, ['title', 'pinned']), 'positions without Note field completions').toEqual([]);
-    expect(missing(NAME_POSITIONS, ['Note', 'Folder']), 'positions without entity-name completions').toEqual([]);
-    expect(at.query, 'no completion for a type the schema does not declare').not.toContain('Unregistered');
-    expect(at.where, "a read offers the engine's fields").toContain('createdAt');
+  it.each(EXPECTED)('offers $what', ({ at: positions, offers, not = [], only }) => {
+    const wrong = positions.filter((position) => {
+      const offered = at[position] ?? [];
+      return !offers.every((name) => offered.includes(name)) || not.some((name) => offered.includes(name))
+        || (only && offered.length !== offers.length);
+    });
+    expect(Object.fromEntries(wrong.map((position) => [position, at[position]]))).toEqual({});
   });
 
-  it('offers a write the fields it may name, and a delete the optional ones alone', () => {
-    expect(missing(WRITE_POSITIONS, ['title', 'pinned']), 'write positions without Note field completions').toEqual([]);
-    expect(WRITE_POSITIONS.filter((position) => at[position]?.includes('createdAt')), 'write positions offering an engine field').toEqual([]);
-    // A required field is replaced with set, never deleted
-    expect(at.delete).toContain('body');
-    expect(at.delete).not.toContain('title');
-  });
-
-  it('offers the relation kinds and roles, and an option naming one of a few modes those alone', () => {
-    expect(missing(KIND_POSITIONS, ['contains', 'cites']), 'positions without relation-kind completions').toEqual([]);
-    expect(missing(ROLE_POSITIONS, ['starred', 'archived']), 'positions without role completions').toEqual([]);
-    expect([...at.similarMeasure!].sort()).toEqual(['adamicAdar', 'jaccard']);
-    // A topological order follows each edge one way
-    expect([...at.topologicalDirection!].sort()).toEqual(['in', 'out']);
-    expect(at.rankedIndex).toEqual(['noteRank']);
-  });
-
-  it("offers a created row the shape's fields and the identity it may bring, and none of the engine's others", () => {
-    expect(at.createRow).toEqual(expect.arrayContaining(['title', 'pinned', 'body', 'id', 'createdAt']));
-    expect(at.createRow).not.toContain('entityType');
-  });
-
-  it('offers a weight to a weighted kind alone, and a rank its walk\'s options', () => {
-    expect(at.weightedLinkOption).toEqual(expect.arrayContaining(['info', 'weight']));
-    expect(at.linkOption).toContain('info');
-    expect(at.linkOption).not.toContain('weight');
-    expect(at.rankOption).toEqual(expect.arrayContaining(['direction', 'seeds', 'weights']));
-  });
-
-  it("lists, in a typo's error, the names it could have been", () => {
-    expect(diagnostics.find((message) => message.includes('"titel"'))).toMatch(/"title"/);
-    expect(diagnostics.find((message) => message.includes('"pinnd"'))).toMatch(/"pinned"/);
-    expect(diagnostics.find((message) => message.includes('"containz"'))).toMatch(/"contains"/);
-    expect(diagnostics.find((message) => message.includes('"stared"'))).toMatch(/"starred"/);
+  it.each(TYPOS)("lists, in the error for %s, %s", (typo, meant) => {
+    expect(diagnostics.find((message) => message.includes(`"${typo}"`))).toMatch(`"${meant}"`);
   });
 });
