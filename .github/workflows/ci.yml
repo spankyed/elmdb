@@ -53,7 +53,7 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
           # With no base to compare against, as with no documentation to tell apart, everything runs
-          if [ -n "$base" ] && ! git diff --name-only "$base" HEAD | grep -qE '^(Cargo\.lock|deny\.toml)$'; then
+          if [ -n "$base" ] && ! git diff --name-only "$base" HEAD | grep -qE '(^|/)Cargo\.(lock|toml)$|^deny\.toml$|^crates/elmdb-node/package\.json$'; then
             echo "dependencies=false" >> "$GITHUB_OUTPUT"
           else
             echo "dependencies=true" >> "$GITHUB_OUTPUT"
@@ -136,7 +136,8 @@ jobs:
         with:
           tool: cargo-deny@0.21.0
       - run: cargo deny check bans sources
-      # The RustSec advisories, for a change to the lockfile or to deny.toml, whose ignores relax this check. Any other
+      # The RustSec advisories, for a change to the lockfile, a manifest, the binding's targets or deny.toml, whose
+      # ignores relax this check. Any other
       # change leaves them to advisories.yml's daily run, so an advisory published today fails no unrelated change
       - if: needs.changes.outputs.dependencies == 'true'
         run: cargo deny check advisories

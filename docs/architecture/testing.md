@@ -571,12 +571,15 @@ Licenses aren't among them: `crates/elmdb-node/about.toml` is the one license po
 bare `cargo deny check` runs a license check with nothing accepted, and fails on every crate.
 
 The `repo` job runs bans and sources on every change. It runs advisories when the `changes` job reports that the
-change touches `Cargo.lock` or `deny.toml`, so a crate with an advisory doesn't merge, and a change that adds an ignore
+change touches `Cargo.lock`, a `Cargo.toml`, `deny.toml` or the binding's `package.json` (whose `napi.targets`
+`deny.toml`'s targets are kept equal to by hand), so a crate with an advisory doesn't merge, and a change that adds an ignore
 meets the check it relaxes. An advisory published against a crate already in the tree fails no unrelated pull request:
-`advisories.yml` reads them each day on `main`. `cargo xtask pre-push` runs all three, and says how to install
-cargo-deny where it is missing. CI installs cargo-deny 0.21.0.
+`advisories.yml` reads them each day on `main`. `cargo xtask pre-push` runs all three with cargo-deny 0.21.0 exactly,
+the version CI installs, and says how to install it where it is missing or another. The advisories need the network:
+where their database can't be fetched, `pre-push` says they weren't read and goes on, leaving them to CI. A crate
+yanked from crates.io warns and doesn't fail, cargo-deny's default.
 
-Six workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
+Seven workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
 or its test, as no required check (Power loss). `release.yml` runs on a tag, each Monday, and on a pull request that
 changes the binding's package or the workspace's build configuration (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
 `mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
@@ -584,7 +587,7 @@ LMDB (`scripts/lmdb-upstream.py`). `advisories.yml` runs each day and fails on a
 the lockfile (`cargo deny check advisories`), or an npm advisory of high severity or above against the binding's build
 tooling (`npm audit --audit-level=high`, the root `package-lock.json`; the npm package itself depends on nothing).
 `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
-and so is `models.yml` (Concurrency models).
+and so is `models.yml` (Concurrency models). `model-mutants.yml` runs each week and on dispatch (Mutation testing).
 
 ## Releases
 

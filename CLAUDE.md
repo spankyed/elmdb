@@ -40,7 +40,7 @@ cargo nextest run --workspace  # each test in its own process, under .config/nex
 cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-notices        # the npm package's third-party notices match the lockfile (needs cargo-about 0.9.3)
-cargo deny check bans sources advisories  # deny.toml: no banned crate, crates.io alone, no RustSec advisory (needs cargo-deny; name the checks, a bare `check` fails on licenses, which about.toml owns)
+cargo deny check bans sources advisories  # deny.toml: no banned crate, crates.io alone, no RustSec advisory (needs cargo-deny 0.21.0 and, for advisories, the network; name the checks, a bare `check` fails on licenses, which about.toml owns)
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
 cargo xtask check-exact          # every ICU crate, and each crate whose output an index stores, required at exactly its locked version
 cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
