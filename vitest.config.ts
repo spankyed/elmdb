@@ -1,12 +1,13 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, mergeConfig } from 'vitest/config';
+import ears from './vitest.ears.config.ts';
 
-// Small (`SIZE_MS` × `DEADLINE_FACTOR`, scripts/lib/unit-suites.ts). Declared rather than left to vitest's 5s
-// default, which is *tighter* than the size allows: under the chain's three lanes a 5.8s typecheck in
-// @apackdev/sdk crossed it and reported a hang where the size had headroom to spare.
+// EARS' suite as apack runs it: EARS' own configuration (`vitest.ears.config.ts`, which names nothing of apack's), with
+// the bounds every apack config holds a test to added here. So EARS' suite needs no file of another package, and this
+// file stays the one apack's tools find (the root config's projects, `suite-timeouts.spec.ts`, `npm test`).
 //
 // One project, as every host config is: the host pool runs this package as the project its workspace names, and
 // a `projects` list here would be ignored there. The package has no integration half.
-export default defineConfig({
+export default mergeConfig(ears, defineConfig({
   test: {
     // Small (`SIZE_MS` × `DEADLINE_FACTOR`, scripts/lib/unit-suites.ts): the CPU one test may spend. A test that
     // needs more declares a reviewed `meta.cpuBudgetMs` (`suite-timeouts.spec.ts`)
@@ -15,12 +16,7 @@ export default defineConfig({
     // test that spends the CPU budget above (`vitest-progress-guard.ts`, `@apackdev/testing`)
     testTimeout: 0,
     hookTimeout: 0,
-    // A worker exits when its vitest does, rather than running on orphaned
+    // A worker exits when its vitest does, rather than running on orphaned; git reads no config of the machine's
     setupFiles: ['../apack-testing/src/vitest-exit-with-parent.ts', '../apack-testing/src/vitest-progress-guard.ts', '../apack-testing/src/vitest-git-config.ts'],
-    // Test files run in parallel: each worker's tests create their own EARS engines, each on a database of its own
-    fileParallelism: true,
-    benchmark: { include: ['bench/**/*.bench.ts'] },
-    include: ['tests/**/*.spec.ts'],
-    exclude: ['**/node_modules/**'],
   },
-});
+}));

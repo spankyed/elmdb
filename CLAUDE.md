@@ -189,6 +189,9 @@ Held by the types and the engine specs, which say more than a rule over names co
 - `vocabulary.spec.ts`: the rules in Vocabulary, over every member of the engine, `admin`, a query builder and a write builder — off the types for `is*`, `find*`, flags and chaining, off a real engine for pairs and absence — each with a case showing it names a member that breaks it.
 - `engines.spec.ts`: a typed facade acts on whichever engine its getter returns; two engines in one process share nothing. The bound engine's operations are the SDK's, and its spec is `apack-sdk/tests/ears/bound-ears.spec.ts`.
 - One half: the package has no integration config. Test files run in parallel (`fileParallelism: true`): each creates its own engines.
+- Two configs, so the suite needs no file of another package: `vitest.ears.config.ts` is EARS' own (its specs and
+  benchmarks, and a minute's clock for a test run alone), and `vitest.config.ts`, which apack's tools find, is that
+  with apack's bounds added: vitest's clock off, the CPU deadline and the progress guard (`@apackdev/testing`).
 
 ## Benchmark
 
