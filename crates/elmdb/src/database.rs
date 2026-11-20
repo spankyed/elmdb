@@ -799,8 +799,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
         // An operation lets the store go 5 s into a wait of 6, and a sync of another thread holds the record past
-        // both: the close ends at 6 s, and one given the whole wait again would take 11 s. The bound between them
-        // leaves 2.5 s either side, for a loaded runner: it was 1.5 s on times half these
+        // both: the close ends at 6 s, and one given the whole wait again would take 11 s. A sleep and a wait end
+        // late and never early, so the wrong close is never under 11 s, and the bound leaves the right one 4 s for
+        // a loaded runner: it was 1.5 s on times half these, and then 2.5 s
         let store = db.store().unwrap();
         let held = store.hold_record();
         let operation = std::thread::spawn(move || {
@@ -810,7 +811,7 @@ mod tests {
         let began = std::time::Instant::now();
         assert_eq!(db.close_at_exit(Duration::from_secs(6)).unwrap_err().code, ErrorCode::Io);
         let took = began.elapsed();
-        assert!(took < Duration::from_millis(8500), "{took:?}, for a wait of 6 s");
+        assert!(took < Duration::from_secs(10), "{took:?}, for a wait of 6 s");
         operation.join().unwrap();
         drop(held);
     }

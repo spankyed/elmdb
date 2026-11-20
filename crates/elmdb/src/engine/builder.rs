@@ -1393,7 +1393,7 @@ mod tests {
         let waiter = std::thread::spawn(move || tell.send(matches!(waiting.waited(true), Waited::Idle)).unwrap());
         assert!(told.recv_timeout(Duration::from_millis(200)).is_err(), "the wait answered with a change under way");
         core.end_change(Vec::new(), true);
-        assert_eq!(told.recv_timeout(Duration::from_secs(5)), Ok(true));
+        assert_eq!(told.recv_timeout(crate::waits::ARRIVES), Ok(true));
         waiter.join().unwrap();
     }
 
@@ -1433,7 +1433,7 @@ mod tests {
         let began = Instant::now();
         let waited = loop {
             match core.waited(true) {
-                Waited::Held(_) if began.elapsed() < Duration::from_secs(2) => {
+                Waited::Held(_) if began.elapsed() < crate::waits::ARRIVES => {
                     std::thread::sleep(Duration::from_millis(5))
                 }
                 other => break other,
@@ -1510,7 +1510,7 @@ mod tests {
         });
         assert!(!core.on_its_thread());
         core.queue([index("a")]);
-        assert_eq!(told.recv_timeout(Duration::from_secs(5)), Ok(true), "the thread didn't know itself");
+        assert_eq!(told.recv_timeout(crate::waits::ARRIVES), Ok(true), "the thread didn't know itself");
         runner.join().unwrap();
         assert!(!core.on_its_thread() && core.lock().thread.is_none(), "the thread kept as it ended");
     }

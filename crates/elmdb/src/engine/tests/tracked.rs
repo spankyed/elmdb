@@ -1212,7 +1212,7 @@ fn the_last_of_a_database_let_go_of_with_the_builder_s_listener_waits_for_nothin
     starts.recv_timeout(crate::waits::ARRIVES).expect("the builder's commit told its listener");
     drop(db);
     release.send(()).unwrap();
-    let deadline = Instant::now() + Duration::from_secs(4);
+    let deadline = Instant::now() + crate::waits::ARRIVES;
     let again = loop {
         let options = crate::OpenOptions { schema: Some(schema(1e-9)), syncs: false, ..Default::default() };
         match Database::open(dir.path(), options) {

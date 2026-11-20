@@ -2859,7 +2859,7 @@ fn work_queued_as_a_close_waits_for_the_store_starts_no_thread_to_hold_it() {
     crate::failpoints::run_once_here(crate::failpoints::points::CLOSE_TAKEN, move || {
         builders.queue(vec![crate::engine::Work::Rank { name: "taskRank".into() }]);
     });
-    let closed = db.close_within(Some(std::time::Duration::from_secs(3))).unwrap();
+    let closed = db.close_within(Some(crate::waits::ARRIVES)).unwrap();
     assert!(closed, "the close waited on a store a thread started beside it held");
     assert!(!db.is_open());
 }
