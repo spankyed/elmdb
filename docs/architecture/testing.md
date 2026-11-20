@@ -243,6 +243,15 @@ the source's `// mutant-skip:` comments make (below); without it a run reports e
 command derives it again, since it holds the lines the comments are above as it is written: one kept from before an
 edit would excuse whatever the edit moved onto those lines, and report the mutants it moved off them.
 
+The suite a mutation run builds holds none of the concurrency models, which need `--cfg shuttle`, so a mutant only a
+model tells apart survives it. `.cargo/mutants.toml` excludes such mutants from the pull request's gate, each saying
+which model holds it. A weekly workflow (`.github/workflows/model-mutants.yml`, `scripts/mutants-models.py`) is what
+checks that. It mutates each file a Shuttle model holds (the builder's, the reads asked at their call, the unit slot
+and the watch) and tests every mutant against that model at 200,000 schedules, and again at ten times as many where
+one survives, Shuttle's schedules being random. It reads the source's `// mutant-skip:` comments and none of
+`.cargo/mutants.toml`'s, so a mutant that file excludes for a model is tested here. Survivors fail the run and are
+listed in the issue labelled `mutants-model`, which a run that catches all of them closes. It gates nothing.
+
 ```sh
 # Pass 1, every mutant of the files named, against the suite without the model harness (about 25 s idle, 2026-10-28)
 cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb/src/engine/trigram.rs -- -- --skip model::machine::the_engine
@@ -259,6 +268,8 @@ python3 scripts/mutants-in-diff.py main 3 --resume
 gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
 # What the exclusions leave out of a file
 diff <(cargo mutants --list --no-config --file F) <(cargo mutants --list --config "$(cargo xtask mutant-exclusions)" --file F)
+# The code a Shuttle model holds, against that model alone (what the weekly model-mutants workflow runs)
+python3 scripts/mutants-models.py builder
 # The binding's process claim, against elmdb-node's suite rather than the engine's
 cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants --file crates/elmdb-node/src/process.rs --test-package elmdb-node
 # Some mutants of a file again, after the specs that should kill them: a regex over their names
