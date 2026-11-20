@@ -112,11 +112,11 @@ describe("the code a site names, as the engine's creator names it", () => {
   });
 
   it('names a path from the last root given in it, and skips the frames the pattern given calls the engine\'s', async () => {
-    const cut = await named({ engineFrames: /\/apack-ears\/src\//, roots: ['/apack-ears/', '/engine/'] });
+    const cut = await named({ engineFrames: /\/ears\/src\//, roots: ['/ears/', '/engine/'] });
     expect(cut.site).toMatch(/^engine\/calls\.spec\.ts:\d+$/);
     expect(cut.label).toMatch(/^engine\/calls\.spec\.ts:\d+/);
     // This file taken for the engine's: the site is the code that called it
-    const past = await named({ engineFrames: /\/apack-ears\/(?:src|tests)\// });
+    const past = await named({ engineFrames: /\/ears\/(?:src|tests)\// });
     expect(past.site).not.toContain('calls.spec.ts');
   });
 });

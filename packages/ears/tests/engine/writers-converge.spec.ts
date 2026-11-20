@@ -35,7 +35,7 @@ const aStep: fc.Arbitrary<Step> = fc.oneof(
   fc.constant({ step: 'tell' as const }),
 );
 
-const requireFromEars = createRequire(createRequire(import.meta.url).resolve('@apackdev/ears/package.json'));
+const requireFromEars = createRequire(createRequire(import.meta.url).resolve('@elmdb/ears/package.json'));
 
 /** Another process holding the database open: it applies each op it's sent, one commit each, and answers */
 function anotherProcess(path: string) {

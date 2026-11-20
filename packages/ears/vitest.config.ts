@@ -1,23 +1,17 @@
-import { defineConfig, mergeConfig } from 'vitest/config';
-import ears from './vitest.ears.config.ts';
+import { defineConfig } from 'vitest/config';
 
-// EARS' suite as apack runs it: EARS' own config (`vitest.ears.config.ts`, which needs no file of another package)
-// with the bounds every apack config holds a test to. apack's tools find this file by its name.
-//
-// One project, as every host config is: the host pool runs this package as the project its workspace names, and
-// a `projects` list here would be ignored there. This is the fast half: the specs that pack and compile the built
-// package are the integration half's (`vitest.integration.config.ts`).
-export default mergeConfig(ears, defineConfig({
+// EARS' fast half: every spec but the integration half's (`vitest.integration.config.ts`, which extends this), and the
+// benchmarks (`vitest bench`).
+export default defineConfig({
   test: {
-    exclude: ['**/*.integration.spec.ts'],
-    // Small (`SIZE_MS` × `DEADLINE_FACTOR`, scripts/lib/unit-suites.ts): the CPU one test may spend. A test that
-    // needs more declares a reviewed `meta.cpuBudgetMs` (`suite-timeouts.spec.ts`)
-    provide: { 'apack.testCpuMs': 30_000 },
-    // Vitest's clock is off: the progress guard in setupFiles fails a test or hook whose process tree stalls, and a
-    // test that spends the CPU budget above (`vitest-progress-guard.ts`, `@apackdev/testing`)
-    testTimeout: 0,
-    hookTimeout: 0,
-    // A worker exits when its vitest does, rather than running on orphaned; git reads no config of the machine's
-    setupFiles: ['../apack-testing/src/vitest-exit-with-parent.ts', '../apack-testing/src/vitest-progress-guard.ts', '../apack-testing/src/vitest-git-config.ts'],
+    // A test or hook is bounded by the clock: a minute, since the model-based specs and the two-process convergence run
+    // past vitest's 5s default on a quiet machine
+    testTimeout: 60_000,
+    hookTimeout: 60_000,
+    // Test files run in parallel: each worker's tests create their own EARS engines, each on a database of its own
+    fileParallelism: true,
+    benchmark: { include: ['bench/**/*.bench.ts'] },
+    include: ['tests/**/*.spec.ts'],
+    exclude: ['**/node_modules/**', '**/*.integration.spec.ts'],
   },
-}));
+});

@@ -1,57 +1,43 @@
 {
-  "name": "@apackdev/ears",
-  "version": "0.1.0",
-  "description": "EARS, the entity-attribute-relation store behind apack pack data",
-  "license": "MIT",
+  "name": "@elmdb/ears",
+  "version": "0.0.0",
+  "description": "EARS, the fluent TypeScript API over an elmdb database: query and write builders, watches and typed facades",
+  "license": "MIT OR Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/spankyed/apack.git",
-    "directory": "packages/apack-ears"
+    "url": "git+https://github.com/spankyed/elmdb.git",
+    "directory": "packages/ears"
   },
+  "private": true,
   "type": "module",
   "sideEffects": false,
   "engines": {
-    "node": ">=22"
+    "node": ">=22.17.0"
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
   ],
   "scripts": {
-    "build:package": "tsx ../../scripts/build-package.ts .",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
-    "bench": "npm run build:package && vitest bench --run",
-    "bench:heap": "npm run build:package && node --expose-gc bench/heap.ts",
-    "bench:watch": "npm run build:package && node bench/watch-stress.ts",
-    "api:build": "node -e \"require('fs').rmSync('.temp/api-types', { recursive: true, force: true })\" && tsc -p tsconfig.api-extractor.json",
-    "api:check": "npm run api:build && tsx ../../scripts/api-reports.ts .",
-    "api:update": "npm run api:build && tsx ../../scripts/api-reports.ts . --local"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
   },
   "exports": {
     ".": {
-      "@apackdev/source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
     "./package.json": "./package.json",
-    "./lmdb": {
-      "@apackdev/source": "./src/lmdb/index.ts",
+    "./database": {
       "types": "./dist/lmdb/index.d.ts",
       "default": "./dist/lmdb/index.js"
     }
   },
-  "devDependencies": {
-    "@microsoft/api-extractor": "^7.59.1",
-    "fast-check": "^3.23.2",
-    "typescript": "^5.8.3",
-    "vitest": "^4.1.12"
-  },
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
+  "peerDependencies": {
+    "elmdb": "0.0.0"
   },
   "dependencies": {
-    "elmdb": "file:../../vendor/elmdb/crates/elmdb-node",
     "msgpackr": "^2.1.4"
   }
 }

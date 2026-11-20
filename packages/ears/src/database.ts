@@ -2,7 +2,7 @@
 // `createConnection`, which sends them to the unit `transact` holds open, or to the database itself outside one, and
 // hands back each answer decoded and each refusal as an `EarsError`.
 //
-// The port is structural so this module never loads `elmdb`: `@apackdev/ears/lmdb` opens the database, and only that
+// The port is structural so this module never loads `elmdb`: `@elmdb/ears/database` opens the database, and only that
 // entry imports it. What crosses is typed by elmdb's generated protocol, whose types this module imports and nothing
 // else of `elmdb`.
 import { Packr, Unpackr } from 'msgpackr';
@@ -54,7 +54,7 @@ export interface EarsUnit {
 export type { OpenReport, SchemaChange };
 
 /**
- * What the engine needs of an open elmdb database (`elmdb`'s `Database`, which `@apackdev/ears/lmdb` opens). Each
+ * What the engine needs of an open elmdb database (`elmdb`'s `Database`, which `@elmdb/ears/database` opens). Each
  * member answers exactly what the binding's does, its bytes read as a `Uint8Array` (`src/lmdb/port.test-d.ts`)
  */
 export interface EarsDatabase {

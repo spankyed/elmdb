@@ -1,8 +1,8 @@
 // The text index as a chat log grows: a message write's commit and a fuzzy search, at 1,000, 10,000 and 50,000
-// messages, each on a database of its own, against which elmdb's docs/roadmap/text-index-at-scale.md decides what to
+// messages, each on a database of its own, against which docs/roadmap/text-index-at-scale.md decides what to
 // build: a write's growth beside the store's own (a message with no text), and a fuzzy search's beside a common word's
-// ranking. Run with `npm run bench -w @apackdev/ears`, in the built engine, synced as the app's is; the readings are in
-// elmdb's docs/evidence/next-phase-6.md.
+// ranking. Run with `npm run bench -w @elmdb/ears`, in the built engine, synced as the app's is; the readings are in
+// docs/evidence/next-phase-6.md.
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';

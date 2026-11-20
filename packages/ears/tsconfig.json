@@ -3,9 +3,9 @@
     "noUnusedLocals": true,
     // Typechecking only, so the .tsbuildinfo is the whole point: a re-run with nothing changed reuses it
     // instead of reparsing. `incremental` works with `noEmit`; `composite` does not, which is why this is
-    // not project references (docs/goals/goal-test-tiers.md).
+    // not project references.
     "incremental": true,
-    "tsBuildInfoFile": "../../node_modules/.cache/tsbuildinfo/apack-ears.tsbuildinfo",
+    "tsBuildInfoFile": "../../node_modules/.cache/tsbuildinfo/ears.tsbuildinfo",
     "target": "ES2022",
     "module": "nodenext",
     "moduleResolution": "nodenext",
@@ -19,5 +19,5 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "bench/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"]
+  "include": ["src/**/*.ts", "tests/**/*.ts", "bench/**/*.ts", "scripts/**/*.ts", "vitest.config.ts", "vitest.integration.config.ts"]
 }

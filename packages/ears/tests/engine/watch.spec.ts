@@ -32,7 +32,7 @@ const titles = () => e.query('Task').ids().map((id) => e.getAttr(id, 'title'));
 
 /** Commits to the database from a process of its own, as a tool killed before telling anyone leaves it */
 const commitElsewhere = async (database: EarsDatabase, create?: string) => {
-  const requireFromEars = createRequire(createRequire(import.meta.url).resolve('@apackdev/ears/package.json'));
+  const requireFromEars = createRequire(createRequire(import.meta.url).resolve('@elmdb/ears/package.json'));
   const elmdb = requireFromEars.resolve('elmdb');
   const msgpackr = requireFromEars.resolve('msgpackr');
   const [, type, id] = create?.match(/create\('(\w+)', '([\w-]+)'\)/) ?? [];
@@ -157,7 +157,7 @@ describe('a commit from another process', () => {
 
 describe('another process replacing every row', () => {
   const resetElsewhere = async (database: EarsDatabase) => {
-    const elmdb = createRequire(createRequire(import.meta.url).resolve('@apackdev/ears/package.json')).resolve('elmdb');
+    const elmdb = createRequire(createRequire(import.meta.url).resolve('@elmdb/ears/package.json')).resolve('elmdb');
     await promisify(execFile)(process.execPath, ['-e', [
       `const { Database } = require(${JSON.stringify(elmdb)});`,
       // In the engine's mode, as commitElsewhere opens it

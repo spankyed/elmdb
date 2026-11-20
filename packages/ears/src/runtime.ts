@@ -4,7 +4,7 @@
  *
  * CHANGE CONTROL: these types are a specified contract, and editor completions and error messages
  * depend on their exact form. Don't change them to make one call site compile; fix the call site.
- * Read packages/apack-sdk/TYPED-EARS.md (the contract and the pre-change checklist) first.
+ * docs/architecture/ears.md, Typed contract, says what checks a change to them.
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { RESERVED_ATTRIBUTES } from './errors.ts';
@@ -31,7 +31,7 @@ export interface RelationEdge<K extends string = string, Source extends string =
 /** What an engine is created with (`createEarsEngine`) */
 export interface EARSRuntimeDeps {
   /**
-   * The elmdb database the engine reads and writes, opened by `@apackdev/ears/lmdb` (`openDatabase`). Its schema is
+   * The elmdb database the engine reads and writes, opened by `@elmdb/ears/database` (`openDatabase`). Its schema is
    * the engine's entity types, relation kinds and roles, and the rules their rows and edges are held to; the engine's
    * creator changes it with `admin.setSchema`
    */
@@ -328,8 +328,8 @@ export interface UntypedSchema extends EarsSchema {
  * Field parameters stay `keyof ShapeOf<D['shapes'], E> & string` and picked rows `Pick<ShapeOf<D['shapes'], E>, K>`:
  * that form is what gives editors field completions and lists the valid fields in a typo's error.
  * Wrapping them in conditional or mapped types keeps everything compiling and passing type tests
- * while breaking completions (TYPED-EARS.md, Incidents). For a union shape (Node rows) only shared
- * fields are accepted; a query over member-specific or runtime fields uses the untyped host `query`.
+ * while breaking completions, which `tests/typed/completions.integration.spec.ts` asks a language service for.
+ * For a union shape (Node rows) only shared fields are accepted; a query over member-specific or runtime fields uses the untyped host `query`.
  */
 export interface QueryBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
   ofType<T extends string>(t: EntityNameArg<D['names'], T>): QueryBuilder<T, D>;
@@ -697,7 +697,7 @@ export type FieldValues<S extends EntityShapes, E extends string> =
 /**
  * The writes to one entity, from `create`, `upsert` or `write`. `E` and `D` type them: started from a
  * declared entity type or an id tagged with one, a write names only the shape's declared fields and stores
- * their declared types; from a plain id (or from `@apackdev/ears`) every write is unchecked. The attributes the engine owns (`id`,
+ * their declared types; from a plain id (or from `@elmdb/ears`) every write is unchecked. The attributes the engine owns (`id`,
  * `entityType`, `shortCode`, `createdAt`, `updatedAt`, `role`, `trashedAt`) are refused by every attribute write, and
  * each attribute write stamps `updatedAt` once per builder unless it was started with `{ touch: false }`.
  *

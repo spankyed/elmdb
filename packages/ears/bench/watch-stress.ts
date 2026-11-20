@@ -1,10 +1,10 @@
 // What watches cost under a writer that commits as fast as it runs, in the built engine:
-// `npm run bench:watch -w @apackdev/ears [-- <seconds> [none]]`, `none` running the writer with no view open. A writer sets a field of one of the first open tasks on
+// `npm run bench:watch -w @elmdb/ears [-- <seconds> [none]]`, `none` running the writer with no view open. A writer sets a field of one of the first open tasks on
 // every turn of the event loop, into a hot table of 20,000 tasks, while three views are open over it: one row, the
 // indexed `where` with a `limit` of 50, and every open task ordered (about 6,700 rows). It prints one JSON line:
 // each view's runs a second and time a run, the share of a core the process used, the event loop's delay, and how
 // late a view hears a commit — from the commit to the first delivery reflecting it — for the two views every write
-// changes. Readings are recorded in elmdb's docs/evidence/next-phase-3.md (G14).
+// changes. Readings are recorded in docs/evidence/next-phase-3.md (G14).
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';

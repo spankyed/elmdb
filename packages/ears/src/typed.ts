@@ -5,7 +5,7 @@
  *
  * CHANGE CONTROL: these types are a specified contract, and editor completions and error messages
  * depend on their exact form. Don't change them to make one call site compile; fix the call site.
- * Read packages/apack-sdk/TYPED-EARS.md (the contract and the pre-change checklist) first.
+ * docs/architecture/ears.md, Typed contract, says what checks a change to them.
  * Overload order here is part of the contract: a signature that accepts more than the one before
  * it lets a call that should fail (a typo'd name or field) fall through to it.
  */

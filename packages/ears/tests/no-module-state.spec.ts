@@ -1,5 +1,5 @@
-// The engine is an instance: no module in @apackdev/ears keeps anything at module scope, not even a reference to an
-// engine. Which engine a process acts on is the SDK's (`@apackdev/sdk/ears`), one layer up.
+// An EARS engine is an instance: no module in @elmdb/ears keeps anything at module scope, not even a reference to an
+// EARS engine. Which one a process acts on is the program's to bind.
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import ts from 'typescript';
@@ -14,8 +14,7 @@ const _files = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: t
 
 /**
  * The walk, refusing an empty answer: the check below asserts that a *derived* set is empty, which passes for
- * free when the population it filtered was empty. `population()` (`@apackdev/sdk/testing`) is this guard
- * everywhere else; this package is a layer below the SDK and cannot import it, so the refusal is written here.
+ * free when the population it filtered was empty, so the walk refuses an empty answer itself.
  * Only the top-level call is held — the recursion goes through `_files`, where an empty directory is ordinary.
  */
 const files = (dir: string): string[] => {
@@ -54,7 +53,7 @@ export function moduleState(file: string, text: string): string[] {
   return found;
 }
 
-describe('@apackdev/ears module state', () => {
+describe('@elmdb/ears module state', () => {
   it('no engine module holds data at module scope', () => {
     const found = files(SRC).flatMap((file) => {
       const rel = path.relative(SRC, file);
