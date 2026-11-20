@@ -1,14 +1,21 @@
 # The rest of the supply chain
 
-Status: deferred, 2026-11-18; planned, not built. This is what remains of change 9 of the road to 1.0
-(`../../roadmap.md`) once the prebuilt binaries are built (`release.yml`, `../../architecture/testing.md`, Releases):
-`cargo-deny` and an audit in CI, and the `$schema` URL resolving. It says what each one checks, what today's tree
-would answer, the decisions, and the order to build them in. The domain decision has a deadline that the rest doesn't:
-it has to be settled before milestone 0.3 freezes the protocol (When).
+Status: built in part, 2026-11-20 (elmdb#202); the rest waits on the domain. This is what remained of change 9 of the
+road to 1.0 (`../../roadmap.md`) once the prebuilt binaries were built (`release.yml`,
+`../../architecture/testing.md`, Releases): `cargo-deny` and an audit in CI, and the `$schema` URL resolving. It says
+what each one checks, what the tree answered when it was planned, the decisions, and the order to build them in.
 
-## Where it starts
+- **Built:** `deny.toml` and its checks in `ci.yml`'s repo job and in `cargo xtask pre-push`; the daily
+  `advisories.yml`; and the generated JSON Schema's `$id`, which `check-generated` holds
+  (`../../architecture/testing.md`, Platforms; The work, in order, steps 2 to 4).
+- **Waiting on the domain:** the domain itself, the owner's decision (decision 5); serving the JSON Schema at its
+  URL; and the scheduled check that fetches it. `elmdb.dev` isn't registered, so a publish to it or a fetch of it
+  would fail on every run, and neither is built. The domain has a deadline: it has to be settled before milestone 0.3
+  freezes the protocol (When).
 
-Read on 2026-11-18, at `9c6e765`:
+## Where it started
+
+Read on 2026-11-18, at `9c6e765`, before any of it was built:
 
 - **Licenses already have one policy.** `crates/elmdb-node/about.toml` lists the licenses a dependency of the binding
   may be under. Nine crates have clarifications, which name what a crate's declared license leaves out. Three of those
@@ -36,7 +43,7 @@ Read on 2026-11-18, at `9c6e765`:
   - The JSON Schema meant to be served there is generated, `crates/elmdb-node/protocol/schema-1.json`
     (`cargo xtask generate`). It has no `$id`. GitHub Pages isn't enabled for the repository.
 
-## What `cargo-deny` finds today
+## What `cargo-deny` found
 
 One run of cargo-deny 0.21.0 on a scratch copy of `origin/main` at `c4f73b6`, 2026-11-18, whose `Cargo.lock` and
 `about.toml` are `9c6e765`'s. Its configuration had:
@@ -60,6 +67,10 @@ It answered:
 - **bans: passes, with warnings.** Eight crates are built at more than one version: `rand`, `rand_core` and
   `getrandom` at three, and `rand_chacha`, `hashbrown`, `foldhash`, `syn` and `convert_case` at two.
 - **sources: passes.**
+
+With the `deny.toml` that is built, cargo-deny 0.21.0 on 2026-11-20 at `09ec765`, macOS arm64, answered
+`advisories ok, bans ok, sources ok`, with the same eight crates warned of as built at more than one version.
+`npm audit --audit-level=high` found nothing the same day.
 
 ## Decisions
 
@@ -118,9 +129,9 @@ It answered:
 
 ## The work, in order
 
-1. **The domain** (owner): register `elmdb.dev`, or choose the second way above. Nothing else here waits on it, but
-   0.3 does.
-2. **`deny.toml` and the checks a merge waits on.**
+1. **The domain** (owner): register `elmdb.dev`, or choose the second way above. Not decided. Serving the schema
+   (step 4) waits on it, and so does 0.3.
+2. **`deny.toml` and the checks a merge waits on.** Built, 2026-11-20 (elmdb#202).
    - `deny.toml` at the root:
      - `[graph]` targets from `napi.targets`;
      - `[advisories]`, with no ignore today;
@@ -129,37 +140,46 @@ It answered:
      - no `[licenses]`, and a comment saying `about.toml` owns them and that a bare `cargo deny check` fails.
    - In `ci.yml`'s repo job, at a pinned cargo-deny: `cargo deny check bans sources`, and
      `cargo deny check advisories` when the `changes` job reports `Cargo.lock` or `deny.toml` changed.
-   - `cargo xtask pre-push` runs both, so a push meets them before CI does.
+   - `cargo xtask pre-push` runs both, so a push meets them before CI does. Where cargo-deny isn't installed it
+     refuses, with the command that installs it.
    - `docs/architecture/testing.md`, Platforms, names them.
-3. **The daily run**, `.github/workflows/advisories.yml`: `cargo deny check advisories` and
+3. **The daily run**, `.github/workflows/advisories.yml`, built, 2026-11-20 (elmdb#202): `cargo deny check advisories` and
    `npm audit --audit-level=high` on `main`. It gates nothing and fails on its own run, which testing.md's list of
    workflows that gate no pull request gains.
 4. **The schema served and held to the code.**
-   - `cargo xtask generate` writes `$id` into `schema-1.json`, equal to `SCHEMA_LANGUAGE`, and `check-generated` holds
-     it there.
-   - Pages publishes `crates/elmdb-node/protocol/schema-1.json` at `schema/1.json` on each push to `main` that changes
-     it.
-   - A scheduled check fetches the URL. It fails when the answer isn't 200, when its type doesn't start with
+   - Built, 2026-11-20 (elmdb#202): `cargo xtask generate` writes `$id` into `schema-1.json`, equal to
+     `SCHEMA_LANGUAGE`, and `check-generated` holds it there.
+   - Waiting on the domain: Pages publishes `crates/elmdb-node/protocol/schema-1.json` at `schema/1.json` on each
+     push to `main` that changes it. GitHub Pages isn't enabled for the repository.
+   - Waiting on the domain: a scheduled check fetches the URL. It fails when the answer isn't 200, when its type doesn't start with
      `application/json` (Pages adds a charset), or when the bytes differ from the committed file.
-5. **The roadmap's item 9 is marked built**, each gate with the run or check that holds it.
+5. **The roadmap's item 9 is marked built**, each gate with the run or check that holds it. It names steps 2 and 3
+   and the `$id` as built, and the served schema as waiting; it is marked built once the URL resolves.
 
 ## How each is shown to fail
 
-Each gate fails once on a mutated copy, never the working tree (`CLAUDE.md`):
+Each gate fails once on a mutated copy, never the working tree (`CLAUDE.md`). The first three and the `$id` were
+shown on 2026-11-20, on copies of `09ec765` with the change, with cargo-deny 0.21.0 on macOS arm64; elmdb#202's
+description holds what each printed:
 
 - **Sources:** a copy whose crate's `Cargo.toml` takes a dependency from a git repository. A git source written into
   `Cargo.lock` alone doesn't do it: cargo refuses the lockfile with `--locked`, and prunes the entry without it, so
-  the sources check never sees one.
-- **Bans:** a copy that bans a crate the tree builds.
+  the sources check never sees one. Shown: `elmdb-cli` given `itoa` from its git repository fails
+  `cargo deny check sources` with `source-not-allowed`.
+- **Bans:** a copy that bans a crate the tree builds. Shown: `deny.toml` given a ban on `heed` fails
+  `cargo deny check bans` with `banned`.
 - **Advisories:** a copy that takes heed with its default features again, which fails on RUSTSEC-2025-0141 as the
-  run above did.
-- **The served schema:** a copy of the check pointed at a file that differs by a byte.
+  run above did. Shown: it fails `cargo deny check advisories` on `bincode` 1.3.3, with that advisory.
+- **The `$id`:** a copy whose committed `schema-1.json` has another `$id`, and a copy whose generator writes another.
+  Shown: `cargo xtask check-generated` fails on each with `schema-1.json: changed`, and the generator's own test
+  fails on the second.
+- **The served schema**, not built: a copy of the check pointed at a file that differs by a byte.
 
 ## When
 
 - **The domain:** before milestone 0.3, which freezes the protocol. After it, changing the URL is a protocol break.
 - **`deny.toml` and the daily run:** before the first tag, so the first release's dependencies have been read against
-  RustSec.
+  RustSec. Built on 2026-11-20, and no release is tagged.
 - **Serving the schema:** once the domain is settled.
 
 ## Not covered here
