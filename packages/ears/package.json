@@ -20,8 +20,12 @@
     "LICENSE-APACHE"
   ],
   "scripts": {
+    "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "bench": "node scripts/build.mjs && vitest bench --run",
+    "bench:heap": "node scripts/build.mjs && node --expose-gc bench/heap.ts",
+    "bench:watch": "node scripts/build.mjs && node bench/watch-stress.ts"
   },
   "exports": {
     ".": {

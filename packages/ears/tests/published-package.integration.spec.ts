@@ -32,8 +32,8 @@ engine.admin.clear();
 `;
 
 describe('the packed package', () => {
-  it('ships its build, its manifest and its license, and no source maps', () => {
-    expect(fs.readdirSync(consumer().installed).sort()).toEqual(['LICENSE', 'dist', 'package.json']);
+  it('ships its build, its manifest and its licenses, and no source maps', () => {
+    expect(fs.readdirSync(consumer().installed).sort()).toEqual(['LICENSE-APACHE', 'LICENSE-MIT', 'dist', 'package.json']);
     const shipped = fs.readdirSync(path.join(consumer().installed, 'dist'), { recursive: true }).map(String);
     expect(shipped.filter((file) => file.endsWith('.js')).length, 'no built module shipped').toBeGreaterThan(0);
     // A map would point at `src`, which isn't published

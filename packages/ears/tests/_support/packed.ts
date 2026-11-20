@@ -1,8 +1,7 @@
 /**
- * This package as a consumer installs it: its staged tree npm-packed, the tarball unpacked into a consumer's
- * `node_modules` with the package's dependencies (`elmdb`, the binding, among them) linked beside it, and the
- * compilers a consumer may use. The package's name and exports are read from its own manifest, so nothing here names
- * the package.
+ * This package as a consumer installs it: npm-packed, the tarball unpacked into a consumer's `node_modules` with the
+ * package's dependencies and peers (`elmdb`, the binding, among them) linked beside it, and the compilers a consumer
+ * may use. The package's name and exports are read from its own manifest, so nothing here names the package.
  */
 import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
@@ -17,6 +16,7 @@ interface Manifest {
   name: string;
   exports: Record<string, unknown>;
   dependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
 }
 
 export const readManifest = (dir: string): Manifest => JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')) as Manifest;
@@ -94,26 +94,27 @@ export interface Consumer {
 
 /**
  * A consumer with the packed package installed, as npm installs it from the registry, made before the calling file's
- * tests and removed after them. The staged tree (`publish/`) is the build's; that it is the build of the source as it
- * is now is the runner's to see to (apack's chain runs this half after `packages:ensure`).
+ * tests and removed after them. What is packed is the package's directory as npm packs it, its `dist` among it; that
+ * `dist` is the build of the source as it is now is the runner's to see to (`npm run build` at the root before
+ * `npm test`).
  */
 export function packedConsumer(): () => Consumer {
   const tempDir = tempDirs();
   let consumer: Consumer | undefined;
   beforeAll(async () => {
-    const staged = path.join(PACKAGE_DIR, 'publish');
-    if (!fs.existsSync(path.join(staged, 'package.json'))) {
-      throw new Error(`${MANIFEST.name} isn't built: no ${staged}. Run npm run build:package in ${PACKAGE_DIR}`);
+    if (!fs.existsSync(path.join(PACKAGE_DIR, 'dist'))) {
+      throw new Error(`${MANIFEST.name} isn't built: no dist. Run npm run build at the repository's root`);
     }
     const dir = tempDir('ears-consumer-');
-    const packed = await run('npm', ['pack', staged, '--pack-destination', dir, '--json', '--ignore-scripts'], dir);
+    const packed = await run('npm', ['pack', PACKAGE_DIR, '--pack-destination', dir, '--json', '--ignore-scripts'], dir);
     if (packed.code !== 0) throw new Error(`npm pack failed:\n${packed.output}`);
     const [{ filename }] = JSON.parse(packed.output.slice(packed.output.indexOf('['))) as Array<{ filename: string }>;
     const installed = path.join(dir, 'node_modules', MANIFEST.name);
     fs.mkdirSync(installed, { recursive: true });
     const unpacked = await run('tar', ['-xzf', path.join(dir, path.basename(filename)), '-C', installed, '--strip-components', '1'], dir);
     if (unpacked.code !== 0) throw new Error(`tar failed:\n${unpacked.output}`);
-    for (const dependency of Object.keys(MANIFEST.dependencies ?? {})) {
+    // A peer is installed beside its dependent, as npm installs one the consumer doesn't already hold
+    for (const dependency of Object.keys({ ...MANIFEST.dependencies, ...MANIFEST.peerDependencies })) {
       const target = path.join(dir, 'node_modules', dependency);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       fs.symlinkSync(packageDirOf(dependency), target, 'junction');
