@@ -3,15 +3,14 @@
 //   node packages/ears/scripts/build.mjs        (npm run build -w @elmdb/ears)
 //
 // The tree is emitted into a staging directory and checked there, and renamed over `dist` only once every check has
-// passed, so a reader never finds `dist` half-built or built by a run that failed.
+// passed, so a reader never finds `dist` half-built or built by a run that failed. The stamp `dist-current.mjs` answers
+// from is cleared before `dist` is touched and written once it is replaced.
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import { builtinModules, createRequire } from 'node:module';
 import * as path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { PACKAGE_DIR, clearStamp, writeStamp } from './dist-current.mjs';
 
-/** This package's directory */
-const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url));
 const require = createRequire(path.join(PACKAGE_DIR, 'package.json'));
 const ts = require('typescript');
 
@@ -89,6 +88,7 @@ function assertExportTargetsBuilt(dir) {
   if (missing.length > 0) throw new Error(`Export targets were not built:\n  ${missing.join('\n  ')}`);
 }
 
+clearStamp(PACKAGE_DIR);
 fs.rmSync(stagedDir, { recursive: true, force: true });
 fs.mkdirSync(stagedDir, { recursive: true });
 // `--outDir` overrides the config's; `rootDir` is `src` either way, so the layout is the same
@@ -107,4 +107,10 @@ fs.rmSync(previous, { recursive: true, force: true });
 if (fs.existsSync(distDir)) fs.renameSync(distDir, previous);
 fs.renameSync(stagedDir, distDir);
 fs.rmSync(previous, { recursive: true, force: true });
+try {
+  writeStamp(PACKAGE_DIR);
+} catch (error) {
+  // Outside a git checkout (a source archive, a scratch copy) there is no tree to name, and dist is never called current
+  console.warn(`dist is built but has no stamp, since git couldn't read the checkout: ${String(error.message).split('\n')[0]}`);
+}
 console.log(`Built ${manifest.name}@${manifest.version} into ${path.relative(process.cwd(), distDir)}`);
