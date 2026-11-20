@@ -1,17 +1,17 @@
 # Testing
 
 What proves elmdb correct, and where each proof lives. `cargo nextest run --workspace` runs the Rust suites, each test in
-its own process (`cargo test --workspace --doc` the doc tests); `npm test` runs the binding's. A test that hangs is
-killed at its deadline in `.config/nextest.toml`: ten seconds for a watch test, where a regression deadlocks a
-delivery, and for the open of a file that lost its commit's meta page; twenty for a graph walk, rank index,
-reader-saturation or idle-reader test; forty for the rank index's random histories; sixty for the open that takes a
+its own process (`cargo test --workspace --doc` the doc tests); `npm test` runs the binding's, then EARS'
+([EARS](#ears)). A test that hangs is killed at its deadline in `.config/nextest.toml`: ten seconds for a watch test,
+where a regression deadlocks a delivery, and for the open of a file that lost its commit's meta page; twenty for a
+graph walk, rank index, reader-saturation or idle-reader test; forty for the rank index's random histories; sixty for the open that takes a
 map another process grows; fifteen minutes for the model harness; and four minutes for any other; the rest run on. A filter that selects no test fails the run. A test still runs the test binary again where it needs
 a second process: the crash harnesses' killed writers, another process's commit, schema change and map growth seen by
 this one, a read-only open beside another process's writer, and the process claim.
 
 ## The model harness
 
-The acceptance suite is a model harness (`crates/elmdb/src/engine/tests/model/`), ported from apack's (`@apackdev/ears`,
+The acceptance suite is a model harness (`crates/elmdb/src/engine/tests/model/`), ported from EARS' (`packages/ears`,
 `tests/_harness/`): random workloads over a small pool of ids, so writes collide, refer to each other and are refused,
 checked after every operation against a plain reference model. The workload is a state machine (proptest-state-machine):
 each step is chosen from what the model holds — an id it has, an edge it has, a key holding a list — and one write in
@@ -66,10 +66,10 @@ and nothing else; the harness then declares them again, and `check()` must be cl
 It runs in two places:
 
 - in Rust, against the engine directly;
-- in apack, against the engine through the binding and `@apackdev/ears` (`tests/engine/model-based.spec.ts`), where it
-  also checks a watch on every derived read, every row and the whole state against the read run afresh after every
-  op; and during the move to elmdb it drove apack's JavaScript engine with the same workloads and compared the two
-  (`docs/evidence/phase-9.md`).
+- in EARS, against the engine through the binding (`packages/ears/tests/engine/model-based.spec.ts`), where it also
+  checks a watch on every derived read, every row and the whole state against the read run afresh after every op; and
+  during apack's move onto elmdb it drove EARS' JavaScript implementation over lmdb-js with the same workloads and
+  compared the two (`docs/evidence/phase-9.md`).
 
 ## Where a test's files go
 
@@ -299,7 +299,8 @@ other checks before a push, so the job finds nothing. Linux splits the change's 
 runner doesn't compile builds unchanged and passes every test, so it would show as missed whatever the tests: the script
 reads each changed file's `#[cfg(...)]` items, and Linux leaves out the code compiled only on another platform, while
 Windows mutates only the code that compiles on Windows alone (`--windows-only`); a change with none installs nothing
-there. macOS-only code is in neither, and is read on a Mac. A change to documentation alone mutates nothing.
+there. macOS-only code is in neither, and is read on a Mac. A change to documentation alone mutates nothing, and
+neither does one to EARS' TypeScript alone ([EARS](#ears)).
 `mutants-pass`, the workflow's last job, passes when every job before it did, at once for a change with nothing to
 mutate, and is the check a merge waits on. A dispatched share reports under another name: it runs on the pull
 request's own commit, where one share passing would otherwise stand for all of them until the pull request's run
@@ -513,6 +514,49 @@ is collected: napi-rs roots the object of a method that returns a task for the t
 every promise the binding answers is spawned instead. Each blocking form, the plain name, is the one the rest of the
 suite calls.
 
+## EARS
+
+`packages/ears/tests/` (`ears.md`, Tests) holds EARS' specs, under vitest: the black-box specs of its API, each on a
+temporary database of its own; the model harness's TypeScript twin, which checks an EARS engine against a reference
+model after every op with a watch on every derived read, every row and the whole state; the watch contract's specs,
+one with a second process committing into the same database and killed part way; the vocabulary rules; the typed
+contract's type assertions, which `typecheck` fails; and the guards. A test or a hook is bounded by a minute
+(`testTimeout` and `hookTimeout`), and test files run in parallel. They run in two halves, which `npm test` at the
+root runs after the binding's suite (`npm run test:ears` alone):
+
+- **the fast half** (`vitest.config.ts`), every spec but `*.integration.spec.ts`;
+- **the integration half** (`vitest.integration.config.ts`, which extends the fast half's), which needs `dist` built:
+  it packs the built package into a consumer with `elmdb` beside it and no Node types, compiles the consumer on
+  TypeScript 5.7 and on the root's, loads each export in Node, and asks a language service for completions over the
+  source and the packed package. TypeScript 5.7, the oldest EARS supports, is `packages/typescript-floor`, a private
+  workspace whose one dependency is that compiler, so npm installs it in the workspace's own `node_modules`, and the
+  half is given its path as `EARS_TYPESCRIPT_FLOOR`. A floor declared inside `packages/ears` replaced the compiler
+  EARS itself builds with.
+
+**The API reports**, `packages/ears/etc/index.api.md` and `database.api.md`, are API Extractor's over the built
+declarations, one per entry: `npm run api:check -w @elmdb/ears` fails when either differs from a fresh reading, and
+`npm run api:update -w @elmdb/ears` writes them. Their diff is how an export change is reviewed. The change filters of
+`ci.yml`, `full.yml` and `mutants.yml` read them as code, though they end in `.md`.
+
+**CI**: `ci.yml`'s `ears` job, on Node 24, which vitest 4.1.12 needs (`^20 || ^22 || >=24`), builds the binding (by
+cargo on Windows, as `platforms.yml` builds it there) and `dist`, then runs `typecheck:ears`, `test:ears` and the API
+report check. It runs on Linux for every push to `main` and every pull request, and on macOS arm64 and Windows x64
+wherever the fast tier's `platforms` job does, and `ci-pass` waits on it. It isn't in the full tier, under Electron or
+on each Node the platform jobs load the binding in: EARS holds no native code, so a platform reaches it only through
+the binding, which those jobs run. Its runs on elmdb#207 took 3 min 51 s on Linux, 5 min 43 s on macOS and 6 min 50 s
+on Windows (2026-11-20), and added nothing to the pull request's wall time. The binding's jobs run the root's
+`build:binding`, `typecheck:binding` and `test:binding`, not `build`, `typecheck` and `test`, which take in EARS and its
+vitest, on Node 23 there. `cargo xtask pre-push` runs the root's
+`build`, `typecheck` and `test` and the API report check, and `npm ci` first when the lockfile is newer than
+`node_modules`.
+
+**Mutation testing reads Rust alone.** A change to EARS alone passes `mutants.yml`'s filter, since TypeScript is no
+document, and its jobs run `scripts/mutants-in-diff.py`, which hands cargo-mutants the change's Rust, and there is none:
+nothing of EARS is mutated, and `mutants-pass` passes. What shows EARS' specs can fail is the scratch copies made when
+EARS arrived (elmdb#207): the engine's `SELF_LINK` refusal removed failed 2 specs, `grant` writing a `revoke` op 7,
+and a watch a commit marks not set to run again 42. Mutating EARS' TypeScript is one of the openings the move left
+(`../archive/roadmap/ears.md`).
+
 ## Platforms
 
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
@@ -524,7 +568,7 @@ the engine's with `diagnostics`, the doc tests); `heap` (the maintenance heap bo
 (Dependencies, below); the
 binding's build, typecheck and suite; the read profile; SQLite's comparison at 2,000 notes; the read-only mount,
 idle-reader, reader-recovery, process-claim and publication scripts under `scripts/`; and that the generated loader and
-declarations are committed); and `loom` and `shuttle` (Concurrency models).
+declarations are committed); `loom` and `shuttle` (Concurrency models); and `ears` ([EARS](#ears)).
 Every pull request, draft or ready for review, also runs the fast tier's platforms, macOS arm64 and Windows x64. A
 pull request ready for review runs the full tier as well (`.github/workflows/full.yml`), which completes the matrix —
 macOS (arm64, x64), Linux (x64, arm64; glibc and musl) and Windows x64 — each job building the binding and running
