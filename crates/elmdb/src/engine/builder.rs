@@ -1072,7 +1072,7 @@ mod tests {
         let waiter = std::thread::spawn(move || tell.send(matches!(waiting.waited(false), Waited::Idle)).unwrap());
         assert!(told.recv_timeout(Duration::from_millis(200)).is_err(), "the wait answered with work queued");
         core.stop();
-        assert_eq!(told.recv_timeout(Duration::from_secs(5)), Ok(true), "a builder stopped for good is waited for");
+        assert_eq!(told.recv_timeout(crate::waits::ARRIVES), Ok(true), "a builder stopped for good is waited for");
         waiter.join().unwrap();
         // A close under way is said to it at once
         let core = Core::new(Box::new(SystemClock));

@@ -819,18 +819,19 @@ mod tests {
     fn an_exit_whose_store_comes_free_late_closes_within_what_is_left_of_its_wait() {
         let dir = tempfile::tempdir().unwrap();
         let db = Database::open(dir.path().join("db"), OpenOptions::default()).unwrap();
-        // An operation lets the store go 2.5 s into a wait of 3, and a sync of another thread holds the record past
-        // both: a close given the whole wait again would take 5.5 s
+        // An operation lets the store go 5 s into a wait of 6, and a sync of another thread holds the record past
+        // both: the close ends at 6 s, and one given the whole wait again would take 11 s. The bound between them
+        // leaves 2.5 s either side, for a loaded runner: it was 1.5 s on times half these
         let store = db.store().unwrap();
         let held = store.hold_record();
         let operation = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(2500));
+            std::thread::sleep(Duration::from_secs(5));
             drop(store);
         });
         let began = std::time::Instant::now();
-        assert_eq!(db.close_at_exit(Duration::from_secs(3)).unwrap_err().code, ErrorCode::Io);
+        assert_eq!(db.close_at_exit(Duration::from_secs(6)).unwrap_err().code, ErrorCode::Io);
         let took = began.elapsed();
-        assert!(took < Duration::from_millis(4500), "{took:?}, for a wait of 3 s");
+        assert!(took < Duration::from_millis(8500), "{took:?}, for a wait of 6 s");
         operation.join().unwrap();
         drop(held);
     }

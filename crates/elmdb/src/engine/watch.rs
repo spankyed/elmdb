@@ -701,7 +701,7 @@ mod registration_tests {
                 deliver_with(&tracks, &[id], |id| read_watch_with(&tracks, &|| 0, id, |_| (Ok(vec![1]), dependency())))
             })
         };
-        listening.recv_timeout(Duration::from_secs(5)).expect("the listener runs");
+        listening.recv_timeout(crate::waits::ARRIVES).expect("the listener runs");
         let (ended, unwatched) = channel();
         let unwatcher = {
             let tracks = Arc::clone(&tracks);
@@ -712,7 +712,7 @@ mod registration_tests {
         };
         assert!(unwatched.recv_timeout(Duration::from_millis(100)).is_err(), "unwatch returned while the listener ran");
         release.send(()).unwrap();
-        unwatched.recv_timeout(Duration::from_secs(5)).expect("unwatch returns once the listener has");
+        unwatched.recv_timeout(crate::waits::ARRIVES).expect("unwatch returns once the listener has");
         gone.try_recv().expect("the listener was dropped before unwatch returned");
         assert!(delivery.join().unwrap().is_empty());
         unwatcher.join().unwrap();

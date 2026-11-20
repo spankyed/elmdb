@@ -11,6 +11,8 @@ pub mod format;
 pub mod schema;
 mod store;
 mod sync;
+#[cfg(test)]
+mod waits;
 
 pub use database::{Database, OpenOptions, OpenReport, Restore};
 pub use engine::Unit;

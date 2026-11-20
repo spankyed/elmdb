@@ -380,7 +380,7 @@ fn a_wait_for_the_write_transaction_ends_when_the_unit_does_or_when_it_is_stoppe
     drop(gate);
     writer.release();
     store.end_unit();
-    ended.recv_timeout(Duration::from_secs(5)).expect("returned once the unit ended");
+    ended.recv_timeout(crate::waits::ARRIVES).expect("returned once the unit ended");
 
     // Ended by its stop, the unit still open
     let (txn, gate, writer) = store.begin().unwrap();
@@ -389,7 +389,7 @@ fn a_wait_for_the_write_transaction_ends_when_the_unit_does_or_when_it_is_stoppe
     assert!(ended.recv_timeout(quiet_for).is_err(), "returned while the unit was open");
     stop.store(true, Ordering::SeqCst);
     store.wake_unit_waiters();
-    ended.recv_timeout(Duration::from_secs(5)).expect("returned once stopped");
+    ended.recv_timeout(crate::waits::ARRIVES).expect("returned once stopped");
     txn.abort();
     drop(gate);
     writer.release();
@@ -536,7 +536,7 @@ fn a_read_runs_while_a_growth_waits_for_the_open_unit() {
         let store = Arc::clone(&store);
         std::thread::spawn(move || sent.send(get(&store, "a")).unwrap());
     }
-    let value = read.recv_timeout(Duration::from_secs(5)).expect("a read ran while a growth waited for the unit");
+    let value = read.recv_timeout(crate::waits::ARRIVES).expect("a read ran while a growth waited for the unit");
     assert_eq!(value.as_deref(), Some(&b"1"[..]));
     txn.abort();
     drop(gate);
@@ -568,14 +568,13 @@ fn a_backup_replaces_an_earlier_one_and_refuses_a_database_open_here() {
 
 #[test]
 fn a_close_returns_though_a_wait_for_durability_is_still_held() {
-    use std::time::Duration;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), StoreOptions::default()).unwrap();
     put(&store, "a", b"1").unwrap();
     let durable = store.durable().expect("the store syncs");
     let (sent, closed) = std::sync::mpsc::channel();
     std::thread::spawn(move || sent.send(store.close()).unwrap());
-    closed.recv_timeout(Duration::from_secs(5)).expect("the close returned").unwrap();
+    closed.recv_timeout(crate::waits::ARRIVES).expect("the close returned").unwrap();
     durable.wait().unwrap();
 }
 
@@ -678,11 +677,11 @@ fn backup_reserves_destination_against_open_and_another_publisher() {
     let worker = std::thread::spawn(move || {
         crate::failpoints::run_once_here(crate::failpoints::points::BACKUP_READY, move || {
             entered.send(()).expect("the test waits for the publisher");
-            continued.recv_timeout(Duration::from_secs(5)).expect("the test lets the publisher go on");
+            continued.recv_timeout(crate::waits::ARRIVES).expect("the test lets the publisher go on");
         });
         worker_store.copy_to(&destination)
     });
-    ready.recv_timeout(Duration::from_secs(5)).expect("publisher reached ready point");
+    ready.recv_timeout(crate::waits::ARRIVES).expect("publisher reached ready point");
     let opened = Store::open(target.path(), quiet());
     let published = store.copy_to(target.path());
     resume.send(()).unwrap();

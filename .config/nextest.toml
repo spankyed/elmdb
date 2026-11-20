@@ -12,10 +12,11 @@ slow-timeout = { period = "60s", terminate-after = 4 }
 filter = "test(=engine::tests::model::machine::the_engine_holds_what_the_model_holds_after_every_step)"
 slow-timeout = { period = "60s", terminate-after = 15 }
 
-# A watch callback that closes, unwatches or delivers again from inside a delivery deadlocks when it regresses
+# A watch callback that closes, unwatches or delivers again from inside a delivery deadlocks when it regresses: ended
+# at 20 s, above the 8 s a test of these gives each wait for what must happen (`waits::ARRIVES`)
 [[profile.default.overrides]]
 filter = "test(/^engine::tests::tracked::/)"
-slow-timeout = { period = "10s", terminate-after = 1 }
+slow-timeout = { period = "10s", terminate-after = 2 }
 
 # An open that asks again and again for a meta page no commit will bring never ends: the test takes under a second
 [[profile.default.overrides]]

@@ -215,12 +215,12 @@ mod tests {
         let owner = std::thread::spawn(move || {
             let mut state = shared.state.lock().unwrap();
             locked.send(()).unwrap();
-            wait_release.recv_timeout(Duration::from_secs(3)).unwrap();
+            wait_release.recv_timeout(crate::waits::ARRIVES).unwrap();
             // Let the detached worker end normally after simulating a thread that was gone at exit.
             state.stopping = true;
             shared.changed.notify_one();
         });
-        wait_locked.recv_timeout(Duration::from_secs(3)).unwrap();
+        wait_locked.recv_timeout(crate::waits::ARRIVES).unwrap();
         idle.stop_at_exit(Instant::now());
         drop(idle);
         release.send(()).unwrap();

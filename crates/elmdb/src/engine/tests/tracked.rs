@@ -774,13 +774,13 @@ fn a_unit_opened_between_writer_checks_is_refused_without_holding_schema() {
         });
         finished.send(writer.write(&batch(Vec::new()), false).map(|_| ())).unwrap();
     });
-    queued.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+    queued.recv_timeout(crate::waits::ARRIVES).unwrap();
     let unit = db.begin().unwrap();
     proceed.send(()).unwrap();
     assert_eq!(db.set_schema(super::schema()).unwrap_err().code, crate::ErrorCode::UnitOpen);
     assert_eq!(
         result
-            .recv_timeout(std::time::Duration::from_secs(2))
+            .recv_timeout(crate::waits::ARRIVES)
             .expect("a writer must refuse an open unit rather than wait on it")
             .unwrap_err()
             .code,
@@ -853,7 +853,7 @@ fn ends_beside_a_builder_s_delivery(action: &'static str, needs: Needs) {
     let links =
         (1..60).map(|i| json!({ "op": "link", "source": format!("Task-{i}"), "kind": "refs", "target": "Task-0" }));
     write(&db, links.collect()).unwrap();
-    told.recv_timeout(Duration::from_secs(4)).expect("the builder's drain delivered to the watch");
+    told.recv_timeout(crate::waits::ARRIVES).expect("the builder's drain delivered to the watch");
 
     let (done, returned) = std::sync::mpsc::channel();
     let called = Arc::clone(&db);
@@ -865,7 +865,7 @@ fn ends_beside_a_builder_s_delivery(action: &'static str, needs: Needs) {
         let _ = done.send(outcome);
     });
     returned
-        .recv_timeout(Duration::from_secs(4))
+        .recv_timeout(crate::waits::ARRIVES)
         .unwrap_or_else(|_| panic!("{action}: it waits for the builder's thread, which waits for what it holds"))
         .unwrap();
 }
@@ -928,7 +928,6 @@ fn link_all(db: &Database) {
 /// once the listener returns
 #[test]
 fn a_listener_on_the_builder_s_thread_changes_the_schema() {
-    use std::time::Duration;
     let (_dir, db, schema, top) = ranked_tasks();
     let (tell, told) = std::sync::mpsc::channel();
     let mut tell = Some(tell);
@@ -949,7 +948,7 @@ fn a_listener_on_the_builder_s_thread_changes_the_schema() {
     .unwrap();
     link_all(&db);
     let outcome = told
-        .recv_timeout(Duration::from_secs(4))
+        .recv_timeout(crate::waits::ARRIVES)
         .expect("the change waits for the thread it is made on, or that thread ended without making it");
     assert_eq!(outcome.unwrap(), 1, "the tolerance changed");
     // The schema is the one given, and the builder builds what the change left
@@ -969,7 +968,6 @@ fn a_listener_on_the_builder_s_thread_changes_the_schema() {
 fn asked_on_the_builder_s_thread<T: Send + 'static>(
     asks: impl Fn(&Database) -> T + Send + Sync + 'static,
 ) -> (tempfile::TempDir, Arc<Database>, T) {
-    use std::time::Duration;
     let (dir, db, _, top) = ranked_tasks();
     db.read(&reads(vec![top], Some(7))).unwrap();
     let (tell, told) = std::sync::mpsc::channel();
@@ -983,7 +981,7 @@ fn asked_on_the_builder_s_thread<T: Send + 'static>(
     .unwrap();
     link_all(&db);
     let answer = told
-        .recv_timeout(Duration::from_secs(4))
+        .recv_timeout(crate::waits::ARRIVES)
         .expect("the builder's commit told its listener, which was answered and not left waiting for its own thread");
     (dir, db, answer)
 }
@@ -1056,7 +1054,7 @@ fn asked_as_the_builder_is_waited_for<T: Send + 'static>(
     })))
     .unwrap();
     link_all(db);
-    started.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
+    started.recv_timeout(crate::waits::ARRIVES).expect("the builder's commit told its listener");
     told
 }
 
@@ -1081,7 +1079,7 @@ fn a_wait_for_the_builds_under_way_waits_through_a_schema_change_for_what_it_lea
     })))
     .unwrap();
     link_all(&db);
-    started.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
+    started.recv_timeout(crate::waits::ARRIVES).expect("the builder's commit told its listener");
     let (tell, told) = std::sync::mpsc::channel();
     let waiting = Arc::clone(&db);
     std::thread::spawn(move || tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap());
@@ -1099,7 +1097,7 @@ fn a_wait_for_the_builds_under_way_waits_through_a_schema_change_for_what_it_lea
     let early = told.recv_timeout(Duration::from_millis(200));
     assert!(early.is_err(), "answered {early:?} with the index the change declared not built");
     release.send(()).unwrap();
-    assert_eq!(told.recv_timeout(Duration::from_secs(4)).unwrap(), Ok(()));
+    assert_eq!(told.recv_timeout(crate::waits::ARRIVES).unwrap(), Ok(()));
     let unbuilt: Vec<String> =
         db.index_status().unwrap().into_iter().filter(|index| !index.built).map(|index| index.index).collect();
     assert_eq!(unbuilt, Vec::<String>::new());
@@ -1131,8 +1129,8 @@ fn a_wait_for_the_builds_under_way_as_a_close_gives_up_goes_on_to_what_it_queues
     assert!(!db.close_within(Some(Duration::from_millis(5))).unwrap());
     assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::CLOSE_GAVE_UP));
     drop(held);
-    returned.recv_timeout(Duration::from_secs(4)).unwrap();
-    assert_eq!(told.recv_timeout(Duration::from_secs(4)).unwrap(), Ok(()));
+    returned.recv_timeout(crate::waits::ARRIVES).unwrap();
+    assert_eq!(told.recv_timeout(crate::waits::ARRIVES).unwrap(), Ok(()));
     db.close().unwrap();
 }
 
@@ -1153,7 +1151,7 @@ fn a_thread_stopped_is_waited_for_until_the_work_it_is_on_ends() {
     })))
     .unwrap();
     link_all(&db);
-    started.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
+    started.recv_timeout(crate::waits::ARRIVES).expect("the builder's commit told its listener");
     let (tell, told) = std::sync::mpsc::channel();
     let pausing = Arc::clone(&db);
     let pauser = std::thread::spawn(move || {
@@ -1162,7 +1160,7 @@ fn a_thread_stopped_is_waited_for_until_the_work_it_is_on_ends() {
     });
     assert!(told.recv_timeout(Duration::from_millis(200)).is_err(), "the thread was let go of before its work ended");
     release.send(()).unwrap();
-    told.recv_timeout(Duration::from_secs(4)).expect("the stop waited past the work's end");
+    told.recv_timeout(crate::waits::ARRIVES).expect("the stop waited past the work's end");
     pauser.join().unwrap();
     db.close().unwrap();
 }
@@ -1184,8 +1182,8 @@ fn a_wait_for_the_builds_a_close_ends_is_told_the_database_is_closed() {
     // is told the same
     std::thread::sleep(Duration::from_millis(50));
     db.close().unwrap();
-    returned.recv_timeout(Duration::from_secs(4)).unwrap();
-    assert_eq!(told.recv_timeout(Duration::from_secs(4)).unwrap(), Err(crate::ErrorCode::Closed));
+    returned.recv_timeout(crate::waits::ARRIVES).unwrap();
+    assert_eq!(told.recv_timeout(crate::waits::ARRIVES).unwrap(), Err(crate::ErrorCode::Closed));
     assert_eq!(db.wait_for_index_builds().unwrap_err().code, crate::ErrorCode::Closed);
 }
 
@@ -1211,7 +1209,7 @@ fn the_last_of_a_database_let_go_of_with_the_builder_s_listener_waits_for_nothin
     })))
     .unwrap();
     link_all(&db);
-    starts.recv_timeout(Duration::from_secs(4)).expect("the builder's commit told its listener");
+    starts.recv_timeout(crate::waits::ARRIVES).expect("the builder's commit told its listener");
     drop(db);
     release.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(4);
@@ -1234,7 +1232,6 @@ fn the_last_of_a_database_let_go_of_with_the_builder_s_listener_waits_for_nothin
 #[test]
 fn a_listener_of_the_builder_s_commits_that_panics_is_heard_no_more() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
     let (_dir, db, schema, top) = ranked_tasks();
     db.read(&reads(vec![top], Some(7))).unwrap();
     let heard = Arc::new(AtomicUsize::new(0));
@@ -1248,7 +1245,7 @@ fn a_listener_of_the_builder_s_commits_that_panics_is_heard_no_more() {
     let (tell, told) = std::sync::mpsc::channel();
     let waiting = Arc::clone(&db);
     std::thread::spawn(move || tell.send(waiting.wait_for_index_builds()).unwrap());
-    told.recv_timeout(Duration::from_secs(4)).expect("the builder went on past its listener's panic").unwrap();
+    told.recv_timeout(crate::waits::ARRIVES).expect("the builder went on past its listener's panic").unwrap();
     assert_eq!(heard.load(Ordering::SeqCst), 1);
     // A schema change waits for the builder's thread, which ended without the panic, and the next builder's commits
     // tell no one

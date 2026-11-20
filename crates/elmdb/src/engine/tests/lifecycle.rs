@@ -298,7 +298,7 @@ fn an_adoption_of_nothing_leaves_no_wait_for_the_builds_waiting() {
     let (tell, told) = std::sync::mpsc::channel();
     let waiting = std::sync::Arc::clone(&db);
     std::thread::spawn(move || tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap());
-    let waited = told.recv_timeout(std::time::Duration::from_secs(4));
+    let waited = told.recv_timeout(crate::waits::ARRIVES);
     assert_eq!(waited, Ok(Ok(())), "the wait is held by a change that was begun and never ended");
 }
 

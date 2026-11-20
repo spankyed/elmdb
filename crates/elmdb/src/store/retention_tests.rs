@@ -232,14 +232,14 @@ fn active_snapshot_outlives_expiry_and_cannot_return_after_commit() {
                 .read(|txn, db| {
                     let id = txn.id();
                     started.send(()).unwrap();
-                    wait_resume.recv_timeout(Duration::from_secs(3)).unwrap();
+                    wait_resume.recv_timeout(crate::waits::ARRIVES).unwrap();
                     assert_eq!(txn.id(), id);
                     assert_eq!(db.get(txn, b"block0000")?, Some(vec![0; VALUE_BYTES].as_slice()));
                     Ok(())
                 })
                 .unwrap();
         });
-        wait_started.recv_timeout(Duration::from_secs(3)).unwrap();
+        wait_started.recv_timeout(crate::waits::ARRIVES).unwrap();
         // A separate completed read expires while the first snapshot remains actively borrowed.
         store.read(|_, _| Ok(())).unwrap();
         wait_until_empty(store);
