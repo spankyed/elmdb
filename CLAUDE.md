@@ -40,6 +40,7 @@ cargo nextest run --workspace  # each test in its own process, under .config/nex
 cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
 cargo xtask check-notices        # the npm package's third-party notices match the lockfile (needs cargo-about 0.9.3)
+cargo deny check bans sources advisories  # deny.toml: no banned crate, crates.io alone, no RustSec advisory (needs cargo-deny; name the checks, a bare `check` fails on licenses, which about.toml owns)
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
 cargo xtask check-exact          # every ICU crate, and each crate whose output an index stores, required at exactly its locked version
 cargo xtask check-sync           # engine code locks through crate::sync, which the concurrency models swap, or says why not
@@ -55,8 +56,9 @@ benchmarks' smoke runs, the Loom and Shuttle models, and the read profile. `xtas
 repository checks `xtask/src/main.rs` hands it, is the list.
 
 - **Changed a protocol type?** `cargo xtask generate`, and commit `crates/elmdb-node/protocol/`.
-- **Changed a dependency, or the toolchain?** `cargo xtask notices`, and commit what it writes into
-  `crates/elmdb-node/`. It fails on a dependency under a license `crates/elmdb-node/about.toml` doesn't accept, and on
+- **Changed a dependency, or the toolchain?** `cargo deny check bans sources advisories`, the last of which CI runs
+  on a change to `Cargo.lock` or `deny.toml`; an advisory is answered by removing the crate, or by an `ignore` in
+  `deny.toml` naming it and why. Then `cargo xtask notices`, and commit what it writes into `crates/elmdb-node/`. It fails on a dependency under a license `crates/elmdb-node/about.toml` doesn't accept, and on
   one whose clarified license file there changed, until its license is read and the file says so.
 - **Moved a line a `// mutant-skip:` excuses?** Keep its comment directly above it, and that is all: the comment is the
   exclusion, read from the source at each run, and no list of them is committed. A `cargo mutants` run by hand reads

@@ -9,9 +9,9 @@ read allocations, copies and codecs (`read-allocation-codec.md`) and query work 
 (`string-order.md`), the tooling for tests that can fail, faults by name and measured bounds
 (`verification-tooling.md`), and the maintenance verification (`maintenance-verification.md`).
 What graph query languages answer that a plan doesn't, and the order to add it, is in
-[`deferred/graph-traversal.md`](deferred/graph-traversal.md). The rest of the supply chain, `cargo-deny`, an
-advisory audit and a schema language URL that resolves, is planned in
-[`deferred/supply-chain.md`](deferred/supply-chain.md). What a schema change costs the writes beside it, and the
+[`deferred/graph-traversal.md`](deferred/graph-traversal.md). The rest of the supply chain is in
+[`deferred/supply-chain.md`](deferred/supply-chain.md): `cargo-deny` and an advisory audit, which are built, and a
+schema language URL that resolves, which waits on the domain's owner. What a schema change costs the writes beside it, and the
 design that would cut the slowest of them, is in
 [`deferred/schema-change-write-latency.md`](deferred/schema-change-write-latency.md).
 

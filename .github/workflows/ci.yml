@@ -25,12 +25,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Whether the change holds anything but documentation, which no check reads
+  # Whether the change holds anything but documentation, which no check reads, and whether it changes the lockfile or
+  # `deny.toml`, which the advisories are read against
   changes:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       code: ${{ steps.diff.outputs.code }}
+      dependencies: ${{ steps.diff.outputs.dependencies }}
     steps:
       # A pull request's merge commit and its first parent, the base it merges into
       - uses: actions/checkout@v4
@@ -49,6 +51,12 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           else
             echo "code=true" >> "$GITHUB_OUTPUT"
+          fi
+          # With no base to compare against, as with no documentation to tell apart, everything runs
+          if [ -n "$base" ] && ! git diff --name-only "$base" HEAD | grep -qE '^(Cargo\.lock|deny\.toml)$'; then
+            echo "dependencies=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "dependencies=true" >> "$GITHUB_OUTPUT"
           fi
 
   # The Linux checks, split three ways so they run beside each other: lint and the suites; the heap test and the
@@ -122,6 +130,16 @@ jobs:
         with:
           tool: cargo-about@0.9.3
       - run: cargo xtask check-notices
+      # deny.toml: no banned crate, and none from a git repository or a registry other than crates.io. The checks are
+      # named, since a bare `cargo deny check` would also run a license check deny.toml leaves to about.toml
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.21.0
+      - run: cargo deny check bans sources
+      # The RustSec advisories, for a change to the lockfile or to deny.toml, whose ignores relax this check. Any other
+      # change leaves them to advisories.yml's daily run, so an advisory published today fails no unrelated change
+      - if: needs.changes.outputs.dependencies == 'true'
+        run: cargo deny check advisories
       - run: cargo xtask check-one-lmdb
       - run: cargo xtask check-exact
       - run: cargo xtask check-diagnostics-off
