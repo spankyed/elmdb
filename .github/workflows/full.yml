@@ -38,7 +38,8 @@ jobs:
           fetch-depth: 2
       - id: diff
         run: |
-          if [ "$GITHUB_EVENT_NAME" = pull_request ] && ! git diff --name-only HEAD^1 HEAD | grep -qvE '^docs/|\.md$'; then
+          # A document is a file under docs/ or one ending in .md, but for EARS' API reports (ci.yml's changes job)
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && ! git diff --name-only HEAD^1 HEAD | sed -E 's#^(packages/ears/etc/[^/]*\.api)\.md$#\1#' | grep -qvE '^docs/|\.md$'; then
             echo "code=false" >> "$GITHUB_OUTPUT"
           else
             echo "code=true" >> "$GITHUB_OUTPUT"

@@ -57,7 +57,8 @@ jobs:
       - id: scope
         if: inputs.shard == '' || inputs.shard == matrix.shard
         run: |
-          if git diff --name-only "$BASE...HEAD" | grep -qvE '^docs/|\.md$'; then
+          # A document is a file under docs/ or one ending in .md, but for EARS' API reports (ci.yml's changes job)
+          if git diff --name-only "$BASE...HEAD" | sed -E 's#^(packages/ears/etc/[^/]*\.api)\.md$#\1#' | grep -qvE '^docs/|\.md$'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
       - if: steps.scope.outputs.code == 'true'
