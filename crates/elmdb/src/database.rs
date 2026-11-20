@@ -804,11 +804,11 @@ mod tests {
         // a loaded runner: it was 1.5 s on times half these, and then 2.5 s
         let store = db.store().unwrap();
         let held = store.hold_record();
+        let began = std::time::Instant::now();
         let operation = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs(5));
             drop(store);
         });
-        let began = std::time::Instant::now();
         assert_eq!(db.close_at_exit(Duration::from_secs(6)).unwrap_err().code, ErrorCode::Io);
         let took = began.elapsed();
         assert!(took < Duration::from_secs(10), "{took:?}, for a wait of 6 s");
