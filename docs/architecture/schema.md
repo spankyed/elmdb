@@ -353,7 +353,9 @@ elmdb's Rust schema types are the definition. From them `cargo xtask generate` w
 `crates/elmdb-node/protocol/`, which the binding's package holds:
 
 - the TypeScript types of the schema (`Schema`, `Schema.ts`);
-- the JSON Schema `$schema` names (`schema-1.json`), for an editor to complete and check a schema with. It is looser
+- the JSON Schema `$schema` names (`schema-1.json`), for an editor to complete and check a schema with. Its `$id` is
+  the schema language's URL, `SCHEMA_LANGUAGE`, which `check-generated` holds; nothing is served at that URL
+  (`../roadmap/deferred/supply-chain.md`). It is looser
   than the parser: it takes a key it doesn't know, and the `dot` metric and the `f16` and `i8` precisions the
   validator refuses, so a schema is valid once `open` or `setSchema` takes it, not once the JSON Schema does.
 

@@ -1,6 +1,7 @@
 //! The repository's own tasks, run as `cargo xtask <task>`:
 //!
-//! - `generate`: writes the TypeScript declarations of the protocol's types into `crates/elmdb-node/protocol/`.
+//! - `generate`: writes the TypeScript declarations of the protocol's types into `crates/elmdb-node/protocol/`, and
+//!   the schema's JSON Schema, whose `$id` is the schema language's URL.
 //! - `check-generated`: fails when what `generate` would write differs from what is committed.
 //! - `notices`: writes the npm package's notices into `crates/elmdb-node/`: `THIRD-PARTY-NOTICES`, the licenses and
 //!   notices of the crates its `.node` files are built from, with cargo-about (`CARGO_ABOUT`) and the configuration and
