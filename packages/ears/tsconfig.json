@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "noUnusedLocals": true,
+    // Typechecking only, so the .tsbuildinfo is the whole point: a re-run with nothing changed reuses it
+    // instead of reparsing. `incremental` works with `noEmit`; `composite` does not, which is why this is
+    // not project references (docs/goals/goal-test-tiers.md).
+    "incremental": true,
+    "tsBuildInfoFile": "../../node_modules/.cache/tsbuildinfo/apack-ears.tsbuildinfo",
+    "target": "ES2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "verbatimModuleSyntax": true,
+    // Relative imports name the .ts source; tsc rewrites them to .js in emitted JS
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "bench/**/*.ts", "scripts/**/*.ts", "vitest.config.ts"]
+}
