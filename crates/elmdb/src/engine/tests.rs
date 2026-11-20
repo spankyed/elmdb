@@ -1190,3 +1190,62 @@ mod units {
         db.begin().unwrap().commit(false).unwrap();
     }
 }
+
+/// The same work owed a third time in a row with nothing committed between is a builder that ran it and left it
+/// unbuilt; work owed anew, or owed again after a commit, is progress and starts the count again
+#[test]
+fn a_wait_counts_the_same_work_queued_again_with_no_commit_between() {
+    use super::builder::Work;
+    let a = vec![Work::Index { entity_type: "Task".to_owned(), index: "a".to_owned() }];
+    let b = vec![Work::Rank { name: "top".to_owned() }];
+    let mut queued = super::QueuedAgain::default();
+    assert!(!queued.stuck(&a, 7));
+    assert!(!queued.stuck(&a, 7));
+    assert!(queued.stuck(&a, 7), "the builder ran it twice over and left it unbuilt");
+    // A commit between is progress
+    let mut queued = super::QueuedAgain::default();
+    for sequence in 1..5 {
+        assert!(!queued.stuck(&a, sequence));
+    }
+    // Other work owed is too
+    let mut queued = super::QueuedAgain::default();
+    for owed in [&a, &b, &a, &b] {
+        assert!(!queued.stuck(owed, 7));
+    }
+}
+
+/// A message names each piece of work by what it builds
+#[test]
+fn work_is_named_by_what_it_builds() {
+    use super::builder::Work;
+    let work = [
+        Work::Index { entity_type: "Task".to_owned(), index: "a".to_owned() },
+        Work::Order { entity_type: "Task".to_owned(), index: "a".to_owned() },
+        Work::Rank { name: "top".to_owned() },
+    ];
+    assert_eq!(super::named(&work), "Task's index a, the order of Task's index a, the rank index top");
+}
+
+/// Work queued with no thread to take it is waited for as work under way is: a unit open on the waiting thread is
+/// refused, since the thread the wait starts would build only once the unit ends
+#[test]
+fn a_wait_with_a_unit_open_and_work_queued_for_no_thread_is_refused() {
+    use super::builder::Work;
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open(&dir));
+    db.wait_for_index_builds().unwrap();
+    db.building.pause();
+    db.building.queue([Work::Index { entity_type: "Task".to_owned(), index: "a".to_owned() }]);
+    assert!(!db.building.running());
+    let (tell, told) = std::sync::mpsc::channel();
+    let waiting = std::sync::Arc::clone(&db);
+    std::thread::spawn(move || {
+        let unit = waiting.begin().unwrap();
+        tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap();
+        drop(unit);
+    });
+    let answer = told
+        .recv_timeout(std::time::Duration::from_secs(8))
+        .expect("the wait answered rather than waiting on its own unit");
+    assert_eq!(answer, Err(ErrorCode::UnitOpen));
+}
