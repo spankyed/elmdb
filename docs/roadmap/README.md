@@ -7,7 +7,8 @@ two); each file says how far it is built. Directions that were built are in
 read allocations, copies and codecs (`read-allocation-codec.md`) and query work efficiency
 (`query-work-efficiency.md`), one plan algebra (`plan-algebra.md`), a string's order read from its index
 (`string-order.md`), the tooling for tests that can fail, faults by name and measured bounds
-(`verification-tooling.md`), and the maintenance verification (`maintenance-verification.md`).
+(`verification-tooling.md`), the maintenance verification (`maintenance-verification.md`), and EARS' move into this
+repository as `@elmdb/ears` (`ears.md`).
 What graph query languages answer that a plan doesn't, and the order to add it, is in
 [`deferred/graph-traversal.md`](deferred/graph-traversal.md). The rest of the supply chain is in
 [`deferred/supply-chain.md`](deferred/supply-chain.md): `cargo-deny` and an advisory audit, which are built, and a
@@ -33,11 +34,6 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 - [One builder for a database's life](single-builder.md): built. The index builder was stopped and started at
   every schema change, which eleven defects came from; a database now has one building, told of each schema change
   and each close, with its operations modelled.
-
-## Where the code lives
-
-- [EARS in elmdb's repository](ears.md): planned, not built. apack's `@apackdev/ears`, the fluent TypeScript API over
-  a database, moves here as `@elmdb/ears`, with what apack keeps, what it costs and the phases.
 
 ## Development improvements
 

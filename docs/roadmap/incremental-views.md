@@ -7,7 +7,7 @@ Incremental views and the boundary).
 ## Where it starts
 
 Tracked reads (`../architecture/engine.md`, Change sets and watch) tell a watch which commits wrote into what it read,
-and apack's watch scheduler (`packages/apack-ears/src/watch.ts`, Phase 3) runs it again no sooner than four times its
+and EARS' watch scheduler (`packages/ears/src/watch.ts`, Phase 3) runs it again no sooner than four times its
 last run's time and at least a frame after the last, so an expensive view takes at most a fifth of a core. That is
 exact about when to recompute and bounded in what it costs, but a view still recomputes its whole answer for one row
 changed in it.

@@ -363,7 +363,7 @@ elmdb's Rust schema types are the definition. From them `cargo xtask generate` w
 ## apack's schema
 
 apack doesn't write this document. Codegen reads each pack's manifest and shapes into its registration, and the host
-builds the schema from the registered packs' (`toElmdbSchema`, apack's `packages/apack-ears/src/schema.ts`), refusing a
+builds the schema from the registered packs' (`toElmdbSchema`, EARS' `packages/ears/src/schema.ts`), refusing a
 name two packs declare and naming both:
 
 - **types, short code prefixes and indexes** from each `apack.json` entity entry. Its `indexes: ["pinned"]` is the

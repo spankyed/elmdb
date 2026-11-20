@@ -8,7 +8,8 @@ of this directory's; this document covers the API over it.
 
 In this repository "the engine" is the Rust crate. `createEarsEngine` and `EarsEngine` keep the name EARS gave them
 before it moved here, so below **an EARS engine** is what `createEarsEngine` returns, and "the engine" alone is still
-the crate. The names are one of the decisions left for after the move (`../roadmap/ears.md`).
+the crate. The names are one of the decisions left for after the move (`../archive/roadmap/ears.md`, and `design.md`,
+Vocabulary).
 
 ## The package
 
@@ -115,8 +116,8 @@ Held by the types and the specs, which say more than a rule over names could:
 - **An instance.** `createEarsEngine({ database, warn, freeze, callSites })` returns a new EARS engine over a
   database, which holds everything it knows: it keeps no copy of the data, so a read reads the database. Each module
   is a factory closing over the connection (`createQuery`, `createWrites`, `createNameChecks`), and no module keeps
-  anything at module scope, not even a reference to an EARS engine. The database's schema says which names are entity
-  types, relation kinds and roles, and what each type's rows are held to (`RowRules`): its `required` fields, which
+  anything at module scope, not even a reference to an EARS engine. The database's schema says which names are types,
+  relation kinds and roles, and what each type's rows are held to (`RowRules`): its `required` fields, which
   `create` refuses a row without and `delete` one of (`REQUIRED_FIELD`), and its `shortCode` prefix, which `create`
   numbers every row's `shortCode` with, `<prefix>-<n>`, once every check has passed, so a refused create takes no
   number. Whoever creates the EARS engine gives the database its schema (`openDatabase({ schema })`,
@@ -207,16 +208,16 @@ Held by the types and the specs, which say more than a rule over names could:
 - **Substrings and patterns.** A type whose row rules declare `substrings` has a trigram index named `substrings`.
   `containing(text, { caseInsensitive? })` and `matching(pattern)` filter without ranking (`search.md`, Substrings and
   patterns as built); a type with none refuses them (`UNKNOWN_INDEX`).
-- **Watches.** `watch(read, observer)` runs `read` and delivers its result, then runs it again after every commit
-  that wrote into what it read, delivering each result that differs from the last, with the commit's sequence
+- **Watches.** `watch(read, observer)` runs `read` and delivers its result, then runs it again after every commit that
+  wrote into what it read, delivering each result that differs from the last, with the commit's sequence
   (`lastCommit()`). Tracking is the database's (`engine.md`, Change sets and watch): each run drops what the watch's
   token held and makes its reads tracked under it, and a commit's change set names the tokens it wrote into, so a
   write's cost doesn't grow with the watches open. **However fast anything commits, a watch's cost is bounded by the
-  scheduler, not by its writers** (G14 of `../archive/goals/goal-elmdb-next.md`): a watch has at most one run
-  pending and the states between are skipped; after a run it waits four times that run's cost, and at least a frame;
-  a watch idle when a commit lands runs at once; and a flush starts no run past an 8 ms slice. A commit the connection
-  makes past the key log (`admin.clear`, `admin.replaceWith`, `admin.setSchema`, `admin.declare`, a load) is heard as
-  touching every watch. Deliveries never come inside a write: re-runs wait for a microtask, so a burst of commits is
+  scheduler, not by its writers** (G14 of `../archive/goals/goal-elmdb-next.md`): a watch has at most one run pending
+  and the states between are skipped; after a run it waits four times that run's cost, and at least a frame; a watch
+  idle when a commit lands runs at once; and a flush starts no run past an 8 ms slice. A commit the connection can't
+  name the touched tokens of (`admin.clear`, `admin.replaceWith`, `admin.setSchema`, `admin.declare`, a load) is heard
+  as touching every watch. Deliveries never come inside a write: re-runs wait for a microtask, so a burst of commits is
   one. A unit that throws notifies nothing. A read that throws delivers to `observer.error` and stays watched. **A
   watched read is a pure read of the EARS engine**: what it reads elsewhere isn't tracked. `admin.watchesSettled()`
   resolves once every commit before it has been delivered, and `admin.watchStats()` counts the watches and what the

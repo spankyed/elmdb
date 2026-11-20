@@ -92,7 +92,45 @@ console.log(count.n); // 3
 client.db.close();
 ```
 
-[apack](https://github.com/spankyed/apack), elmdb's first user, puts a typed query builder over it in `@apackdev/ears`.
+## Through EARS
+
+EARS, the entity-attribute-relation system, is the fluent TypeScript API over a database: query and write builders
+that compile to those plans and batches, watches, and typed facades over your own entity shapes. It is
+[`@elmdb/ears`](packages/ears), in this repository, and [apack](https://github.com/spankyed/apack), elmdb's first
+user, runs on it.
+
+```js
+import { createEarsEngine } from '@elmdb/ears';
+import { openDatabase } from '@elmdb/ears/database';
+
+const database = openDatabase({
+  path: './notes',
+  schema: {
+    types: { Note: { required: ['title'], search: { fields: { title: 1 } } } },
+    relations: { refs: {} },
+    roles: [],
+  },
+});
+const ears = createEarsEngine({ database });
+
+const choosing = ears.create('Note', { title: 'Choosing a database' }).id();
+ears.create('Note', { title: 'Backups' }).link('refs', choosing);
+ears.create('Note', { title: 'Database migrations' }).link('refs', choosing);
+
+const titles = (notes) => notes.map((note) => note.title);
+console.log(titles(ears.query('Note').search('databse').pick(['title']))); // misspelled, most relevant first
+console.log(titles(ears.query.ids([choosing]).in('refs', 'Note').pick(['title']))); // the notes that refer to it
+
+database.close();
+```
+
+```text
+[ 'Database migrations', 'Choosing a database' ]
+[ 'Backups', 'Database migrations' ]
+```
+
+Each write outside `transact` is its own commit, and a read answers what is committed. What EARS holds you to, and the
+rest of its API, is in [ears.md](docs/architecture/ears.md).
 
 ## Status
 
@@ -102,7 +140,8 @@ until a release has users, so nothing here is a stable API yet.
 ```sh
 git clone https://github.com/spankyed/elmdb.git && cd elmdb
 npm ci && npm run build
-npm install /path/to/elmdb/crates/elmdb-node msgpackr   # from your app
+npm install /path/to/elmdb/crates/elmdb-node msgpackr   # from your app, for the binding
+npm install /path/to/elmdb/packages/ears                 # and for EARS beside it
 ```
 
 It uses N-API, so a Node or Electron upgrade needs no rebuild.
@@ -149,6 +188,7 @@ See [docs map](docs/README.md). The ones most people want:
 - [design.md](docs/architecture/design.md): principles, vocabulary, and what elmdb won't do
 - [schema.md](docs/architecture/schema.md): types, fields, relations, indexes, and how a schema changes
 - [engine.md](docs/architecture/engine.md): every read, write and admin operation, and the protocol
+- [ears.md](docs/architecture/ears.md): EARS, the fluent TypeScript API over a database
 - [roadmap.md](docs/roadmap.md): what's built, and what's waiting on what
 
 ## Develop
@@ -157,7 +197,7 @@ Needs Rust, which `rust-toolchain.toml` pins, Node, and [cargo-nextest](https://
 `CLAUDE.md` has the full list of checks and the repository's rules.
 
 ```sh
-npm ci && npm run build && npm test  # the binding and its tests
+npm ci && npm run build && npm test  # the binding and EARS, and their tests
 cargo nextest run --workspace        # the Rust suites
 cargo run -p elmdb-cli -- check DIR  # also: inspect, rebuild, backup, dump, load, acknowledge-restore
 ```

@@ -4,8 +4,9 @@ What working with lmdb-js in apack taught, in October 2026. apack has since move
 
 ## apack's storage
 
-apack's EARS engine (`@apackdev/ears`) stored everything in LMDB through lmdb-js, with no copy of the data in memory:
-the engine read and wrote the database directly, behind an ordered key-value seam (`OrderedKV`). apack's production data
+EARS, apack's entity-attribute-relation API (since moved into this repository as `@elmdb/ears`,
+`architecture/ears.md`), stored everything in LMDB through lmdb-js, with no copy of the data in memory: it read and
+wrote the database directly, behind an ordered key-value seam (`OrderedKV`). apack's production data
 then held 22,816 entities, 178,131 attributes and 45,798 relations.
 
 ## A crash in lmdb-js's fork of LMDB
