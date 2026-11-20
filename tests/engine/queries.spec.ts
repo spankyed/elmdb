@@ -1,6 +1,6 @@
 // The engine's contract: query builder starts, filters, ordering and terminals
 import { beforeEach, describe, expect, it } from 'vitest';
-import { EARS } from '../../src/index.ts';
+import { EARS, type EarsWarning } from '../../src/index.ts';
 import { NAMES, engine, type Id, type RelId } from './helpers.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 
@@ -325,19 +325,20 @@ describe('declared indexes', () => {
   /** An engine whose Tasks declare an index on `status`, with enough Tasks that a walk of them is reported */
   function indexedTasks() {
     const warnings: string[] = [];
+    const warned: EarsWarning[] = [];
     const engine = freshEngine({
       ...NAMES,
       rowRules: { Task: { required: [], indexes: ['status'] } },
-      warn: (message) => warnings.push(message),
+      warn: (message, warning) => { warnings.push(message); warned.push(warning); },
     });
     engine.transact(() => {
       for (let i = 0; i < 2_500; i++) engine.create('Task', { status: i % 2 ? 'open' : 'done', title: `Task ${i}`, tags: [`t${i % 3}`] });
     });
-    return { engine, warnings };
+    return { engine, warnings, warned };
   }
 
   it('a where on a declared field reads its index; on any other, it filters the rows and finds the same matches', () => {
-    const { engine, warnings } = indexedTasks();
+    const { engine, warnings, warned } = indexedTasks();
     const open = engine.query('Task').where('status', 'open').ids();
     expect(open).toHaveLength(1_250);
     expect(warnings).toEqual([]);
@@ -346,7 +347,10 @@ describe('declared indexes', () => {
     expect(engine.query('Task').where('title', 'Task 7').ids()).toEqual([engine.query('Task').ids()[7]]);
     expect(engine.query('Task').where('tags', 't1').count()).toBe(833);
     expect(warnings).toHaveLength(2);
-    expect(warnings[0]).toMatch(/^where\('title'\) filtered 2500 Task rows without an index \(.*queries\.spec\.ts.*\)\. Declare it in the Task entry of apack\.json: "indexes": \["title"\]$/);
+    expect(warnings[0]).toMatch(/^where\('title'\) filtered 2500 Task rows without an index \(.*queries\.spec\.ts.*\)\. Declare a value index on Task\.title: "indexes": \["title"\] in its row rules$/);
+    // The same as data, for a creator that says where its own declarations hold the index
+    expect(warned[0]).toEqual({ kind: 'unindexedWalk', types: ['Task'], field: 'title', visited: 2_500, site: expect.stringContaining('queries.spec.ts') });
+    expect(warnings[0]).toContain(`(${(warned[0] as { site: string }).site})`);
   });
 
   it('warns once per call site, and not for a type small enough to walk', () => {

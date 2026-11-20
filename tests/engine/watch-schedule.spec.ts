@@ -5,6 +5,7 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createConnection, type Connection } from '../../src/database.ts';
 import { createWatches, WATCH_SCHEDULE, type WatchClock, type Watches } from '../../src/watch.ts';
 import { createTemporaryDatabases } from '../../src/lmdb/index.ts';
+import type { EarsWarning } from '../../src/index.ts';
 
 const databases = createTemporaryDatabases();
 afterAll(() => databases.disposeAll());
@@ -49,6 +50,7 @@ let connection: Connection;
 let time: ReturnType<typeof fakeClock>;
 let watches: Watches;
 let warnings: string[];
+let warned: EarsWarning[];
 let sequence = 0;
 
 /** A write outside a unit, to the one row every watch here reads */
@@ -91,7 +93,8 @@ beforeEach(() => {
   connection = createConnection(database);
   time = fakeClock();
   warnings = [];
-  watches = createWatches(connection, { clock: time.clock, warn: (message) => warnings.push(message) });
+  warned = [];
+  watches = createWatches(connection, { clock: time.clock, warn: (message, warning) => { warnings.push(message); warned.push(warning); } });
   sequence = 0;
 });
 
@@ -204,6 +207,7 @@ describe('the watch scheduler', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('the costly view');
     expect(warnings[0]).toContain('20.0 ms a run');
+    expect(warned).toEqual([{ kind: 'slowWatch', label: 'the costly view', ms: 20, runs: expect.any(Number) }]);
   });
 
   it('counts each watch\'s runs and the states it skipped, while the calls are counted', async () => {

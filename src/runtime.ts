@@ -41,11 +41,23 @@ export interface EARSRuntimeDeps {
    */
   freeze?: boolean;
   /**
-   * Told when a query does something its data will make slow — a `where` filtering thousands of a type's rows for
-   * want of an index — once per call site. Nothing by default; the app passes one in development
+   * Told when the engine does something its data will make slow — a `where` filtering thousands of a type's rows for
+   * want of an index, once per call site, or a watch that keeps costing more than a flush's slice, once per watch —
+   * with a message saying what and how to fix it, and the same as data (`EarsWarning`), for a creator that says where
+   * its own declarations make that fix. Nothing by default
    */
-  warn?: (message: string) => void;
+  warn?: (message: string, warning: EarsWarning) => void;
 }
+
+/** What the engine warns its creator of (`EARSRuntimeDeps.warn`), as data */
+export type EarsWarning =
+  /**
+   * A `where` on `field`, straight after a start from `types`, filtered `visited` rows, since one of those types
+   * declares no value index on the field (`RowRules.indexes`); `site` is the code that made the query
+   */
+  | { kind: 'unindexedWalk'; types: readonly string[]; field: string; visited: number; site: string }
+  /** The watch `label` cost `ms` a run, more than a flush's slice, `runs` runs in a row */
+  | { kind: 'slowWatch'; label: string; ms: number; runs: number };
 
 /**
  * What a created row of an entity type is held to, which codegen (`apack pack generate-entries`) writes from the pack's

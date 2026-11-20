@@ -410,7 +410,7 @@ export interface EarsOperationResult {
 export interface EARSRuntimeDeps {
     database: EarsDatabase;
     freeze?: boolean;
-    warn?: (message: string) => void;
+    warn?: (message: string, warning: EarsWarning) => void;
 }
 
 // @public
@@ -447,6 +447,27 @@ export interface EarsUnit {
     // (undocumented)
     write(batch: Uint8Array): Uint8Array;
 }
+
+// @public
+export type EarsWarning =
+/**
+* A `where` on `field`, straight after a start from `types`, filtered `visited` rows, since one of those types
+* declares no value index on the field (`RowRules.indexes`); `site` is the code that made the query
+*/
+    {
+    kind: 'unindexedWalk';
+    types: readonly string[];
+    field: string;
+    visited: number;
+    site: string;
+}
+/** The watch `label` cost `ms` a run, more than a flush's slice, `runs` runs in a row */
+| {
+    kind: 'slowWatch';
+    label: string;
+    ms: number;
+    runs: number;
+};
 
 // @public
 export type EdgeDirection = 'out' | 'in' | 'both';

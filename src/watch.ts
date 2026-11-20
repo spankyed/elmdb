@@ -13,6 +13,7 @@ import { WatchCauses } from './observation.ts';
 // once. A flush spends at most a slice of time on runs, and the watches left over run first in the next one; a watch
 // whose last run would overrun what is left waits for that, so an expensive watch never holds a cheap one back.
 import type { Commit, Connection } from './database.ts';
+import type { EARSRuntimeDeps } from './runtime.ts';
 import { callSite } from './calls.ts';
 
 /** What a watch delivers to: each changed result, and what a read threw, with the commit it reflects */
@@ -98,7 +99,7 @@ export interface WatchScope {
   clock?: WatchClock;
   schedule?: WatchSchedule;
   /** Hears a watch that keeps costing more than a flush's slice, once per watch */
-  warn?: (message: string) => void;
+  warn?: EARSRuntimeDeps['warn'];
 }
 
 /** Runs `fn` on a later turn of the event loop, after other work: what a flush that ran out of time waits for */
@@ -220,7 +221,8 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       watch.warned = true;
       warn(`A watch takes ${watch.costMs.toFixed(1)} ms a run, more than a flush's ${schedule.flushSliceMs} ms, `
         + `${watch.overBudget} runs in a row: ${watch.label}. It runs at most every `
-        + `${(schedule.delayFactor * watch.costMs).toFixed(0)} ms; a narrower read costs less`);
+        + `${(schedule.delayFactor * watch.costMs).toFixed(0)} ms; a narrower read costs less`,
+      { kind: 'slowWatch', label: watch.label, ms: watch.costMs, runs: watch.overBudget });
     }
   };
 

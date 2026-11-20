@@ -1,7 +1,7 @@
 // The engine's queries: a builder chain compiled to one of elmdb's plans (`elmdb/docs/architecture/engine.md`, Reads: plans), which a
 // terminal sends and decodes the answer of.
 import type { EARS } from './entities.ts';
-import type { EdgeDirection, QueryBuilder, QueryStage, RankedOptions, RankOptions, RelationEdge, SimilarityMeasure } from './runtime.ts';
+import type { EARSRuntimeDeps, EdgeDirection, QueryBuilder, QueryStage, RankedOptions, RankOptions, RelationEdge, SimilarityMeasure } from './runtime.ts';
 import { EarsError } from './errors.ts';
 import type { Answer } from './database.ts';
 import type { TypeName } from './write.ts';
@@ -73,7 +73,7 @@ export interface QueryScope {
   /** Whether a `where` on the type's field reads a value index */
   indexed(type: string, field: string): boolean;
   names: NameChecks;
-  warn?: (message: string) => void;
+  warn?: EARSRuntimeDeps['warn'];
 }
 
 /** A relation row as a read answers it: `info` is left out when the edge holds none */
@@ -136,12 +136,14 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
     Error.stackTraceLimit = limit;
     return stack?.split('\n').slice(1).find((frame) => !own(frame))?.trim() ?? 'unknown';
   };
-  const unindexed = (type: string, field: string, walked: number, site: string) => {
+  const unindexed = (types: string[], field: string, visited: number, site: string) => {
+    const type = types.join('/');
     const key = `${type}\x1F${field}\x1F${site}`;
     if (!warn || warnedSites.has(key)) return;
     warnedSites.add(key);
-    warn(`where('${field}') filtered ${walked} ${type} rows without an index (${site}). `
-      + `Declare it in the ${type} entry of apack.json: "indexes": ["${field}"]`);
+    warn(`where('${field}') filtered ${visited} ${type} rows without an index (${site}). `
+      + `Declare a value index on ${type}.${field}: "indexes": ["${field}"] in its row rules`,
+      { kind: 'unindexedWalk', types, field, visited, site });
   };
 
   /**
@@ -165,7 +167,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       if (!visits) return read([{ read: 'query', plan }])[0]!;
       visits = false;
       const [{ answer, visited }] = read([{ read: 'query', plan, visits: true }]) as Array<Answer & { answer: Answer; visited: number }>;
-      if (visited >= UNINDEXED_WALK_WARNING) unindexed(recipe.unindexed!.types.join('/'), recipe.unindexed!.field, visited, callSite());
+      if (visited >= UNINDEXED_WALK_WARNING) unindexed(recipe.unindexed!.types, recipe.unindexed!.field, visited, callSite());
       return answer;
     };
     for (const [at, pending] of recipe.steps.entries()) {
