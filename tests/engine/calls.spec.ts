@@ -4,7 +4,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { NAMES, engine } from './helpers.ts';
 import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
-import type { CallKind, CallSite } from '../../src/index.ts';
+import type { CallKind, CallSite, CallSiteNaming } from '../../src/index.ts';
 
 let e: EngineUnderTest;
 beforeEach(() => { e = engine(); });
@@ -93,7 +93,7 @@ describe('admin.calls', () => {
 
 describe("the code a site names, as the engine's creator names it", () => {
   /** The first frame of the one read's site, and the label of a watch opened without one, under `naming` */
-  async function named(naming?: Parameters<typeof freshEngine>[0]['callSites']) {
+  async function named(naming?: CallSiteNaming) {
     const named = freshEngine({ ...NAMES, callSites: naming });
     const watching = named.watch(() => named.query('Task').ids(), () => {});
     await named.admin.watchesSettled();
@@ -108,8 +108,7 @@ describe("the code a site names, as the engine's creator names it", () => {
 
   it("by default skips the frames in the engine's own directory, and keeps a path outside node_modules whole", async () => {
     const { site, label } = await named();
-    expect(site).toMatch(/.[\\/]tests[\\/]engine[\\/]calls\.spec\.ts:\d+$/);
-    expect(label.split(' < ')[0]).toMatch(/.[\\/]tests[\\/]engine[\\/]calls\.spec\.ts:\d+$/);
+    for (const name of [site, label.split(' < ')[0]]) expect(name).toMatch(/.[\\/]tests[\\/]engine[\\/]calls\.spec\.ts:\d+$/);
   });
 
   it('names a path from the last root given in it, and skips the frames the pattern given calls the engine\'s', async () => {

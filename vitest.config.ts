@@ -1,9 +1,8 @@
 import { defineConfig, mergeConfig } from 'vitest/config';
 import ears from './vitest.ears.config.ts';
 
-// EARS' suite as apack runs it: EARS' own configuration (`vitest.ears.config.ts`, which names nothing of apack's), with
-// the bounds every apack config holds a test to added here. So EARS' suite needs no file of another package, and this
-// file stays the one apack's tools find (the root config's projects, `suite-timeouts.spec.ts`, `npm test`).
+// EARS' suite as apack runs it: EARS' own config (`vitest.ears.config.ts`, which needs no file of another package)
+// with the bounds every apack config holds a test to. apack's tools find this file by its name.
 //
 // One project, as every host config is: the host pool runs this package as the project its workspace names, and
 // a `projects` list here would be ignored there. This is the fast half: the specs that pack and compile the built
