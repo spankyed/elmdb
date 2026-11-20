@@ -2842,7 +2842,7 @@ fn a_wait_for_the_builds_asked_for_as_a_close_gives_up_waits_for_what_it_queues_
     assert!(!db.close_within(Some(Duration::from_millis(5))).unwrap());
     assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::CLOSE_GAVE_UP));
     drop(held);
-    told.recv_timeout(Duration::from_secs(4)).expect("the wait went on once the close had given up").unwrap();
+    told.recv_timeout(crate::waits::ARRIVES).expect("the wait went on once the close had given up").unwrap();
     db.close().unwrap();
 }
 

@@ -422,7 +422,7 @@ fn a_wait_for_the_builds_asked_for_during_a_schema_change_waits_for_what_it_leav
     });
     db.set_schema(schema("b")).unwrap();
     assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::SCHEMA_CHANGE_BEGUN));
-    told.recv_timeout(Duration::from_secs(4)).expect("the wait went on to what the change left").unwrap();
+    told.recv_timeout(crate::waits::ARRIVES).expect("the wait went on to what the change left").unwrap();
     let unbuilt: Vec<String> =
         db.index_status().unwrap().into_iter().filter(|index| !index.built).map(|index| index.index).collect();
     assert_eq!(unbuilt, Vec::<String>::new(), "answered once the index the change declared was built");
