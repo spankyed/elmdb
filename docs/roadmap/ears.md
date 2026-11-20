@@ -1,8 +1,13 @@
 # EARS in elmdb's repository
 
-Status: planned, 2026-11-14, revised 2026-11-15, and phase 0's list of what changed read again on 2026-11-16; nothing
-is built here, and in apack one step of phase 0 is: its specs' child processes open in their parent's mode (apack's
-`618983142a`, 2026-11-16). This is the sixth draft: five independent reads,
+Status: planned, 2026-11-14, revised 2026-11-15, and phase 0's list of what changed read again on 2026-11-16; where
+phase 0 stands read again on 2026-11-20, against apack's `master` at `c9336bf0a2`. Nothing is built here. In apack,
+phase 0's first step is done: the pin is on this repository's `main` (`91c92659c1` moved it to `2029f9c` on
+2026-11-16 and `06a18f0ac0` to `4f134df` on 2026-11-17), EARS calls `read` where it called `readSync`, and its specs'
+child processes open in their parent's mode (`618983142a`). The one-time rebuild of apack's databases is the step run
+by hand that phase 0 describes: apack marked it with a checkpoint for a day and dropped the mark (`9a5a89ecec`), and
+which machines have run it is not recorded. The ties, the types, the packs' imports and the specs written beside EARS
+are not begun. This is the sixth draft: five independent reads,
 each against both repositories, changed the five before it (What the reviews changed, at the end).
 
 EARS, the entity-attribute-relation system, is the fluent TypeScript API over an elmdb database: what a program
@@ -270,7 +275,15 @@ Opened by having both halves in one repository, each to be decided on a reading,
 
 0. **In apack, before anything moves** (`spankyed/apack`; each step checked by apack's suites, and each worth having
    if the rest never follows).
-   - **The pin moves to this repository's `main`.** That is more than a rename. The one rename apack makes is `readSync`
+   - **The pin moves to this repository's `main`.** Done (Status, at the top); what follows is what that move met,
+     kept for the moves after it. Since `4f134df`, to `643ec60` (2026-11-20), the binding's declarations and protocol
+     changed only in `waitForIndexBuilds` (the codes listed below; a unit open refused only while there is something
+     to build; no wait for an index's string order that another elmdb's writes put off, which `indexStatus` answers as
+     `ordered: false`) and by the schema's JSON Schema gaining an `$id` (`git diff 4f134df 643ec60 --
+     crates/elmdb-node/index.d.ts crates/elmdb-node/protocol`), and the format only by a derived key, `d/xbr`,
+     the place a build of an index has reached (#189): a database without one is built from its type's first entity,
+     so no rebuild is owed. The pin moves again before the ties are cut, so that phase 0's other steps are made against
+     the binding they will move beside. That is more than a rename. The one rename apack makes is `readSync`
      to `read`, in EARS' port and its call (`src/database.ts`) and in its benchmark; `write` stays as it is, blocking.
      The host's `backup` stays as it is too: it blocks at the pin and on `main` alike, and moving it to `backupAsync` is
      a decision of its own, with the rollback copy an import takes before it replaces a database in view (the host's
@@ -340,7 +353,12 @@ Opened by having both halves in one repository, each to be decided on a reading,
      wherever its marker isn't the builder's own, so it isn't misread. Each of apack's elmdb databases is rebuilt once
      (opened by the new pin, `rebuild()` of everything) or reset, on each machine that holds one, by a step run by hand
      at the move: nothing in a database says which elmdb wrote it, so no open can tell that the step is owed. From then
-     on no older elmdb may open it, since it would misread what the new pin wrote.
+     on no older elmdb may open it, since it would misread what the new pin wrote. apack's `91c92659c1` showed the
+     rebuild's effect on a copy of a development database the old pin wrote: 854 derived keys differed in the new
+     pin's `check()`, and none after `rebuild()`. It made the rebuild at an open, marked by a checkpoint naming an elmdb
+     revision, and `9a5a89ecec` dropped that mark the same day: a revision isn't the shape of the derived data, so a
+     mark not bumped past an in-place change misreads, and one bumped needlessly rebuilds every database. The step
+     stays one run by hand while only developers' databases exist.
    - **The ties above are cut.**
    - **The builders, the schema, the error table and the port are typed** as Decisions says, a write's answer decoded
      as `Written` and a unit's write's as `BatchResult`, and the import guard's rule inside EARS is reworded to allow
@@ -352,7 +370,7 @@ Opened by having both halves in one repository, each to be decided on a reading,
    - apack's gate with its end-to-end suite added, `npm run chain -- --e2e`, passes on the new pin, with EARS using no
      setup file from another package;
    - a database the old pin wrote, rebuilt as above, has no derived key missing, extra or differing in the new pin's
-     `check()`, and a copy of it not rebuilt is shown with some;
+     `check()`, and a copy of it not rebuilt is shown with some (shown in `91c92659c1`: 854, and none after);
    - a backup taken by the old pin is restored by the new one;
    - scratch copies of this repository fail apack's `typecheck:ears`, one each for a renamed required field of
      `Op`, `Step`, `Terminal` and `Schema`, a code added to `ErrorCode`, and a port member turned into a promise;
