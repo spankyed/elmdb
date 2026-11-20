@@ -70,6 +70,17 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
                 Ok(())
             })
             .unwrap();
+        // A wait's answer is the database's: every index it says is built, with none failed, is what reads find
+        engine.db.wait_for_index_builds().expect("the builds end");
+        let unbuilt: Vec<String> = engine
+            .db
+            .index_status()
+            .unwrap()
+            .into_iter()
+            .filter(|index| !index.built)
+            .map(|index| format!("{:?} {}", index.entity_type, index.index))
+            .collect();
+        assert_eq!(unbuilt, Vec::<String>::new(), "a wait for the builds answered with these unbuilt");
         // The drain waited for, so no commit of its own takes a refusal the next step armed
         let live: Vec<String> =
             reference.model.entities.iter().filter(|(_, e)| !e.trashed).map(|(id, _)| id.clone()).collect();

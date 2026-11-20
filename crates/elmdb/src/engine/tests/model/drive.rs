@@ -110,6 +110,7 @@ pub(super) fn op_of_plain(step: &Step) -> Json {
         | Step::RenameRelation { .. }
         | Step::RenameField { .. }
         | Step::Backup
+        | Step::CloseGivesUp
         | Step::ReplaceWith
         | Step::Redeclare
         | Step::PurgeField
@@ -147,6 +148,14 @@ pub(super) fn run(db: &Database, step: &Step) -> Result<Option<ChangeSet>, crate
         Step::Reset => db.reset().map(|()| None),
         Step::RenameRelation { from, to } => db.rename_relation(from, to).map(|()| None),
         Step::RenameField { from, to } => db.rename_field("Task", from, to).map(|()| None),
+        Step::CloseGivesUp => {
+            // The store held past the close's wait, as an operation under way holds it
+            let held = db.store()?;
+            let closed = db.close_within(Some(std::time::Duration::from_millis(1)));
+            drop(held);
+            assert_eq!(closed.map_err(|refused| refused.code), Ok(false), "a close given up on for the store held");
+            Ok(None)
+        }
         Step::Backup => {
             // Into the database's own directory, so that the copy goes with it; the last backup is the one replaced with
             let target = db.path().join("model-backup");

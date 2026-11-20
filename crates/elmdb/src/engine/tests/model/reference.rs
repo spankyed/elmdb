@@ -263,6 +263,7 @@ impl Model {
             | Step::RenameRelation { .. }
             | Step::RenameField { .. }
             | Step::Backup
+            | Step::CloseGivesUp
             | Step::ReplaceWith
             | Step::Redeclare
             | Step::PurgeField
@@ -377,6 +378,10 @@ impl Model {
                 self.edges.remove(&(source.clone(), kind, target.clone()));
                 self.edges.insert((source, to.to_string(), target));
             }
+            return Ok(());
+        }
+        if let Step::CloseGivesUp = step {
+            // Commits nothing, and changes nothing the model holds: an armed refusal waits for the next commit
             return Ok(());
         }
         if let Step::Backup = step {
