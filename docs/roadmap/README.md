@@ -11,7 +11,9 @@ read allocations, copies and codecs (`read-allocation-codec.md`) and query work 
 What graph query languages answer that a plan doesn't, and the order to add it, is in
 [`deferred/graph-traversal.md`](deferred/graph-traversal.md). The rest of the supply chain, `cargo-deny`, an
 advisory audit and a schema language URL that resolves, is planned in
-[`deferred/supply-chain.md`](deferred/supply-chain.md).
+[`deferred/supply-chain.md`](deferred/supply-chain.md). What a schema change costs the writes beside it, and the
+design that would cut the slowest of them, is in
+[`deferred/schema-change-write-latency.md`](deferred/schema-change-write-latency.md).
 
 What they share: LMDB already is an ordered B-tree with cheap snapshots and one writer. The best answer to most of these
 uses those directly, rather than rebuilding what Lucene or a server database needs because it lacks them.
