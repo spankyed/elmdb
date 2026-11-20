@@ -1016,13 +1016,14 @@ fn a_build_the_builder_begins_again_is_put_off_and_begun_when_its_wait_is_over()
     ended(&db);
     db.wait_for_index_builds().unwrap();
     assert!(readable(&db) && idle(&db));
-    // The second is put off: the wait for the builds doesn't wait for it, and the order is not built
+    // The second is put off: the wait for the builds doesn't wait for it, and the order is not built. Timed from
+    // before it is, so that the wait below is no shorter for what the lines between take on a loaded machine
+    let began = std::time::Instant::now();
     ended(&db);
     db.wait_for_index_builds().unwrap();
     assert!(!readable(&db));
     assert_eq!(db.check().unwrap().notes, ["The order of Item.byTag's strings is not built yet, and was not compared"]);
     // Until its wait is over, a second long
-    let began = std::time::Instant::now();
     while !readable(&db) {
         assert!(began.elapsed() < std::time::Duration::from_secs(20), "the build put off never began");
         std::thread::sleep(std::time::Duration::from_millis(50));
