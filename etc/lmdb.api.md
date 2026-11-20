@@ -4,6 +4,11 @@
 
 ```ts
 
+import type { OpenReport } from 'elmdb/protocol/OpenReport.js';
+import type { Schema } from 'elmdb/protocol/Schema.js';
+import type { SchemaChange } from 'elmdb/protocol/SchemaChange.js';
+import type { Stats } from 'elmdb/protocol/Stats.js';
+
 // @public
 export function createTemporaryDatabases(): TemporaryDatabases;
 

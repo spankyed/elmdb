@@ -4,7 +4,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import elmdb, { type Schema } from 'elmdb';
+import elmdb from 'elmdb';
 import type { EarsDatabase } from '../database.ts';
 import { toElmdbSchema, type EngineSchema } from '../schema.ts';
 
@@ -25,14 +25,17 @@ export interface DatabaseOptions {
   syncs?: boolean;
 }
 
-/** Opens the elmdb database at `path` for an engine (`createEarsEngine({ database })`) */
+/**
+ * Opens the elmdb database at `path` for an engine (`createEarsEngine({ database })`): the binding's `Database`, which
+ * is an `EarsDatabase` as it is, with no cast (`port.test-d.ts`)
+ */
 export function openDatabase({ path: dir, schema, readOnly, syncs }: DatabaseOptions): EarsDatabase {
   return elmdb.Database.open(dir, {
     ...(readOnly && { readOnly }),
     // elmdb checks the schema whole, naming every problem
-    ...(schema && { schema: toElmdbSchema(schema) as Schema }),
+    ...(schema && { schema: toElmdbSchema(schema) }),
     ...(syncs === false && { syncs }),
-  }) as unknown as EarsDatabase;
+  });
 }
 
 /** Databases opened in temporary directories, each removed when it is disposed or the process exits */

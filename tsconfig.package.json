@@ -16,5 +16,7 @@
     // The engine runs in Node and in the renderer: no Node types in the published source
     "types": []
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  // Type tests (`*.test-d.ts`) are read by the typecheck, and are no part of the package
+  "exclude": ["src/**/*.test-d.ts"]
 }

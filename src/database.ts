@@ -3,8 +3,20 @@
 // hands back each answer decoded and each refusal as an `EarsError`.
 //
 // The port is structural so this module never loads `elmdb`: `@apackdev/ears/lmdb` opens the database, and only that
-// entry imports it.
+// entry imports it. What crosses is typed by elmdb's generated protocol, whose types this module imports and nothing
+// else of `elmdb`.
 import { Packr, Unpackr } from 'msgpackr';
+import type { Batch } from 'elmdb/protocol/Batch.js';
+import type { BatchResult } from 'elmdb/protocol/BatchResult.js';
+import type { ChangeSet } from 'elmdb/protocol/ChangeSet.js';
+import type { ErrorCode } from 'elmdb/protocol/ErrorCode.js';
+import type { Op } from 'elmdb/protocol/Op.js';
+import type { OpenReport } from 'elmdb/protocol/OpenReport.js';
+import type { OpResult } from 'elmdb/protocol/OpResult.js';
+import type { Schema } from 'elmdb/protocol/Schema.js';
+import type { SchemaChange } from 'elmdb/protocol/SchemaChange.js';
+import type { Stats } from 'elmdb/protocol/Stats.js';
+import type { Written } from 'elmdb/protocol/Written.js';
 import { createCallSites, createCallTally, type CallCounting, type CallReport, type CallSiteNaming, type CallTally } from './calls.ts';
 import { EarsError, type EarsErrorCode } from './errors.ts';
 import { setField } from './ids.ts';
@@ -38,34 +50,23 @@ export interface EarsUnit {
   readonly isOpen: boolean;
 }
 
-/** An elmdb change to a schema: its path, what changed, and what was done about it */
-export interface SchemaChange {
-  path: string;
-  change: string;
-  effect: string;
-}
+/**
+ * An elmdb change to a schema: its path, what changed, and what was done about it (elmdb's `SchemaChange`). What
+ * opening an elmdb database did: the schema's changes, a restore an open made, until `acknowledgeRestore()`, and whether
+ * the record of the last sync named another file (elmdb's `OpenReport`)
+ */
+export type { OpenReport, SchemaChange };
 
-/** What opening an elmdb database did */
-export interface OpenReport {
-  /** The schema's changes, each with what opening did about it */
-  schemaChanges: SchemaChange[];
-  /**
-   * A restore an open made: a power loss or a failed sync took the database back to its last synced commit, and the
-   * commits after it are gone. `sequence` is the one it opened at, null where a read-only open couldn't write it down.
-   * Every open reports it until `acknowledgeRestore()`
-   */
-  restored: { sequence: number | null } | null;
-  /** The record of the last sync, beside the data file, named another file than this one, which was opened as it is */
-  notBorneOut: boolean;
-}
-
-/** What the engine needs of an open elmdb database (`elmdb`'s `Database`, which `@apackdev/ears/lmdb` opens) */
+/**
+ * What the engine needs of an open elmdb database (`elmdb`'s `Database`, which `@apackdev/ears/lmdb` opens). Each
+ * member answers exactly what the binding's does, its bytes read as a `Uint8Array` (`src/lmdb/port.test-d.ts`)
+ */
 export interface EarsDatabase {
   readonly path: string;
   readonly readOnly: boolean;
   readonly isOpen: boolean;
-  /** The schema the database holds, in elmdb's canonical JSON */
-  readonly schema: unknown;
+  /** The schema the database holds, in elmdb's canonical JSON; none for a database that holds none */
+  readonly schema: Schema | null;
   /** What opening it did */
   readonly openReport: OpenReport;
   /** Says the restore `openReport` names was read, so that no open reports it after; refused on a read-only database */
@@ -73,7 +74,7 @@ export interface EarsDatabase {
   write(batch: Uint8Array, durable?: boolean | null): Uint8Array;
   read(reads: Uint8Array): Uint8Array;
   begin(): EarsUnit;
-  setSchema(schema: object): SchemaChange[];
+  setSchema(schema: Schema): SchemaChange[];
   /**
    * Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done, as
    * the database says once its builder is idle; throws `SYNC_BEHIND` or `READERS_FULL` when what holds a build up is a
@@ -106,7 +107,7 @@ export interface EarsDatabase {
   changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
   /** Every entry replaced by another database's primary data, the derived data rebuilt under this one's schema */
   replaceWith(source: string): void;
-  stats(): { types: Record<string, { live: number; trashed: number }>; relations: Record<string, number>; fileBytes: number };
+  stats(): Stats;
   bulkLoad(loads: Uint8Array): void;
   /** The last commit's sequence, or 0: a number that only increases for as long as the database exists */
   readonly sequence: number;
@@ -188,8 +189,11 @@ function freezeValues(answer: Answer): Answer {
   return answer;
 }
 
-/** elmdb's codes that are one of the engine's own, under the engine's name for it */
-const CODES: Record<string, EarsErrorCode> = {
+/**
+ * Each of elmdb's codes (its generated `ErrorCode`, so a code elmdb adds fails to compile until it is here): one of the
+ * engine's own, under the engine's name for it, or `null`, passed through as elmdb names it, with elmdb's code
+ */
+const CODES: { readonly [C in ErrorCode]: EarsErrorCode | null } = {
   UNKNOWN_TYPE: 'UNKNOWN_ENTITY_TYPE',
   RESERVED_FIELD: 'RESERVED_ATTRIBUTE',
   RESERVED_TYPE: 'RESERVED_ENTITY_TYPE',
@@ -211,7 +215,48 @@ const CODES: Record<string, EarsErrorCode> = {
   INDEX_BUILDING: 'INDEX_BUILDING',
   FIELD_TYPE: 'FIELD_TYPE',
   PATTERN_INVALID: 'PATTERN_INVALID',
+  // Passed through with elmdb's code: the database's own failures, and refusals the engine has no name of its own for
+  IO: null,
+  LMDB: null,
+  MAP_FULL: null,
+  READERS_FULL: null,
+  CORRUPTED: null,
+  ALREADY_OPEN: null,
+  CLOSED: null,
+  READ_ONLY: null,
+  NO_DATABASE: null,
+  SCHEMA_INVALID: null,
+  SCHEMA_CHANGE_REFUSED: null,
+  SCHEMA_CHANGED: null,
+  DATA_REPLACED: null,
+  NOT_A_DATABASE: null,
+  WRONG_FORMAT: null,
+  BATCH_INVALID: null,
+  UNKNOWN_FIELD: null,
+  ENDPOINT: null,
+  CARDINALITY: null,
+  UNIQUE: null,
+  UNIT_OPEN: null,
+  ALREADY_LISTENING: null,
+  NO_LISTENER: null,
+  DATABASE_MISMATCH: null,
+  INDEX_BUILD_FAILED: null,
+  THREAD_REFUSED: null,
+  BUILDS_STOPPED: null,
+  RESTORE_PENDING: null,
+  NOT_DURABLE: null,
+  SYNC_BEHIND: null,
+  MODE_MISMATCH: null,
+  ALREADY_LOADED: null,
+  NUMBERS_EXHAUSTED: null,
+  CALLBACK_PANICKED: null,
+  WATCH_PANICKED: null,
+  CALLBACK_ACTIVE: null,
+  PANICKED: null,
 };
+
+/** Whether `code` is one of elmdb's, as the table above names them */
+const isErrorCode = (code: unknown): code is ErrorCode => typeof code === 'string' && Object.hasOwn(CODES, code);
 
 /**
  * Runs `fn`, a call into elmdb, rethrowing a refusal the engine names as an `EarsError`; anything else elmdb throws
@@ -222,7 +267,7 @@ export function crossing<T>(fn: () => T): T {
     return fn();
   } catch (error) {
     const code = (error as { code?: unknown })?.code;
-    const mapped = typeof code === 'string' ? CODES[code] : undefined;
+    const mapped = isErrorCode(code) ? CODES[code] : null;
     if (mapped) throw new EarsError(mapped, (error as Error).message);
     throw error;
   }
@@ -249,12 +294,6 @@ export function runCommitted<T>(operation: () => T, notify: () => void): T {
   notify();
   return result;
 }
-
-/** One batch operation, as elmdb's protocol takes it (`elmdb/protocol/Op.ts`) */
-export type Op = { op: string } & Record<string, unknown>;
-/** One answer of a batch */
-export type OpResult = { kind: 'done' } | { kind: 'entity'; id: string; shortCode: string | null; created: boolean }
-  | { kind: 'relation'; id: string; linked: boolean } | { kind: 'label'; label: string } | { kind: 'stale' };
 
 /**
  * A commit, as a commit listener hears it: its sequence, and the tokens whose tracked reads it wrote into, or `all` for
@@ -517,9 +556,9 @@ export function createConnection(
     }
     try {
       // The unit's deferred checks run as it commits; one that fails aborts it
-      const changes = timedInUnit(() => unpackr.unpack(noticing(() => crossing(() => held.commit(options?.durable ?? false)))));
+      const changes = timedInUnit(() => unpackr.unpack(noticing(() => crossing(() => held.commit(options?.durable ?? false)))) as ChangeSet);
       unitEnded();
-      made(changes as { sequence: number; touched: number[] });
+      made(changes);
     } catch (error) {
       const open = held.isOpen;
       if (open) held.abort();
@@ -588,14 +627,20 @@ export function createConnection(
       if (hook && levels.length === 0 && ops.some((op) => { const type = typeOfOp(op); return type !== undefined && hook!.wants(type); })) {
         return transact(() => connection.write(ops, now));
       }
-      const written = counting('write', ops.length, () => {
-        const bytes = observation.request(pack({ ops, now }));
-        const target = levels.length ? writable() : undefined;
-        const answer = observation.response(noticing(() => crossing(() => (target ? target.write(bytes) : database.write(bytes, false)))));
-        if (target) levels.at(-1)!.kept = true;
-        return unpackr.unpack(answer) as { results: OpResult[]; changes?: { sequence: number; touched: number[] } };
+      const written = counting('write', ops.length, (): BatchResult | Written => {
+        const batch: Batch = { ops: [...ops], now };
+        const bytes = observation.request(pack(batch));
+        if (!levels.length) {
+          // A database's write commits, answering the commit's change set beside the results
+          return unpackr.unpack(observation.response(noticing(() => crossing(() => database.write(bytes, false))))) as Written;
+        }
+        const target = writable();
+        // A unit's write answers the results alone: what it changed commits with the unit
+        const answer = unpackr.unpack(observation.response(noticing(() => crossing(() => target.write(bytes))))) as BatchResult;
+        levels.at(-1)!.kept = true;
+        return answer;
       });
-      if (written.changes) made(written.changes);
+      if ('changes' in written) made(written.changes);
       return written.results;
     },
     load(loads) {

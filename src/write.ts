@@ -1,10 +1,12 @@
 // The engine's writes: each builder call one of elmdb's batch operations (`elmdb/docs/architecture/engine.md`, Writes: batches and
 // units), sent as a batch of its own, in the unit `transact` holds open or as a unit of its own. elmdb holds each to
-// its rules and refuses it whole; the builder checks only what can't cross, a value of `undefined`.
+// its rules and refuses it whole; the builder checks only what can't cross, a value of `undefined`. Each operation is
+// written whole as a literal of elmdb's generated `Op`, so a field renamed there fails to compile here.
+import type { Op } from 'elmdb/protocol/Op.js';
+import type { OpResult } from 'elmdb/protocol/OpResult.js';
 import type { EARS } from './entities.ts';
 import { EarsError, RESERVED_ENTITY_TYPES, refuseReserved } from './errors.ts';
 import type { NameChecks } from './names.ts';
-import type { Op, OpResult } from './database.ts';
 import type { RelationPatch, RowIdentity, WeightedLinkOptions, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
 
 const LINK_OPTIONS: readonly string[] = ['info', 'weight'] satisfies Array<keyof WeightedLinkOptions>;
@@ -51,6 +53,18 @@ function definedFields(fields: Record<string, unknown>, via: string): Record<str
   return defined;
 }
 
+/** The entity a create or an upsert answers: elmdb answers each with its entity */
+function entityOf(result: OpResult): { id: EARS.EntityId; created: boolean } {
+  if (result.kind !== 'entity') throw new Error(`elmdb answered a write to an entity with ${JSON.stringify(result)}`);
+  return { id: result.id as EARS.EntityId, created: result.created };
+}
+
+/** A brought short code is a string, which is all the protocol carries; elmdb holds it to the type's form */
+function refuseShortCode(via: string, type: string, shortCode: unknown): asserts shortCode is string | undefined {
+  if (shortCode === undefined || typeof shortCode === 'string') return;
+  throw new EarsError('INVALID_SHORT_CODE', `${via}(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(shortCode)} }): a short code is a string, <prefix>-<n>`);
+}
+
 export function createWrites({ write: send, exists, getRow, names, isEntityType }: WriteScope) {
   const one = (op: Op, now?: number) => send([op], now)[0]!;
 
@@ -60,9 +74,10 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
    */
   function builder(id: EARS.EntityId, touch: boolean, changedAt?: number): WriteBuilder {
     let stampAt = changedAt;
+    /** Sends an attribute write, made with the builder's `id` and `touch`, stamped with the builder's time */
     const attribute = (op: Op) => {
       stampAt ??= Date.now();
-      one({ ...op, id, touch }, stampAt);
+      one(op, stampAt);
       return self;
     };
     /** `undefined` can't cross to the engine, which would read it as `null`, so a write of one refuses */
@@ -72,17 +87,17 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
     const self: WriteBuilder = {
       set(k, v) {
         if (v === undefined) throw new EarsError('NO_VALUE', `set('${k}'): no value to store. delete('${k}') removes the attribute`);
-        return attribute({ op: 'set', fields: definedFields({ [k]: v }, 'set') });
+        return attribute({ op: 'set', id, fields: definedFields({ [k]: v }, 'set'), touch });
       },
       setMany(attrs) {
         const fields = definedFields(attrs as Record<string, unknown>, 'setMany');
-        return Object.keys(fields).length ? attribute({ op: 'set', fields }) : self;
+        return Object.keys(fields).length ? attribute({ op: 'set', id, fields, touch }) : self;
       },
-      append: (k, v) => (valued('append', k, v), attribute({ op: 'append', field: k, value: v })),
-      merge: (k, v) => (valued('merge', k, v), attribute({ op: 'merge', field: k, value: v })),
-      delete: (k) => attribute({ op: 'delete', field: k }),
-      removeAt: (k, index) => attribute({ op: 'removeAt', field: k, index }),
-      removeValue: (k, v) => (valued('removeValue', k, v), attribute({ op: 'removeValue', field: k, value: v })),
+      append: (k, v) => (valued('append', k, v), attribute({ op: 'append', id, field: k, value: v, touch })),
+      merge: (k, v) => (valued('merge', k, v), attribute({ op: 'merge', id, field: k, value: v, touch })),
+      delete: (k) => attribute({ op: 'delete', id, field: k, touch }),
+      removeAt: (k, index) => attribute({ op: 'removeAt', id, field: k, index, touch }),
+      removeValue: (k, v) => (valued('removeValue', k, v), attribute({ op: 'removeValue', id, field: k, value: v, touch })),
 
       link(kind, target, options: WeightedLinkOptions = {}) {
         // An edge's info is `{ info }`: an object with other keys is info passed where the options go
@@ -139,11 +154,6 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
     return self;
   }
 
-  /** A brought short code is a string, which is all the protocol carries; elmdb holds it to the type's form */
-  const refuseShortCode = (via: string, type: string, shortCode: unknown) => {
-    if (shortCode === undefined || typeof shortCode === 'string') return;
-    throw new EarsError('INVALID_SHORT_CODE', `${via}(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(shortCode)} }): a short code is a string, <prefix>-<n>`);
-  };
 
   /**
    * Refuses a name the schema doesn't declare, saying where an id goes when it is one. The engine's own types (a
@@ -164,7 +174,7 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
     refuseShortCode('create', type, shortCode);
     const result = one({ op: 'create', type, id: given, fields: definedFields(fields, 'create'), shortCode, createdAt, updatedAt });
     // The creation is the entity's first change: its fields, and what the builder writes now, are part of it
-    return builder((result as { id: EARS.EntityId }).id, false);
+    return builder(entityOf(result).id, false);
   }) as Create;
 
   const write = ((id: EARS.EntityId, { touch = true }: WriteOptions = {}) => {
@@ -187,7 +197,7 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
     if ((fields.createdAt !== undefined || fields.updatedAt !== undefined) && !exists(id).entity) return create(type, row);
     const now = Date.now();
     const defined = definedFields(fields, 'upsert');
-    const result = one({ op: 'upsert', type, id, fields: defined, shortCode }, now) as { created: boolean };
+    const result = entityOf(one({ op: 'upsert', type, id, fields: defined, shortCode }, now));
     if (result.created) return builder(id, false);
     return builder(id, true, Object.keys(defined).length ? now : undefined);
   }) as Upsert;

@@ -13,5 +13,7 @@
     "outDir": ".temp/api-types",
     "types": []
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  // Type tests (`*.test-d.ts`) are read by the typecheck, and are no part of the package
+  "exclude": ["src/**/*.test-d.ts"]
 }

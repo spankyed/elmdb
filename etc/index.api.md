@@ -4,6 +4,11 @@
 
 ```ts
 
+import type { OpenReport } from 'elmdb/protocol/OpenReport.js';
+import type { Schema } from 'elmdb/protocol/Schema.js';
+import type { SchemaChange } from 'elmdb/protocol/SchemaChange.js';
+import type { Stats } from 'elmdb/protocol/Stats.js';
+
 // @public (undocumented)
 export const b64Decode: (s: string) => number;
 
@@ -284,19 +289,12 @@ export interface EarsDatabase {
     replacedElsewhere(): number | null;
     replaceWith(source: string): void;
     reset(): void;
-    readonly schema: unknown;
+    readonly schema: Schema | null;
     readonly sequence: number;
     // (undocumented)
-    setSchema(schema: object): SchemaChange[];
+    setSchema(schema: Schema): SchemaChange[];
     // (undocumented)
-    stats(): {
-        types: Record<string, {
-            live: number;
-            trashed: number;
-        }>;
-        relations: Record<string, number>;
-        fileBytes: number;
-    };
+    stats(): Stats;
     trackStats(): {
         owners: number;
         keys: number;
@@ -570,14 +568,7 @@ export interface LinkOptions {
 // @public
 export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
 
-// @public
-export interface OpenReport {
-    notBorneOut: boolean;
-    restored: {
-        sequence: number | null;
-    } | null;
-    schemaChanges: SchemaChange[];
-}
+export { OpenReport }
 
 // @public
 export type OptionalField<S extends EntityShapes, E extends string> = [
@@ -914,15 +905,7 @@ export interface RowRules {
     substrings?: readonly string[];
 }
 
-// @public
-export interface SchemaChange {
-    // (undocumented)
-    change: string;
-    // (undocumented)
-    effect: string;
-    // (undocumented)
-    path: string;
-}
+export { SchemaChange }
 
 // @public
 export interface SchemaStats {
