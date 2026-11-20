@@ -1,14 +1,24 @@
 # EARS in elmdb's repository
 
-Status: planned, 2026-11-14, revised 2026-11-15, and phase 0's list of what changed read again on 2026-11-16; where
-phase 0 stands read again on 2026-11-20, against apack's `master` at `c9336bf0a2`. Nothing is built here. In apack,
-phase 0's first step is done: the pin is on this repository's `main` (`91c92659c1` moved it to `2029f9c` on
-2026-11-16 and `06a18f0ac0` to `4f134df` on 2026-11-17), EARS calls `read` where it called `readSync`, and its specs'
-child processes open in their parent's mode (`618983142a`). The one-time rebuild of apack's databases is the step run
-by hand that phase 0 describes: apack marked it with a checkpoint for a day and dropped the mark (`9a5a89ecec`), and
-which machines have run it is not recorded. The ties, the types, the packs' imports and the specs written beside EARS
-are not begun. This is the sixth draft: five independent reads,
-each against both repositories, changed the five before it (What the reviews changed, at the end).
+Status: phases 0, 1 and 3 done, 2026-11-20; phase 2 in progress in apack. Planned 2026-11-14, revised 2026-11-15
+and its list of what changed read again on 2026-11-16. It went through six drafts: five independent reads, each
+against both repositories, changed the five before it (What the reviews changed, at the end). The rest of this
+document is the plan as it stood before the move; how EARS works now is `../../architecture/ears.md`, and the
+boundary with apack `../../architecture/design.md`.
+
+- **Phase 0 is done in apack**, each step merged into apack's `develop`: #579 moved the pin to this repository's
+  `main`, #580 cut the ties, #582 typed the builders, the schema, the error table and the port from `elmdb/protocol`,
+  #581 wrote EARS' own specs beside it, #584 made packs and generated code import through the SDK, and #585 fixed the
+  end-to-end harness, which the gate needed. A backup taken by elmdb `4f134df` was restored by `eb6c6dd` with
+  `check()` clean (2,000 entities, 500 relations, 2026-11-20). The rebuild's evidence is apack's `91c92659c1`: a copy
+  of a development database the old pin wrote had 854 derived keys differing in the new pin's `check()`, and none
+  after `rebuild()`.
+- **Phase 1 is merged as elmdb#207**: `packages/apack-ears` split at apack's `92b4a7e387` into `ad7bd9d7`, merged
+  under `packages/ears` by a merge commit. The EARS job took 3 min 51 s on Linux, 5 min 43 s on macOS and 6 min 50 s
+  on Windows (2026-11-20), and added no wall time to the pull request.
+- **Phase 2 is in progress in apack**: apack switches to the linked `@elmdb/ears` and deletes `packages/apack-ears`,
+  and the phase is being finished there.
+- **Phase 3 is done**: the documents name `@elmdb/ears`, and this plan is archived.
 
 EARS, the entity-attribute-relation system, is the fluent TypeScript API over an elmdb database: what a program
 holds (`createEarsEngine({ database })`), its query and write builders, which compile to plans and batches, its
@@ -20,7 +30,7 @@ and says what apack keeps.
 In this document "the engine" is the Rust crate, as everywhere in this repository. apack calls EARS an engine too
 (`createEarsEngine`); that name is one of the decisions left for after the move.
 
-`../architecture/design.md` (The boundary with apack) decided the opposite in `badd720` (2026-10-24), and named
+`../../architecture/design.md` (The boundary with apack) decided the opposite in `badd720` (2026-10-24), and named
 what would reverse it: "If the builders settle and another program wants them, they move into elmdb then." Neither
 condition is met. The move was decided by the repositories' owner on 2026-11-14 for the reasons below; this plan
 counts what it costs rather than re-deciding it, and that section of `design.md` is rewritten in phase 3.
@@ -38,7 +48,7 @@ counts what it costs rather than re-deciding it, and that section of `design.md`
   commits behind `bf4b21b` (`git rev-list --count --no-merges 4b67670..bf4b21b`), and since the pin the binding's
   names changed under it: `6616fd3` (2026-11-12) made `write` answer a promise, which EARS reads at once, and the
   changes of 2026-11-15 made the plain name the blocking one: `write` blocks again, as at the pin, `readSync` becomes
-  `read`, and the promise forms are `…Async` (`../architecture/design.md`, principle 9 and Conventions). EARS calls
+  `read`, and the promise forms are `…Async` (`../../architecture/design.md`, principle 9 and Conventions). EARS calls
   `readSync`, which no longer exists, so EARS as it stands does not run on this repository's `main`, and nothing here
   says so.
 - **A protocol change and the builder that uses it become one pull request**, tested together before either merges.
@@ -98,8 +108,8 @@ The other costs:
 ## What moves, what stays, what goes
 
 **Moves, whole**: `packages/apack-ears`: `src/`, `tests/`, `bench/` (whose readings are already here, in
-`../evidence/phase-9.md` and `../evidence/next-phase-3.md`), `etc/` (the API reports) and its `CLAUDE.md`, as
-`../architecture/ears.md`. It imports no apack package. What ties it to apack is cut in phase 0:
+`../../evidence/phase-9.md` and `../../evidence/next-phase-3.md`), `etc/` (the API reports) and its `CLAUDE.md`, as
+`../../architecture/ears.md`. It imports no apack package. What ties it to apack is cut in phase 0:
 
 - `query.ts`: the unindexed-walk warning says "Declare it in the … entry of apack.json". The message names the type
   and the field; apack's `warn` adds where a pack declares an index.
@@ -346,7 +356,7 @@ Opened by having both halves in one repository, each to be decided on a reading,
        acknowledge-restore`; and a writable open that can't write that notice is refused with the failure that stopped
        it, `IO` where the filesystem refused the write (#157).
    - **apack's databases are rebuilt once on the new pin.** Format 1 was edited in place between the pin and `main`, in
-     derived data (`../architecture/format.md`, Versions): a value index's orders, ranges and pages (#95), a compound
+     derived data (`../../architecture/format.md`, Versions): a value index's orders, ranges and pages (#95), a compound
      index's order under equalities (#96), a term's places in blocks with lengths by place (#93), a list before a
      compound index's last field (#98) and a value's places in blocks (#108), which an elmdb built after a change may
      misread rather than refuse; and the order of a value index's strings (#139), which the builder builds again
@@ -387,8 +397,8 @@ Opened by having both halves in one repository, each to be decided on a reading,
      run again), so the suite is shown able to fail here;
    - the API report differs from apack's at the recorded commit only by the package's name, the entry `/database`,
      and the `elmdb/protocol` import paths;
-   - the benchmark and the watch stress run from this repository, and `../architecture/ears.md` names their commands
-     (the dated records in `../evidence/` are left as they are).
+   - the benchmark and the watch stress run from this repository, and `../../architecture/ears.md` names their commands
+     (the dated records in `../../evidence/` are left as they are).
 2. **apack switches**, prepared against phase 1's branch so that it merges within the day. Its packages depend on
    the linked `@elmdb/ears`; the changes under "Changes in apack" are made; `packages/apack-ears` and the list under
    "Goes from apack" are deleted; the pin moves. Done when:
@@ -400,8 +410,8 @@ Opened by having both halves in one repository, each to be decided on a reading,
      with EARS' `msgpackr` left out.
 3. **The documents.** `design.md`'s boundary, Packages and Vocabulary; `engine.md`, `testing.md` and
    `background.md` where they name apack's package; `CLAUDE.md`'s Layout and Checks; `README.md`, which opens a
-   database and runs a query through EARS; `../architecture/ears.md`, in this repository's vocabulary (a database,
-   never a store); and this plan, to `../archive/roadmap/`, its entry in this directory's `README.md` moving to that
+   database and runs a query through EARS; `../../architecture/ears.md`, in this repository's vocabulary (a database,
+   never a store); and this plan, to `docs/archive/roadmap/`, its entry in `docs/roadmap/README.md` moving to that
    file's list of archived directions. Done when `git grep '@apackdev/ears'` here finds it only under `archive/` and
    `evidence/`.
 
@@ -409,9 +419,29 @@ Phases 1 and 2 are one move in two repositories, and the openings listed above s
 its own reading. From phase 1's merge until phase 2's, EARS is changed here only;
 phase 2's first condition is what catches a change made in apack meanwhile.
 
-This plan is in no milestone of `../roadmap.md`, and is not ahead of one.
+This plan is in no milestone of `../../roadmap.md`, and is not ahead of one.
 
 ## Unproven
+
+Settled by phase 1 (elmdb#207, 2026-11-20):
+
+- **Every moved spec passes on Linux, macOS and Windows**, under vitest's deadlines set to a minute a test or hook
+  (60 s), in the EARS job's runs.
+- **What the EARS job adds**: 3 min 51 s on Linux, 5 min 43 s on macOS and 6 min 50 s on Windows, and nothing to the
+  pull request's wall time.
+- **Blame survives the split and the rename**: `git blame packages/ears/src/watch.ts` names apack's commits. `git log
+  -- packages/ears` shows only the commits made after the move; the history before it is reached through the merge's
+  second parent, the split `ad7bd9d7` that `8a7817a0` merged, where the package's files are at the root
+  (`git log ad7bd9d7 -- src/watch.ts`).
+- **`mutants.yml` on a change to EARS alone**: it passes the filter, since TypeScript is no document, runs
+  `scripts/mutants-in-diff.py`, and mutates nothing, the change holding no Rust. What shows EARS' specs can fail is
+  the three scratch copies, which failed 2, 7 and 42 specs.
+- **The TypeScript floor is a sibling workspace**, `packages/typescript-floor`: one inside `packages/ears` replaced
+  EARS' own compiler.
+- **The binding's jobs got `:binding` scripts** (`build:binding`, `typecheck:binding`, `test:binding`) once the root's
+  `npm test` ran vitest, which their Node 23 doesn't support.
+
+Still open, for phase 2:
 
 - That EARS can leave apack's shared-instance list once packs import it only through the SDK. The harness that runs
   a pack's dependencies shares EARS by name. Until a pack built that way is shown loading one copy, EARS stays on
@@ -419,11 +449,6 @@ This plan is in no milestone of `../roadmap.md`, and is not ahead of one.
 - That apack's API bundle and its CLI bundle, which inline EARS from source today, inline a linked `dist`, with
   source maps good enough for the call sites `calls.ts` reports; and that the renderer's dev server serves a linked
   `dist` from outside its root.
-- That every moved spec passes under vitest's deadlines, and on Linux and Windows runners, where CI has never run
-  them.
-- What the EARS job adds to a pull request's time here.
-- That blame survives the split and the rename to `packages/ears`.
-- How `mutants.yml` behaves on a change to EARS alone, beyond passing its filter.
 
 ## What the reviews changed
 
