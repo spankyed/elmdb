@@ -510,8 +510,8 @@ stale as the reads already filed. In Rust the call is `Database::read_at_call` a
 asked it is refused `DATABASE_MISMATCH`, and its snapshot let go; one that has run already, at its call or in a
 growth of the asking database's map, answers as it ran, its answer that database's own.
 
-A caller's own function can't cross: a query builder over the protocol, such as apack's, that holds one sends the
-plan up to that step, and runs the rest itself.
+A caller's own function can't cross: a query builder over the protocol, such as EARS' (`ears.md`), that holds one
+sends the plan up to that step, and runs the rest itself.
 
 **Answers** are owned bytes: ids as strings, each row as a map of `id`, `entityType` and the fields' stored msgpack
 bytes spliced in unchanged, counts as numbers. A call answers an array of an answer per read, each a map whose `kind`
@@ -529,8 +529,8 @@ each map an object, as the first decode gives it; the exact decode gives a `Map`
 `db.write(batch, durable?)` applies a batch as one unit, on the calling thread, and answers once it has committed,
 or with `durable` once its sync has run. A write is never answered by a promise: what it answers, an entity's id and
 short code, and what it refuses are its caller's at the call, and a read made after it sees it. In the grouped mode a
-`set` committed alone took about 38 µs, one inside a unit about 11 µs and a `create` about 107 µs, through apack's
-engine (`../evidence/phase-10.md`, D17's re-reading, 2026-10-25), and the sync runs later on a thread of its own,
+`set` committed alone took about 38 µs, one inside a unit about 11 µs and a `create` about 107 µs, through EARS,
+then apack's (`../evidence/phase-10.md`, D17's re-reading, 2026-10-25), and the sync runs later on a thread of its own,
 which `db.durable()` waits for without holding the event loop. A batch of thousands of operations holds the calling
 thread for as long as it runs.
 
@@ -577,7 +577,7 @@ The operations:
   info, its weight) and remove one, destroy, take a label (the next `<base> <n>` of a type), and embed (a caller's vector
   for a chunk, answered `stale` if its text changed).
 - **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
-  it, and `unit.release(depth)` keeps its writes in the unit around it, as apack's nested `transact` does. A savepoint
+  it, and `unit.release(depth)` keeps its writes in the unit around it, as EARS' nested `transact` does. A savepoint
   is an undo log of each key's previous value, so rolling one back costs what it wrote. A write that has just read a
   key hands the log what it read, so the log reads it again only where the write didn't: a field write reads what the
   field held once, and the entity's place once for all the indexes covering it (`engine/tests/field_writes.rs` counts
@@ -659,8 +659,8 @@ committed data and in-memory schema already installed. Empty-index markers are s
 transaction, not by a second commit. A caller must not retry the mutation as though it had been refused; the error names
 its sequence, and `db.sequence` gives the current commit without parsing the message. The failed call does not return
 its touched-token list: callers managing tracked tokens must conservatively invalidate all of them on `NOT_DURABLE`.
-Native watches have already been finalized. apack follows that invalidation rule. `close()` syncs what is owed, and
-reports a sync that failed.
+Native watches have already been finalized. EARS follows that invalidation rule (`ears.md`, Persistence). `close()`
+syncs what is owed, and reports a sync that failed.
 
 `syncEachCommit` (`OpenOptions.sync_each_commit`) is the power-loss-safe mode: LMDB syncs each commit as it is made, its
 pages before the meta page that names them, so a commit that returned survives the machine losing power, and no group
@@ -817,12 +817,12 @@ in either order. `db.sequence` is the last commit's.
   schema before, and is let go of when the listener returns, and the thread goes on to what the change left. A close after such a change, by the same listener, is refused like any it asks for.
 
 **Why tracked reads, not only `watch(plan)`:** apack's views are functions over its repositories — several plans and
-filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). apack's engine keeps a
-view current by running the function again when a commit names its token (apack's `docs/plans/live-queries.md`). Its
-JavaScript engine already does this over lmdb-js, tracking key ranges and matching commits through the same kind of
-index (`@apackdev/ears`, `engine.watch`), so the contract is one both engines keep and the move swaps the
-implementation under it. Tracking key ranges rather than types, fields and ids is also the more precise of the two: an
-edit to one entity names no token whose reads didn't touch that entity.
+filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). EARS' `watch` keeps
+such a view current by running the function again when a commit names its token (`ears.md`, Watches; apack's
+`docs/plans/live-queries.md`). Before elmdb, EARS did this over lmdb-js, tracking key ranges and matching commits
+through the same kind of index in JavaScript, so the contract its watches kept stayed the same when elmdb took the
+tracking over. Tracking key ranges rather than types, fields and ids is also the more precise of the two: an edit to
+one entity names no token whose reads didn't touch that entity.
 
 ## Admin
 

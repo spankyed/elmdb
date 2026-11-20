@@ -44,8 +44,8 @@ How often a file is torn, and what the mode that can't be costs the program elmd
   that reply's commits are about 1 ms in the one mode and a third of a second in the other, a thirtieth of the
   time it streams. Neither was measured in apack. apack opens every database it keeps in the grouped mode, asks
   for no durable write, opens temporary ones with `syncs: false`, and opens its databases read-only beside the
-  running app from its CLI and its backup (apack's `packages/apack-ears/src/lmdb/database.ts` and
-  `packages/apack-host`, read 2026-11-14).
+  running app from its CLI and its backup (EARS' `src/lmdb/database.ts`, then in apack and now
+  in `packages/ears`, and apack's `packages/apack-host`, read 2026-11-14).
 
 What they say: `syncEachCommit` as the default needs no new code, and by the count as it now stands it may well
 serve apack: the fourth draft set it aside on the count of 181, which was out of date. Which of the two to build

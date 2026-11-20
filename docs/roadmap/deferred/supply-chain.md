@@ -37,8 +37,8 @@ Read on 2026-11-18, at `9c6e765`, before any of it was built:
     other is refused (`schema/parse.rs`), at `open`, at `setSchema` and when a dump is loaded.
   - A database given a schema stores it, URL included, in its canonical schema (`m/schema`) and its hash.
   - The literal URL is also written in the README, `docs/architecture/schema.md`, about twenty of the binding's tests
-    and benches, and `scripts/measure-recovery.mjs` and `scripts/release-smoke.mjs`. apack names it in
-    `ELMDB_SCHEMA_LANGUAGE` (`packages/apack-ears/src/schema.ts`) and in `build/prod/smoke-native.mjs`.
+    and benches, and `scripts/measure-recovery.mjs` and `scripts/release-smoke.mjs`. EARS names it in
+    `ELMDB_SCHEMA_LANGUAGE` (`packages/ears/src/schema.ts`), and apack in `build/prod/smoke-native.mjs`.
   - `elmdb.dev` has no DNS record, and Google Registry's RDAP answers 404 for it: it isn't registered.
   - The JSON Schema meant to be served there is generated, `crates/elmdb-node/protocol/schema-1.json`
     (`cargo xtask generate`). It has no `$id`. GitHub Pages isn't enabled for the repository.

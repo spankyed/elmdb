@@ -20,5 +20,6 @@ What each directory is for, so you know how far to trust what you're reading.
 - [format.md](architecture/format.md): the key layout, values, versions, dumps and LMDB.
 - [filesystems.md](architecture/filesystems.md): where a database may live.
 - [testing.md](architecture/testing.md): what proves it correct, and the commands for each check.
+- [ears.md](architecture/ears.md): EARS, the fluent TypeScript API over a database (`@elmdb/ears`).
 
 [background.md](background.md) is why elmdb exists.
