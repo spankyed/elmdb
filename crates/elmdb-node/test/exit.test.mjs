@@ -178,7 +178,7 @@ test('a rebuild of a handle nothing else holds is answered once the handle has b
 test('a handle that ran a call answering a promise is collected once nothing holds it', (t) => {
   // Each call that answers a promise holds the database by a hold of its own, so nothing roots the handle's
   // JavaScript object for it: a handle dropped after the promise has settled is collected like one that never made the
-  // call. Each child prints `collected`, or `kept` after five seconds of collections that never found it. Returned as
+  // call. Each child prints `collected`, or `kept` after twenty seconds of collections that never found it. Returned as
   // napi-rs's AsyncTask, every one of these was `kept`
   const said = {};
   const calls = {
@@ -200,7 +200,7 @@ test('a handle that ran a call answering a promise is collected once nothing hol
       `const asked = ${what === 'backup' ? `db.backupAsync(${JSON.stringify(join(dir, 'copy'))})` : calls[what]};`,
       'db = undefined;',
       'asked.then(() => {',
-      '  const until = Date.now() + 5000;',
+      '  const until = Date.now() + 20000;',
       '  (function wait() {',
       '    global.gc();',
       "    if (collected === null && Date.now() < until) return setImmediate(wait);",

@@ -185,7 +185,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(directory.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
         let idle = IdleReads::new().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + crate::waits::ARRIVES;
         loop {
             idle.clear();
             let (_, generation) = idle.take(&store.env);
@@ -225,7 +225,7 @@ mod tests {
         drop(idle);
         release.send(()).unwrap();
         owner.join().unwrap();
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + crate::waits::ARRIVES;
         while weak.upgrade().is_some() {
             assert!(Instant::now() < deadline, "the detached cache worker kept its state alive");
             std::thread::sleep(Duration::from_millis(5));

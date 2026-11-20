@@ -189,7 +189,7 @@ fn measure_idle_reader_read_overhead() {
 
 // Observing the private cache does not acquire a database snapshot or trigger expiration.
 fn wait_until_empty(store: &Store) {
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::waits::ARRIVES;
     while store.idle.len() != 0 {
         assert!(Instant::now() < deadline, "completed snapshots were not released without another read");
         std::thread::sleep(Duration::from_millis(5));
@@ -310,7 +310,7 @@ fn hot_reads_do_not_extend_other_cached_snapshots() {
     let store = Store::open(directory.path(), quiet()).unwrap();
     nested(&store, MAX_IDLE);
     assert_eq!(store.idle.len(), MAX_IDLE);
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + crate::waits::ARRIVES;
     loop {
         store.read(|_, _| Ok(())).unwrap();
         if store.idle.len() <= 1 {
