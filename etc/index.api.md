@@ -69,6 +69,12 @@ export interface CallSite {
 }
 
 // @public
+export interface CallSiteNaming {
+    engineFrames?: RegExp;
+    roots?: readonly string[];
+}
+
+// @public
 export interface ChangedEntities {
     complete: boolean;
     destroyed: string[];
@@ -408,6 +414,7 @@ export interface EarsOperationResult {
 
 // @public
 export interface EARSRuntimeDeps {
+    callSites?: CallSiteNaming;
     database: EarsDatabase;
     freeze?: boolean;
     warn?: (message: string, warning: EarsWarning) => void;

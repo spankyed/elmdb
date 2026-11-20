@@ -5,7 +5,7 @@
 // The port is structural so this module never loads `elmdb`: `@apackdev/ears/lmdb` opens the database, and only that
 // entry imports it.
 import { Packr, Unpackr } from 'msgpackr';
-import { callSite, createCallTally, type CallCounting, type CallReport, type CallTally } from './calls.ts';
+import { createCallSites, createCallTally, type CallCounting, type CallReport, type CallSiteNaming, type CallTally } from './calls.ts';
 import { EarsError, type EarsErrorCode } from './errors.ts';
 import { setField } from './ids.ts';
 import { createOperationObservation, type EarsOperationObserver } from './observation.ts';
@@ -356,10 +356,16 @@ export interface Connection {
   readonly calls: CallCounting;
   /** The count being kept, while counting runs: what the watch scheduler records each watch's runs into */
   tally(): CallTally | undefined;
+  /** The code calling into the engine now, as the engine's creator names it (`CallSiteNaming`) */
+  callSite(): string;
   observe(observer: EarsOperationObserver): () => void;
 }
 
-export function createConnection(database: EarsDatabase, { freeze = false }: { freeze?: boolean } = {}): Connection {
+export function createConnection(
+  database: EarsDatabase,
+  { freeze = false, callSites }: { freeze?: boolean; callSites?: CallSiteNaming } = {},
+): Connection {
+  const callSite = createCallSites(callSites);
   /**
    * The units `transact` is inside, outermost first. elmdb's unit opens at the first write, so a unit that writes
    * nothing commits nothing, and a read before it sees what a snapshot would; each level inside the outermost is a
@@ -665,6 +671,7 @@ export function createConnection(database: EarsDatabase, { freeze = false }: { f
     lastCommit: () => database.sequence,
     calls,
     tally: () => tally,
+    callSite,
     observe: observation.observe,
   };
   return connection;

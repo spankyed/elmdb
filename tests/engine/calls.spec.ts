@@ -2,8 +2,8 @@
 // Each case reads the counts a measurement would, and the site is checked to name this file, since a site that named
 // the engine's own modules would attribute every call to the engine.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { engine } from './helpers.ts';
-import type { EngineUnderTest } from './engine-under-test.ts';
+import { NAMES, engine } from './helpers.ts';
+import { freshEngine, type EngineUnderTest } from './engine-under-test.ts';
 import type { CallKind, CallSite } from '../../src/index.ts';
 
 let e: EngineUnderTest;
@@ -88,5 +88,36 @@ describe('admin.calls', () => {
     e.admin.calls.start();
     expect(e.admin.calls.report()).toMatchObject({ counting: true, sites: [], totals: { read: { calls: 0 } } });
     e.admin.calls.stop();
+  });
+});
+
+describe("the code a site names, as the engine's creator names it", () => {
+  /** The first frame of the one read's site, and the label of a watch opened without one, under `naming` */
+  async function named(naming?: Parameters<typeof freshEngine>[0]['callSites']) {
+    const named = freshEngine({ ...NAMES, callSites: naming });
+    const watching = named.watch(() => named.query('Task').ids(), () => {});
+    await named.admin.watchesSettled();
+    named.admin.calls.start();
+    named.query('Task').ids();
+    named.create('Task', { title: 'touches the watch' });
+    await named.admin.watchesSettled();
+    const report = named.admin.calls.stop();
+    watching.stop();
+    return { site: sitesOf('read', report.sites).find((site) => !site.watch)!.site.split(' < ')[0]!, label: report.watches[0]!.label };
+  }
+
+  it("by default skips the frames in the engine's own directory, and keeps a path outside node_modules whole", async () => {
+    const { site, label } = await named();
+    expect(site).toMatch(/.[\\/]tests[\\/]engine[\\/]calls\.spec\.ts:\d+$/);
+    expect(label.split(' < ')[0]).toMatch(/.[\\/]tests[\\/]engine[\\/]calls\.spec\.ts:\d+$/);
+  });
+
+  it('names a path from the last root given in it, and skips the frames the pattern given calls the engine\'s', async () => {
+    const cut = await named({ engineFrames: /\/apack-ears\/src\//, roots: ['/apack-ears/', '/engine/'] });
+    expect(cut.site).toMatch(/^engine\/calls\.spec\.ts:\d+$/);
+    expect(cut.label).toMatch(/^engine\/calls\.spec\.ts:\d+/);
+    // This file taken for the engine's: the site is the code that called it
+    const past = await named({ engineFrames: /\/apack-ears\/(?:src|tests)\// });
+    expect(past.site).not.toContain('calls.spec.ts');
   });
 });

@@ -7,7 +7,7 @@ function fixture(recordCauses?: () => boolean) {
   let sequence = 0;
   let listener: ((commit: Commit) => void) | undefined;
   const connection = {
-    database: { isOpen: true }, untrack() {}, tally: () => undefined,
+    database: { isOpen: true }, untrack() {}, tally: () => undefined, callSite: () => 'a scheduler spec',
     track: (_token: number, read: () => unknown) => read(),
     lastCommit: () => sequence, trackStats: () => ({ keys: 0, ranges: 0 }),
     onCommit(next: (commit: Commit) => void) { listener = next; return () => { listener = undefined; }; },

@@ -9,7 +9,7 @@ export {
 export type { BeforeCommit, ChangedEntities, ChangedPosition, EarsDatabase, PendingChanges, EarsUnit, OpenReport, SchemaChange, UnitOptions } from './database.ts';
 export { WATCH_SCHEDULE } from './watch.ts';
 export type { WatchObserver, WatchOptions, WatchReadContext, Watching, WatchSchedule } from './watch.ts';
-export type { CallCounting, CallKind, CallReport, CallSite, WatchCount } from './calls.ts';
+export type { CallCounting, CallKind, CallReport, CallSite, CallSiteNaming, WatchCount } from './calls.ts';
 export type { EngineSchema, RankDeclaration, RelationRules } from './schema.ts';
 export type { Create, Upsert, Write, TypeName } from './write.ts';
 export { EarsError, RESERVED_ATTRIBUTES, RESERVED_ENTITY_TYPES, type EarsErrorCode } from './errors.ts';

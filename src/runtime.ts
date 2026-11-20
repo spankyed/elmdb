@@ -9,6 +9,7 @@
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { RESERVED_ATTRIBUTES } from './errors.ts';
 import type { EarsDatabase } from './database.ts';
+import type { CallSiteNaming } from './calls.ts';
 
 /**
  * An id as `write` takes it: an entity's, plain or tagged with its type, and never a relation's (`EARS.RelationId`),
@@ -47,6 +48,8 @@ export interface EARSRuntimeDeps {
    * its own declarations make that fix. Nothing by default
    */
   warn?: (message: string, warning: EarsWarning) => void;
+  /** How a counted call (`admin.calls`), or a watch given no label, names the code that made it (`CallSiteNaming`) */
+  callSites?: CallSiteNaming;
 }
 
 /** What the engine warns its creator of (`EARSRuntimeDeps.warn`), as data */

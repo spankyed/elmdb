@@ -69,12 +69,6 @@ export interface CallCounting {
 const SITE_FRAMES = 3;
 /** How deep a stack is read for them, past the engine's own frames */
 const STACK_DEPTH = 40;
-/**
- * The engine's frames, never a site: its package's own source or build, by path. A bundle that inlines the engine
- * (the development app's API) names those paths only through its source maps, which is why that bundle has them; the
- * directory this module loaded from isn't used, being the bundle's, which holds every host frame too
- */
-const ENGINE_FRAME = /\/(?:apack-ears|@apackdev\/ears)\/(?:src|dist)\//;
 
 function filePath(location: string): string {
   return location.startsWith('file://') ? decodeURIComponent(new URL(location).pathname) : location;
@@ -90,23 +84,45 @@ function framesOf(stack: string): string[] {
   return frames;
 }
 
-/**
- * A path from its last `packages/`, `node_modules/` or `packs/` directory on, which is where two checkouts' paths, or
- * two data directories' installed packs, stop differing
- */
-function shortened(frame: string): string {
-  const at = Math.max(...['/packages/', '/node_modules/', '/packs/'].map((dir) => frame.lastIndexOf(dir)));
-  return at === -1 ? frame : frame.slice(at + 1);
+/** How a counted call, or a watch given no label, names the code that made it (`EARSRuntimeDeps.callSites`) */
+export interface CallSiteNaming {
+  /**
+   * The engine's own frames, never a site, by their path. By default, a frame in the directory the engine's modules
+   * were loaded from (its source or its build, `src/` or `dist/`). A program that bundles the engine into its own code
+   * gives a pattern here: there that directory is the bundle's, holding the program's frames too, and the engine's
+   * modules are named only through the bundle's source maps
+   */
+  engineFrames?: RegExp;
+  /**
+   * Directories a site names a path from, the last of them in the path on, which is where two machines' paths to one
+   * file stop differing. `['/node_modules/']` by default; a path holding none of them is named whole
+   */
+  roots?: readonly string[];
 }
 
-/** The code calling into the engine now, as `CallSite.site` names it */
-export function callSite(): string {
-  const limit = Error.stackTraceLimit;
-  Error.stackTraceLimit = STACK_DEPTH;
-  const stack = new Error().stack ?? '';
-  Error.stackTraceLimit = limit;
-  const outside = framesOf(stack).filter((frame) => !ENGINE_FRAME.test(frame) && !frame.startsWith('node:'));
-  return outside.length ? outside.slice(0, SITE_FRAMES).map(shortened).join(' < ') : 'unknown';
+/** The directory, with its separator, of the file a V8 frame (`file:line`) is in */
+function directoryOf(frame: string): string {
+  const file = frame.replace(/:\d+$/, '');
+  return file.slice(0, Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\')) + 1);
+}
+
+/** What names the code calling into an engine, as `CallSite.site` names it, for one engine's `naming` */
+export function createCallSites({ engineFrames, roots = ['/node_modules/'] }: CallSiteNaming = {}): () => string {
+  // This module's own frame says where the engine was loaded from: `import.meta` is empty in a CommonJS bundle
+  const engineDirectory = engineFrames ? undefined : directoryOf(framesOf(new Error().stack ?? '')[0] ?? '');
+  const isEngineFrame = (frame: string) => (engineFrames ? engineFrames.test(frame) : !!engineDirectory && frame.startsWith(engineDirectory));
+  const shortened = (frame: string) => {
+    const at = Math.max(...roots.map((dir) => frame.lastIndexOf(dir)));
+    return at < 0 ? frame : frame.slice(at + 1);
+  };
+  return () => {
+    const limit = Error.stackTraceLimit;
+    Error.stackTraceLimit = STACK_DEPTH;
+    const stack = new Error().stack ?? '';
+    Error.stackTraceLimit = limit;
+    const outside = framesOf(stack).filter((frame) => !isEngineFrame(frame) && !frame.startsWith('node:'));
+    return outside.length ? outside.slice(0, SITE_FRAMES).map(shortened).join(' < ') : 'unknown';
+  };
 }
 
 /** One count's tallies, and a unit being counted until it commits or aborts */

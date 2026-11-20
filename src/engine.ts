@@ -253,8 +253,8 @@ const newRelationId = () => `${RESERVED_ENTITY_TYPES.relation}-${idSuffix()}` as
  * are those the database's schema declares. Whoever holds the engine calls its operations on it; the app's is the
  * SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
  */
-export function createEarsEngine({ database, warn, freeze }: EARSRuntimeDeps): EarsEngine {
-  const connection = createConnection(database, { freeze });
+export function createEarsEngine({ database, warn, freeze, callSites }: EARSRuntimeDeps): EarsEngine {
+  const connection = createConnection(database, { freeze, callSites });
   // A write's result names what it touched. An index's own commits have no result to read, so a watch over a `ranked`
   // would otherwise hold its answer until something writes. One engine to a database: elmdb refuses a second listener
   database.hearBuilderCommits(connection.heard);

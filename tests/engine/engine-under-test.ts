@@ -17,21 +17,23 @@ export interface EngineUnderTestOptions {
   warn?: EARSRuntimeDeps['warn'];
   /** Wraps the database the engine is handed, to watch what it is asked */
   wrap?: (database: EarsDatabase) => EarsDatabase;
-  /** Freezes the values reads give back, as the SDK's test runtime does */
+  /** Freezes the values reads give back, as a test runtime does */
   freeze?: boolean;
+  /** How a counted call names the code that made it; the engine's default unless given */
+  callSites?: EARSRuntimeDeps['callSites'];
 }
 
 const databases = createTemporaryDatabases();
 afterAll(() => databases.disposeAll());
 
-export function freshEngine({ types, relationKinds, roles, rowRules = {}, relationRules = {}, ranks, warn, wrap, freeze }: EngineUnderTestOptions): EarsEngine {
+export function freshEngine({ types, relationKinds, roles, rowRules = {}, relationRules = {}, ranks, warn, wrap, freeze, callSites }: EngineUnderTestOptions): EarsEngine {
   const { database } = databases.open({
     types: Object.fromEntries([...types].map((type) => [type, rowRules[type] ?? { required: [] }])),
     relations: Object.fromEntries([...relationKinds].map((kind) => [kind, relationRules[kind] ?? {}])),
     roles: [...roles],
     ...(ranks && { ranks }),
   });
-  return createEarsEngine({ database: wrap ? wrap(database) : database, warn, freeze });
+  return createEarsEngine({ database: wrap ? wrap(database) : database, warn, freeze, callSites });
 }
 
 export type EngineUnderTest = EarsEngine;

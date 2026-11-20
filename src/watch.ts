@@ -14,7 +14,6 @@ import { WatchCauses } from './observation.ts';
 // whose last run would overrun what is left waits for that, so an expensive watch never holds a cheap one back.
 import type { Commit, Connection } from './database.ts';
 import type { EARSRuntimeDeps } from './runtime.ts';
-import { callSite } from './calls.ts';
 
 /** What a watch delivers to: each changed result, and what a read threw, with the commit it reflects */
 export interface WatchObserver<T> {
@@ -299,7 +298,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     watch(read, observer, options) {
       const watch: Watch = {
         token: nextToken++,
-        label: options?.label ?? callSite(),
+        label: options?.label ?? connection.callSite(),
         read,
         causes: options?.recordCauses && new WatchCauses(options.recordCauses),
         observer: (typeof observer === 'function' ? { next: observer } : observer) as WatchObserver<unknown>,
