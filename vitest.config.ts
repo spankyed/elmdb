@@ -6,9 +6,11 @@ import ears from './vitest.ears.config.ts';
 // file stays the one apack's tools find (the root config's projects, `suite-timeouts.spec.ts`, `npm test`).
 //
 // One project, as every host config is: the host pool runs this package as the project its workspace names, and
-// a `projects` list here would be ignored there. The package has no integration half.
+// a `projects` list here would be ignored there. This is the fast half: the specs that pack and compile the built
+// package are the integration half's (`vitest.integration.config.ts`).
 export default mergeConfig(ears, defineConfig({
   test: {
+    exclude: ['**/*.integration.spec.ts'],
     // Small (`SIZE_MS` × `DEADLINE_FACTOR`, scripts/lib/unit-suites.ts): the CPU one test may spend. A test that
     // needs more declares a reviewed `meta.cpuBudgetMs` (`suite-timeouts.spec.ts`)
     provide: { 'apack.testCpuMs': 30_000 },
