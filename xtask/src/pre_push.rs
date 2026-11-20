@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 /// npm and Python by the names this platform runs them under
 #[cfg(windows)]
@@ -60,8 +60,8 @@ const FIRST: &[Step] = &[
     ),
 ];
 
-/// After the repository checks: the suites, the heap bound and the benchmarks' smoke, the concurrency models with CI's
-/// configuration and target directories, so a model run shares nothing with the suite's build, and the binding
+/// After the repository checks: the suites, the heap bound and the benchmarks' smoke, and the concurrency models with
+/// CI's configuration and target directories, so a model run shares nothing with the suite's build
 const THEN: &[Step] = &[
     step("tests", &["cargo", "nextest", "run", "--workspace"]),
     step("tests with diagnostics", &["cargo", "nextest", "run", "-p", "elmdb", "--features", "diagnostics"]),
@@ -121,9 +121,14 @@ const THEN: &[Step] = &[
             &["cargo", "run", "-q", "-p", "elmdb", "--example", "read-allocations", "--", "--json"],
         )
     },
-    step("binding build", &[NPM, "run", "build"]),
-    step("binding typecheck", &[NPM, "run", "typecheck"]),
-    step("binding tests", &[NPM, "test"]),
+];
+
+/// The binding and EARS, and the readings over the binding, as CI's jobs run them, once `npm ci` has run where the
+/// lockfile moved
+const NPM_STEPS: &[Step] = &[
+    step("build: the binding, then EARS' dist", &[NPM, "run", "build"]),
+    step("typecheck: the binding and EARS", &[NPM, "run", "typecheck"]),
+    step("tests: the binding's, then EARS'", &[NPM, "test"]),
     step(
         "generated loader committed",
         &["git", "diff", "--exit-code", "--", "crates/elmdb-node/index.js", "crates/elmdb-node/index.d.ts"],
@@ -162,6 +167,17 @@ const LINUX: &[Step] = &[
 ];
 #[cfg(not(target_os = "linux"))]
 const LINUX: &[Step] = &[];
+
+/// Whether `npm ci` is owed before the npm steps: nothing is installed, or the lockfile changed after npm last installed
+/// from it, so the steps would test the dependencies it named before. `installed` is when npm last wrote
+/// `node_modules/.package-lock.json`, which it does at every install
+fn install_owed(lockfile: Option<SystemTime>, installed: Option<SystemTime>) -> bool {
+    match (lockfile, installed) {
+        (_, None) => true,
+        (Some(lockfile), Some(installed)) => lockfile > installed,
+        (None, Some(_)) => false,
+    }
+}
 
 /// A repository check this task runs in-process, by the name it prints
 pub type Check<'a> = (&'a str, &'a dyn Fn() -> Result<(), String>);
@@ -247,10 +263,35 @@ pub fn pre_push(root: &Path, args: &[String], checks: &[Check<'_>]) -> Result<()
         println!("pre-push: {name}");
         check().map_err(|e| format!("pre-push: {name} failed: {e}"))?;
     }
-    for step in THEN.iter().chain(LINUX) {
+    for step in THEN {
+        run(root, step, &[])?;
+    }
+    let modified = |file: &str| std::fs::metadata(root.join(file)).and_then(|m| m.modified()).ok();
+    if install_owed(modified("package-lock.json"), modified("node_modules/.package-lock.json")) {
+        run(root, &step("npm ci, the lockfile having moved since the last install", &[NPM, "ci"]), &[])?;
+    }
+    for step in NPM_STEPS.iter().chain(LINUX) {
         run(root, step, &[])?;
     }
     run(root, &step("mutants of the change", &[PYTHON, "scripts/mutants-in-diff.py"]), &[base])?;
     println!("pre-push: everything passed in {:.0?}", started.elapsed());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::install_owed;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn npm_ci_is_owed_where_nothing_is_installed_or_the_lockfile_is_newer() {
+        let then = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let later = then + Duration::from_secs(1);
+        assert!(install_owed(Some(then), None), "nothing installed");
+        assert!(install_owed(None, None), "nothing installed, and no lockfile to install from");
+        assert!(install_owed(Some(later), Some(then)), "the lockfile moved after the install");
+        assert!(!install_owed(Some(then), Some(later)), "installed from the lockfile as it is");
+        assert!(!install_owed(Some(then), Some(then)), "installed in the same instant");
+        assert!(!install_owed(None, Some(then)), "no lockfile to be newer");
+    }
 }

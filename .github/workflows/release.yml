@@ -133,7 +133,7 @@ jobs:
           rustup toolchain install
           rustup show active-toolchain
           npm ci --no-audit --no-fund
-          npm run build -- --target ${{ matrix.target }} -- --locked
+          npm run build:binding -- --target ${{ matrix.target }} -- --locked
       # In manylinux_2_28 (AlmaLinux 8, glibc 2.28), on the runner's own architecture: every object compiled and linked
       # there, LMDB's C among them, is built against glibc 2.28's headers and library. The check after reads the
       # binary's undefined symbols: one versioned past 2.28 would refuse to load on an older glibc, and one with no
@@ -176,7 +176,7 @@ jobs:
             rustup toolchain install
             rustup show active-toolchain
             npm ci --no-audit --no-fund
-            npm run build -- --target ${{ matrix.target }} -- --locked
+            npm run build:binding -- --target ${{ matrix.target }} -- --locked
           '
           sudo chown -R "$(id -u):$(id -g)" .
       - shell: bash

@@ -171,8 +171,8 @@ jobs:
             tar -xzf "$archive" -C "$HOME/.cargo/bin" && rm "$archive"
             cargo nextest run --workspace --profile ci
             npm ci
-            npm run build
-            npm test
+            npm run build:binding
+            npm run test:binding
           '
           # The container writes as root; the cache is saved by the runner's user
           sudo chown -R "$(id -u):$(id -g)" "$cache" target
