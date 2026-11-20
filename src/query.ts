@@ -183,8 +183,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
     const send = (plan: Plan): Answer => {
       if (!visits) return read([{ read: 'query', plan }])[0]!;
       visits = false;
-      const answers = read([{ read: 'query', plan, visits: true }]);
-      const [{ answer, visited }] = answers as Array<Answer & { answer: Answer; visited: number }>;
+      const [{ answer, visited }] = read([{ read: 'query', plan, visits: true }]) as Array<Answer & { answer: Answer; visited: number }>;
       if (visited >= UNINDEXED_WALK_WARNING) unindexed(recipe.unindexed!.types, recipe.unindexed!.field, visited, callSite());
       return answer;
     };
@@ -193,8 +192,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         steps.push(pending.step);
         continue;
       }
-      const values = send({ scope, start, steps, terminal: { answer: 'rows', fields: [pending.field] } });
-      const rows = values.rows as Array<Record<string, unknown> & { id: string }>;
+      const rows = send({ scope, start, steps, terminal: { answer: 'rows', fields: [pending.field] } }).rows as Array<Record<string, unknown> & { id: string }>;
       const passes = (row: Record<string, unknown>) =>
         Object.prototype.hasOwnProperty.call(row, pending.field) && pending.test(row[pending.field]);
       const rest = recipe.steps.slice(at + 1);
@@ -252,10 +250,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       const answer = run(this.#recipe, { answer: 'edges', kinds: asArr(kinds), direction, types: optionalArr(type) });
       return (answer.relations as Record<string, unknown>[]).map(relationRow);
     }
-    #ids() {
-      const answer = run(this.#recipe, { answer: 'ids' });
-      return answer.ids as EARS.EntityId[];
-    }
+    #ids() { return run(this.#recipe, { answer: 'ids' }).ids as EARS.EntityId[]; }
 
     ofType(t: string) { return this.#next({ step: 'ofType', type: t }); }
     within(sub: readonly EARS.EntityId[]) { return this.#next({ step: 'within', ids: [...sub] }); }
@@ -314,13 +309,11 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
     }
     weakComponents(kinds: MaybeArr<string>) {
       names.relationKinds(kinds, 'weakComponents');
-      const answer = run(this.#recipe, { answer: 'weakComponents', kinds: asArr(kinds) });
-      return answer.weakComponents as EARS.EntityId[][];
+      return run(this.#recipe, { answer: 'weakComponents', kinds: asArr(kinds) }).weakComponents as EARS.EntityId[][];
     }
     strongComponents(kinds: MaybeArr<string>) {
       names.relationKinds(kinds, 'strongComponents');
-      const answer = run(this.#recipe, { answer: 'strongComponents', kinds: asArr(kinds) });
-      return answer.strongComponents as EARS.EntityId[][];
+      return run(this.#recipe, { answer: 'strongComponents', kinds: asArr(kinds) }).strongComponents as EARS.EntityId[][];
     }
     communities(kinds: MaybeArr<string>, { resolution, seed, weights }: { resolution?: number; seed?: number; weights?: boolean; } = {}) {
       names.relationKinds(kinds, 'communities');
@@ -337,10 +330,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
     // an infinite count
     limit(n: number) { return (n === Infinity ? this : this.#next({ step: 'limit', n: Number.isNaN(n) ? 0 : Math.max(0, Math.floor(n)) })); }
     distinct(field?: string) { return this.#next({ step: 'distinct', field }); }
-    groupBy(field: string) {
-      const answer = run(this.#recipe, { answer: 'groupBy', field });
-      return new Map(answer.groups as Array<[unknown, EARS.EntityId[]]>);
-    }
+    groupBy(field: string) { return new Map(run(this.#recipe, { answer: 'groupBy', field }).groups as Array<[unknown, EARS.EntityId[]]>); }
     search(text: string, options?: SearchOptions) { return this.#next({ step: 'search', query: text, options: searchOptions(options) }); }
     containing(text: string, { caseInsensitive = false }: { caseInsensitive?: boolean; } = {}) { return this.#next({ step: 'containing', text, caseInsensitive }); }
     matching(pattern: string) { return this.#next({ step: 'matching', pattern }); }
@@ -371,26 +361,13 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
         throw new EarsError('NOT_EXPLAINABLE', 'explain() answers the plan the database runs, and a where(...) given a function runs outside it: explain the query up to that where');
       }
       const plan: Plan = { scope: this.#recipe.scope, start: this.#recipe.start, steps: stepsOf(this.#recipe.steps), terminal: { answer: 'ids' } };
-      const answers = read([{ read: 'query', plan, explain: true }]);
-      const [explained] = answers as Array<Answer & { answer: Answer; visited: number; ms: number; stages: QueryStage[]; }>;
+      const [explained] = read([{ read: 'query', plan, explain: true }]) as Array<Answer & { answer: Answer; visited: number; ms: number; stages: QueryStage[]; }>;
       return { ids: explained!.answer.ids as EARS.EntityId[], visited: explained!.visited, ms: explained!.ms, stages: explained!.stages };
     }
-    count() {
-      const answer = run(this.#recipe, { answer: 'count' });
-      return answer.n as number;
-    }
-    first() {
-      const answer = run(this.#recipe, { answer: 'first' });
-      return (answer.id as EARS.EntityId | null) ?? undefined;
-    }
-    last() {
-      const answer = run(this.#recipe, { answer: 'last' });
-      return (answer.id as EARS.EntityId | null) ?? undefined;
-    }
-    exists() {
-      const answer = run(this.#recipe, { answer: 'exists' });
-      return answer.value as boolean;
-    }
+    count() { return run(this.#recipe, { answer: 'count' }).n as number; }
+    first() { return (run(this.#recipe, { answer: 'first' }).id as EARS.EntityId | null) ?? undefined; }
+    last() { return (run(this.#recipe, { answer: 'last' }).id as EARS.EntityId | null) ?? undefined; }
+    exists() { return run(this.#recipe, { answer: 'exists' }).value as boolean; }
     // A callback runs on the ids once they are read, so its own writes are its to read
     map<T>(fn: (i: EARS.EntityId) => T) { return this.#ids().map(fn); }
     forEach(fn: (i: EARS.EntityId) => void) { return (this.#ids().forEach(fn), this); }

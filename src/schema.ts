@@ -171,14 +171,13 @@ export function toElmdbSchema(schema: EngineSchema): Schema {
  */
 export function withDeclarations(held: Schema | null, declared: Schema): Schema {
   const before: Partial<Schema> = held ?? {};
-  const after = declared;
   return {
     ...before,
-    ...after,
-    types: { ...before.types, ...after.types },
-    relations: { ...before.relations, ...after.relations },
-    roles: { ...before.roles, ...after.roles },
-    ...((before.ranks ?? after.ranks) && { ranks: { ...before.ranks, ...after.ranks } }),
+    ...declared,
+    types: { ...before.types, ...declared.types },
+    relations: { ...before.relations, ...declared.relations },
+    roles: { ...before.roles, ...declared.roles },
+    ...((before.ranks ?? declared.ranks) && { ranks: { ...before.ranks, ...declared.ranks } }),
   };
 }
 

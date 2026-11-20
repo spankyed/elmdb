@@ -50,11 +50,7 @@ export interface EarsUnit {
   readonly isOpen: boolean;
 }
 
-/**
- * An elmdb change to a schema: its path, what changed, and what was done about it (elmdb's `SchemaChange`). What
- * opening an elmdb database did: the schema's changes, a restore an open made, until `acknowledgeRestore()`, and whether
- * the record of the last sync named another file (elmdb's `OpenReport`)
- */
+/** elmdb's change to a schema, and what opening a database did, as the port answers them */
 export type { OpenReport, SchemaChange };
 
 /**
@@ -255,9 +251,6 @@ const CODES: { readonly [C in ErrorCode]: EarsErrorCode | null } = {
   PANICKED: null,
 };
 
-/** Whether `code` is one of elmdb's, as the table above names them */
-const isErrorCode = (code: unknown): code is ErrorCode => typeof code === 'string' && Object.hasOwn(CODES, code);
-
 /**
  * Runs `fn`, a call into elmdb, rethrowing a refusal the engine names as an `EarsError`; anything else elmdb throws
  * (a full disk, a closed database) is thrown as it is, with its own code
@@ -267,7 +260,7 @@ export function crossing<T>(fn: () => T): T {
     return fn();
   } catch (error) {
     const code = (error as { code?: unknown })?.code;
-    const mapped = isErrorCode(code) ? CODES[code] : null;
+    const mapped = typeof code === 'string' && Object.hasOwn(CODES, code) ? CODES[code as ErrorCode] : null;
     if (mapped) throw new EarsError(mapped, (error as Error).message);
     throw error;
   }
@@ -627,18 +620,14 @@ export function createConnection(
       if (hook && levels.length === 0 && ops.some((op) => { const type = typeOfOp(op); return type !== undefined && hook!.wants(type); })) {
         return transact(() => connection.write(ops, now));
       }
-      const written = counting('write', ops.length, (): BatchResult | Written => {
-        const batch: Batch = { ops: [...ops], now };
-        const bytes = observation.request(pack(batch));
-        if (!levels.length) {
-          // A database's write commits, answering the commit's change set beside the results
-          return unpackr.unpack(observation.response(noticing(() => crossing(() => database.write(bytes, false))))) as Written;
-        }
-        const target = writable();
-        // A unit's write answers the results alone: what it changed commits with the unit
-        const answer = unpackr.unpack(observation.response(noticing(() => crossing(() => target.write(bytes))))) as BatchResult;
-        levels.at(-1)!.kept = true;
-        return answer;
+      const written = counting('write', ops.length, () => {
+        const bytes = observation.request(pack({ ops: [...ops], now } satisfies Batch));
+        const target = levels.length ? writable() : undefined;
+        const answer = observation.response(noticing(() => crossing(() => (target ? target.write(bytes) : database.write(bytes, false)))));
+        if (target) levels.at(-1)!.kept = true;
+        // A unit's write answers its results alone, what it changed committing with the unit; a database's write
+        // commits, answering the change set beside them
+        return unpackr.unpack(answer) as BatchResult | Written;
       });
       if ('changes' in written) made(written.changes);
       return written.results;

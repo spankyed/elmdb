@@ -154,7 +154,6 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
     return self;
   }
 
-
   /**
    * Refuses a name the schema doesn't declare, saying where an id goes when it is one. The engine's own types (a
    * relation's) are elmdb's to refuse, as no schema declares them
