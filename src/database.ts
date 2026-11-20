@@ -75,8 +75,12 @@ export interface EarsDatabase {
   begin(): EarsUnit;
   setSchema(schema: object): SchemaChange[];
   /**
-   * Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done; throws
-   * `SYNC_BEHIND` or `READERS_FULL` when what holds a build up is a sync that failed or a reader table that is full
+   * Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done, as
+   * the database says once its builder is idle; throws `SYNC_BEHIND` or `READERS_FULL` when what holds a build up is a
+   * sync that failed or a reader table that is full, `CLOSED` on a closed database, `DATA_REPLACED` while another
+   * process's replacement of every row is not adopted, `BUILDS_STOPPED` where a close at exit gave up and left builds,
+   * and `THREAD_REFUSED` where the system won't start the builder's thread (calling it again starts one). It doesn't
+   * wait for the order of an index's strings that another elmdb's writes put off: reads sort meanwhile
    */
   waitForIndexBuilds(): void;
   /** Every entry removed but the database's format and schema */
