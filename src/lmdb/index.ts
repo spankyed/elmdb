@@ -1,7 +1,7 @@
 /**
- * The databases behind an app's EARS engines, the app's own and its run history's: elmdb databases (`openDatabase`),
- * the one thing in `@apackdev/ears` that loads elmdb. Packs don't use this entry; a pack's tests reach it through
- * `@apackdev/sdk/testing`, whose test runtime opens temporary databases.
+ * The databases behind EARS engines: elmdb databases (`openDatabase`), and temporary ones for tests and tools
+ * (`createTemporaryDatabases`), the one thing in `@apackdev/ears` that loads elmdb. Code that is handed an engine never
+ * needs this entry; whoever creates the engine opens its database here.
  *
  * @packageDocumentation
  */

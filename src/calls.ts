@@ -1,4 +1,4 @@
-// What a stretch of the app's work costs in crossings to elmdb: every read, every write made outside a unit, and every
+// What a stretch of a program's work costs in crossings to elmdb: every read, every write made outside a unit, and every
 // unit with the writes it held, each counted with the time it took and the code that made it. The connection records
 // into it only while counting is started (`EarsAdmin.calls`), so an engine nobody is measuring pays one check per call.
 

@@ -1,6 +1,6 @@
 // An EARS engine: the operations over an elmdb database as the engine's own members, with the creator's privileges
 // beside them in `admin`. A program is handed the engine typed as `Ears`, which has no `admin`: the faces define the
-// contract, not a security boundary (packs run in-process). Everything the engine holds is in the database; the
+// contract, not a security boundary (code handed the engine runs in-process). Everything the engine holds is in the database; the
 // engine holds its connection, and the names its schema declares, read again when `admin.setSchema` changes them.
 import type { EARS } from './entities.ts';
 import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge, RelationPatch } from './runtime.ts';
@@ -65,7 +65,7 @@ export interface DatabaseCatalog {
 
 /** An engine's operations — its queries, writes and transactions: what a program is handed */
 export interface Ears {
-  /** Queries the engine, untyped (a pack's `#generated/ears` types it) */
+  /** Queries the engine, untyped (a typed facade, `defineEars`, types it) */
   query: Query;
   /** Creates an entity of a registered type, with a new id or the one given */
   create: Create;
@@ -109,7 +109,7 @@ export interface Ears {
   wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
   /** `<base> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */
   nextLabel(type: EARS.Entity, base: string): string;
-  /** The entity types holding a vector index (a manifest entry's `embed`) */
+  /** The entity types holding a vector index (their row rules' `embed`) */
   embeddedTypes(): string[];
   /** Up to `limit` (100 unless given) of the type's chunks waiting for embeddings, in key order, and how many wait in all */
   pendingEmbeddings(type: EARS.Entity, options?: { limit?: number }): PendingEmbeddings;
@@ -131,7 +131,7 @@ export interface Ears {
   lastCommit(): number;
 }
 
-/** An engine's data lifecycle and direct writes: for the code that created it (the app's composition root, tests, tooling) */
+/** An engine's data lifecycle and direct writes: for the code that created it (a program's composition root, tests, tooling) */
 export interface EarsAdmin {
   /** Empties the engine's database, keeping its schema */
   clear(): void;
@@ -214,8 +214,8 @@ export interface EarsAdmin {
   setSchema(schema: EngineSchema): SchemaChange[];
   /**
    * Declares what `schema` declares — each of its types, relation kinds, roles and rank indexes, with their rules — keeping every other
-   * declaration the database holds: what an app whose packs register one at a time applies as each does, so a pack's
-   * registration changes nothing another pack declared. Answers the changes as `setSchema` does
+   * declaration the database holds: what a program whose parts declare their names one at a time applies as each does,
+   * so one part's declaration changes nothing another declared. Answers the changes as `setSchema` does
    */
   declare(schema: EngineSchema): SchemaChange[];
   /**
@@ -233,7 +233,7 @@ export interface EarsAdmin {
   watchStats(): { watches: number; keys: number; ranges: number };
   /**
    * Counting the engine's calls to its database — reads, writes outside a unit, and units — with their time and the
-   * code that made each, off until started: what a measurement of the app's work reads
+   * code that made each, off until started: what a measurement of a program's work reads
    */
   readonly calls: CallCounting;
   /** Observe operation boundaries without stack capture; unregister to restore the disabled path. */
@@ -250,8 +250,8 @@ const newRelationId = () => `${RESERVED_ENTITY_TYPES.relation}-${idSuffix()}` as
 
 /**
  * A new engine over `database`, which holds everything the engine does: its entity types, relation kinds and roles
- * are those the database's schema declares. Whoever holds the engine calls its operations on it; the app's is the
- * SDK's bound engine (`boundEars`, `@apackdev/sdk/ears`).
+ * are those the database's schema declares. Whoever holds the engine calls its operations on it; a program that binds
+ * one engine for code that holds none passes it a getter of that engine (`defineEars`).
  */
 export function createEarsEngine({ database, warn, freeze, callSites }: EARSRuntimeDeps): EarsEngine {
   const connection = createConnection(database, { freeze, callSites });

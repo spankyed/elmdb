@@ -366,7 +366,7 @@ export type EarsErrorCode =
 /** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
 | 'VALUE_INVALID'
 /**
-* `search` was on a type with no text index (no `search` in its manifest entry), `near`, `like`, `hybrid` or
+* `search` was on a type with no text index (no `search` in its row rules), `near`, `like`, `hybrid` or
 * `pendingEmbeddings` on one with no vector index (no `embed`), or `containing` or `matching` on one with no trigram
 * index (no `substrings`)
 */

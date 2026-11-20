@@ -1,6 +1,6 @@
 /// <reference types="node" />
-// Opening the elmdb database an engine runs on: the one module that loads elmdb, which only the app, its tools and
-// tests reach through this entry.
+// Opening the elmdb database an engine runs on: the one module that loads elmdb, which only whoever creates an engine
+// (a program's composition root, its tools and tests) reaches, through this entry.
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';

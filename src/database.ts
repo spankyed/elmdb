@@ -172,7 +172,7 @@ function deepFreeze<T>(value: T): T {
 
 /**
  * The stored values an answer holds, frozen: each row's field values, a field's value and an edge's info. The rows and
- * lists a read builds are the caller's own to change, as they would be in the app
+ * lists a read builds are the caller's own to change, as they would be unfrozen
  */
 function freezeValues(answer: Answer): Answer {
   const row = (r: unknown) => {

@@ -43,7 +43,7 @@ export type EarsErrorCode =
   /** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
   | 'VALUE_INVALID'
   /**
-   * `search` was on a type with no text index (no `search` in its manifest entry), `near`, `like`, `hybrid` or
+   * `search` was on a type with no text index (no `search` in its row rules), `near`, `like`, `hybrid` or
    * `pendingEmbeddings` on one with no vector index (no `embed`), or `containing` or `matching` on one with no trigram
    * index (no `substrings`)
    */
@@ -72,13 +72,13 @@ export class EarsError extends Error {
 /**
  * Attributes only the engine writes: its own kinds (a role is written by `grant`, when an entity was trashed by
  * `trash`) and an entity's identity, type, short code, creation time and last change, which the engine stamps on
- * every attribute write (`updatedAt`). A short code is numbered by `create` from the prefix the type's manifest
- * declares, and references name it, so nothing changes it once it is written.
+ * every attribute write (`updatedAt`). A short code is numbered by `create` from the prefix the type's row rules
+ * declare, and references name it, so nothing changes it once it is written.
  */
 export const RESERVED_ATTRIBUTES = ['id', 'entityType', 'shortCode', 'createdAt', 'updatedAt', 'role', 'trashedAt'] as const;
 
 /**
- * Entity types no pack declares: the engine's own ids are written with them — a relation's `Relation-<suffix>` — and
+ * Entity types no schema declares: the engine's own ids are written with them — a relation's `Relation-<suffix>` — and
  * a relation is no entity a query reaches
  */
 export const RESERVED_ENTITY_TYPES = { relation: 'Relation' } as const;

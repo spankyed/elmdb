@@ -2,14 +2,14 @@
  * EARS type infrastructure
  *
  * The engine's structural type framework — Entity, EntityId, RelKind,
- * AttrKind, Blueprint, BaseEntity, etc. — with open types that the SDK and
- * packs compose with concrete values.
+ * AttrKind, Blueprint, BaseEntity, etc. — with open types that a program using
+ * the engine composes with concrete values.
  *
  * Entity and RelKind are open by design:
  *   Entity  — the engine owns no entity type (a relation is not an entity);
- *             the SDK adds its entities (@apackdev/sdk's EARS) and packs declare theirs.
- *   RelKind — the engine provides the Custom() helper and open type; the SDK
- *             and packs add their relation kinds.
+ *             the program declares its own.
+ *   RelKind — the engine provides the Custom() helper and open type; the program
+ *             adds its relation kinds.
  *
  * CHANGE CONTROL: these types are a specified contract, and editor completions and error messages
  * depend on their exact form. Don't change them to make one call site compile; fix the call site.
@@ -18,7 +18,7 @@
 
 export namespace EARS {
   // ─── Entity ────────────────────────────────────────────────────────────
-  // An entity type's name. The engine declares none: the SDK and packs declare theirs, each as an `Entity` constant
+  // An entity type's name. The engine declares none: a program declares its own, each as an `Entity` constant
   export type Entity = string & {};
   /**
    * An entity id, tagged with its entity type when that's known (`EntityId<'Note'>`). A plain id
@@ -35,7 +35,7 @@ export namespace EARS {
   export type RelationId = `${string}-${string}` & { readonly __relation: true };
 
   // ─── RelKind ───────────────────────────────────────────────────────────
-  // Concrete values come from the SDK and packs; the engine provides just the type framework.
+  // Concrete values come from the program using the engine; the engine provides just the type framework.
   const _relCustom = <T extends string>(k: T) => k as T & RelKind;
 
   export const RelKind = {
@@ -93,9 +93,8 @@ export interface BaseEntity {
 }
 
 /**
- * Entity type name → attribute shape. There is no global registry: each pack's
- * `#generated/ears` defines its `PackShapes` (its own entities plus its dependencies')
- * and exports EARS helpers typed against it.
+ * Entity type name → attribute shape. There is no global registry: each schema a typed facade is
+ * defined over (`defineEars`) names its own shapes, and the facade's helpers are typed against them.
  */
 export type EntityShapes = { [entityType: string]: object };
 
@@ -115,17 +114,18 @@ export type ShapeOf<S extends EntityShapes, E extends string> =
     : BaseEntity & Record<string, unknown>;
 
 /**
- * An entity name parameter checked against the names `N` a pack declares; `E` is inferred from the
+ * An entity name parameter checked against the names `N` a schema declares; `E` is inferred from the
  * argument. A literal must be one of `N`: an undeclared name isn't a registered type at runtime, so
  * it matches nothing. A name only known at runtime (typed `string` or the open `EARS.Entity`) passes
  * unchecked, and so does everything when `N` is `string`.
  *
  * TypeScript can't check a name whose type is an unresolved type parameter, so a generic helper
- * constrains it to the pack's `EntityName`. Its callers get the rows typed with the entity's shape;
+ * constrains it to the schema's entity names. Its callers get the rows typed with the entity's shape;
  * inside the helper only the fields every entity has are known:
  *
  * ```ts
- * import { query, type EntityName } from '#generated/ears';
+ * const { query } = defineEars<Schema>(() => engine);
+ * type EntityName = Schema['names'];
  *
  * function newestOf<E extends EntityName>(entityType: E) {
  *   return query(entityType).pickAll().sort((a, b) => b.createdAt - a.createdAt);

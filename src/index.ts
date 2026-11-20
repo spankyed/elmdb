@@ -1,6 +1,6 @@
 // The EARS engine: an instance you create over an elmdb database and hold, with its operations as its members
 // (`engine.create(...)`) and the creator's privileges beside them (`engine.admin`). Nothing here acts on an engine you
-// didn't pass: the app's engine, and the operations over it that pack code calls, are the SDK's (`@apackdev/sdk/ears`).
+// didn't pass: a program that binds one engine for code that holds none does that itself, over `defineEars`'s getter.
 // The database is opened by `@apackdev/ears/lmdb`, the one entry that loads elmdb.
 export {
   createEarsEngine, type EarsEngine, type Ears, type EarsAdmin,

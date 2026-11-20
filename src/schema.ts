@@ -1,6 +1,6 @@
-// The schema an engine's database holds, as apack's packs declare it, and the elmdb schema it becomes
-// (`elmdb/docs/architecture/schema.md`). Whoever creates the engine builds it from what is registered — the app from its packs, a
-// test from its own names — and changes it with `admin.setSchema` when that changes.
+// The schema an engine's database holds, as a program declares it, and the elmdb schema it becomes
+// (`elmdb/docs/architecture/schema.md`). Whoever creates the engine builds it from the names it uses — a program from
+// what it has registered, a test from its own — and changes it with `admin.setSchema` or `admin.declare` when they change.
 import type { EdgeDirection, FieldRule, FieldType, RowRules } from './runtime.ts';
 import { RESERVED_ATTRIBUTES } from './errors.ts';
 import { setField } from './ids.ts';

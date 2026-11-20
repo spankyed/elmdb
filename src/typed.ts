@@ -1,8 +1,7 @@
 /**
- * EARS query helpers typed against an entity shape map. This is the only pack-facing way
- * to get them: `apack pack generate-entries` writes `#generated/ears` with
- * `defineEars<PackSchema>()` (the pack's entities plus its dependencies'). There is no
- * global registry, so each pack's typing depends only on what it declares.
+ * EARS query helpers typed against an entity shape map: `defineEars<Schema>()`, over the
+ * schema a program declares (its entities' shapes, and the names, relation kinds and roles they
+ * take). There is no global registry, so each facade's typing depends only on its own schema.
  *
  * CHANGE CONTROL: these types are a specified contract, and editor completions and error messages
  * depend on their exact form. Don't change them to make one call site compile; fix the call site.
@@ -86,8 +85,8 @@ export interface TypedEars<D extends EarsSchema> {
 /**
  * The EARS query helpers typed against the schema `D` — its entity shapes, and the entity names, relation kinds and
  * roles they take — each acting on the engine `engine` returns when it is called. A getter rather than an engine,
- * so a facade can be defined before its engine exists, which is the case for every pack: its `#generated/ears`
- * passes the SDK's `boundEars`.
+ * so a facade can be defined before its engine exists: a module that defines one at import, before the program has
+ * opened its database, passes a getter of whichever engine the program has bound by the time a helper is called.
  */
 export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<D> {
   const on = <K extends keyof Ears>(name: K) =>

@@ -2,7 +2,7 @@ import type { EARS } from './entities.ts';
 import { idSuffix } from './utils.ts';
 
 /**
- * Creates an id for a new entity of type `t`. A pack's `#generated/ears` exports this
+ * Creates an id for a new entity of type `t`. A typed facade (`defineEars`) holds this as `newId`,
  * typed to brand the id with the entity type, so reads through its helpers infer the shape.
  *
  * @internal
