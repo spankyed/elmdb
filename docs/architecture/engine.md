@@ -515,7 +515,7 @@ plan up to that step, and runs the rest itself.
 
 **Answers** are owned bytes: ids as strings, each row as a map of `id`, `entityType` and the fields' stored msgpack
 bytes spliced in unchanged, counts as numbers. A call answers an array of an answer per read, each a map whose `kind`
-says which: `Answers` and `Answer` in `engine/answer.rs`, generated as `protocol/Answers.ts` and `protocol/Answer.ts`.
+says which: `Answers` and `Answer` in `engine/answer.rs`, generated as `protocol/Answers.d.ts` and `protocol/Answer.d.ts`.
 `reads.rs` writes the bytes itself rather than serializing those types, so no stored value is decoded to be answered;
 `answer::conforms` holds the bytes to the types, every key and none more, on every read the crate's own tests make. A
 field a row is asked for twice is answered once. An answer holding stored values (rows, groups, hits, a field's value,
@@ -752,7 +752,7 @@ had before its first move (`movedFrom`: as the commit began, or the ends a relat
 the commit's **sequence**, a number that only increases for as long as the
 database exists (`m/sequence`, raised by every logical commit, a reset's and a replace's included; reset's optional physical
 checkpoint does not raise it). A database's write answers each operation's result and the commit's change set, which
-holds its sequence, and across the binding the three cross as `Written` (generated as `protocol/Written.ts`); a unit's
+holds its sequence, and across the binding the three cross as `Written` (generated as `protocol/Written.d.ts`); a unit's
 commit answers its change set, whose `sequence` is the commit's, and a unit's write its results alone (`BatchResult`). So a caller can tell whether a result it was handed
 reflects its own write (`result.sequence >= written.sequence`): read your writes, across two channels that may deliver
 in either order. `db.sequence` is the last commit's.

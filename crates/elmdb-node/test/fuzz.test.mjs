@@ -14,7 +14,7 @@ const { Database } = createRequire(import.meta.url)('../index.js');
 const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
 // Every code elmdb throws, read from the generated protocol
 const codes = new Set(
-  [...readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../protocol/ErrorCode.ts'), 'utf8').matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]),
+  [...readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../protocol/ErrorCode.d.ts'), 'utf8').matchAll(/"([A-Z_]+)"/g)].map((m) => m[1]),
 );
 
 /** A small deterministic generator, so a failure names its seed */

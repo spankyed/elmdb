@@ -1,5 +1,6 @@
 //! What a read answers (`docs/architecture/engine.md`, Reads: plans), as types: the definition of the answers'
-//! protocol, generated as TypeScript into the binding's `protocol/` (`Answers.ts`, `Answer.ts` and the types they name).
+//! protocol, generated as TypeScript declarations into the binding's `protocol/` (`Answers.d.ts`, `Answer.d.ts` and the
+//! types they name).
 //!
 //! `reads.rs` writes an answer's msgpack itself, splicing each field's stored bytes in unchanged, so no value is decoded
 //! to be answered; these types are what those bytes decode to. `conforms` holds the bytes to them, field for field: this
