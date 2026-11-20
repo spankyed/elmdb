@@ -1092,7 +1092,7 @@ mod tests {
     #[test]
     fn a_failure_is_listed_once_for_its_generation_and_cleared_by_a_build_that_ends_built() {
         let core = Arc::new(Core::new(Box::new(SystemClock)));
-        let runs = Arc::new(std::sync::Mutex::new(Vec::<&str>::new()));
+        let runs = Arc::new(Mutex::new(Vec::<&str>::new()));
         let plan = Arc::clone(&runs);
         let within = Arc::clone(&core);
         let runner = running(&core, move |work, _| {
