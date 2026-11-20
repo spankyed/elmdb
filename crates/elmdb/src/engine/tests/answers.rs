@@ -1,5 +1,5 @@
 //! Every kind of answer a read can give, each decoded into the type that declares it (`answer.rs`): the definition the
-//! binding's `protocol/Answer.ts` is generated from. `answer::conforms` holds a read's bytes to that type field for
+//! binding's `protocol/Answer.d.ts` is generated from. `answer::conforms` holds a read's bytes to that type field for
 //! field, so a key the engine writes that the type lacks, or one the type declares that the engine doesn't write, fails
 //! here.
 

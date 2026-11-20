@@ -352,7 +352,8 @@ relations.parent_of.endpoints[1].target: no such type "Documnet"
 elmdb's Rust schema types are the definition. From them `cargo xtask generate` writes, into
 `crates/elmdb-node/protocol/`, which the binding's package holds:
 
-- the TypeScript types of the schema (`Schema`, `Schema.ts`);
+- the TypeScript types of the schema (`Schema`, `Schema.d.ts`), as declaration files: types only, which a consumer's
+  compiler and API Extractor take as a package's declarations, imported as `elmdb/protocol/Schema.js`;
 - the JSON Schema `$schema` names (`schema-1.json`), for an editor to complete and check a schema with. Its `$id` is
   the schema language's URL, `SCHEMA_LANGUAGE`, which `check-generated` holds; nothing is served at that URL
   (`../roadmap/deferred/supply-chain.md`). It is looser

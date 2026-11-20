@@ -1,5 +1,6 @@
 //! The TypeScript declarations generated from the protocol's Rust types. The Rust types are the definition; nothing
-//! here is written by hand.
+//! here is written by hand. They are written as `.d.ts`, types only: a consumer's compiler checks a `.ts` file under
+//! its own options, which `skipLibCheck` doesn't skip, and API Extractor refuses a program holding one.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -33,8 +34,26 @@ pub fn write(dir: &Path) -> Result<(), String> {
     elmdb::engine::maintenance::Stats::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::engine::derive::CheckReport::export_all(&config).map_err(|e| e.to_string())?;
     elmdb::engine::IndexStatus::export_all(&config).map_err(|e| e.to_string())?;
+    declarations(dir)?;
     let text = serde_json::to_string_pretty(&json_schema()?).map_err(|e| e.to_string())? + "\n";
     std::fs::write(dir.join(JSON_SCHEMA), text).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Renames each `.ts` file ts-rs wrote in `dir` to `.d.ts`, which ts-rs has no setting for. ts-rs writes only `export
+/// type` declarations, which a declaration file holds as they are, and an import of `./Name.js` resolves to
+/// `Name.d.ts` as it did to `Name.ts`, so no file's text changes
+fn declarations(dir: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("couldn't read {}: {e}", dir.display()))?;
+    for entry in entries {
+        let path = entry.map_err(|e| e.to_string())?.path();
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        if let Some(stem) = name.strip_suffix(".ts").filter(|stem| !stem.ends_with(".d")) {
+            let declaration = dir.join(format!("{stem}.d.ts"));
+            std::fs::rename(&path, &declaration)
+                .map_err(|e| format!("couldn't rename {} to {}: {e}", path.display(), declaration.display()))?;
+        }
+    }
     Ok(())
 }
 
@@ -109,5 +128,32 @@ mod tests {
         assert_ne!(moved, text);
         std::fs::write(committed.path().join(JSON_SCHEMA), moved).unwrap();
         assert_eq!(differences(fresh.path(), committed.path()).unwrap(), [format!("{JSON_SCHEMA}: changed")]);
+    }
+
+    #[test]
+    fn the_protocol_is_written_as_declarations_and_a_committed_ts_file_differs() {
+        let (fresh, committed) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        write(fresh.path()).unwrap();
+        write(committed.path()).unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(fresh.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        // Every file but the JSON Schema is a declaration, and the imports between them name `.js`, which resolves to
+        // the declaration
+        assert!(names.iter().any(|name| name == "Schema.d.ts"), "{names:?}");
+        let sources: Vec<&String> =
+            names.iter().filter(|name| *name != JSON_SCHEMA && !name.ends_with(".d.ts")).collect();
+        assert_eq!(sources, Vec::<&String>::new());
+        let batch = std::fs::read_to_string(fresh.path().join("Batch.d.ts")).unwrap();
+        assert!(batch.contains("from \"./Op.js\""), "{batch}");
+
+        // A `.ts` committed where its declaration belongs is what `check-generated` fails on
+        std::fs::rename(committed.path().join("Schema.d.ts"), committed.path().join("Schema.ts")).unwrap();
+        assert_eq!(
+            differences(fresh.path(), committed.path()).unwrap(),
+            ["Schema.d.ts: missing", "Schema.ts: no longer generated"]
+        );
     }
 }
