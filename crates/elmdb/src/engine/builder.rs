@@ -377,7 +377,7 @@ impl Core {
             debug_assert!(state.running, "a thread runs the building that wasn't claimed");
             state.thread = Some(std::thread::current().id());
         }
-        // Ends idle, and given up, whichever way it ends, a piece of work that panics among them: a thread started
+        // Ends idle, and given up, whichever way it ends, a panic outside a build's own among them: a thread started
         // after it finds no work under way, and may be started at all, and no wait is left waiting on this one
         struct Ending<'a>(&'a Core);
         impl Drop for Ending<'_> {
@@ -443,6 +443,8 @@ impl Core {
             let built = catch_unwind(AssertUnwindSafe(|| build(&work, &|| self.over(generation))))
                 .unwrap_or_else(|panic| Err(crate::Error::new(ErrorCode::IndexBuildFailed, panicked(&*panic))));
             let mut state = self.lock();
+            // What held the build up is over with it, however it ended: a panic while it waited one out among them
+            state.held = None;
             // Work over rows another process has replaced isn't owed any more: adopting that queues what is. Nor is
             // work for what the builder built to when it was taken: what it failed on may be what replaced that
             let current = state.generation == generation;
@@ -1416,15 +1418,28 @@ mod tests {
     #[test]
     fn a_build_that_panics_is_its_work_s_failure_and_the_thread_goes_on() {
         let core = Arc::new(Core::new(Box::new(SystemClock)));
-        let runner = running(&core, |work, _| {
+        let held = Arc::clone(&core);
+        let runner = running(&core, move |work, _| {
             let Work::Index { index, .. } = work else { unreachable!() };
             if index == "a" {
+                // Panics as it waits out what refused it: what held it up ends with it
+                held.hold(Some(refused(ErrorCode::SyncBehind)));
                 panic!("the stand-in's own");
             }
             Ok(())
         });
         core.queue([index("a"), index("b")]);
-        assert!(matches!(core.waited(true), Waited::Idle));
+        // Held up while `a` is under way, and then not: asked again until the hold is long over, it is idle
+        let began = Instant::now();
+        let waited = loop {
+            match core.waited(true) {
+                Waited::Held(_) if began.elapsed() < Duration::from_secs(2) => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                other => break other,
+            }
+        };
+        assert!(matches!(waited, Waited::Idle), "still held up once the build that held it panicked");
         let failures = core.lock().failures.clone();
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].work, index("a"));
