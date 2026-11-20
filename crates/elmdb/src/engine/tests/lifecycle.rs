@@ -268,7 +268,7 @@ fn a_wait_for_the_builds_is_refused_while_a_replacement_elsewhere_is_not_adopted
     let db = open(&dir);
     write(&db, vec![A_TASK("Task-1")]).unwrap();
     db.wait_for_index_builds().unwrap();
-    drop(db.builder().take());
+    db.pause_builder();
     replace_elsewhere(&dir, &source);
     let epoch = db.replaced_elsewhere().unwrap().expect("replaced");
     assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::DataReplaced, "with no builder");
@@ -279,6 +279,27 @@ fn a_wait_for_the_builds_is_refused_while_a_replacement_elsewhere_is_not_adopted
     assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::DataReplaced, "with a builder");
     assert!(db.adopt_replacement(epoch).unwrap());
     db.wait_for_index_builds().unwrap();
+}
+
+/// An adoption tells the builder that its rows are changing before it knows whether there is anything to adopt.
+/// Where there isn't, the change it began ends all the same, and a wait for the builds isn't left waiting for it
+#[test]
+fn an_adoption_of_nothing_leaves_no_wait_for_the_builds_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = std::sync::Arc::new(open(&dir));
+    write(&db, vec![A_TASK("Task-1")]).unwrap();
+    let index = db.index_status().unwrap().into_iter().find(|index| index.entity_type.is_some()).unwrap();
+    let work = crate::engine::Work::Index { entity_type: index.entity_type.unwrap(), index: index.index };
+    db.builders().unwrap().expect("a writable database starts builders").queue(vec![work]);
+    db.wait_for_index_builds().unwrap();
+    assert!(db.builder().is_some(), "a builder for the adoption to tell");
+    // No replacement was made, so no epoch is the one to adopt
+    assert!(!db.adopt_replacement(u64::MAX).unwrap());
+    let (tell, told) = std::sync::mpsc::channel();
+    let waiting = std::sync::Arc::clone(&db);
+    std::thread::spawn(move || tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap());
+    let waited = told.recv_timeout(std::time::Duration::from_secs(4));
+    assert_eq!(waited, Ok(Ok(())), "the wait is held by a change that was begun and never ended");
 }
 
 #[test]

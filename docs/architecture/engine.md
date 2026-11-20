@@ -148,15 +148,21 @@ index's are, so read part way it would answer from the entities filed so far and
 out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller to make again; with `INDEX_BUILD_FAILED`, naming
 each, when a build failed; while a unit is open, once the database has started its index builder (`UNIT_OPEN`),
 since a build waits for the unit to end; and in a listener running on the builder's thread (`CALLBACK_ACTIVE`). With
-no builder started, it reads what is unbuilt: nothing, and it answers at once; something, left by a close at exit
-that gave up or a schema change that failed part way, and it queues that and waits for it. That read is refused as
+no thread building, it reads what is unbuilt: nothing, and it answers at once; something, left by a schema change that
+failed part way or a thread stopped with work left, and it queues that, which starts a thread, and waits for it. That read is refused as
 any is (`SCHEMA_CHANGED`, `READERS_FULL`). While another process's replacement of every row is not adopted the wait
 is refused (`DATA_REPLACED`), since no build commits over rows that are gone. A read-only database builds nothing,
-and answers at once whatever is unbuilt, which `indexStatus` says. A schema change stops the builder and starts another for what the schema it
-leaves has to build: a wait under way goes on to that one, and one asked for between the two waits for the second, so
-its answer is for the schema the database holds as it returns. A close stops the builder with builds left for the next
-open, and a wait under way is told `CLOSED`, as one asked of a closed database is; where the close gives up, the wait
-goes on to the builds it queues again. The order a value index keeps of its
+and answers at once whatever is unbuilt, which `indexStatus` says. A database has one building from its open until it is dropped: a queue, what waits for it, and a
+thread started with the first work queued, stopped by a close and started again where the close gave up. A schema change
+tells it that what it builds to is changing, which takes its work away and tells the piece under way to stop, and
+then what the schema it leaves has to build: a wait under way, or asked for between the two, waits through both, so
+its answer is for the schema the database holds as it returns. A close stops the builder's thread with builds left for the next
+open, and a wait under way waits for the close to say what became of the database: closed, the wait is told `CLOSED`,
+as one asked of a closed database is; left open by a close that gave up, it goes on to the builds that close queues
+again, for a thread started then. A close at exit that gives up leaves the database open in a process that is
+exiting, with the builder's thread let go of unjoined: nothing more is built there, and a wait starts nothing and
+answers as it would with nothing left to build, saying only what had failed. It is the one case in which the wait's
+`Ok` doesn't mean built. The order a value index keeps of its
 strings is waited for with its index, but for a build of it that was put off (above, An order of strings is kept beside the
 index's entries): one that another elmdb's writes ended, which the builder begins again after a wait that doubles, to ten
 minutes at most. That is decided, not left over. Nothing is refused for such an order: the index is built, a read
@@ -771,9 +777,11 @@ in either order. `db.sequence` is the last commit's.
   token of its own, and runs them again after each commit that names it, handing the listener the new answer when it
   differs from the last; after a commit whose writes aren't logged, every watch runs again. The listener is called
   after the commit, outside its transaction, on the thread that committed, which for a commit of the index builder's
-  is the builder's own. A schema change and a close on another thread wait for that thread to end, and wait holding nothing its
+  is the builder's own. A close on another thread waits for that thread to end, and waits holding nothing its
   delivery takes, the schema's lock least of all: a watch's read, and whatever its listener calls of the database,
-  goes on while they wait, and the listener's calls after a close are answered `CLOSED`. An unwinding listener panic removes that
+  goes on while it waits, and the listener's calls after a close are answered `CLOSED`. A schema change waits for
+  no thread: it holds the schema's lock until it is made, so a watch's read on the builder's thread waits for the
+  change, and the change for nothing that thread has. An unwinding listener panic removes that
   watch and its tracked reads; the panic hook still runs. Other watches continue, and a committed operation retains
   its ordinary commit/sync outcome. An initial listener panic returns `CALLBACK_PANICKED` without leaving a watch.
   A panic in the watch's read also removes its registration, preserves a committed mutation's sync outcome and does
@@ -790,15 +798,14 @@ in either order. `db.sequence` is the last commit's.
   returns `CALLBACK_ACTIVE` immediately, including timed close; close it after the callback returns instead.
   The listener of the builder's commits is such a callback, run on the builder's thread, and a close it asks for
   is refused the same way: a close waits for the store that thread holds. So is a wait for the index builds asked
-  for on the thread of the builder it would wait for, which would wait for the listener asking; a listener that
-  changed the schema waits for the builder started for it. A wait any listener asks for while a schema change or a
-  close made elsewhere has the builder stopped is refused too: the change waits for the builder's thread, and so for a
-  listener running on it, and the wait would wait for the change. The listener is let go of inside the callback too, so
+  for on the thread of the builder it would wait for, which would wait for the listener asking; and that thread is the
+  builder's for as long as the database is open, whatever its schema has been changed to. A wait any listener asks
+  for while a close made elsewhere has the builder stopped is refused too: the close waits for the builder's thread,
+  and so for a listener running on it, and the wait would wait for the close. The listener is let go of inside the callback too, so
   the last of a database it held closes nothing that waits for the builder's thread: the environment is let go of
   as that thread ends. One that panics is heard no more, and the builder goes on. A schema change made by a listener on that thread,
-  a watch's or the builder's commits', stops the builder without waiting for it, there being no other thread to
-  wait: the builder ends once it has delivered that commit, and the one started for the new schema builds what it
-  left. A close after such a change, by the same listener, is refused like any it asks for.
+  a watch's or the builder's commits', is made as any is: the piece of work that delivered to the listener is of the
+  schema before, and is let go of when the listener returns, and the thread goes on to what the change left. A close after such a change, by the same listener, is refused like any it asks for.
 
 **Why tracked reads, not only `watch(plan)`:** apack's views are functions over its repositories — several plans and
 filtering in JavaScript between them — and a caller's own function can't cross (above, Reads). apack's engine keeps a
@@ -994,7 +1001,7 @@ detect itself is what `check()` is for (`docs/evidence/phase-1.md`).
 A code names what went wrong, not the call that met it, so one failure met by two calls is one code. `CALLBACK_ACTIVE`
 is a call that waits for what a listener of the database is called from, made by that listener: a `close`, from a
 watch's listener or the listener of the builder's commits, and a `waitForIndexBuilds` on the thread of the builder it
-would wait for, or in any listener while a schema change or a close has that builder stopped. Either would wait for itself, and either is made after the listener returns (above, Change sets and
+would wait for, or in any listener while a close has that builder stopped. Either would wait for itself, and either is made after the listener returns (above, Change sets and
 watch). Both are calls of the Rust API: the binding has no watch, and hands each of the builder's commits to its
 JavaScript listener on the main thread, after the builder has gone on, so from JavaScript neither arises.
 

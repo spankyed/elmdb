@@ -410,8 +410,17 @@ piece of work does, and a clock the model moves, since Shuttle models no time an
 queued and waits in the queue once; that work queued while it runs runs again; that a waiter returns only once the work
 queued before it is done; that a stop ends the builder waiting, pausing or working, and its waiters; that a failure
 reaches the waiter its work wakes; that a rank index's drain starts only once its commits have paused; and that commits
-that never pause hold it back no longer than the cap. The store, the chunks' units and LMDB are outside
-it, and so is `database.rs`'s slot the builder is kept in; the rank index's own specs and the model harness run the
+that never pause hold it back no longer than the cap. Of a change to what the builder builds to, a schema change's
+(`begin_change`, `end_change`), it holds that a waiter asked as the change is made returns only once the work the
+change leaves is done; that work under way as it begins is told to stop and is listed neither as done nor as failed;
+that work queued before it never runs after; that the work it leaves, and work queued as it is made, each run once;
+that a change made from within a piece of work leaves that work undone and the thread at what the change left; and
+that a stop ends a wait for a change that hasn't ended; that work queued as a change is made isn't begun until every
+change has ended; and that a change that wasn't made keeps what had failed. Of a close (`begin_close`, `end_close`),
+it holds that a waiter asked as one is under way returns only once what a close that gave up left is built; that a
+close that closes ends the wait, and one under way is said to a caller it may be waiting for; and that the thread a
+close stops ends with no work under way, so another takes what is queued. The store, the chunks' units and LMDB are
+outside it, and so is what the builder builds to itself, which `database.rs` hands it; the rank index's own specs and the model harness run the
 builder on real threads.
 
 ```sh

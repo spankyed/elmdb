@@ -28,9 +28,9 @@ uses those directly, rather than rebuilding what Lucene or a server database nee
 
 ## How the engine is put together
 
-- [One builder for a database's life](single-builder.md): designed, not built. The index builder is stopped and
-  started at every schema change, which eleven defects came from; one handed each new schema, modelled first, and what
-  that deletes.
+- [One builder for a database's life](single-builder.md): built. The index builder was stopped and started at
+  every schema change, which eleven defects came from; a database now has one building, told of each schema change
+  and each close, with its operations modelled.
 
 ## Where the code lives
 

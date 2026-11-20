@@ -196,13 +196,20 @@ fn a_builder_with_an_earlier_declaration_refuses_before_writing_index_entries() 
     )
     .unwrap();
     change_in_child(dir.path());
-    let mut builder =
-        crate::database::start_builder(&db.store().unwrap(), &db.engine_schema(), &db.tracks, &db.observing_schema());
-    builder.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
-    builder.waiter().wait();
-    let failures = builder.failures();
-    builder.stop();
-    drop(builder);
+    // A building of its own, over this handle's store and the schema it holds, which is the earlier one
+    let building = crate::engine::Building::default();
+    building.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
+    let builder = crate::database::start_builder(
+        &building,
+        &db.store().unwrap(),
+        &db.engine_schema(),
+        &db.tracks,
+        &db.observing_schema(),
+    );
+    assert!(matches!(building.wait(true), crate::engine::Waited::Idle));
+    let failures = building.failures();
+    // With what it built to, which holds the store the close below waits for
+    drop((builder, building));
     assert_eq!(failures.len(), 1);
     assert!(failures[0].message.contains("schema") && failures[0].message.contains("reopen"));
     db.close().unwrap();
@@ -284,12 +291,13 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
             false,
         )
         .unwrap();
-    // Deterministically represent a stopped worker with pending work, avoiding a scheduler-dependent race with a
-    // fast single-row build. set_schema must retain this queue even when its recovery inventory cannot be read.
-    let mut builder = crate::database::start_builder(&store, &db.engine_schema(), &db.tracks, &db.observing_schema());
-    builder.stop();
-    builder.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
-    *db.builder() = Some(builder);
+    // Work queued that isn't begun, held so by the building's having no thread: a single row's build would
+    // otherwise race the change. The change takes the work as it begins, and must hand it back when it fails and
+    // can't read what is left to build either
+    let lookup = crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() };
+    db.pause_builder();
+    db.building.queue([lookup]);
+    assert!(db.builder().is_none());
     crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_RECOVERY, || {
         crate::failpoints::fail_once_here(crate::failpoints::points::INDEX_REFRESH)
     });
@@ -297,8 +305,9 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
     let error = db.set_schema(schema("b")).unwrap_err();
     assert_eq!(error.code, ErrorCode::Io);
     assert!(error.message.contains("refreshing index state also failed"));
-    let kept = db.builder().as_ref().map(|builder| builder.pending());
-    assert!(kept.is_some_and(|kept| !kept.is_empty()), "the change kept the queue, which a wait would else read");
+    // Handed back, it is work for a thread, which the change starts: a wait would else read what is unbuilt and
+    // build it itself, so the thread is what is asked after
+    assert!(db.builder().is_some(), "the change didn't hand back the work it took");
     db.wait_for_index_builds().unwrap();
     assert!(db.index_status().unwrap().iter().all(|index| index.built));
     assert_eq!(db.schema(), Some(schema("a")));
@@ -361,64 +370,59 @@ fn a_schema_stored_before_its_canonical_form_grew_a_field_still_opens_and_reads(
     db.read(&reads()).unwrap();
 }
 
+/// A database with nothing to build has no builder, and a schema change starts one only for what it leaves to
+/// build: a wait for the builds would take that up itself, so the builder is asked after, not the index
 #[test]
-fn a_unit_begun_while_a_schema_change_waits_for_the_builder_refuses_the_change() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
+fn a_schema_change_starts_a_builder_for_what_it_leaves_and_none_for_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let options = OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() };
-    let db = std::sync::Arc::new(Database::open(dir.path(), options).unwrap());
+    let plain = Schema::from_json(&json!({"$schema":crate::schema::SCHEMA_LANGUAGE, "types":{"Task":{
+        "fields":{"a":{"type":"string"},"b":{"type":"string"}}
+    }}}))
+    .unwrap();
+    let options = OpenOptions { schema: Some(plain), syncs: false, ..Default::default() };
+    let db = Database::open(dir.path(), options).unwrap();
+    assert!(db.builder().is_none(), "nothing to build");
+    // A field's type, which leaves nothing to build over no entities
+    let wider = Schema::from_json(&json!({"$schema":crate::schema::SCHEMA_LANGUAGE, "types":{"Task":{
+        "fields":{"a":{"type":"string"},"b":{"type":"string"},"c":{"type":"string","optional":true}}
+    }}}))
+    .unwrap();
+    db.set_schema(wider).unwrap();
+    assert!(db.builder().is_none(), "a change that left nothing to build started a builder");
     write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
-    // A builder for the change to wait for, which it does with the schema's lock let go
-    let lookup = crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() };
-    db.builders().unwrap().expect("a writable database starts builders").queue(vec![lookup]);
+    assert!(db.builder().is_none(), "a write that left the builder no work started none");
+    db.set_schema(schema("a")).unwrap();
+    assert!(db.builder().is_some(), "a change that left an index to build started no builder");
     db.wait_for_index_builds().unwrap();
-    let unit = Rc::new(RefCell::new(None));
-    let (beginning, held) = (std::sync::Arc::clone(&db), Rc::clone(&unit));
-    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED, move || {
-        *held.borrow_mut() = Some(beginning.begin().unwrap());
-    });
-    let error = db.set_schema(schema("b")).unwrap_err();
-    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED));
-    assert_eq!(error.code, ErrorCode::UnitOpen, "{error}");
-    assert_eq!(db.schema().unwrap(), schema("a"), "the schema stands as it was");
-    let answer: serde_json::Value = rmp_serde::from_slice(&db.read(&query()).unwrap()).unwrap();
-    assert_eq!(answer[0]["ids"], json!(["Task-0"]));
-
-    // The unit ended, the change is made, and its index built
-    unit.borrow_mut().take();
-    db.set_schema(schema("b")).unwrap();
-    db.wait_for_index_builds().unwrap();
-    assert_eq!(db.schema().unwrap(), schema("b"));
-    assert!(db.check().unwrap().is_clean());
+    db.close().unwrap();
 }
 
-/// A schema change takes the builder from the database, stops it, and starts another for what the schema it leaves
-/// has to build. A wait for the builds asked for between the two waits for the second: answered then, it would say
-/// built of an index no builder had begun
+/// A schema change tells the builder that what it builds to is changing, applies the schema, and then tells it
+/// what that leaves to build. A wait for the builds asked for between the two waits for the second: answered then,
+/// it would say built of an index the builder had not been given
 #[test]
-fn a_wait_for_the_builds_asked_for_during_a_schema_change_waits_for_the_builder_it_starts() {
+fn a_wait_for_the_builds_asked_for_during_a_schema_change_waits_for_what_it_leaves_to_build() {
     use std::rc::Rc;
     use std::sync::{Arc, mpsc};
     let dir = tempfile::tempdir().unwrap();
     let options = OpenOptions { schema: Some(schema("a")), syncs: false, ..Default::default() };
     let db = Arc::new(Database::open(dir.path(), options).unwrap());
     write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
-    // A builder for the change to stop
+    // A builder for the change to tell
     let lookup = crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() };
     db.builders().unwrap().expect("a writable database starts builders").queue(vec![lookup]);
     db.wait_for_index_builds().unwrap();
     let (tell, told) = mpsc::channel();
     let told = Rc::new(told);
     let (waiting, answered) = (Arc::clone(&db), Rc::clone(&told));
-    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED, move || {
+    crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_CHANGE_BEGUN, move || {
         std::thread::spawn(move || tell.send(waiting.wait_for_index_builds()).unwrap());
         let early = answered.recv_timeout(Duration::from_millis(200));
-        assert!(early.is_err(), "answered {early:?} with the builder stopped and the change's not started");
+        assert!(early.is_err(), "answered {early:?} with the change begun and what it leaves not queued");
     });
     db.set_schema(schema("b")).unwrap();
-    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::SCHEMA_BUILDER_STOPPED));
-    told.recv_timeout(Duration::from_secs(4)).expect("the wait went on to the change's builder").unwrap();
+    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::SCHEMA_CHANGE_BEGUN));
+    told.recv_timeout(Duration::from_secs(4)).expect("the wait went on to what the change left").unwrap();
     let unbuilt: Vec<String> =
         db.index_status().unwrap().into_iter().filter(|index| !index.built).map(|index| index.index).collect();
     assert_eq!(unbuilt, Vec::<String>::new(), "answered once the index the change declared was built");

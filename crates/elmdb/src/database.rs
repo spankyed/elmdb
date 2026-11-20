@@ -2,7 +2,7 @@
 //! (`docs/architecture/engine.md`, Opening).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::time::Duration;
@@ -84,10 +84,11 @@ pub struct Database {
     /// schema that changed while it ran
     engine_schema: Arc<RwLock<Arc<EngineSchema>>>,
     report: OpenReport,
-    /// Builds the indexes that wait for it; none in a read-only database
+    /// The thread that builds the indexes that wait for it, while there is one; none in a read-only database
     builder: Arc<Mutex<Option<crate::engine::Builder>>>,
-    /// The schema changes and closes that have taken the builder from its slot and not yet finished
-    pub(crate) replacing: Replacing,
+    /// The index building the thread in `builder` does, which outlives each such thread: its queue, what waits for
+    /// it, and what a schema change and a close tell it
+    pub(crate) building: crate::engine::Building,
     /// The tracked reads' read sets, and the database's watches
     pub(crate) tracks: crate::engine::watch::SharedTracks,
     /// Held by a rebuild from before it makes room in the map until its commit has been delivered: rebuilds asked on
@@ -175,10 +176,10 @@ impl Database {
         let store = Arc::new(store);
         let tracks: crate::engine::watch::SharedTracks = Default::default();
         let observing = Arc::new(RwLock::new(Arc::clone(&engine_schema)));
+        let building = crate::engine::Building::default();
         let builder = (!options.read_only && !unbuilt.is_empty()).then(|| {
-            let builder = start_builder(&store, &engine_schema, &tracks, &observing);
-            builder.queue(unbuilt);
-            builder
+            building.queue(unbuilt);
+            start_builder(&building, &store, &engine_schema, &tracks, &observing)
         });
         Ok(Self {
             path: store.path().to_path_buf(),
@@ -188,7 +189,7 @@ impl Database {
             schema: RwLock::new(schema),
             report,
             builder: Arc::new(Mutex::new(builder)),
-            replacing: Replacing::default(),
+            building,
             tracks,
             rebuilding: Default::default(),
         })
@@ -221,29 +222,18 @@ impl Database {
             return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: commit or abort it, then change the schema"));
         }
         let mut current = self.engine_schema.write();
-        // Refused before the builder stops: a unit holding the write transaction would keep a build from finishing
+        // Asked again under the lock, for a unit begun since: it holds the write transaction the change needs
         if store.unit_is_open() {
             return Err(Error::new(ErrorCode::UnitOpen, "A unit is open: commit or abort it, then change the schema"));
         }
-        // The builder works to the schema it was started with, so it stops first and starts again on the one held
-        // after, whichever that is. Told to stop, it is waited for with the schema's lock and the builder's slot let
-        // go: its thread may be delivering a commit of its own to a watch, whose read and whose listener's calls of
-        // the database take them, and would wait on this thread as it waits on theirs. One started meanwhile, by a
-        // commit that left it work, stops the same way; a unit begun meanwhile refuses the change as it does any write
-        let mut interrupted = Vec::new();
-        // From before a builder is taken until the one for the schema held after is in the slot: a wait for the
-        // index builds that finds the slot empty between the two waits for this change to end
-        let replacing = self.replacing.begin();
-        loop {
-            let running = self.builder().take();
-            let Some(mut builder) = running else { break };
-            builder.tell_to_stop();
-            drop(current);
-            builder.stop();
-            interrupted.extend(builder.pending());
-            run_point!(SCHEMA_BUILDER_STOPPED);
-            current = self.engine_schema.write();
-        }
+        // The building is told that what it builds to is changing, and its thread is waited for by no one:
+        // its work is for the schema held until now and goes, the piece its thread is on is told to stop, and a
+        // commit of that piece after the change is refused by the fingerprint the change stores
+        // (`engine::builder_commits`). The schema's lock is held from here to the builder's being told what the
+        // change left, so no commit queues it work and no close takes it in between, and a wait for the builds
+        // asked for meanwhile waits for that (`Core::wait`)
+        let change = self.building.begin_change();
+        run_point!(SCHEMA_CHANGE_BEGUN);
         let mut applied = apply_schema(&store, Some(schema), Some(&current));
         if let Ok(applied) = &applied {
             *current = Arc::new(EngineSchema::stored(applied.schema.clone(), applied.hash.clone()));
@@ -253,22 +243,34 @@ impl Database {
             run_point!(SCHEMA_RECOVERY);
         }
         let unbuilt = match &mut applied {
-            Ok(applied) => applied.unbuilt.clone(),
+            Ok(applied) => Some(applied.unbuilt.clone()),
             Err(original) => match crate::engine::remaining_indexes(&store, &current) {
-                Ok(unbuilt) => unbuilt,
+                Ok(unbuilt) => Some(unbuilt),
                 Err(secondary) => {
                     original.message.push_str(&format!("; refreshing index state also failed: {secondary}"));
-                    interrupted
+                    None
                 }
             },
         };
-        if !unbuilt.is_empty() {
-            let builder = start_builder(&store, &current, &self.tracks, &self.engine_schema);
-            builder.queue(unbuilt);
-            *self.builder() = Some(builder);
-        }
         // Ended before the change's commit is delivered: a listener it tells may wait for the builds
-        drop(replacing);
+        {
+            // A read-only database builds nothing, whether its change was refused or changed nothing
+            match unbuilt.filter(|_| !self.read_only) {
+                Some(unbuilt) => {
+                    let commits = builder_commits_of(&store, &current, &self.tracks, &self.engine_schema);
+                    self.building.end_change(change, Arc::clone(&current), commits, unbuilt);
+                }
+                // The change wasn't made and what is left to build couldn't be read: the building has back the
+                // work the change took, and what had failed stays failed
+                None => drop(change),
+            }
+            // A thread for what the change left, where none runs: the schema's lock is held, so no commit starts one
+            // beside this
+            let mut slot = self.builder();
+            if slot.is_none() && self.building.has_work() && !self.building.closing() {
+                *slot = Some(start_builder(&self.building, &store, &current, &self.tracks, &self.engine_schema));
+            }
+        }
         drop(current);
         let AppliedSchema { report, commit, .. } = applied?;
         if let Some(commit) = commit {
@@ -280,6 +282,15 @@ impl Database {
     /// What opening did
     pub fn open_report(&self) -> &OpenReport {
         &self.report
+    }
+
+    /// Stops the building's thread, leaving what is queued for another (`Builder::pause`)
+    #[cfg(test)]
+    pub(crate) fn pause_builder(&self) {
+        let running = self.builder().take();
+        if let Some(builder) = running {
+            builder.pause();
+        }
     }
 
     pub(crate) fn builder(&self) -> std::sync::MutexGuard<'_, Option<crate::engine::Builder>> {
@@ -369,6 +380,7 @@ impl Database {
         let store = self.store()?;
         let weak = Arc::downgrade(&store);
         let (slot, schemas, tracks) = (Arc::clone(&self.builder), self.observing_schema(), Arc::clone(&self.tracks));
+        let building = self.building.clone();
         let read_only = self.read_only;
         store.wake.listen(Arc::new(move || {
             // Work over rows another process has replaced can't commit until the holder adopts that, which queues it
@@ -378,6 +390,7 @@ impl Database {
                 let schema = Arc::clone(&schemas.read());
                 if let Ok(owed) = crate::engine::remaining_indexes(&store, &schema) {
                     let builders = Builders {
+                        building: building.clone(),
                         slot: Arc::clone(&slot),
                         store,
                         schemas: Arc::clone(&schemas),
@@ -417,7 +430,7 @@ impl Database {
                 if at_exit {
                     builder.abandon();
                 } else {
-                    builder.stop();
+                    builder.join();
                 }
             }
         };
@@ -432,7 +445,7 @@ impl Database {
         {
             return Ok(false);
         }
-        let (taken, running, replacing) = {
+        let (taken, running, mut closing) = {
             // Held while the builder is told to stop and the store is taken, so a schema change can't start a builder
             // after; released before either is waited for. At exit it is waited for until the deadline: on Windows the
             // exit handlers run after every other thread was ended, and one ended holding the schema for reading (a
@@ -457,16 +470,19 @@ impl Database {
                 Some(store) if store.unit_is_open() => return Ok(false),
                 Some(_) => {}
             }
-            // Until the close returns: one that gives up queues what is left to build again, and a wait for the
-            // builds that finds the slot empty before then waits for that
-            let replacing = self.replacing.begin();
+            // The building is told, which tells its thread to stop. Until this close says whether the database
+            // closed, a wait for the builds waits for it to, and work a commit queues starts no thread, which would
+            // hold the store this waits for
+            let closing = self.building.begin_close();
             let running = self.builder().take();
-            if let Some(builder) = &running {
-                builder.tell_to_stop();
-            }
-            (slot.take(), running, replacing)
+            (slot.take(), running, closing)
         };
         stop(running);
+        if at_exit {
+            // The thread was let go of unjoined, and may be running: whatever becomes of this close, a failed sync
+            // or a panic among it, no thread is started beside that one, and the building is said to be over now
+            closing.closed();
+        }
         let Some(mut store) = taken else { return Ok(true) };
         run_point!(CLOSE_TAKEN);
         // An operation that took the store before the close finishes first, and none keeps it long. The slot is free
@@ -482,9 +498,9 @@ impl Database {
                         deadline.saturating_duration_since(std::time::Instant::now())
                     });
                     // The close can no longer give up, and whoever waits for it is told the database is closed.
-                    // Ended before the store closes, which waits for its own threads: a listener one of them runs
+                    // Said before the store closes, which waits for its own threads: a listener one of them runs
                     // may be among those waiting
-                    drop(replacing);
+                    closing.closed();
                     let closed = if at_exit { store.close_at_exit(left) } else { store.close() };
                     return closed.map(|()| true);
                 }
@@ -494,29 +510,38 @@ impl Database {
                         let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
                         *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
                         synced?;
+                        if at_exit {
+                            // The process is exiting: nothing more is built here, which the building was told as
+                            // its thread was let go of
+                            return Ok(false);
+                        }
                         run_point!(CLOSE_GAVE_UP);
-                        // The database stays open with its builder stopped: what is left to build is queued again,
-                        // as an open queues it, or a read of an unbuilt index would be told to wait for no one
-                        // A close that gave up answers that it did: what keeps the builds from being queued, another
-                        // process's schema or a close beside this one, is the next operation's to say
-                        if !at_exit
-                            && let Ok(Some(builders)) = self.builders()
-                            && let Ok(store) = self.store()
-                        {
-                            // The schema's read is let go before the builders queue, which reads it too
+                        // The database stays open: what is left to build is queued again, as an open queues it, or
+                        // a read of an unbuilt index would be told to wait for no one. The close is said to be over
+                        // first, which lets a thread be started for it. A close that gave up answers that it did:
+                        // what keeps the builds from being queued, another process's schema or a close beside this
+                        // one, is the next operation's to say
+                        // Queued while the close is still said to be under way, so that a wait for the builds
+                        // that this close's end wakes finds the work there, and not a moment in which nothing is
+                        // queued and no thread runs. The thread is started once the close is over, which is what
+                        // lets one be
+                        if let Ok(store) = self.store() {
+                            // Where it can't be read nothing is queued, and a wait for the builds reads it again
+                            // itself, with no thread there, and says why it can't. The schema's read is let go
+                            // at this statement's end, before the builders take it
                             let owed = crate::engine::remaining_indexes(&store, &self.engine_schema.read());
-                            if let Ok(owed) = owed {
-                                builders.queue(owed);
-                            }
+                            self.building.queue(owed.unwrap_or_default());
+                        }
+                        drop(closing);
+                        if let Ok(Some(builders)) = self.builders() {
+                            builders.queue(Vec::new());
                         }
                         return Ok(false);
                     }
                     store = shared;
                     // An operation that took the store before the close, a commit or another process's wake, may queue
-                    // index work after it, which starts a builder that holds the store for as long as it runs: stopped
-                    // as the first was, or the wait for the store would never end
-                    let running = self.builder().take();
-                    stop(running);
+                    // index work after it. It starts no thread, which would hold the store, while the close is under
+                    // way (`Builders::queue`): the work waits in the queue for the close to give up, or goes with it
                     std::thread::sleep(Duration::from_millis(1));
                 }
             }
@@ -540,80 +565,33 @@ struct AppliedSchema {
     commit: Option<crate::store::Commit>,
 }
 
-/// The schema changes and closes in progress that have taken the builder from its slot to stop it. Each leaves the
-/// slot empty until it ends, with builds still owed that the builder it starts or queues for then takes up. A wait
-/// for the index builds that finds the slot empty waits here for them to end, rather than start a builder the
-/// change would only stop again
-#[derive(Default)]
-pub(crate) struct Replacing {
-    /// How many are in progress
-    changes: Mutex<usize>,
-    ended: Condvar,
+/// How a builder's chunks commit under `schema`: as writes do
+fn builder_commits_of(
+    store: &Arc<Store>,
+    schema: &Arc<EngineSchema>,
+    tracks: &crate::engine::watch::SharedTracks,
+    observing: &Arc<RwLock<Arc<EngineSchema>>>,
+) -> crate::engine::BuilderCommits {
+    crate::engine::builder_commits(Arc::clone(tracks), Arc::clone(store), Arc::clone(observing), Arc::clone(schema))
 }
 
-impl Replacing {
-    fn changes(&self) -> std::sync::MutexGuard<'_, usize> {
-        // A count: whatever panicked holding it left it whole
-        self.changes.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    /// Begins a change, which ends when what this answers is dropped. Begun before the builder is taken from its
-    /// slot, so whoever finds the slot empty with none in progress knows no change emptied it
-    pub(crate) fn begin(&self) -> Replace<'_> {
-        *self.changes() += 1;
-        Replace(self)
-    }
-
-    /// Whether a change is in progress. Asked with the builder's slot held, it says whether an empty slot is one a
-    /// change is still to fill
-    pub(crate) fn in_progress(&self) -> bool {
-        *self.changes() > 0
-    }
-
-    /// Blocks until no change is in progress, and answers that none is. With `wait` false it waits for nothing,
-    /// and answers whether none was
-    pub(crate) fn ended(&self, wait: bool) -> bool {
-        let mut changes = self.changes();
-        while *changes > 0 {
-            if !wait {
-                return false;
-            }
-            changes = self.ended.wait(changes).unwrap_or_else(std::sync::PoisonError::into_inner);
-        }
-        true
-    }
-}
-
-/// A change in progress (`Replacing`), ended when dropped
-pub(crate) struct Replace<'a>(&'a Replacing);
-
-impl Drop for Replace<'_> {
-    fn drop(&mut self) {
-        *self.0.changes() -= 1;
-        self.0.ended.notify_all();
-    }
-}
-
-/// The builder over `schema`, whose chunks commit as writes do
+/// The building's thread, started over `schema`, whose chunks commit as writes do
 pub(crate) fn start_builder(
+    building: &crate::engine::Building,
     store: &Arc<Store>,
     schema: &Arc<EngineSchema>,
     tracks: &crate::engine::watch::SharedTracks,
     observing: &Arc<RwLock<Arc<EngineSchema>>>,
 ) -> crate::engine::Builder {
-    let commits = crate::engine::builder_commits(
-        Arc::clone(tracks),
-        Arc::clone(store),
-        Arc::clone(observing),
-        Arc::clone(schema),
-    );
-    crate::engine::Builder::start(Arc::clone(store), Arc::clone(schema), commits)
+    let commits = builder_commits_of(store, schema, tracks, observing);
+    building.start(Arc::clone(store), Arc::clone(schema), commits)
 }
 
-/// The database's builder slot and what starting a builder in it takes, which a unit holds to hand the builder the
-/// pushes its commit left
+/// The database's building, the slot its thread is kept in and what starting that thread takes, which a unit holds
+/// to hand the building the pushes its commit left
 #[derive(Clone)]
 pub(crate) struct Builders {
+    pub(crate) building: crate::engine::Building,
     pub(crate) slot: Arc<Mutex<Option<crate::engine::Builder>>>,
     pub(crate) store: Arc<Store>,
     pub(crate) schemas: Arc<RwLock<Arc<EngineSchema>>>,
@@ -621,18 +599,26 @@ pub(crate) struct Builders {
 }
 
 impl Builders {
-    /// Queues work for the builder, starting it when none runs: a rank index a commit left with pushes waiting
+    /// Queues work for the building, and starts its thread where none runs and there is work: a rank index a commit
+    /// left with pushes waiting, or what an earlier thread left queued. None is started while a close is under way:
+    /// it would hold the store the close waits for, and the work waits in the queue for a close that gives up
     pub(crate) fn queue(&self, work: Vec<crate::engine::Work>) {
-        if work.is_empty() {
+        self.building.queue(work);
+        if !self.building.has_work() {
             return;
         }
-        // The schema's lock before the builder's slot, the order a schema change takes them in
+        // The schema's lock before the builder's slot, the order a schema change takes them in. Held for reading, it
+        // keeps this from landing while a schema change is being made, which holds it for writing throughout
         let schema = self.schemas.read();
         let mut slot = self.slot.lock().expect("the builder slot's lock is never poisoned");
-        if slot.is_none() {
-            *slot = Some(start_builder(&self.store, &schema, &self.tracks, &self.schemas));
+        if slot.is_none() && !self.building.closing() {
+            *slot = Some(start_builder(&self.building, &self.store, &schema, &self.tracks, &self.schemas));
         }
-        slot.as_ref().expect("started above").queue(work);
+    }
+
+    /// Whether the building's thread is running
+    pub(crate) fn running(&self) -> bool {
+        self.slot.lock().expect("the builder slot's lock is never poisoned").is_some()
     }
 }
 
@@ -649,6 +635,7 @@ impl Database {
             return Ok(None);
         }
         Ok(Some(Builders {
+            building: self.building.clone(),
             slot: Arc::clone(&self.builder),
             store,
             schemas: self.observing_schema(),
@@ -822,6 +809,8 @@ mod tests {
         let took = began.elapsed();
         // Bounded, the record being held a minute: what a flush beside a loaded suite takes is no part of the test
         assert!(took < Duration::from_secs(10), "{took:?}, for a wait of 300 ms");
+        // Its sync refused, the close still left nothing building: a thread may have been let go of unjoined
+        assert!(db.building.closing(), "a thread could be started beside one a close at exit let go of");
         drop(held);
         drop(store);
     }

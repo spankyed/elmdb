@@ -320,9 +320,9 @@ fn rebuilding_one_index_refuses_one_the_schema_doesnt_declare() {
     assert!(db.check().unwrap().is_clean());
 }
 
-/// A database can be left with an index unbuilt and no builder: by a close at exit that gives up, which leaves its
-/// builder stopped and queues nothing again. A wait for the builds then takes up what is unbuilt, where it would
-/// answer that nothing waits to be built
+/// A database can be left with an index unbuilt and no thread building it: a schema change that failed part way,
+/// or a thread stopped with work left. A wait for the builds then takes up what is unbuilt, where it would answer
+/// that nothing waits to be built
 #[test]
 fn a_wait_for_the_builds_takes_up_what_no_builder_was_left() {
     let dir = tempfile::tempdir().unwrap();
@@ -335,10 +335,8 @@ fn a_wait_for_the_builds_takes_up_what_no_builder_was_left() {
     assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
     let built = || db.index_status().unwrap().iter().find(|s| s.index == "one").unwrap().built;
     assert!(!built());
-    let held = db.store().unwrap();
-    assert!(!db.close_at_exit(std::time::Duration::from_millis(5)).unwrap(), "given up on for the store held");
-    drop(held);
-    assert!(db.builder().is_none(), "the close left no builder");
+    db.pause_builder();
+    assert!(db.builder().is_none());
     // Still unbuildable, the wait says so again; and of a builder that fails it a second time, once
     let failed = || {
         let failed = db.wait_for_index_builds().unwrap_err();
@@ -351,7 +349,7 @@ fn a_wait_for_the_builds_takes_up_what_no_builder_was_left() {
     failed();
     // And once it can be built, with no builder again, the wait builds it
     write(&db, vec![json!({ "op": "set", "id": "Note-2", "fields": { "kind": "other" } })]).unwrap();
-    drop(db.builder().take());
+    db.pause_builder();
     assert!(!built());
     db.wait_for_index_builds().unwrap();
     assert!(built());
@@ -589,6 +587,65 @@ fn a_build_under_way_as_every_row_is_replaced_leaves_no_entity_out_of_an_index_i
     assert_eq!(visited.entities, 2, "the rows walked, the index being unbuilt");
     assert!(!built());
     assert!(db.check().unwrap().is_clean());
+}
+
+/// A close that gives up queues again what is left to build, read as it gives up. Where that read is refused, it
+/// queues nothing, and a wait for the builds woken by its end finds no thread and nothing queued: it reads what is
+/// left itself, and builds it, where it would answer that all is built
+#[test]
+fn a_wait_woken_by_a_close_that_gave_up_and_queued_nothing_reads_what_is_left_itself() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(
+        with_schema(&dir, notes(base_fields(), json!({ "byKind": { "kind": "value", "fields": ["kind"] } }))).unwrap(),
+    );
+    let note = |id: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "kind": "k" } });
+    write(&db, vec![note("Note-1"), note("Note-2")]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    // The index unbuilt, and no thread to build it
+    db.pause_builder();
+    damage(&db, |txn, main| Ok(main.delete(txn, &keys::index_built("Note", "byKind")).map(|_| ())?));
+    let built = |db: &Database| db.index_status().unwrap().iter().find(|s| s.index == "byKind").unwrap().built;
+    assert!(!built(&db));
+    let (tell, told) = std::sync::mpsc::channel();
+    let waiting = Arc::clone(&db);
+    crate::failpoints::run_once_here(crate::failpoints::points::CLOSE_GAVE_UP, move || {
+        // A wait under way through the close, which the close's end wakes
+        std::thread::spawn(move || tell.send(waiting.wait_for_index_builds().map_err(|refused| refused.code)).unwrap());
+        std::thread::sleep(Duration::from_millis(100));
+        // And the close's own reading of what is left, refused
+        crate::failpoints::fail_once_here(crate::failpoints::points::INDEX_REFRESH);
+    });
+    let held = db.store().unwrap();
+    assert!(!db.close_within(Some(Duration::from_millis(5))).unwrap());
+    assert!(!crate::failpoints::is_armed_here(crate::failpoints::points::CLOSE_GAVE_UP));
+    drop(held);
+    assert_eq!(told.recv_timeout(Duration::from_secs(8)), Ok(Ok(())));
+    assert!(built(&db), "the wait answered with the index unbuilt");
+    db.close().unwrap();
+}
+
+/// A close at exit that gives up leaves the database open in a process that is exiting, its builder's thread let go
+/// of unjoined. Nothing more is built there: a wait for the builds answers, and starts no thread beside that one
+#[test]
+fn a_close_at_exit_that_gives_up_leaves_nothing_building_and_no_wait_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let indexes = json!({ "one": { "kind": "value", "fields": ["kind"], "unique": true } });
+    let db = with_schema(&dir, notes(base_fields(), json!({}))).unwrap();
+    let note = |id: &str, kind: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "kind": kind } });
+    write(&db, vec![note("Note-1", "same"), note("Note-2", "same")]).unwrap();
+    // An index that can't be built, so that there is something left to build
+    db.set_schema(Schema::from_json(&notes(base_fields(), indexes)).unwrap()).unwrap();
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
+    let held = db.store().unwrap();
+    assert!(!db.close_at_exit(std::time::Duration::from_millis(5)).unwrap(), "given up on for the store held");
+    drop(held);
+    assert!(db.is_open());
+    write(&db, vec![json!({ "op": "set", "id": "Note-2", "fields": { "kind": "other" } })]).unwrap();
+    let waited = db.wait_for_index_builds();
+    assert!(db.builder().is_none(), "a thread was started in a process that is exiting");
+    assert_eq!(waited.map_err(|refused| refused.code), Err(ErrorCode::IndexBuildFailed), "what failed is still said");
 }
 
 #[test]

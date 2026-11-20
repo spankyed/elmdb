@@ -101,7 +101,7 @@ exclude_re = [
     "builder.rs:.*Core::await_quiet",
     # Whether a piece of work is told to stop: the builder also checks between pieces, so the suite here ends either way;
     # a stop that never reaches the work underway is the Shuttle model's (`a_stop_ends_the_work_underway…` never ends)
-    "builder.rs:.*replace Core::stopping -> bool with false",
+    "builder.rs:.*replace Core::over -> bool with false",
     # Busy after a piece of work whether or not more waits: a waiter waits while the queue holds work whatever it says,
     # and the loop's next turn sets it from the queue before anything reads it otherwise
     "builder.rs:.*delete ! in Core::run",
