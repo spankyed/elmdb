@@ -1,0 +1,32 @@
+# Fails, which mails whoever maintains this, when a crate in the lockfile has a RustSec advisory deny.toml doesn't
+# ignore, or the binding's build tooling (the root package-lock.json) has an npm advisory of high severity or above.
+# The npm package itself depends on nothing. An advisory appears with no change here, so this reads them each day on
+# main and gates no pull request; ci.yml reads the RustSec ones for a pull request that changes the lockfile or deny.toml
+name: advisories
+on:
+  schedule:
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-24.04
+    # A prebuilt cargo-deny, the advisory database's clone and cargo's metadata, then one request to npm's registry: a
+    # few minutes at most
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 23
+      - run: rustup show active-toolchain
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.21.0
+      - run: cargo deny check advisories
+      # After a RustSec failure too, so one run says everything there is to answer
+      - if: always()
+        run: npm audit --audit-level=high

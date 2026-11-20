@@ -136,8 +136,8 @@ jobs:
         with:
           tool: cargo-deny@0.21.0
       - run: cargo deny check bans sources
-      # The RustSec advisories, for a change to the lockfile or to deny.toml, whose ignores relax this check, so an
-      # advisory published today fails no unrelated change
+      # The RustSec advisories, for a change to the lockfile or to deny.toml, whose ignores relax this check. Any other
+      # change leaves them to advisories.yml's daily run, so an advisory published today fails no unrelated change
       - if: needs.changes.outputs.dependencies == 'true'
         run: cargo deny check advisories
       - run: cargo xtask check-one-lmdb

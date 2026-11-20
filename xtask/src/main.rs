@@ -627,7 +627,7 @@ fn check_notices(root: &Path) -> Result<(), String> {
     }
 }
 
-/// The cargo-deny CI installs (`.github/workflows/ci.yml`), which the install hint names
+/// The cargo-deny CI installs (`.github/workflows/ci.yml`, `advisories.yml`), which the install hint names
 const CARGO_DENY: &str = "0.21.0";
 
 /// `deny.toml`'s checks, through `cargo`: no banned crate, none from a git repository or a registry other than
