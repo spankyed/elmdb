@@ -20,7 +20,8 @@ targets = [
     "x86_64-pc-windows-msvc",
 ]
 
-# Every advisory fails, a crate marked unmaintained included, wherever in the tree it is. An advisory is answered by
+# Every advisory fails, a crate marked unmaintained included, wherever in the graph above it is: a crate built only
+# under `cfg(loom)` or `cfg(shuttle)` is in the lockfile and outside it. An advisory is answered by
 # removing the crate where that can be done. Where it can't, `ignore` gains an entry with the advisory's id and, as
 # its `reason`, why the crate stays; cargo-deny warns of an entry that matches nothing, so none outlives its crate
 [advisories]

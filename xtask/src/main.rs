@@ -636,22 +636,48 @@ const CARGO_DENY: &str = "0.21.0";
 /// The checks are named, since `deny.toml` leaves licenses to `about.toml` and a bare `cargo deny check` would fail
 /// every crate on its license.
 fn check_deny(cargo: &str, root: &Path) -> Result<(), String> {
-    let installed = Command::new(cargo).args(["deny", "--version"]).output().is_ok_and(|out| out.status.success());
-    if !installed {
+    let version = Command::new(cargo).args(["deny", "--version"]).output().ok().filter(|out| out.status.success());
+    let version = version.map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned());
+    if version.as_deref().and_then(|v| v.split_whitespace().last()) != Some(CARGO_DENY) {
         return Err(format!(
-            "cargo-deny isn't installed, and deny.toml is checked with it: cargo install --locked \
-             cargo-deny@{CARGO_DENY}"
+            "deny.toml is checked with cargo-deny {CARGO_DENY}, as CI checks it, and this machine has {}: cargo \
+             install --locked cargo-deny@{CARGO_DENY}",
+            version.as_deref().unwrap_or("none")
         ));
     }
-    let status = Command::new(cargo)
-        .args(["deny", "check", "bans", "sources", "advisories"])
-        .current_dir(root)
-        .status()
-        .map_err(|e| format!("cargo deny didn't run: {e}"))?;
-    match status.success() {
-        true => Ok(()),
-        false => Err(format!("cargo deny check bans sources advisories failed ({status}); what it printed says which")),
+    let deny = |checks: &[&str]| {
+        Command::new(cargo)
+            .args(["deny", "check"])
+            .args(checks)
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("cargo deny didn't run: {e}"))
+    };
+    let said = |out: &std::process::Output| {
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    };
+    let offline = deny(&["bans", "sources"])?;
+    if !offline.status.success() {
+        return Err(format!("cargo deny check bans sources failed ({}):\n{}", offline.status, said(&offline)));
     }
+    // The advisories are read from RustSec's database, which cargo-deny fetches at each run. A machine that can't
+    // reach it has read none: that is said and passed over, as what else this machine can't run is, since CI reads
+    // them on every change to the lockfile and each day
+    let advisories = deny(&["advisories"])?;
+    let printed = said(&advisories);
+    match advisories.status.success() {
+        true => Ok(()),
+        false if advisory_database_unreachable(&printed) => {
+            eprintln!("  the RustSec advisories weren't read: their database couldn't be fetched. CI reads them");
+            Ok(())
+        }
+        false => Err(format!("cargo deny check advisories failed ({}):\n{printed}", advisories.status)),
+    }
+}
+
+/// Whether what `cargo deny check advisories` printed says it failed to fetch the database, and found no advisory
+fn advisory_database_unreachable(printed: &str) -> bool {
+    printed.contains("failed to fetch advisory database") && !printed.contains("error[")
 }
 
 fn check_generated() -> Result<(), String> {
@@ -852,6 +878,16 @@ mod tests {
             let refused = check_deny(cargo, &workspace_root()).unwrap_err();
             assert!(refused.contains("cargo install --locked cargo-deny@0.21.0"), "{refused}");
         }
+    }
+
+    #[test]
+    fn advisories_that_couldnt_be_fetched_are_told_from_one_that_was_found() {
+        assert!(super::advisory_database_unreachable("error: failed to fetch advisory database https://x\n"));
+        assert!(!super::advisory_database_unreachable("error[unmaintained]: Bincode is unmaintained\n"));
+        // A database that was fetched before and an advisory read from it: the advisory still fails
+        assert!(!super::advisory_database_unreachable(
+            "warning: failed to fetch advisory database\nerror[vulnerability]: x\n"
+        ));
     }
 
     fn skip(line: usize, pattern: &str) -> Skip {
