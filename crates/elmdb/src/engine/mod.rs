@@ -464,6 +464,26 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     Ok(unbuilt)
 }
 
+/// What a wait for the builds queued again, each time the building went idle owing it: how many times in a row it was
+/// the same work with no commit since, which is a builder that ran it and left it unbuilt. Work owed anew, by commits
+/// landing meanwhile, is progress and not counted
+#[derive(Default)]
+struct QueuedAgain {
+    times: u32,
+    before: Option<(Vec<Work>, u64)>,
+}
+
+impl QueuedAgain {
+    /// Notes `owed`, as of the store's commit `sequence`, about to be queued again: whether it is the third time in a
+    /// row with nothing committed between, the builder having run it twice over and left it unbuilt
+    fn stuck(&mut self, owed: &[Work], sequence: u64) -> bool {
+        let unchanged = self.before.as_ref().is_some_and(|(before, at)| before == owed && *at == sequence);
+        self.times = if unchanged { self.times + 1 } else { 0 };
+        self.before = Some((owed.to_vec(), sequence));
+        self.times >= 2
+    }
+}
+
 /// The work's indexes, named for a message
 fn named(work: &[Work]) -> String {
     let names: Vec<String> = work
@@ -722,11 +742,7 @@ impl Database {
     /// the database: closed, the wait is told so (`CLOSED`), as it is of a database closed before it; left open by a
     /// close that gave up, it goes on to what that close queues again
     pub fn wait_for_index_builds(&self) -> Result<()> {
-        // How many times in a row the building went idle with the same work owed and no commit since, which this
-        // queued again: a builder that ran it and left it unbuilt. Work owed anew, by commits landing meanwhile, is
-        // progress and not counted
-        let mut queued_again = 0;
-        let mut owed_before: Option<(Vec<Work>, u64)> = None;
+        let mut queued_again = QueuedAgain::default();
         // A build that failed is tried again where no thread was building as this was asked: the data may have
         // changed since, as the next open would try it. With a thread at work, its failures stand until it has more
         // to build, and are what this answers
@@ -823,16 +839,12 @@ impl Database {
             // Owed and idle: no thread ran it, a close or a stop having let it go, or commits landed and owed it anew,
             // or a thread ran it and left it unbuilt. The last, twice over with nothing committed between, is a builder
             // that disagrees with the database: it is listed as failed, which this then answers
-            let sequence = store.sequence();
-            let unchanged = owed_before.as_ref().is_some_and(|(before, at)| *before == owed && *at == sequence);
-            queued_again = if unchanged { queued_again + 1 } else { 0 };
-            if queued_again >= 2 {
+            if queued_again.stuck(&owed, store.sequence()) {
                 for work in owed {
                     self.building.fail(work, "the builder ran it and left it unbuilt, saying nothing".to_owned());
                 }
                 break;
             }
-            owed_before = Some((owed.clone(), sequence));
             if let Some(builders) = self.builders_of(store)? {
                 builders.queue(owed);
             }
