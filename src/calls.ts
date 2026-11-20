@@ -87,34 +87,27 @@ function framesOf(stack: string): string[] {
 /** How a counted call, or a watch given no label, names the code that made it (`EARSRuntimeDeps.callSites`) */
 export interface CallSiteNaming {
   /**
-   * The engine's own frames, never a site, by their path. By default, a frame in the directory the engine's modules
-   * were loaded from (its source or its build, `src/` or `dist/`). A program that bundles the engine into its own code
-   * gives a pattern here: there that directory is the bundle's, holding the program's frames too, and the engine's
-   * modules are named only through the bundle's source maps
+   * The paths of the engine's own frames, which are never a site. By default, those in the directory the engine's
+   * modules loaded from. A program that bundles the engine gives a pattern instead, since that directory is then the
+   * bundle's, holding the program's frames too
    */
   engineFrames?: RegExp;
   /**
-   * Directories a site names a path from, the last of them in the path on, which is where two machines' paths to one
-   * file stop differing. `['/node_modules/']` by default; a path holding none of them is named whole
+   * Directories a site's path is named from, cut at the last of them it holds: where two machines' paths to one file
+   * stop differing. `['/node_modules/']` by default; a path holding none is named whole
    */
   roots?: readonly string[];
 }
 
-/** The directory, with its separator, of the file a V8 frame (`file:line`) is in */
-function directoryOf(frame: string): string {
-  const file = frame.replace(/:\d+$/, '');
-  return file.slice(0, Math.max(file.lastIndexOf('/'), file.lastIndexOf('\\')) + 1);
-}
-
-/** What names the code calling into an engine, as `CallSite.site` names it, for one engine's `naming` */
+/** What names the code calling into an engine now, as `CallSite.site` does */
 export function createCallSites({ engineFrames, roots = ['/node_modules/'] }: CallSiteNaming = {}): () => string {
-  // This module's own frame says where the engine was loaded from: `import.meta` is empty in a CommonJS bundle
-  const engineDirectory = engineFrames ? undefined : directoryOf(framesOf(new Error().stack ?? '')[0] ?? '');
-  const isEngineFrame = (frame: string) => (engineFrames ? engineFrames.test(frame) : !!engineDirectory && frame.startsWith(engineDirectory));
-  const shortened = (frame: string) => {
-    const at = Math.max(...roots.map((dir) => frame.lastIndexOf(dir)));
-    return at < 0 ? frame : frame.slice(at + 1);
-  };
+  // This module's own frame says which directory the engine loaded from: `import.meta` is empty in a CommonJS bundle
+  const own = framesOf(new Error().stack ?? '')[0] ?? '';
+  const engineDirectory = own.slice(0, Math.max(own.lastIndexOf('/'), own.lastIndexOf('\\')) + 1);
+  const isEngineFrame = engineFrames
+    ? (frame: string) => engineFrames.test(frame)
+    : (frame: string) => engineDirectory !== '' && frame.startsWith(engineDirectory);
+  const shortened = (frame: string) => frame.slice(Math.max(...roots.map((dir) => frame.lastIndexOf(dir))) + 1);
   return () => {
     const limit = Error.stackTraceLimit;
     Error.stackTraceLimit = STACK_DEPTH;
