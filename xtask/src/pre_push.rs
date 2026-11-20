@@ -129,6 +129,7 @@ const NPM_STEPS: &[Step] = &[
     step("build: the binding, then EARS' dist", &[NPM, "run", "build"]),
     step("typecheck: the binding and EARS", &[NPM, "run", "typecheck"]),
     step("tests: the binding's, then EARS'", &[NPM, "test"]),
+    step("EARS' API reports", &[NPM, "run", "api:check", "-w", "@elmdb/ears"]),
     step(
         "generated loader committed",
         &["git", "diff", "--exit-code", "--", "crates/elmdb-node/index.js", "crates/elmdb-node/index.d.ts"],

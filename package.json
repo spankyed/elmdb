@@ -20,6 +20,7 @@
     "typecheck:ears": "npm run typecheck -w @elmdb/ears"
   },
   "devDependencies": {
+    "@microsoft/api-extractor": "^7.59.1",
     "@napi-rs/cli": "3.10.9",
     "@types/node": "^24.1.0",
     "fast-check": "^3.23.2",
