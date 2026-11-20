@@ -183,6 +183,9 @@ enum Step {
     },
     /// A copy of the database as it is, into `model-backup` inside its directory, the copy before replaced
     Backup,
+    /// A close that gives up, the store held past its wait: it stops the builder, commits nothing, and leaves the
+    /// database open with what was left to build queued again for another thread
+    CloseGivesUp,
     /// Every row replaced with those of the last backup: refused with no backup, and otherwise a commit with no change
     /// set, after which a reader from before it is told the answer is incomplete, as after a reset
     ReplaceWith,

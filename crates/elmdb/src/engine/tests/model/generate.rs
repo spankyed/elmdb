@@ -142,6 +142,7 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
         let rebuild = prop::sample::select(&REBUILDS[..]).prop_map(|index| Step::Rebuild { index }).boxed();
         let reset = Just(Step::Reset).boxed();
         let backup = Just(Step::Backup).boxed();
+        let close = Just(Step::CloseGivesUp).boxed();
         let replace = Just(Step::ReplaceWith).boxed();
         let model = &state.model;
         let held_kind = |kind: &str| model.edges.iter().any(|(_, k, _)| k == kind);
@@ -200,6 +201,9 @@ impl proptest_state_machine::ReferenceStateMachine for ModelMachine {
             field_rename_share => blind(field_rename),
             // A replacement completes only once a backup was taken, and a purge only while the spare names are removed
             2 => blind(prop_oneof![1 => backup, 2 => replace].boxed()),
+            // A close that gives up as the builder works: what it stops is taken up again, and the wait before the
+            // next step is what says it was
+            2 => blind(close),
             declaration_share => blind(declarations),
             2 => blind(onto_joined_ends(&state.model)),
         ]
@@ -381,7 +385,7 @@ pub(super) fn aimed_unit(m: &Model, top: bool) -> BoxedStrategy<Step> {
 }
 
 /// Every kind of step, as `kind_of` names it
-pub(super) const STEP_KINDS: [&str; 33] = [
+pub(super) const STEP_KINDS: [&str; 34] = [
     "Create",
     "Set",
     "Append",
@@ -410,6 +414,7 @@ pub(super) const STEP_KINDS: [&str; 33] = [
     "RenameRelation",
     "RenameField",
     "Backup",
+    "CloseGivesUp",
     "ReplaceWith",
     "Redeclare",
     "PurgeField",
@@ -447,6 +452,7 @@ pub(super) fn kind_of(step: &Step) -> &'static str {
         Step::RenameRelation { .. } => "RenameRelation",
         Step::RenameField { .. } => "RenameField",
         Step::Backup => "Backup",
+        Step::CloseGivesUp => "CloseGivesUp",
         Step::ReplaceWith => "ReplaceWith",
         Step::Redeclare => "Redeclare",
         Step::PurgeField => "PurgeField",

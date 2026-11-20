@@ -1047,7 +1047,7 @@ fn asked_as_the_builder_is_waited_for<T: Send + 'static>(
         let db = weak.upgrade().unwrap();
         start.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(4);
-        while db.builder().is_some() && Instant::now() < deadline {
+        while !db.building.closing() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
         }
         tell.send(asks(&db)).unwrap();

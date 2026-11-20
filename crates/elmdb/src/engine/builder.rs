@@ -100,6 +100,11 @@ struct State {
     closing: usize,
     /// The database closed, or its builder was stopped for good: nothing more is built, and no one waits
     closed: bool,
+    /// A thread runs this building: claimed by `claim_start` before it is started, given up by the thread as it
+    /// ends. One at a time, whoever asks
+    running: bool,
+    /// The thread that runs it, while one does: what a caller asks to know it is a listener that thread called
+    thread: Option<std::thread::ThreadId>,
 }
 
 /// How a wait for the builds ended (`Core::waited`)
@@ -110,6 +115,8 @@ pub enum Waited {
     Held(crate::Error),
     /// A close is under way, which the caller said it must not wait for
     Closing,
+    /// Work is queued with no thread to take it and none coming: the caller starts one
+    Unrun,
 }
 
 /// What the thread decides, apart from what doing a piece of work means: its queue, the pause a rank index's drain
@@ -119,6 +126,20 @@ struct Core {
     state: Mutex<State>,
     changed: Condvar,
     clock: Box<dyn Clock>,
+}
+
+/// What holds of the state whenever its lock is let go, checked in a debug build after each change of it: the counts
+/// and flags are each other's, and what a thread runs it has claimed
+fn holds(state: &State) {
+    debug_assert!(state.active.is_none() || state.busy, "work under way with the builder said to be idle");
+    debug_assert!(state.active.is_none() || state.running, "work under way with no thread claimed");
+    debug_assert!(state.thread.is_none() || state.running, "a thread recorded that isn't claimed");
+    debug_assert!(!state.closed || state.stopping, "closed and not stopping");
+    debug_assert!(state.closing == 0 || state.stopping, "a close under way and the thread not told to stop");
+    debug_assert!(
+        state.queue.iter().enumerate().all(|(at, work)| !state.queue.iter().skip(at + 1).any(|other| other == work)),
+        "a piece of work queued twice"
+    );
 }
 
 impl Core {
@@ -140,7 +161,60 @@ impl Core {
                 state.queue.push_back(index);
             }
         }
+        holds(&state);
+        drop(state);
         self.changed.notify_all();
+    }
+
+    /// Claims the starting of a thread, where one is needed: there is work and no thread runs, and no close is
+    /// under way or has closed the database. Whoever is answered true starts it, and no one else does until it ends
+    fn claim_start(&self) -> bool {
+        let mut state = self.lock();
+        let needed = !state.running
+            && state.closing == 0
+            && !state.closed
+            && (!state.queue.is_empty() || !state.later.is_empty());
+        if needed {
+            state.running = true;
+        }
+        holds(&state);
+        needed
+    }
+
+    /// Claims a thread for a test that runs the core on one of its own, as `claim_start` claims one for the
+    /// building's
+    #[cfg(test)]
+    fn claimed(&self) -> &Self {
+        self.lock().running = true;
+        self
+    }
+
+    /// Whether a thread runs, or is claimed and about to
+    fn running(&self) -> bool {
+        self.lock().running
+    }
+
+    /// Whether the caller is the thread that runs this
+    fn on_its_thread(&self) -> bool {
+        self.lock().thread == Some(std::thread::current().id())
+    }
+
+    /// Whether `work` is put off (`put_off`): not waited for (`waited`)
+    fn put_off_now(&self, work: &Work) -> bool {
+        self.lock().later.iter().any(|(_, put_off)| put_off == work)
+    }
+
+    /// Lists `work` as failed with `message`, in place of a failure it had
+    fn fail(&self, work: Work, message: String) {
+        let mut state = self.lock();
+        state.failures.retain(|failure| failure.work != work);
+        state.failures.push(IndexFailure { work, message });
+        holds(&state);
+    }
+
+    /// Whether the building is stopped for good: nothing more is built
+    fn closed(&self) -> bool {
+        self.lock().closed
     }
 
     /// Stops the builder for good: its thread ends once the piece of work it is on has, and no one waits for it
@@ -148,6 +222,7 @@ impl Core {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.stopping = true;
         state.closed = true;
+        holds(&state);
         drop(state);
         self.changed.notify_all();
     }
@@ -158,6 +233,7 @@ impl Core {
         let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         state.stopping = true;
         state.closing += 1;
+        holds(&state);
         drop(state);
         self.changed.notify_all();
     }
@@ -172,6 +248,7 @@ impl Core {
         } else if !state.closed && state.closing == 0 {
             state.stopping = false;
         }
+        holds(&state);
         drop(state);
         self.changed.notify_all();
     }
@@ -182,6 +259,7 @@ impl Core {
     }
 
     /// Whether a thread may not be started: a close is under way, or the builder is stopped for good
+    #[cfg(test)]
     fn closing(&self) -> bool {
         let state = self.lock();
         state.closing > 0 || state.closed
@@ -205,6 +283,8 @@ impl Core {
         let mut left: Vec<Work> = state.active.iter().cloned().collect();
         left.extend(std::mem::take(&mut state.queue));
         left.extend(std::mem::take(&mut state.later).into_iter().map(|(_, work)| work));
+        holds(&state);
+        drop(state);
         self.changed.notify_all();
         left
     }
@@ -220,6 +300,8 @@ impl Core {
             state.failures.clear();
         }
         state.changing = state.changing.checked_sub(1).expect("a change ended was begun");
+        holds(&state);
+        drop(state);
         self.changed.notify_all();
     }
 
@@ -244,7 +326,7 @@ impl Core {
     fn wait(&self) -> Option<crate::Error> {
         match self.waited(true) {
             Waited::Held(held) => Some(held),
-            Waited::Idle | Waited::Closing => None,
+            Waited::Idle | Waited::Closing | Waited::Unrun => None,
         }
     }
 
@@ -253,7 +335,9 @@ impl Core {
     /// may itself be waiting for, a listener, is told of it instead
     fn waited(&self, through_a_close: bool) -> Waited {
         let mut state = self.lock();
-        while (!state.queue.is_empty() || state.busy || state.changing > 0 || state.closing > 0)
+        // Work queued with no thread, and none to come of a change or a close under way, is waited for by no one:
+        // the caller starts a thread for it, or says it is left (`Database::wait_for_index_builds`)
+        while (state.changing > 0 || state.closing > 0 || (state.running && (!state.queue.is_empty() || state.busy)))
             && !state.closed
             && state.held.is_none()
         {
@@ -264,6 +348,7 @@ impl Core {
         }
         match state.held.clone() {
             Some(held) if !state.closed => Waited::Held(held),
+            _ if !state.closed && !state.running && !state.queue.is_empty() => Waited::Unrun,
             _ => Waited::Idle,
         }
     }
@@ -274,18 +359,37 @@ impl Core {
         self.changed.notify_all();
     }
 
-    /// Takes the queue's work one piece at a time until stopped, `build` doing each, given whether to stop
+    /// Takes the queue's work one piece at a time until stopped, `build` doing each, given whether to stop. Run by
+    /// the thread `claim_start` claimed, which it gives up as it ends
     fn run(&self, mut build: impl FnMut(&Work, &dyn Fn() -> bool) -> crate::Result<()>) {
+        {
+            let mut state = self.lock();
+            debug_assert!(state.running, "a thread runs the building that wasn't claimed");
+            state.thread = Some(std::thread::current().id());
+        }
+        // Ends idle, and given up, whichever way it ends, a piece of work that panics among them: a thread started
+        // after it finds no work under way, and may be started at all, and no wait is left waiting on this one
+        struct Ending<'a>(&'a Core);
+        impl Drop for Ending<'_> {
+            fn drop(&mut self) {
+                let mut state = self.0.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.busy = false;
+                state.active = None;
+                state.running = false;
+                state.thread = None;
+                holds(&state);
+                drop(state);
+                self.0.changed.notify_all();
+            }
+        }
+        let _ending = Ending(self);
+        let ended = drop::<crate::sync::MutexGuard<'_, State>>;
         loop {
             let (work, generation) = {
                 let mut state = self.lock();
                 loop {
                     if state.stopping {
-                        // Idle as it ends: a thread started after a close that gave up finds no work under way
-                        state.busy = false;
-                        state.active = None;
-                        self.changed.notify_all();
-                        return;
+                        return ended(state);
                     }
                     // What was put off until now is work again, and may begin
                     let now = self.clock.now();
@@ -308,6 +412,7 @@ impl Core {
                         break (next, state.generation);
                     }
                     state.busy = false;
+                    holds(&state);
                     self.changed.notify_all();
                     // Asleep until work is queued, or until the first of what was put off is due
                     let first = state.later.iter().map(|(at, _)| *at).min().filter(|_| !self.clock.is_manual());
@@ -328,6 +433,7 @@ impl Core {
             // Work over rows another process has replaced isn't owed any more: adopting that queues what is. Nor is
             // work for what the builder built to when it was taken: what it failed on may be what replaced that
             let current = state.generation == generation;
+            let ended_ok = built.is_ok();
             match built {
                 Err(e) if e.code != ErrorCode::DataReplaced && current => {
                     // The work's one failure: a build that fails again says why it failed last
@@ -339,12 +445,28 @@ impl Core {
                 Ok(()) if current && !state.stopping => state.failures.retain(|failure| failure.work != work),
                 _ => {}
             }
-            state.active = None;
-            state.busy = !state.stopping && !state.queue.is_empty();
-            self.changed.notify_all();
-            if state.stopping {
-                return;
+            // Told to stop as it ended, the work may be part made: it goes back to the head of the queue, for the
+            // thread after this one. Any of it is done again to no effect where it was finished, and work a change
+            // took isn't the building's to keep
+            if state.stopping
+                && current
+                && ended_ok
+                && !state.queue.contains(&work)
+                && !state.later.iter().any(|(_, put_off)| *put_off == work)
+            {
+                state.queue.push_front(work.clone());
             }
+            state.active = None;
+            // mutant-skip: replace && with \|\| in Core::run
+            // Either busy with work queued; where they differ the thread goes on, and its next turn sets it from the
+            // queue before it sleeps, a waiter seeing it busy only in between
+            state.busy = !state.stopping && !state.queue.is_empty();
+            if state.stopping {
+                return ended(state);
+            }
+            holds(&state);
+            drop(state);
+            self.changed.notify_all();
         }
     }
 
@@ -402,23 +524,30 @@ impl Core {
 pub type Commits =
     Arc<dyn Fn(&mut dyn FnMut(&mut Txn<'_, '_>) -> crate::Result<bool>) -> crate::Result<bool> + Send + Sync>;
 
-/// What the builder builds to: the schema, and how its chunks commit under it
-type Target = (Arc<EngineSchema>, Commits);
+/// What the builder builds to: the store, the schema, and how its chunks commit under it
+pub type Target = (Arc<Store>, Arc<EngineSchema>, Commits);
 
-/// A database's index building, from its open until it is dropped: the queue, the waiters and what is built to. Its
-/// thread (`Builder`) is started with the first work queued, stopped by a close, and started again where the close
-/// gave up and left the database open
+/// A database's index building, from its open until it is dropped: the queue, what waits for it, what it builds to,
+/// and the thread that runs it. The thread is started with the first work there is, stopped by a close, and started
+/// again where the close gave up and left the database open, each by the building: `start` starts one only where
+/// its core says one is needed (`Core::claim_start`), so no two run, and none runs during a close
 #[derive(Clone)]
 pub struct Building {
     core: Arc<Core>,
-    /// What the thread takes each piece of work with: set as a thread is started, replaced by a schema change
-    /// (`end_change`), and let go of by a close, since how a chunk commits holds the store
+    /// What the thread takes each piece of work with: set as a thread is started where none is, replaced by a schema
+    /// change (`end_change`), and let go of by a close, since it holds the store
     target: Arc<Mutex<Option<Target>>>,
+    /// The thread, from its start until a close waits for it or lets go of it
+    thread: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl Default for Building {
     fn default() -> Self {
-        Self { core: Arc::new(Core::new(Box::new(SystemClock))), target: Arc::new(Mutex::new(None)) }
+        Self {
+            core: Arc::new(Core::new(Box::new(SystemClock))),
+            target: Arc::new(Mutex::new(None)),
+            thread: Arc::new(Mutex::new(None)),
+        }
     }
 }
 
@@ -427,16 +556,29 @@ impl Building {
         self.target.lock().expect("the builder's target is never poisoned")
     }
 
-    /// Starts the thread, which builds to `schema` and commits through `commits`. One thread runs at a time: the
-    /// caller holds the slot the one before was taken from, and starts none while a close is under way
-    pub fn start(&self, store: Arc<Store>, schema: Arc<EngineSchema>, commits: Commits) -> Builder {
-        *self.target() = Some((schema, commits));
+    fn handle(&self) -> crate::sync::MutexGuard<'_, Option<JoinHandle<()>>> {
+        self.thread.lock().expect("the builder's thread's lock is never poisoned")
+    }
+
+    /// Starts the thread where one is needed: there is work, no thread runs, and no close is under way. What it
+    /// builds to is `target`'s, asked only where nothing is built to yet. The caller holds the schema for reading or
+    /// writing, which a close takes for writing to begin, so no close begins as this starts one
+    pub fn start(&self, target: impl FnOnce() -> Target) {
+        let mut handle = self.handle();
+        if !self.core.claim_start() {
+            return;
+        }
+        {
+            let mut built_to = self.target();
+            if built_to.is_none() {
+                *built_to = Some(target());
+            }
+        }
         let core = Arc::clone(&self.core);
         #[cfg(test)]
         let forged = super::order::forged();
         let thread = {
             let core = Arc::clone(&core);
-            let store = Arc::clone(&store);
             let target = Arc::clone(&self.target);
             std::thread::Builder::new()
                 .name("elmdb-index".to_owned())
@@ -450,7 +592,7 @@ impl Building {
                         // change has told to stop, and whose commits the store refuses
                         let built_to = target.lock().expect("the builder's target is never poisoned").clone();
                         // Let go of by a close, which has told this thread to stop
-                        let Some((schema, commits)) = built_to else { return Ok(()) };
+                        let Some((store, schema, commits)) = built_to else { return Ok(()) };
                         match work {
                             Work::Index { entity_type, index } => {
                                 build_index(&store, &core, &commits, entity_type, index, stopping)?;
@@ -477,11 +619,22 @@ impl Building {
                 })
                 .expect("the index thread starts")
         };
-        Builder { core, store, thread: Some(thread) }
+        // One that ended before this was started was given up already, and is let go of
+        *handle = Some(thread);
     }
 
     pub fn queue(&self, indexes: impl IntoIterator<Item = Work>) {
         self.core.queue(indexes);
+    }
+
+    /// Whether a thread runs, or is about to
+    pub fn running(&self) -> bool {
+        self.core.running()
+    }
+
+    /// Whether the caller is the thread that runs this: a listener one of its commits delivered to
+    pub fn on_its_thread(&self) -> bool {
+        self.core.on_its_thread()
     }
 
     /// Whether anything is queued or put off, for a thread to take
@@ -489,9 +642,25 @@ impl Building {
         self.core.has_work()
     }
 
+    /// Whether `work` is put off: an order's build that another elmdb's writes keep ending (`Core::waited`)
+    pub fn put_off(&self, work: &Work) -> bool {
+        self.core.put_off_now(work)
+    }
+
     /// Whether a thread may not be started: a close is under way, or the database closed
+    #[cfg(test)]
     pub fn closing(&self) -> bool {
         self.core.closing()
+    }
+
+    /// Whether nothing more is built: the database closed, or a close at exit let its thread go
+    pub fn closed(&self) -> bool {
+        self.core.closed()
+    }
+
+    /// Lists `work` as failed, with why: what `indexStatus` and a wait for the builds then say of it
+    pub fn fail(&self, work: Work, message: String) {
+        self.core.fail(work, message);
     }
 
     /// That what is built to is about to change, the schema or the rows: the work queued is for what it was, and
@@ -501,21 +670,62 @@ impl Building {
     }
 
     /// That the schema change `change` is made, or wasn't: what is built to from here is `schema`, committed
-    /// through `commits`, and `work` is what that leaves to build. Where no thread was ever started nothing is
-    /// built to yet, and the one started for `work` is given both
+    /// through `commits`, and `work` is what that leaves to build. Where nothing is built to yet, the thread
+    /// started for `work` is given both
     pub fn end_change(&self, change: Change, schema: Arc<EngineSchema>, commits: Commits, work: Vec<Work>) {
         if let Some(target) = self.target().as_mut() {
-            *target = (schema, commits);
+            target.1 = schema;
+            target.2 = commits;
         }
         change.end(work);
     }
 
     /// That a close is under way (`Core::begin_close`), until what this answers says the database closed or is
-    /// dropped, which says it didn't. What is built to is let go of, with its hold on the store
+    /// dropped, which says it didn't. The thread is told to stop, and woken where it waits for a unit to end; what
+    /// is built to is let go of, with its hold on the store. The thread is waited for, or let go of, by `join`
+    #[must_use = "a close ends when this is dropped, or says the database closed"]
     pub fn begin_close(&self) -> Closing {
         self.core.begin_close();
-        *self.target() = None;
+        let built_to = self.target().take();
+        if let Some((store, _, _)) = built_to {
+            store.wake_unit_waiters();
+        }
         Closing(Some(self.clone()))
+    }
+
+    /// Waits for the thread a close told to stop (`begin_close`) to end, leaving an index part built for the thread
+    /// after it or the next open; or, `at_exit`, lets go of it unwaited for, in a process whose other threads may be
+    /// gone already. Its caller holds nothing the thread may wait for: a chunk's commit delivers to the watches it
+    /// wrote into, and a watch's read, and whatever its listener calls of the database, takes the schema's lock.
+    /// Called on the thread itself it waits for nothing, the thread ending once what called this returns
+    pub fn join(&self, at_exit: bool) {
+        let thread = self.handle().take();
+        if let Some(thread) = thread
+            && !at_exit
+            && thread.thread().id() != std::thread::current().id()
+        {
+            thread.join().expect("the index thread doesn't panic");
+        }
+    }
+
+    /// Stops the building for good and waits for its thread: a database dropped where its close was refused, or
+    /// one that closed, for which it does nothing more
+    pub fn stop(&self) {
+        self.core.stop();
+        let built_to = self.target().take();
+        if let Some((store, _, _)) = built_to {
+            store.wake_unit_waiters();
+        }
+        self.join(false);
+    }
+
+    /// Stops the thread and waits for it, leaving the building as a close that gave up leaves it, with what is
+    /// queued kept and no thread: how a test has work wait for one
+    #[cfg(test)]
+    pub fn pause(&self) {
+        let closing = self.begin_close();
+        self.join(false);
+        drop(closing);
     }
 
     /// Blocks until every queued index is built or has failed, saying how the wait ended (`Core::waited`)
@@ -538,6 +748,7 @@ impl Building {
 
 /// A close under way (`Building::begin_close`). Dropped, a close that gave up, was refused or panicked, it says the
 /// database was left open, so no wait for the builds is left waiting for it
+#[must_use = "a close ends when this is dropped, or says the database closed"]
 pub struct Closing(Option<Building>);
 
 impl Closing {
@@ -558,71 +769,10 @@ impl Drop for Closing {
     }
 }
 
-/// The thread that builds, for as long as the database is open and has had work: stopped and waited for by a close
-pub struct Builder {
-    core: Arc<Core>,
-    /// Held to wake the thread when it waits for a unit to end and is stopped
-    store: Arc<Store>,
-    thread: Option<JoinHandle<()>>,
-}
-
-impl Builder {
-    /// Whether the caller is on this thread: a listener one of its commits delivered to, calling the database from
-    /// there
-    pub fn on_its_thread(&self) -> bool {
-        self.thread.as_ref().is_some_and(|thread| thread.thread().id() == std::thread::current().id())
-    }
-
-    /// Waits for the thread, which a close has told to stop (`Building::begin_close`), to end: an index part built
-    /// is left for the next open to finish. Its caller holds nothing the thread may wait for: a chunk's commit
-    /// delivers to the watches it wrote into, and a watch's read, and whatever its listener calls of the database,
-    /// takes the schema's lock. Called on the thread itself it waits for nothing, the thread ending once what
-    /// called this returns
-    pub fn join(&mut self) {
-        let waits = !self.on_its_thread();
-        self.store.wake_unit_waiters();
-        if let Some(thread) = self.thread.take()
-            && waits
-        {
-            thread.join().expect("the index thread doesn't panic");
-        }
-    }
-
-    /// Lets go of the thread without waiting for it, in a process that is exiting, whose other threads may be gone
-    /// already
-    pub fn abandon(&mut self) {
-        self.store.wake_unit_waiters();
-        // Dropping the handle detaches the thread
-        self.thread.take();
-    }
-}
-
-impl Builder {
-    /// Stops the thread and waits for it, leaving the building as a close that gave up leaves it, with what is
-    /// queued kept and another thread free to be started: how a test has work wait for no thread
-    #[cfg(test)]
-    pub fn pause(mut self) {
-        self.core.begin_close();
-        self.join();
-        self.core.end_close(false);
-    }
-}
-
-impl Drop for Builder {
-    /// A thread no close waited for, its database dropped where a close was refused: the building is stopped for
-    /// good, and the thread waited for unless this is it, in a listener, when it ends once the listener returns and
-    /// lets go of the store with it
-    fn drop(&mut self) {
-        if self.thread.is_some() {
-            self.core.stop();
-            self.join();
-        }
-    }
-}
-
 /// A change to what is built to, begun and not ended (`Building::begin_change`). Dropped without being ended, a
 /// failure or a panic part way, it ends as a change that wasn't made, with the work it took queued again, so no wait
 /// for the builds is left waiting for it
+#[must_use = "a change ends when this is dropped, as one that wasn't made, or when it is ended"]
 pub struct Change {
     core: Option<Arc<Core>>,
     left: Vec<Work>,
@@ -988,7 +1138,7 @@ mod tests {
         let core = Arc::new(Core::new(Box::new(SystemClock)));
         // As while the builder's thread runs a piece of work, every chunk of which is refused. Each wait is on a thread
         // of its own and bounded, so that a wait that never ends fails the test rather than hanging it
-        core.lock().busy = true;
+        core.claimed().lock().busy = true;
         let (built, building) = std::sync::mpsc::channel();
         {
             let (store, core) = (Arc::clone(&store), Arc::clone(&core));
@@ -1025,6 +1175,8 @@ mod tests {
         core: &Arc<Core>,
         build: impl FnMut(&Work, &dyn Fn() -> bool) -> crate::Result<()> + Send + 'static,
     ) -> std::thread::JoinHandle<()> {
+        // Claimed before it is started, as `Building::start` claims one: a wait asked meanwhile sees it coming
+        core.claimed();
         let core = Arc::clone(core);
         std::thread::spawn(move || core.run(build))
     }
@@ -1065,8 +1217,11 @@ mod tests {
     #[test]
     fn a_wait_that_may_not_wait_through_a_close_is_told_of_one_and_of_nothing_else() {
         let core = Arc::new(Core::new(Box::new(SystemClock)));
-        // Work with no thread: a wait waits, and isn't told of a close that isn't there
+        // Work with no thread, and none to come: nothing waits for it, and the caller is told to start one
         core.queue([index("a")]);
+        assert!(matches!(core.waited(false), Waited::Unrun));
+        // Work with a thread claimed: a wait waits, and isn't told of a close that isn't there
+        core.claimed();
         let (tell, told) = std::sync::mpsc::channel();
         let waiting = Arc::clone(&core);
         let waiter = std::thread::spawn(move || tell.send(matches!(waiting.waited(false), Waited::Idle)).unwrap());
@@ -1162,6 +1317,148 @@ mod tests {
         let state = core.lock();
         assert_eq!(state.failures.len(), 1, "a build stopped part way cleared what had failed");
         assert!(!state.busy && state.active.is_none(), "the thread ended with work under way");
+    }
+
+    #[test]
+    #[should_panic(expected = "work under way with the builder said to be idle")]
+    fn the_state_s_invariants_are_checked_in_a_debug_build() {
+        holds(&State { active: Some(index("a")), running: true, ..State::default() });
+    }
+
+    #[test]
+    fn a_failure_listed_by_hand_replaces_the_work_s_own_and_leaves_the_others() {
+        let building = Building::default();
+        building.fail(index("a"), "first".to_owned());
+        building.fail(index("b"), "other".to_owned());
+        building.fail(index("a"), "second".to_owned());
+        let failed: Vec<(Work, String)> =
+            building.failures().into_iter().map(|failure| (failure.work, failure.message)).collect();
+        assert_eq!(failed, [(index("b"), "other".to_owned()), (index("a"), "second".to_owned())]);
+    }
+
+    #[test]
+    fn a_wait_waits_through_a_change_with_no_thread_running() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        core.begin_change();
+        let (tell, told) = std::sync::mpsc::channel();
+        let waiting = Arc::clone(&core);
+        let waiter = std::thread::spawn(move || tell.send(matches!(waiting.waited(true), Waited::Idle)).unwrap());
+        assert!(told.recv_timeout(Duration::from_millis(200)).is_err(), "the wait answered with a change under way");
+        core.end_change(Vec::new(), true);
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)), Ok(true));
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn work_put_off_as_its_thread_is_stopped_is_not_queued_again() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let within = Arc::clone(&core);
+        let order = Work::Order { entity_type: "Task".to_owned(), index: "a".to_owned() };
+        let put = order.clone();
+        let runner = running(&core, move |_, _| {
+            within.put_off(&put);
+            within.begin_close();
+            Ok(())
+        });
+        core.queue([order.clone()]);
+        runner.join().unwrap();
+        let state = core.lock();
+        assert!(state.queue.is_empty(), "an order put off was queued again, to begin before its wait is over");
+        assert!(state.later.iter().any(|(_, work)| *work == order));
+    }
+
+    #[test]
+    fn a_thread_is_claimed_only_where_one_is_needed_and_by_one_asker() {
+        let core = Core::new(Box::new(SystemClock));
+        assert!(!core.claim_start(), "a thread claimed with nothing to do");
+        assert!(!core.running());
+        core.queue([index("a")]);
+        assert!(core.claim_start());
+        assert!(core.running());
+        assert!(!core.claim_start(), "a second thread claimed beside the first");
+        // Given up: none during a close, one again once it gave up, none once it closed
+        core.lock().running = false;
+        core.begin_close();
+        assert!(!core.claim_start(), "a thread claimed during a close");
+        core.end_close(false);
+        assert!(!core.closed());
+        assert!(core.claim_start());
+        core.lock().running = false;
+        core.stop();
+        assert!(core.closed());
+        assert!(!core.claim_start(), "a thread claimed for a building stopped for good");
+        // Work put off is work a thread is needed for, to begin it when it is due
+        let core = Core::new(Box::new(SystemClock));
+        let order = Work::Order { entity_type: "Task".to_owned(), index: "a".to_owned() };
+        core.put_off(&order);
+        assert!(core.put_off_now(&order) && !core.put_off_now(&index("a")));
+        assert!(core.claim_start());
+    }
+
+    #[test]
+    fn a_wait_says_where_work_is_queued_with_no_thread_to_take_it() {
+        let core = Core::new(Box::new(SystemClock));
+        core.queue([index("a")]);
+        assert!(matches!(core.waited(true), Waited::Unrun));
+        // A building stopped for good has nothing coming, and nothing to say of what it holds
+        core.stop();
+        assert!(matches!(core.waited(true), Waited::Idle));
+    }
+
+    #[test]
+    fn the_thread_knows_itself_while_it_runs_and_no_other_thread_is_it() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let within = Arc::clone(&core);
+        let (tell, told) = std::sync::mpsc::channel();
+        let runner = running(&core, move |_, _| {
+            tell.send(within.on_its_thread()).unwrap();
+            within.begin_close();
+            Ok(())
+        });
+        assert!(!core.on_its_thread());
+        core.queue([index("a")]);
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)), Ok(true), "the thread didn't know itself");
+        runner.join().unwrap();
+        assert!(!core.on_its_thread() && core.lock().thread.is_none(), "the thread kept as it ended");
+    }
+
+    #[test]
+    fn work_a_stop_interrupts_goes_back_to_the_head_of_the_queue_unless_it_failed_or_was_a_change_s() {
+        // Stopped as it ended: queued again ahead of what waits
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let within = Arc::clone(&core);
+        let runner = running(&core, move |_, _| {
+            within.begin_close();
+            Ok(())
+        });
+        core.queue([index("a"), index("b")]);
+        runner.join().unwrap();
+        assert_eq!(core.lock().queue, [index("a"), index("b")], "the work under way was lost to the stop");
+        // Stopped as it failed: listed as failed, and not queued again
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let within = Arc::clone(&core);
+        let runner = running(&core, move |_, _| {
+            within.begin_close();
+            Err(refused(ErrorCode::Io))
+        });
+        core.queue([index("a")]);
+        runner.join().unwrap();
+        let state = core.lock();
+        assert!(state.queue.is_empty() && state.failures.len() == 1, "a failed build queued again");
+        drop(state);
+        // Taken by a change as it ran: the change's to hand back, not the building's to keep
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let within = Arc::clone(&core);
+        let runner = running(&core, move |_, _| {
+            // A change that was made, and left nothing to build: what it took is its own
+            within.begin_change();
+            within.end_change(Vec::new(), true);
+            within.begin_close();
+            Ok(())
+        });
+        core.queue([index("a")]);
+        runner.join().unwrap();
+        assert!(core.lock().queue.is_empty(), "work of the generation before queued again");
     }
 
     #[test]

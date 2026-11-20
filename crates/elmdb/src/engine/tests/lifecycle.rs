@@ -292,7 +292,7 @@ fn an_adoption_of_nothing_leaves_no_wait_for_the_builds_waiting() {
     let work = crate::engine::Work::Index { entity_type: index.entity_type.unwrap(), index: index.index };
     db.builders().unwrap().expect("a writable database starts builders").queue(vec![work]);
     db.wait_for_index_builds().unwrap();
-    assert!(db.builder().is_some(), "a builder for the adoption to tell");
+    assert!(db.building.running(), "a builder for the adoption to tell");
     // No replacement was made, so no epoch is the one to adopt
     assert!(!db.adopt_replacement(u64::MAX).unwrap());
     let (tell, told) = std::sync::mpsc::channel();

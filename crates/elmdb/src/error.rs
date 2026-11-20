@@ -103,6 +103,9 @@ pub enum ErrorCode {
     IndexBuilding,
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
+    /// A wait for the index builds of a database that builds nothing more and has some left unbuilt: a close at exit
+    /// gave up on it, and let its builder go. Reads of an unbuilt index walk the rows; the next open tries to build it
+    BuildsStopped,
     /// An open that found the database to be restored to its last synced commit, after a power loss or a failed sync,
     /// and couldn't make the restore: another process has it open, or the open can't write its data file
     RestorePending,
@@ -184,6 +187,7 @@ impl ErrorCode {
             Self::DatabaseMismatch => "DATABASE_MISMATCH",
             Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
+            Self::BuildsStopped => "BUILDS_STOPPED",
             Self::RestorePending => "RESTORE_PENDING",
             Self::NotDurable => "NOT_DURABLE",
             Self::SyncBehind => "SYNC_BEHIND",
@@ -286,6 +290,7 @@ mod tests {
             ErrorCode::DatabaseMismatch,
             ErrorCode::IndexBuilding,
             ErrorCode::IndexBuildFailed,
+            ErrorCode::BuildsStopped,
             ErrorCode::CallbackPanicked,
             ErrorCode::WatchPanicked,
             ErrorCode::CallbackActive,

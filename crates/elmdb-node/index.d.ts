@@ -156,10 +156,11 @@ export declare class Database {
    */
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /**
-   * Blocks until every index waiting to be built is built, throwing `INDEX_BUILD_FAILED` when a build failed, or
+   * Blocks until every index waiting to be built is built, as the database says once the builder is idle, throwing
+   * `INDEX_BUILD_FAILED` when a build failed, `BUILDS_STOPPED` where a close at exit gave up and left builds, or
    * throws what holds a build up while the builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again
-   * after a pause to wait on. Refused with a unit open once the database has started its index builder
-   * (`UNIT_OPEN`): commit or abort it, then wait. Throws `CLOSED` on a closed database, and `DATA_REPLACED` while
+   * after a pause to wait on. Refused with a unit open while there is something to build (`UNIT_OPEN`): commit
+   * or abort it, then wait. Throws `CLOSED` on a closed database, and `DATA_REPLACED` while
    * another process's replacement of every row is not adopted. It doesn't wait for the order of an index's
    * strings where another elmdb's writes ended its build: reads sort meanwhile, and `indexStatus` answers
    * `ordered: false`

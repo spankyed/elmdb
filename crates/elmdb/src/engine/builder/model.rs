@@ -62,6 +62,7 @@ fn work_queued_is_run_after_it_was_queued_and_waits_in_the_queue_once() {
         let starts = Arc::new(Mutex::new(Vec::new()));
         let runner = {
             let (core, order, starts) = (Arc::clone(&core), Arc::clone(&order), Arc::clone(&starts));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|_, _| {
                     starts.lock().unwrap().push(order.fetch_add(1, Ordering::SeqCst));
@@ -103,6 +104,7 @@ fn work_queued_while_it_runs_runs_again() {
         let runner = {
             let (core, runs, started, release) =
                 (Arc::clone(&core), Arc::clone(&runs), Arc::clone(&started), Arc::clone(&release));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|_, _| {
                     if runs.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -136,6 +138,7 @@ fn a_waiter_returns_once_the_work_queued_before_it_is_done() {
         let done = Arc::new(AtomicBool::new(false));
         let runner = {
             let (core, done) = (Arc::clone(&core), Arc::clone(&done));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|_, _| {
                     thread::yield_now();
@@ -166,6 +169,7 @@ fn a_stop_ends_the_builder_waiting_or_pausing_and_its_waiters() {
         let (core, _) = core();
         let runner = {
             let core = Arc::clone(&core);
+            core.claimed();
             thread::spawn(move || core.run(|_, _| Ok(())))
         };
         let queuer = {
@@ -190,6 +194,7 @@ fn a_stop_ends_the_work_underway_and_its_waiters() {
         let started = Arc::new(AtomicBool::new(false));
         let runner = {
             let (core, started) = (Arc::clone(&core), Arc::clone(&started));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|_, stopping| {
                     started.store(true, Ordering::SeqCst);
@@ -220,6 +225,7 @@ fn a_failure_is_seen_by_the_waiter_its_work_wakes() {
         let (core, _) = core();
         let runner = {
             let core = Arc::clone(&core);
+            core.claimed();
             thread::spawn(move || core.run(|_, _| Err(Error::new(ErrorCode::Io, "the stand-in fails"))))
         };
         core.queue([index()]);
@@ -240,6 +246,7 @@ fn a_rank_index_waits_for_its_commits_to_pause() {
         let last = Arc::new(AtomicU64::new(0));
         let runner = {
             let (core, ticks, last) = (Arc::clone(&core), std::sync::Arc::clone(&ticks), Arc::clone(&last));
+            core.claimed();
             thread::spawn(move || {
                 core.run(move |_, _| {
                     let now = Duration::from_nanos(ticks.elapsed.load(Ordering::SeqCst));
@@ -271,6 +278,7 @@ fn a_steady_stream_of_commits_is_drained_once_patience_has_passed() {
         let started = Arc::new(AtomicBool::new(false));
         let runner = {
             let (core, ticks, started) = (Arc::clone(&core), std::sync::Arc::clone(&ticks), Arc::clone(&started));
+            core.claimed();
             thread::spawn(move || {
                 core.run(move |_, _| {
                     let now = Duration::from_nanos(ticks.elapsed.load(Ordering::SeqCst));
@@ -302,6 +310,7 @@ fn a_wait_asked_for_as_a_change_is_made_waits_for_the_work_the_change_leaves() {
         let done = Arc::new(AtomicBool::new(false));
         let runner = {
             let (core, done) = (Arc::clone(&core), Arc::clone(&done));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|work, _| {
                     if *work == other() {
@@ -333,6 +342,7 @@ fn work_under_way_as_a_change_begins_is_told_to_stop_and_is_neither_done_nor_fai
         let started = Arc::new(AtomicBool::new(false));
         let runner = {
             let (core, started) = (Arc::clone(&core), Arc::clone(&started));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|_, stopping| {
                     started.store(true, Ordering::SeqCst);
@@ -368,6 +378,7 @@ fn work_queued_before_a_change_is_not_run_after_it() {
         let runner = {
             let (core, started, release, ran) =
                 (Arc::clone(&core), Arc::clone(&started), Arc::clone(&release), Arc::clone(&ran));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|work, _| {
                     if *work == other() {
@@ -405,6 +416,7 @@ fn the_work_a_change_leaves_and_the_work_queued_as_it_is_made_each_run_once() {
         let runs = Arc::new(Mutex::new(Vec::new()));
         let runner = {
             let (core, runs) = (Arc::clone(&core), Arc::clone(&runs));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|work, _| {
                     runs.lock().unwrap().push(work.clone());
@@ -435,6 +447,7 @@ fn a_change_made_by_the_work_under_way_leaves_it_undone_and_the_thread_at_what_t
         let ran = Arc::new(AtomicBool::new(false));
         let runner = {
             let (core, ran) = (Arc::clone(&core), Arc::clone(&ran));
+            core.claimed();
             thread::spawn(move || {
                 let within = Arc::clone(&core);
                 core.run(|work, stopping| {
@@ -481,6 +494,7 @@ fn work_queued_as_a_change_is_made_is_not_begun_until_every_change_has_ended() {
         let ended = Arc::new(AtomicBool::new(false));
         let runner = {
             let (core, ended) = (Arc::clone(&core), Arc::clone(&ended));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|_, _| {
                     assert!(ended.load(Ordering::SeqCst), "work begun with a change not yet ended");
@@ -509,6 +523,7 @@ fn a_change_that_was_not_made_keeps_the_failures_and_one_that_was_made_clears_th
         let (core, _) = core();
         let runner = {
             let core = Arc::clone(&core);
+            core.claimed();
             thread::spawn(move || core.run(|_, _| Err(Error::new(ErrorCode::Io, "the stand-in fails"))))
         };
         core.queue([index()]);
@@ -529,8 +544,9 @@ fn a_change_that_was_not_made_keeps_the_failures_and_one_that_was_made_clears_th
 }
 
 /// A close tells the thread to stop and then says whether the database closed (`Core::begin_close`, `end_close`).
-/// One that gives up leaves the database open with what is left queued for another thread, and a wait that
-/// answered while it was under way would say built of that
+/// One that gives up leaves the database open with what is left queued for another thread. A wait waits through the
+/// close, and answers once that work is done, or once it is queued with no thread coming, which its caller starts
+/// one for (`Database::wait_for_index_builds`): never with the work neither done nor left for the caller
 #[test]
 fn a_wait_asked_for_as_a_close_is_under_way_waits_for_what_a_close_that_gives_up_leaves() {
     explore(|| {
@@ -540,8 +556,14 @@ fn a_wait_asked_for_as_a_close_is_under_way_waits_for_what_a_close_that_gives_up
         let waiter = {
             let (core, done) = (Arc::clone(&core), Arc::clone(&done));
             thread::spawn(move || {
-                core.wait();
-                assert!(done.load(Ordering::SeqCst), "the wait answered with what the close left not built");
+                // Told to start a thread, the caller does, and waits again: here the thread below is that one
+                while matches!(core.waited(true), Waited::Unrun) {
+                    thread::yield_now();
+                }
+                assert!(
+                    done.load(Ordering::SeqCst),
+                    "the wait answered with what the close left neither built nor unrun"
+                );
             })
         };
         core.queue([other()]);
@@ -549,6 +571,7 @@ fn a_wait_asked_for_as_a_close_is_under_way_waits_for_what_a_close_that_gives_up
         // The thread started for what was left
         let runner = {
             let (core, done) = (Arc::clone(&core), Arc::clone(&done));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|_, _| {
                     done.store(true, Ordering::SeqCst);
@@ -590,6 +613,7 @@ fn the_thread_a_close_stops_ends_idle_and_another_takes_what_is_queued() {
         let started = Arc::new(AtomicBool::new(false));
         let first = {
             let (core, started) = (Arc::clone(&core), Arc::clone(&started));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|_, stopping| {
                     started.store(true, Ordering::SeqCst);
@@ -615,6 +639,7 @@ fn the_thread_a_close_stops_ends_idle_and_another_takes_what_is_queued() {
         let ran = Arc::new(AtomicBool::new(false));
         let second = {
             let (core, ran) = (Arc::clone(&core), Arc::clone(&ran));
+            core.claimed();
             thread::spawn(move || {
                 core.run(|work, _| {
                     if *work == other() {
@@ -638,6 +663,7 @@ fn a_thread_a_close_stops_between_two_pieces_of_work_ends_idle() {
         let (core, _) = core();
         let runner = {
             let core = Arc::clone(&core);
+            core.claimed();
             thread::spawn(move || core.run(|_, _| Ok(())))
         };
         core.queue([index(), other()]);
@@ -673,5 +699,67 @@ fn a_close_that_gives_up_beside_another_under_way_leaves_the_builder_closing() {
         waiter.join().unwrap();
         assert!(!core.closing() && !core.stopping());
         assert!(matches!(core.waited(false), Waited::Idle));
+    });
+}
+
+/// A thread is started only where one is needed, by whoever claims it first: work queued, none running, no close
+/// under way. Two asking at once start one
+#[test]
+fn of_two_that_ask_to_start_a_thread_one_does_and_none_during_a_close() {
+    explore(|| {
+        let (core, _) = core();
+        assert!(!core.claim_start(), "a thread claimed with nothing to do");
+        core.queue([index()]);
+        let askers: Vec<_> = (0..2)
+            .map(|_| {
+                let core = Arc::clone(&core);
+                thread::spawn(move || core.claim_start())
+            })
+            .collect();
+        let claimed: usize = askers.into_iter().map(|asker| usize::from(asker.join().unwrap())).sum();
+        assert_eq!(claimed, 1, "{claimed} threads claimed for one building");
+        // Given up, with a close under way, no other is claimed until the close has said
+        core.lock().running = false;
+        core.begin_close();
+        assert!(!core.claim_start(), "a thread claimed during a close");
+        core.end_close(false);
+        assert!(core.claim_start());
+    });
+}
+
+/// Work a thread is on as it is told to stop goes back to the queue, ahead of the rest, for the thread after it:
+/// nothing queued is lost to a stop, whenever the stop lands
+#[test]
+fn work_under_way_as_its_thread_is_stopped_is_queued_again_and_none_is_lost() {
+    explore(|| {
+        let (core, _) = core();
+        core.queue([index(), other()]);
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        core.claimed();
+        let runner = {
+            let (core, ended) = (Arc::clone(&core), Arc::clone(&ended));
+            thread::spawn(move || {
+                core.run(|work, stopping| {
+                    // Built only where it ran to its end untold to stop
+                    if !stopping() {
+                        ended.lock().unwrap().push(work.clone());
+                    }
+                    Ok(())
+                });
+            })
+        };
+        let closing = thread::spawn({
+            let core = Arc::clone(&core);
+            move || core.begin_close()
+        });
+        closing.join().unwrap();
+        runner.join().unwrap();
+        // Each piece is built, or waits in the queue, and none is under way
+        let state = core.lock();
+        assert!(!state.running && !state.busy && state.active.is_none());
+        for work in [index(), other()] {
+            let built = ended.lock().unwrap().contains(&work);
+            assert!(built || state.queue.contains(&work), "{work:?} neither built nor queued");
+        }
     });
 }

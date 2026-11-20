@@ -23,7 +23,10 @@ the model's reason for refusing names, and answer every derived read as the mode
 trash, value index lookups and their first two, an order by a field and its first one or three, roles, each edge's far
 ends, and a text index's matches for a few words. A unit, a savepoint and a refused commit roll back with it. A workload
 also rebuilds every index or one now and then: `check()` derives what it compares with the code a rebuild writes with,
-so after a rebuild only the model's answers can show that code wrong. Ranking is checked separately, against fixed
+so after a rebuild only the model's answers can show that code wrong. It closes the database and gives up now and
+then, the store held past the close's wait, which stops the index builder as it works and leaves the database open;
+after every step the builds are waited for and every index must then be built, so a wait whose `Ok` isn't true fails
+the workload. Ranking is checked separately, against fixed
 corpora (`engine/text/tests.rs`, `engine/vector/tests.rs`).
 
 Each commit's change set is checked too: the entities it made, destroyed, trashed or restored, the fields and roles it
@@ -428,9 +431,12 @@ that work queued before it never runs after; that the work it leaves, and work q
 that a change made from within a piece of work leaves that work undone and the thread at what the change left; and
 that a stop ends a wait for a change that hasn't ended; that work queued as a change is made isn't begun until every
 change has ended; and that a change that wasn't made keeps what had failed. Of a close (`begin_close`, `end_close`),
-it holds that a waiter asked as one is under way returns only once what a close that gave up left is built; that a
-close that closes ends the wait, and one under way is said to a caller it may be waiting for; and that the thread a
-close stops ends with no work under way, so another takes what is queued. The store, the chunks' units and LMDB are
+it holds that a waiter asked as one is under way returns only once what a close that gave up left is built, or is
+queued with no thread to take it, which its caller starts one for; that a close that closes ends the wait, and one
+under way is said to a caller it may be waiting for; and that the thread a close stops ends with no work under way, so
+another takes what is queued. Of the thread itself (`claim_start`), it holds that of two that ask to start one at once
+one does, and none during a close; and that work under way as its thread is stopped is built or queued again, never
+lost. The store, the chunks' units and LMDB are
 outside it, and so is what the builder builds to itself, which `database.rs` hands it; the rank index's own specs and the model harness run the
 builder on real threads.
 

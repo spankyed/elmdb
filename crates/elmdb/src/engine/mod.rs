@@ -464,6 +464,39 @@ pub(crate) fn settle_indexes_in(t: &mut Txn<'_, '_>) -> Result<IndexList> {
     Ok(unbuilt)
 }
 
+/// What a wait for the builds queued again, each time the building went idle owing it: how many times in a row it was
+/// the same work with no commit since, which is a builder that ran it and left it unbuilt. Work owed anew, by commits
+/// landing meanwhile, is progress and not counted
+#[derive(Default)]
+struct QueuedAgain {
+    times: u32,
+    before: Option<(Vec<Work>, u64)>,
+}
+
+impl QueuedAgain {
+    /// Notes `owed`, as of the store's commit `sequence`, about to be queued again: whether it is the third time in a
+    /// row with nothing committed between, the builder having run it twice over and left it unbuilt
+    fn stuck(&mut self, owed: &[Work], sequence: u64) -> bool {
+        let unchanged = self.before.as_ref().is_some_and(|(before, at)| before == owed && *at == sequence);
+        self.times = if unchanged { self.times + 1 } else { 0 };
+        self.before = Some((owed.to_vec(), sequence));
+        self.times >= 2
+    }
+}
+
+/// The work's indexes, named for a message
+fn named(work: &[Work]) -> String {
+    let names: Vec<String> = work
+        .iter()
+        .map(|work| match work {
+            Work::Index { entity_type, index } => format!("{entity_type}'s index {index}"),
+            Work::Order { entity_type, index } => format!("the order of {entity_type}'s index {index}"),
+            Work::Rank { name } => format!("the rank index {name}"),
+        })
+        .collect();
+    names.join(", ")
+}
+
 /// Refuses a wait for the index builds while another process has replaced every row and this handle hasn't adopted
 /// that (`DATA_REPLACED`): the builder lets go of work it can't commit over such rows, so nothing would be built
 fn builds_can_commit(store: &Store) -> Result<()> {
@@ -511,7 +544,7 @@ pub(crate) fn settle_indexes_committed(store: &Store, schema: &EngineSchema) -> 
     Ok((unbuilt, None))
 }
 
-pub(crate) use builder::{Builder, Building, Commits as BuilderCommits, Waited, Work};
+pub(crate) use builder::{Building, Commits as BuilderCommits, Target, Waited, Work};
 
 /// A position as the binding hands it, msgpack of `changed::Position`
 fn position(bytes: &[u8]) -> Result<changed::Position> {
@@ -682,19 +715,21 @@ impl Database {
         Ok(rmp_serde::to_vec_named(&self.changed_since(types, &from, limit)?).expect("an answer serializes"))
     }
 
-    /// Blocks until every index waiting to be built is built or has failed. Refused while a unit is open
-    /// (`UNIT_OPEN`): a build waits for the unit to end, and a unit open on the calling thread never would. Refused
-    /// on the thread of the builder it would wait for (`CALLBACK_ACTIVE`), by a listener one of its commits
-    /// delivered to: those builds go on once the listener returns, whatever the listener changed the schema
-    /// to: the thread is the builder's for as long as the database is open. Refused the same in any listener while
-    /// a close has the builder stopped and hasn't returned: it may be waiting for the listener.
+    /// Blocks until every index waiting to be built is built or has failed, and answers `Ok` only where the database
+    /// says so: once the builder is idle, what is unbuilt is read, and what of it is owed, but for builds that failed
+    /// and an order's build that is put off, is queued and waited for again. A builder that runs such work twice, with
+    /// nothing committed between, and leaves it unbuilt disagrees with the database: the work is listed as failed,
+    /// which this answers (`INDEX_BUILD_FAILED`). A build that failed is tried again where no thread was building as this was asked.
     ///
-    /// With no thread building, what is unbuilt is read from the database and queued, which starts one, so an answer
-    /// that nothing is left to build is one the database gives, and builds no one was left are taken up. That read is refused as any is
-    /// (`SCHEMA_CHANGED`, `READERS_FULL`). A read-only database builds nothing and answers at once.
-    ///
+    /// Refused while a unit is open and there is something to build (`UNIT_OPEN`): a build waits for the unit to end,
+    /// and a unit open on the calling thread never would. Refused on the builder's thread (`CALLBACK_ACTIVE`), by a
+    /// listener one of its commits delivered to: those builds go on once the listener returns. Refused the same in
+    /// any listener while a close has the builder stopped and hasn't returned: it may be waiting for the listener.
     /// Refused while another process's replacement of every row is not adopted (`DATA_REPLACED`): no build commits
-    /// over rows that are gone, and adopting the replacement queues what it left unbuilt.
+    /// over rows that are gone, and adopting the replacement queues what it left unbuilt. Refused where a close at
+    /// exit gave up and let the builder go with something left unbuilt (`BUILDS_STOPPED`). The read of what is
+    /// unbuilt is refused as any read is (`SCHEMA_CHANGED`, `READERS_FULL`). A read-only database builds nothing and
+    /// answers at once.
     ///
     /// The order a value index keeps of its strings is waited for as an index is, but for a build of it that was
     /// put off: one another elmdb's writes ended, which this builder begins again after a wait that doubles
@@ -705,15 +740,18 @@ impl Database {
     /// build: a wait under way waits through both (`Core::waited`), and answers for the schema the database holds
     /// when it returns. A close stops the builder's thread, and a wait under way waits for it to say what became of
     /// the database: closed, the wait is told so (`CLOSED`), as it is of a database closed before it; left open by a
-    /// close that gave up, it goes on to what that close queues again. After a close at exit that gave up nothing
-    /// more is built, and the wait answers as it would with nothing left to build, saying only what had failed:
-    /// the one case in which its `Ok` doesn't mean built
+    /// close that gave up, it goes on to what that close queues again
     pub fn wait_for_index_builds(&self) -> Result<()> {
+        let mut queued_again = QueuedAgain::default();
+        // A build that failed is tried again where no thread was building as this was asked: the data may have
+        // changed since, as the next open would try it. With a thread at work, its failures stand until it has more
+        // to build, and are what this answers
+        let mut try_failed = !self.building.running();
         loop {
             let store = self.store()?;
             // On the builder's own thread, in a listener one of its commits delivered to, the builds wait for the
             // listener to return: the wait would be for itself
-            if self.builder().as_ref().is_some_and(Builder::on_its_thread) {
+            if self.building.on_its_thread() {
                 return Err(Error::new(
                     ErrorCode::CallbackActive,
                     "A listener is running on the builder's thread, and the builds wait for it to return: wait for them \
@@ -721,45 +759,38 @@ impl Database {
                 ));
             }
             // A read-only database builds nothing
-            let Some(builders) = self.builders_of(Arc::clone(&store))? else { return Ok(()) };
-            // No thread, and no close that stopped one and is still to say whether the database closed. What is unbuilt
-            // is read rather than taken to be nothing: a schema change that failed part way, or a thread stopped with
-            // work left, left it to no one. It is queued, as an open queues it, which starts the thread this then waits
-            // on
-            if !builders.running() && !self.building.closing() {
-                builds_can_commit(&store)?;
-                // The schema's read is let go before the builders queue, which reads it too
-                let owed = remaining_indexes(&store, &self.schema_guard())?;
-                if owed.is_empty() && !self.building.has_work() {
-                    return Ok(());
-                }
-                builders.queue(owed);
+            if self.is_read_only() {
+                return Ok(());
             }
-            if store.unit_is_open() {
+            builds_can_commit(&store)?;
+            // A build waits for a unit to end, and one open on this thread never would
+            if store.unit_is_open() && (self.building.running() || self.building.has_work()) {
                 return Err(Error::new(
                     ErrorCode::UnitOpen,
                     "A unit is open, and an index build waits for it to end: commit or abort it, then wait for the builds",
                 ));
             }
+            // A thread for what is queued, where none runs: work a stopped thread put back waits for one
+            if let Some(builders) = self.builders_of(Arc::clone(&store))? {
+                builders.queue(Vec::new());
+            }
             // Let go of before the wait: a close waits for every hold on the store but its own
-            drop(builders);
             drop(store);
             // A close under way is waited through, to its closing the database or giving up, but by a listener: the
             // close may be waiting for this thread, for the builder it stopped, whose commit delivered to the listener
             // running here, or for what the operation the listener is called from holds
             match self.building.wait(!watch::in_callback(&self.tracks)) {
-                // Asked again where no thread is building: a close that gave up, and couldn't read what is left to
-                // build, queued nothing, and this reads it, or says why it can't
-                Waited::Idle if !self.building.closing() && !self.builder().is_some() => continue,
-                Waited::Idle => break,
+                Waited::Idle => {}
+                // Work queued and no thread to take it: one is started for it, at the top
+                Waited::Unrun => continue,
                 // Held up by what refused its work with nothing made, the builder waits it out: told so, the caller
                 // tries again
                 Waited::Held(held) => {
                     return Err(Error::new(
                         held.code,
                         format!(
-                            "The index builds wait for what refused their last write, and go on once it passes: call this \
-                             again after a pause to wait on. What refused it: {}",
+                            "The index builds wait for what refused their last write, and go on once it passes: call \
+                             this again after a pause to wait on. What refused it: {}",
                             held.message
                         ),
                     ));
@@ -772,14 +803,53 @@ impl Database {
                     ));
                 }
             }
+            // The building is idle. Whether all is built is the database's to say, not the building's: what it says
+            // is unbuilt, but for what failed and an order's build that is put off (`Core::waited`), is owed. A
+            // close that closed the database meanwhile is said as it is of one closed before
+            let store = self.store()?;
+            let unbuilt: Vec<Work> = remaining_indexes(&store, &self.schema_guard())?
+                .into_iter()
+                .filter(|work| !self.building.put_off(work))
+                .collect();
+            // Nothing more is built here, a close at exit having let the builder go: what is unbuilt, failed or not,
+            // stays so in this process
+            if self.building.closed() && !unbuilt.is_empty() {
+                return Err(Error::new(
+                    ErrorCode::BuildsStopped,
+                    format!(
+                        "A close at exit gave up on this database and let its builder go, and {} left unbuilt: reads \
+                         of it walk the rows, and the next open tries to build it",
+                        named(&unbuilt)
+                    ),
+                ));
+            }
+            let failures = self.building.failures();
+            let owed: Vec<Work> = unbuilt
+                .into_iter()
+                .filter(|work| try_failed || !failures.iter().any(|failure| failure.work == *work))
+                .collect();
+            try_failed = false;
+            if owed.is_empty() {
+                if !failures.is_empty() {
+                    break;
+                }
+                // The builder lets go of work it can't commit over rows another process replaced, and fails nothing
+                return builds_can_commit(&store);
+            }
+            // Owed and idle: no thread ran it, a close or a stop having let it go, or commits landed and owed it anew,
+            // or a thread ran it and left it unbuilt. The last, twice over with nothing committed between, is a builder
+            // that disagrees with the database: it is listed as failed, which this then answers
+            if queued_again.stuck(&owed, store.sequence()) {
+                for work in owed {
+                    self.building.fail(work, "the builder ran it and left it unbuilt, saying nothing".to_owned());
+                }
+                break;
+            }
+            if let Some(builders) = self.builders_of(store)? {
+                builders.queue(owed);
+            }
         }
-        // A close that closed the database ended the wait: said as it is of a database closed before it
-        let store = self.store()?;
         let failures = self.building.failures();
-        if failures.is_empty() {
-            // The builder lets go of work it can't commit over rows another process replaced, and fails nothing
-            return builds_can_commit(&store);
-        }
         let named: Vec<String> = failures
             .iter()
             .map(|f| match &f.work {

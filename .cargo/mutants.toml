@@ -105,7 +105,4 @@ exclude_re = [
     # Busy after a piece of work whether or not more waits: a waiter waits while the queue holds work whatever it says,
     # and the loop's next turn sets it from the queue before anything reads it otherwise
     "builder.rs:.*delete ! in Core::run",
-    # Abandoning the builder as the process exits: without it `Drop` stops the thread and joins it, which matters only
-    # where a join at exit could hang, and no test here runs a process to its exit
-    "builder.rs:.*replace Builder::abandon with \\(\\)",
 ]
