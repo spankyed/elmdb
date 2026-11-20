@@ -626,6 +626,28 @@ fn a_wait_woken_by_a_close_that_gave_up_and_queued_nothing_reads_what_is_left_it
     db.close().unwrap();
 }
 
+/// The system may refuse to start the builder's thread. The work stays queued and the building usable: a wait for
+/// the builds says so, and the next starts the thread and builds it
+#[test]
+fn a_thread_the_system_refuses_leaves_the_work_queued_for_the_next_to_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let db =
+        with_schema(&dir, notes(base_fields(), json!({ "byKind": { "kind": "value", "fields": ["kind"] } }))).unwrap();
+    let note = |id: &str| json!({ "op": "create", "type": "Note", "id": id, "fields": { "kind": "k" } });
+    write(&db, vec![note("Note-1"), note("Note-2")]).unwrap();
+    db.wait_for_index_builds().unwrap();
+    db.pause_builder();
+    damage(&db, |txn, main| Ok(main.delete(txn, &keys::index_built("Note", "byKind")).map(|_| ())?));
+    let built = || db.index_status().unwrap().iter().find(|s| s.index == "byKind").unwrap().built;
+    crate::failpoints::fail_once_here(crate::failpoints::points::THREAD_SPAWN);
+    assert_eq!(db.wait_for_index_builds().unwrap_err().code, ErrorCode::ThreadRefused);
+    assert!(!db.building.running() && !built());
+    // Asked again, the thread starts, and the index is built
+    db.wait_for_index_builds().unwrap();
+    assert!(built());
+    assert!(db.check().unwrap().is_clean());
+}
+
 /// A close at exit that gives up leaves the database open in a process that is exiting, its builder's thread let go
 /// of unjoined. Nothing more is built there: a wait for the builds answers, and starts no thread beside that one
 #[test]

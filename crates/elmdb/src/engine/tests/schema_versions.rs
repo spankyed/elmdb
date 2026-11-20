@@ -200,7 +200,7 @@ fn a_builder_with_an_earlier_declaration_refuses_before_writing_index_entries() 
     let building = crate::engine::Building::default();
     building.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
     let (store, schema) = (db.store().unwrap(), db.engine_schema());
-    building.start(|| crate::database::target(&store, &schema, &db.tracks, &db.observing_schema()));
+    building.start(|| crate::database::target(&store, &schema, &db.tracks, &db.observing_schema())).unwrap();
     drop(store);
     assert!(matches!(building.wait(true), crate::engine::Waited::Idle));
     let failures = building.failures();

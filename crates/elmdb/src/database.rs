@@ -177,7 +177,8 @@ impl Database {
         let building = crate::engine::Building::default();
         if !options.read_only {
             building.queue(unbuilt);
-            building.start(|| target(&store, &engine_schema, &tracks, &observing));
+            // Where the system refuses the thread, the work waits queued for the next write or wait to start it
+            let _ = building.start(|| target(&store, &engine_schema, &tracks, &observing));
         }
         Ok(Self {
             path: store.path().to_path_buf(),
@@ -263,7 +264,8 @@ impl Database {
             }
             // A thread for what the change left, where none runs
             if !self.read_only {
-                self.building.start(|| target(&store, &current, &self.tracks, &self.engine_schema));
+                // Where the system refuses the thread, the work waits queued for the next write or wait to start it
+                let _ = self.building.start(|| target(&store, &current, &self.tracks, &self.engine_schema));
             }
         }
         drop(current);
@@ -581,15 +583,22 @@ impl Builders {
     /// left with pushes waiting, or what an earlier thread left queued. None is started while a close is under way:
     /// it would hold the store the close waits for, and the work waits in the queue for a close that gives up
     pub(crate) fn queue(&self, work: Vec<crate::engine::Work>) {
+        // A commit's work, whose commit has landed: a thread the system refuses leaves it queued, for the next write
+        // or wait for the builds to start one, and the commit isn't answered with it
+        let _ = self.start(work);
+    }
+
+    /// `queue`, answering where the system refused the thread (`THREAD_REFUSED`)
+    pub(crate) fn start(&self, work: Vec<crate::engine::Work>) -> Result<()> {
         self.building.queue(work);
         // A commit that left nothing, and nothing waiting, takes no lock to say so
         if !self.building.has_work() {
-            return;
+            return Ok(());
         }
         // Held for reading, the schema keeps a close from beginning as a thread is started, and a schema change from
         // being made, which each hold it for writing throughout
         let schema = self.schemas.read();
-        self.building.start(|| target(&self.store, &schema, &self.tracks, &self.schemas));
+        self.building.start(|| target(&self.store, &schema, &self.tracks, &self.schemas))
     }
 }
 

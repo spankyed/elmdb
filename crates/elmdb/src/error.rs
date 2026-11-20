@@ -103,6 +103,9 @@ pub enum ErrorCode {
     IndexBuilding,
     /// A wait for the index builds that ended with one or more failed: `indexStatus()` says why each did
     IndexBuildFailed,
+    /// The system refused to start the index builder's thread, for want of memory or of threads: what is left to build
+    /// stays queued, and the next write or wait for the builds starts it
+    ThreadRefused,
     /// A wait for the index builds of a database that builds nothing more and has some left unbuilt: a close at exit
     /// gave up on it, and let its builder go. Reads of an unbuilt index walk the rows; the next open tries to build it
     BuildsStopped,
@@ -188,6 +191,7 @@ impl ErrorCode {
             Self::IndexBuilding => "INDEX_BUILDING",
             Self::IndexBuildFailed => "INDEX_BUILD_FAILED",
             Self::BuildsStopped => "BUILDS_STOPPED",
+            Self::ThreadRefused => "THREAD_REFUSED",
             Self::RestorePending => "RESTORE_PENDING",
             Self::NotDurable => "NOT_DURABLE",
             Self::SyncBehind => "SYNC_BEHIND",
@@ -291,6 +295,7 @@ mod tests {
             ErrorCode::IndexBuilding,
             ErrorCode::IndexBuildFailed,
             ErrorCode::BuildsStopped,
+            ErrorCode::ThreadRefused,
             ErrorCode::CallbackPanicked,
             ErrorCode::WatchPanicked,
             ErrorCode::CallbackActive,
