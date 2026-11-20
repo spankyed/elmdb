@@ -36,7 +36,8 @@
 //! - `scratch-target`: makes and prints the directory a mutated or scratch copy of the tree builds into, beside this
 //!   checkout's target, which `sweep` bounds with the rest.
 //! - `pre-push`: every check CI runs on a change, the change's mutants included, cheapest first, stopping at the first
-//!   that fails: what to run before a push.
+//!   that fails: what to run before a push. Among them is `deny.toml`'s, which CI runs as `cargo deny` itself: the
+//!   bans, the sources and the RustSec advisories.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -78,6 +79,7 @@ fn main() -> ExitCode {
                     ("crate::sync", &|| check_sync(&root)),
                     ("one place commits", &|| check_commits(&root)),
                     ("third-party notices", &|| check_notices(&root)),
+                    ("bans, sources and advisories", &|| check_deny(env!("CARGO"), &root)),
                     ("mutant exclusions", &|| check_mutant_exclusions(&root)),
                 ],
             )
@@ -625,6 +627,32 @@ fn check_notices(root: &Path) -> Result<(), String> {
     }
 }
 
+/// The cargo-deny CI installs (`.github/workflows/ci.yml`), which the install hint names
+const CARGO_DENY: &str = "0.21.0";
+
+/// `deny.toml`'s checks, through `cargo`: no banned crate, none from a git repository or a registry other than
+/// crates.io, and none with a RustSec advisory `deny.toml` doesn't ignore. The advisories are read from the network.
+/// The checks are named, since `deny.toml` leaves licenses to `about.toml` and a bare `cargo deny check` would fail
+/// every crate on its license.
+fn check_deny(cargo: &str, root: &Path) -> Result<(), String> {
+    let installed = Command::new(cargo).args(["deny", "--version"]).output().is_ok_and(|out| out.status.success());
+    if !installed {
+        return Err(format!(
+            "cargo-deny isn't installed, and deny.toml is checked with it: cargo install --locked \
+             cargo-deny@{CARGO_DENY}"
+        ));
+    }
+    let status = Command::new(cargo)
+        .args(["deny", "check", "bans", "sources", "advisories"])
+        .current_dir(root)
+        .status()
+        .map_err(|e| format!("cargo deny didn't run: {e}"))?;
+    match status.success() {
+        true => Ok(()),
+        false => Err(format!("cargo deny check bans sources advisories failed ({status}); what it printed says which")),
+    }
+}
+
 fn check_generated() -> Result<(), String> {
     let fresh = tempfile::tempdir().map_err(|e| e.to_string())?;
     generate::write(fresh.path())?;
@@ -813,6 +841,17 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 mod tests {
     use super::{Skip, exclude_res, skips_in, stale_exclusions, with_skips};
     use super::{UNMODELLED, direct_dependencies, lmdb_sys_crates, locks_outside_sync, unmodelled_files};
+    use super::{check_deny, workspace_root};
+
+    #[test]
+    fn without_cargo_deny_the_check_refuses_and_says_how_to_install_it() {
+        // A program that isn't there, and, where the platform has a `false`, one that is and has no `deny` to run
+        let missing = workspace_root().join("target/no-such-cargo");
+        for cargo in [missing.to_str().unwrap(), "false"] {
+            let refused = check_deny(cargo, &workspace_root()).unwrap_err();
+            assert!(refused.contains("cargo install --locked cargo-deny@0.21.0"), "{refused}");
+        }
+    }
 
     fn skip(line: usize, pattern: &str) -> Skip {
         Skip { path: "crates/x/src/a.rs".to_owned(), line, pattern: pattern.to_owned() }

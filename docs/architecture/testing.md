@@ -519,7 +519,9 @@ CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main
 Its jobs there: `checks` (on Node 23: format, clippy with and without the `diagnostics` feature, the workspace's suite,
 the engine's with `diagnostics`, the doc tests); `heap` (the maintenance heap bound and the benchmarks' smoke runs);
 `repo` (on Node 23: `cargo xtask check-generated`, `check-notices`, `check-one-lmdb`, `check-exact`,
-`check-diagnostics-off`, `check-leiden-serial`, `check-sync`, `check-commits` and `check-mutant-exclusions`; the
+`check-diagnostics-off`, `check-leiden-serial`, `check-sync`, `check-commits` and `check-mutant-exclusions`;
+`cargo deny check bans sources`, and `cargo deny check advisories` for a change to `Cargo.lock` or `deny.toml`
+(Dependencies, below); the
 binding's build, typecheck and suite; the read profile; SQLite's comparison at 2,000 notes; the read-only mount,
 idle-reader, reader-recovery, process-claim and publication scripts under `scripts/`; and that the generated loader and
 declarations are committed); and `loom` and `shuttle` (Concurrency models).
@@ -556,6 +558,23 @@ Musl jobs retain their existing architecture coverage; this does not claim every
 These are required checks configured by the workflow, not a claim that a particular run has passed.
 
 Filesystem support requirements and the limits of this platform coverage are in [filesystems.md](filesystems.md).
+
+**Dependencies.** `deny.toml` at the root is cargo-deny's configuration, for the whole workspace on the seven targets
+the npm package ships for. It holds three checks, and the command always names them:
+
+- **bans:** no crate is banned by name today. A crate built at more than one version warns and doesn't fail.
+- **sources:** a crate comes from crates.io, and from no other registry and no git repository.
+- **advisories:** no crate in the lockfile has a RustSec advisory, one marking it unmaintained included. An advisory
+  is answered by removing the crate, or by an entry in `deny.toml`'s `ignore` with the advisory's id and why.
+
+Licenses aren't among them: `crates/elmdb-node/about.toml` is the one license policy, which `check-notices` holds. A
+bare `cargo deny check` runs a license check with nothing accepted, and fails on every crate.
+
+The `repo` job runs bans and sources on every change. It runs advisories when the `changes` job reports that the
+change touches `Cargo.lock` or `deny.toml`, so a crate with an advisory doesn't merge, and a change that adds an ignore
+meets the check it relaxes. An advisory published against a crate already in the tree fails no unrelated pull request.
+`cargo xtask pre-push` runs all three, and says how to install
+cargo-deny where it is missing. CI installs cargo-deny 0.21.0.
 
 Five workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
 or its test, as no required check (Power loss). `release.yml` runs on a tag, each Monday, and on a pull request that
