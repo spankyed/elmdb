@@ -1,0 +1,49 @@
+{
+  "name": "@elmdb/ears",
+  "version": "0.0.0",
+  "description": "EARS, the fluent TypeScript API over an elmdb database: query and write builders, watches and typed facades",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/spankyed/elmdb.git",
+    "directory": "packages/ears"
+  },
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22.17.0"
+  },
+  "files": [
+    "dist",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run && vitest run --config vitest.integration.config.ts",
+    "bench": "node scripts/build.mjs && vitest bench --run",
+    "bench:heap": "node scripts/build.mjs && node --expose-gc bench/heap.ts",
+    "bench:watch": "node scripts/build.mjs && node bench/watch-stress.ts",
+    "api:check": "node scripts/api-report.mjs",
+    "api:update": "node scripts/api-report.mjs --local"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json",
+    "./database": {
+      "types": "./dist/lmdb/index.d.ts",
+      "default": "./dist/lmdb/index.js"
+    }
+  },
+  "peerDependencies": {
+    "elmdb": "0.0.0"
+  },
+  "dependencies": {
+    "msgpackr": "^2.1.4"
+  }
+}

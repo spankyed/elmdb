@@ -45,9 +45,9 @@ jobs:
             cargo build -p elmdb-node --release
             cp target/release/elmdb_node.dll crates/elmdb-node/elmdb.win32-x64-msvc.node
           else
-            npm run build
+            npm run build:binding
           fi
-          npm test
+          npm run test:binding
       # Reuse the exact same .node file: an ABI-stable binding must load without recompiling for another runtime.
       - name: record the built binding identity
         shell: bash
@@ -61,7 +61,7 @@ jobs:
         shell: bash
         run: |
           node scripts/runtime-binding.cjs verify node24
-          npm test
+          npm run test:binding
           # Node 23's SQLite has no FTS5, so the smoke above compares no search: here both engines answer them
           node crates/elmdb-node/bench/against-sqlite.mjs --json --notes 2000 --require-text > /dev/null
       # The app currently pins Electron 37.2.4. This runs Node's test runner inside that Electron executable,

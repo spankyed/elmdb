@@ -1,0 +1,73 @@
+// An EARS engine is an instance: no module in @elmdb/ears keeps anything at module scope, not even a reference to an
+// EARS engine. Which one a process acts on is the program's to bind.
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import ts from 'typescript';
+import { describe, expect, it } from 'vitest';
+
+const SRC = path.resolve(import.meta.dirname, '..', 'src');
+
+const _files = (dir: string): string[] => fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+  const full = path.join(dir, entry.name);
+  return entry.isDirectory() ? _files(full) : entry.name.endsWith('.ts') ? [full] : [];
+});
+
+/**
+ * The walk, refusing an empty answer: the check below asserts that a *derived* set is empty, which passes for
+ * free when the population it filtered was empty, so the walk refuses an empty answer itself.
+ * Only the top-level call is held — the recursion goes through `_files`, where an empty directory is ordinary.
+ */
+const files = (dir: string): string[] => {
+  const found = _files(dir);
+  if (found.length === 0) throw new Error(`${dir}: no .ts file — anything asserted over it would pass for the wrong reason`);
+  return found;
+};
+
+const STATE_CONSTRUCTORS = new Set(['Map', 'Set', 'WeakMap', 'WeakSet', 'Array']);
+
+/** Whether an initializer creates a container to fill: `new Map()` (and the like), `[]` or `{}` */
+function isContainer(node: ts.Expression | undefined): boolean {
+  if (!node) return false;
+  if (ts.isAsExpression(node) || ts.isSatisfiesExpression(node) || ts.isParenthesizedExpression(node)) return isContainer(node.expression);
+  if (ts.isNewExpression(node)) return ts.isIdentifier(node.expression) && STATE_CONSTRUCTORS.has(node.expression.text);
+  if (ts.isArrayLiteralExpression(node)) return node.elements.length === 0;
+  if (ts.isObjectLiteralExpression(node)) return node.properties.length === 0;
+  return false;
+}
+
+/** Module-scope state in a source: `let`/`var` declarations and containers, in the file and its namespaces */
+export function moduleState(file: string, text: string): string[] {
+  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+  const found: string[] = [];
+  const visit = (statements: ts.NodeArray<ts.Statement>) => {
+    for (const statement of statements) {
+      if (ts.isModuleDeclaration(statement) && statement.body && ts.isModuleBlock(statement.body)) visit(statement.body.statements);
+      if (!ts.isVariableStatement(statement)) continue;
+      const mutable = !(statement.declarationList.flags & ts.NodeFlags.Const);
+      for (const declaration of statement.declarationList.declarations) {
+        if (mutable || isContainer(declaration.initializer)) found.push(declaration.name.getText(source));
+      }
+    }
+  };
+  visit(source.statements);
+  return found;
+}
+
+describe('@elmdb/ears module state', () => {
+  it('no engine module holds data at module scope', () => {
+    const found = files(SRC).flatMap((file) => {
+      const rel = path.relative(SRC, file);
+      return moduleState(file, fs.readFileSync(file, 'utf-8')).map((name) => `${rel}:${name}`);
+    });
+    expect(found, 'keep state in the engine (createEarsEngine) or the object a factory returns').toEqual([]);
+  });
+
+  it('finds let, var and container state', () => {
+    const text = [
+      'let a = 1;', 'var b;', 'const c = new Map<string, number>();', 'const d = new Set();', 'const e: Record<string, unknown> = {};',
+      'const f = [] as string[];', 'export const g = { x: 1 };', 'const h = () => new Map();', 'namespace N { let i = 0; }',
+      'function k() { let inner = 0; const m = new Map(); return inner + m.size; }',
+    ].join('\n');
+    expect(moduleState('x.ts', text)).toEqual(['a', 'b', 'c', 'd', 'e', 'f', 'i']);
+  });
+});

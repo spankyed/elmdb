@@ -1,0 +1,213 @@
+// The schema an engine's database holds, as a program declares it, and the elmdb schema it becomes
+// (`elmdb/docs/architecture/schema.md`). Whoever creates the engine builds it from the names it uses — a program from
+// what it has registered, a test from its own — and changes it with `admin.setSchema` or `admin.declare` when they change.
+// The elmdb schema is elmdb's generated `Schema`, written as its types' literals.
+import type { FieldDef } from 'elmdb/protocol/FieldDef.js';
+import type { IndexDef } from 'elmdb/protocol/IndexDef.js';
+import type { RankDef } from 'elmdb/protocol/RankDef.js';
+import type { RelationDef } from 'elmdb/protocol/RelationDef.js';
+import type { RoleDef } from 'elmdb/protocol/RoleDef.js';
+import type { Schema } from 'elmdb/protocol/Schema.js';
+import type { TypeDef } from 'elmdb/protocol/TypeDef.js';
+import type { ValueType } from 'elmdb/protocol/ValueType.js';
+import type { EdgeDirection, FieldRule, FieldType, RowRules } from './runtime.ts';
+import { RESERVED_ATTRIBUTES } from './errors.ts';
+import { setField } from './ids.ts';
+
+/** What a relation kind is held to, as its declaration says */
+export interface RelationRules {
+  /** A link that would close a cycle through this kind is refused (`CYCLE`) */
+  acyclic?: boolean;
+  /**
+   * The info fields that, with its two ends, identify an edge; none, the ends alone, so two entities are joined by one
+   * edge of the kind at most. A link to an identity an edge holds updates that edge's info and weight
+   */
+  key?: readonly string[];
+  /** Each edge carries a weight, 1 unless a link gives another, which `rank` and `communities` read */
+  weighted?: boolean;
+}
+
+/** A rank index: PageRank over a graph of entity types and relation kinds, kept current by every commit, which `ranked` reads */
+export interface RankDeclaration {
+  /** The types whose live entities are the graph's nodes; their order is the order ties keep */
+  types: readonly string[];
+  /** The relation kinds whose edges between two nodes are the graph's edges */
+  relations: readonly string[];
+  /** Which way each edge is followed; `out` unless given */
+  direction?: EdgeDirection;
+  /** Whether an edge of a kind declared `weighted` counts by its weight; it does unless `false` */
+  weights?: boolean;
+  /** The probability a walker follows an edge rather than jumping to a node at random, in (0, 1); elmdb's default unless given */
+  damping?: number;
+  /** The bound on the L1 distance between the index's scores and PageRank once its pushes are done; elmdb's default unless given */
+  tolerance?: number;
+}
+
+/** What an engine's database knows: its entity types, relation kinds, roles and rank indexes, each with its rules */
+export interface EngineSchema {
+  /** Each entity type, with what its rows are held to (`RowRules`) */
+  types: Readonly<Record<string, RowRules>>;
+  /** Each relation kind, with what its edges are held to */
+  relations: Readonly<Record<string, RelationRules>>;
+  roles: readonly string[];
+  /** Each rank index, by name; none when absent */
+  ranks?: Readonly<Record<string, RankDeclaration>>;
+}
+
+/** elmdb's schema language, which a schema names */
+export const ELMDB_SCHEMA_LANGUAGE = 'https://elmdb.dev/schema/1.json';
+
+/** Whether elmdb writes the field itself, so a schema declares no field or index of it */
+const isEngineField = (field: string) => (RESERVED_ATTRIBUTES as readonly string[]).includes(field);
+/** Whether the field is one of the engine's an index may cover */
+const isIndexableEngineField = (field: string) => field === 'createdAt' || field === 'updatedAt';
+
+/** A field's type as elmdb holds it, with each `ref` held to the types the schema declares: a ref naming none of them is a string */
+function declaredType(field: FieldType, declared: ReadonlySet<string>): ValueType {
+  switch (field.type) {
+    case 'ref': {
+      const to = field.to.filter((type) => declared.has(type));
+      return to.length ? { type: 'ref', to } : { type: 'string' };
+    }
+    case 'list':
+      return { type: 'list', of: declaredType(field.of, declared) };
+    case 'enum':
+      return { type: 'enum', values: [...field.values] };
+    default:
+      return { type: field.type };
+  }
+}
+
+/** Whether a text, vector or trigram index can read a field of this type, as elmdb holds it: text, a list of text, or anything */
+const holdsText = (field: ValueType) =>
+  field.type === 'string' || field.type === 'any' || (field.type === 'list' && field.of.type === 'string');
+
+/**
+ * The elmdb schema of `schema`. A type's fields are those its rules type (`RowRules.fields`, read off its shape), each as
+ * its type, optional and nullable as the shape says; then each required field it doesn't type, which may hold any value
+ * including `null`, and each indexed field, which may be absent too. Every other field is allowed. A `ref` names only
+ * the types the schema declares, and a field a text or vector index reads is held to text or anything. Each indexed
+ * field has a value index of its own, named after it; `role` and `shortCode` are indexed by elmdb on every type. Every
+ * relation kind is many-to-many, and its edges may carry any info
+ */
+export function toElmdbSchema(schema: EngineSchema): Schema {
+  const declared = new Set(Object.keys(schema.types));
+  // An entity type or field may be named `__proto__`, so every name is written with `setField`
+  const types: Record<string, TypeDef> = {};
+  for (const [type, rules] of Object.entries(schema.types)) {
+    const fields: Record<string, FieldDef> = {};
+    const indexes: Record<string, IndexDef> = {};
+    const textRead = new Set([...Object.keys(rules.search?.fields ?? {}), ...(rules.embed?.from ?? []), ...(rules.substrings ?? [])]);
+    for (const [field, rule] of Object.entries(rules.fields ?? {}) as Array<[string, FieldRule]>) {
+      if (isEngineField(field)) continue;
+      const { optional, nullable } = rule;
+      const typed = declaredType(rule, declared);
+      setField(fields, field, {
+        ...(textRead.has(field) && !holdsText(typed) ? { type: 'any' } : typed),
+        ...(optional && { optional: true }),
+        ...(nullable && { nullable: true }),
+      });
+    }
+    const has = (field: string) => Object.prototype.hasOwnProperty.call(fields, field);
+    for (const field of rules.indexes ?? []) {
+      if (isEngineField(field) && !isIndexableEngineField(field)) continue;
+      if (!isIndexableEngineField(field) && !has(field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
+      setField(indexes, field, { kind: 'value', fields: [field] });
+    }
+    for (const field of rules.required) {
+      if (!isEngineField(field) && !has(field)) setField(fields, field, { type: 'any', nullable: true });
+    }
+    // The text index (`search`), its fields declared as any field a rule hasn't: elmdb reads a string or a list of
+    // strings in one, and no text in any other value
+    if (rules.search) {
+      const textFields: Record<string, { weight: number }> = {};
+      for (const [field, weight] of Object.entries(rules.search.fields)) {
+        if (!Object.prototype.hasOwnProperty.call(fields, field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
+        setField(textFields, field, { weight });
+      }
+      if (Object.prototype.hasOwnProperty.call(indexes, 'search')) throw new Error(`${type}: a field named "search" is indexed, and the text index has that name`);
+      setField(indexes, 'search', { kind: 'text', fields: textFields, ...(rules.search.stem !== undefined && { stem: rules.search.stem }) });
+    }
+    // The vector index (`embed`), over the fields its text is made of, read as the text index reads them
+    if (rules.embed) {
+      for (const field of rules.embed.from) {
+        if (!Object.prototype.hasOwnProperty.call(fields, field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
+      }
+      const { from, chunk = 'whole', model, dims } = rules.embed;
+      if (Object.prototype.hasOwnProperty.call(indexes, 'embedding')) throw new Error(`${type}: a field named "embedding" is indexed, and the vector index has that name`);
+      setField(indexes, 'embedding', { kind: 'vector', from: [...from], chunk, dims, metric: 'cosine', precision: 'f32', model });
+    }
+    // The trigram index (`substrings`), over fields read as the text index reads them
+    if (rules.substrings?.length) {
+      for (const field of rules.substrings) {
+        if (!Object.prototype.hasOwnProperty.call(fields, field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
+      }
+      if (Object.prototype.hasOwnProperty.call(indexes, 'substrings')) throw new Error(`${type}: a field named "substrings" is indexed, and the trigram index has that name`);
+      setField(indexes, 'substrings', { kind: 'trigram', fields: [...rules.substrings] });
+    }
+    setField(types, type, {
+      ...(rules.shortCode !== undefined && { shortCode: { prefix: rules.shortCode } }),
+      fields,
+      additionalFields: 'allow',
+      indexes,
+      ...(rules.changeOrder && { changeOrder: true }),
+    });
+  }
+  const relations = Object.fromEntries(Object.entries(schema.relations).map(([kind, rules]): [string, RelationDef] => [kind, {
+    cardinality: 'many-to-many',
+    ...(rules.acyclic && { acyclic: true }),
+    ...(rules.key?.length && { key: [...rules.key] }),
+    ...(rules.weighted && { weighted: true }),
+  }]));
+  const roles = Object.fromEntries(schema.roles.map((role): [string, RoleDef] => [role, {}]));
+  const ranks = Object.fromEntries(Object.entries(schema.ranks ?? {})
+    .map(([name, rank]): [string, RankDef] => [name, { ...rank, types: [...rank.types], relations: [...rank.relations] }]));
+  return { $schema: ELMDB_SCHEMA_LANGUAGE, roles, relations, types, ...(Object.keys(ranks).length && { ranks }) };
+}
+
+/**
+ * `held` (a database's elmdb schema, or `null`) with `declared`'s types, relation kinds, roles and ranks in place of its own of
+ * the same names, and its others kept
+ */
+export function withDeclarations(held: Schema | null, declared: Schema): Schema {
+  const before: Partial<Schema> = held ?? {};
+  return {
+    ...before,
+    ...declared,
+    types: { ...before.types, ...declared.types },
+    relations: { ...before.relations, ...declared.relations },
+    roles: { ...before.roles, ...declared.roles },
+    ...((before.ranks ?? declared.ranks) && { ranks: { ...before.ranks, ...declared.ranks } }),
+  };
+}
+
+/** The names a database's elmdb schema declares, and the fields each type indexes */
+export interface DeclaredNames {
+  types: ReadonlySet<string>;
+  relationKinds: ReadonlySet<string>;
+  roles: ReadonlySet<string>;
+  /** Per type, the fields a value index leads with */
+  indexed: ReadonlyMap<string, ReadonlySet<string>>;
+  /** The types holding a vector index */
+  embedded: ReadonlySet<string>;
+}
+
+/** What a database's elmdb schema (its `schema`, canonical JSON, or `null` when it holds none) declares */
+export function declaredNames(elmdbSchema: Schema | null): DeclaredNames {
+  const schema: Partial<Schema> = elmdbSchema ?? {};
+  const indexed = new Map<string, ReadonlySet<string>>();
+  const embedded = new Set<string>();
+  for (const [type, def] of Object.entries(schema.types ?? {})) {
+    if (Object.values(def.indexes ?? {}).some((index) => index.kind === 'vector')) embedded.add(type);
+    const leading = Object.values(def.indexes ?? {})
+      .flatMap((index) => (index.kind === 'value' && index.fields.length ? [index.fields[0]!] : []));
+    indexed.set(type, new Set(['role', 'shortCode', ...leading]));
+  }
+  return {
+    types: new Set(Object.keys(schema.types ?? {})),
+    relationKinds: new Set(Object.keys(schema.relations ?? {})),
+    roles: new Set(Object.keys(schema.roles ?? {})),
+    indexed,
+    embedded,
+  };
+}

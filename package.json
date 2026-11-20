@@ -1,17 +1,31 @@
 {
   "name": "elmdb-workspace",
   "private": true,
-  "description": "The tooling that builds and tests elmdb's binding (crates/elmdb-node), kept out of the package it publishes so that a project linking the binding installs none of it",
+  "description": "The tooling that builds and tests elmdb's binding (crates/elmdb-node) and EARS (packages/ears), kept out of the packages it builds so that a project linking either installs none of it",
+  "workspaces": [
+    "crates/elmdb-node",
+    "packages/ears",
+    "packages/typescript-floor"
+  ],
   "scripts": {
-    "build": "napi build --cwd crates/elmdb-node --platform --release",
+    "build": "npm run build:binding && npm run build:ears",
+    "build:binding": "napi build --cwd crates/elmdb-node --platform --release",
     "build:debug": "napi build --cwd crates/elmdb-node --platform",
-    "test": "node --test \"crates/elmdb-node/test/**/*.test.mjs\"",
-    "typecheck": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 crates/elmdb-node/protocol/*.d.ts crates/elmdb-node/index.d.ts crates/elmdb-node/client.d.ts && tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --allowJs --checkJs crates/elmdb-node/test/schema-types.test.mjs crates/elmdb-node/test/client.test.mjs crates/elmdb-node/client.js"
+    "build:ears": "npm run build -w @elmdb/ears",
+    "test": "npm run test:binding && npm run test:ears",
+    "test:binding": "node --test \"crates/elmdb-node/test/**/*.test.mjs\"",
+    "test:ears": "npm test -w @elmdb/ears",
+    "typecheck": "npm run typecheck:binding && npm run typecheck:ears",
+    "typecheck:binding": "tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 crates/elmdb-node/protocol/*.d.ts crates/elmdb-node/index.d.ts crates/elmdb-node/client.d.ts && tsc --noEmit --strict --module nodenext --moduleResolution nodenext --target es2022 --allowJs --checkJs crates/elmdb-node/test/schema-types.test.mjs crates/elmdb-node/test/client.test.mjs crates/elmdb-node/client.js",
+    "typecheck:ears": "npm run typecheck -w @elmdb/ears"
   },
   "devDependencies": {
+    "@microsoft/api-extractor": "^7.59.1",
     "@napi-rs/cli": "3.10.9",
     "@types/node": "^24.1.0",
+    "fast-check": "^3.23.2",
     "msgpackr": "^2.1.4",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
   }
 }

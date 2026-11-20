@@ -1,0 +1,760 @@
+/**
+ * EARS runtime types: what an engine is created with, and the query and
+ * transaction builders.
+ *
+ * CHANGE CONTROL: these types are a specified contract, and editor completions and error messages
+ * depend on their exact form. Don't change them to make one call site compile; fix the call site.
+ * docs/architecture/ears.md, Typed contract, says what checks a change to them.
+ */
+import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
+import type { RESERVED_ATTRIBUTES } from './errors.ts';
+import type { EarsDatabase } from './database.ts';
+import type { CallSiteNaming } from './calls.ts';
+
+/**
+ * An id as `write` takes it: an entity's, plain or tagged with its type, and never a relation's (`EARS.RelationId`),
+ * which the compiler refuses here since a relation is no entity
+ */
+export type WriteTarget<E extends string = string> = EARS.EntityId<E> & { readonly __relation?: never };
+
+/** A relation row — its id, kind, ends, info and weight, as `findRelations` returns one — with its ends typed */
+export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
+  id: EARS.RelationId;
+  kind: K;
+  source: EARS.EntityId<Source>;
+  target: EARS.EntityId<Target>;
+  info?: EARS.AttributeValue;
+  /** The edge's weight, for a kind declared `weighted` (1 unless a link gave another); absent for any other kind */
+  weight?: number;
+}
+
+/** What an engine is created with (`createEarsEngine`) */
+export interface EARSRuntimeDeps {
+  /**
+   * The elmdb database the engine reads and writes, opened by `@elmdb/ears/database` (`openDatabase`). Its schema is
+   * the engine's entity types, relation kinds and roles, and the rules their rows and edges are held to; the engine's
+   * creator changes it with `admin.setSchema`
+   */
+  database: EarsDatabase;
+  /**
+   * Freezes every value a read gives back, as a test runtime does: code that changes one, expecting the database to
+   * change, throws there rather than silently not persisting where reads aren't frozen. Off by default
+   */
+  freeze?: boolean;
+  /**
+   * Told when the engine does something its data will make slow — a `where` filtering thousands of a type's rows for
+   * want of an index, once per call site, or a watch that keeps costing more than a flush's slice, once per watch —
+   * with a message saying what and how to fix it, and the same as data (`EarsWarning`), for a creator that says where
+   * its own declarations make that fix. Nothing by default
+   */
+  warn?: (message: string, warning: EarsWarning) => void;
+  /** How a counted call (`admin.calls`), or a watch given no label, names the code that made it (`CallSiteNaming`) */
+  callSites?: CallSiteNaming;
+}
+
+/** What the engine warns its creator of (`EARSRuntimeDeps.warn`), as data */
+export type EarsWarning =
+  /**
+   * A `where` on `field`, straight after a start from `types`, filtered `visited` rows, since one of those types
+   * declares no value index on the field (`RowRules.indexes`); `site` is the code that made the query
+   */
+  | { kind: 'unindexedWalk'; types: readonly string[]; field: string; visited: number; site: string }
+  /** The watch `label` cost `ms` a run, more than a flush's slice, `runs` runs in a row */
+  | { kind: 'slowWatch'; label: string; ms: number; runs: number };
+
+/**
+ * What a created row of an entity type is held to, and what the database keeps for it: the required fields (its
+ * shape's, where a program declares one), its short code prefix and its indexes, as the program declares them
+ */
+export interface RowRules {
+  /** The fields its row must hold: the shape's required ones. `create` refuses a row without one, and `delete` one */
+  required: readonly string[];
+  /**
+   * The prefix `create` numbers the row's `shortCode` with, `<prefix>-<n>`, which a typed shape types the field from
+   * (`ShortCode<prefix>`). A number is never handed out twice
+   * for a type and prefix, and a type with none holds no short code
+   */
+  shortCode?: string;
+  /**
+   * The fields a `where(field, value)` on the type reads an index for. The engine indexes `role` and `shortCode` on
+   * every type; a `where` on any other field filters the type's rows, finding the same matches
+   */
+  indexes?: readonly string[];
+  /** The fields its text index reads, each at its weight, and the language its words are stemmed in: what `search` matches */
+  search?: SearchDeclaration;
+  /** The fields its vector index embeds, and the model it embeds them with: what `near`, `like` and `hybrid` rank by */
+  embed?: EmbedDeclaration;
+  /** The fields its trigram index reads, strings or lists of strings: what `containing` and `matching` find */
+  substrings?: readonly string[];
+  /**
+   * Whether the database keeps the type's entities in the order of the commits that last wrote them, which
+   * `changedSince` reads and a projection derives from. A write to one costs about a fifth more, so only a type
+   * something reads that from keeps one
+   */
+  changeOrder?: boolean;
+  /**
+   * The type of each field the shape declares, as its TypeScript type maps to one of elmdb's (`FieldRule`): what the
+   * database holds every write to, from every writer. A field the shape doesn't declare is still taken
+   */
+  fields?: Readonly<Record<string, FieldRule>>;
+}
+
+/**
+ * A field's type as the database holds a write to it, read off a shape's property: text, a finite number, a boolean,
+ * one of listed strings, an id of listed entity types, a list of one of these, or `any` for what maps to none of them
+ */
+export type FieldType =
+  | { readonly type: 'string' | 'number' | 'boolean' | 'any' }
+  | { readonly type: 'enum'; readonly values: readonly string[] }
+  | { readonly type: 'ref'; readonly to: readonly string[] }
+  | { readonly type: 'list'; readonly of: FieldType };
+
+/** A field's type, and whether the row may lack it (`?`) and whether it may hold `null` (`| null`) */
+export type FieldRule = FieldType & { readonly optional?: boolean; readonly nullable?: boolean };
+
+/** A type's text index, as its row rules declare it (`search`) */
+export interface SearchDeclaration {
+  /** Each field the index reads, with its weight: a field of weight 3 counts each of its words three times */
+  readonly fields: Readonly<Record<string, number>>;
+  /** The language whose stems a word is matched by (`en`, `de`, …), when the index stems */
+  readonly stem?: string;
+}
+
+/**
+ * A type's vector index, as its row rules declare it (`embed`). A write that changes one of its fields leaves the
+ * entity's chunks pending until an embedding of their text is stored (`embed`), which a later write's change refuses as
+ * stale. Embeddings are compared by cosine distance
+ */
+export interface EmbedDeclaration {
+  /** The fields whose text is embedded, in this order: strings, or lists of strings */
+  readonly from: readonly string[];
+  /** How the text is split, each part embedded on its own: whole (the default), at blank lines, or at Markdown headings */
+  readonly chunk?: 'whole' | 'paragraph' | 'heading';
+  /** The model the embeddings are made with: an embedding made with another is refused */
+  readonly model: string;
+  /** The numbers in each embedding, which the model decides */
+  readonly dims: number;
+}
+
+/** Chunks of a type's vector index waiting for embeddings, and what to make them with */
+export interface PendingEmbeddings {
+  model: string;
+  dims: number;
+  /** How many chunks wait in all, those beyond the limit included */
+  count: number;
+  /** Up to the limit of them: each one's entity, its number in the entity, its text's hash and the text to embed */
+  chunks: Array<{ id: EARS.EntityId; chunk: number; hash: string; text: string }>;
+}
+
+/** An embedding of one pending chunk, naming the chunk as `pendingEmbeddings` did */
+export interface Embedding {
+  id: EARS.EntityId;
+  chunk: number;
+  hash: string;
+  model: string;
+  vector: readonly number[];
+}
+
+/**
+ * How `search` matches and ranks. `fields` names the index's fields a match may be in, and `recency` a field holding a
+ * time, by which a score is halved for every `halfLife` milliseconds before `now` (the read's clock unless given)
+ */
+export interface SearchOptions<F extends string = string> {
+  /** The query's last word matches the words it starts, as a search box does while it is typed in */
+  prefix?: boolean;
+  /** A word of five letters or more also matches one an edit away, nine or more two; on unless false */
+  fuzzy?: boolean;
+  /** Any of the query's clauses matching is enough, rather than every one */
+  any?: boolean;
+  fields?: readonly F[];
+  recency?: { field: F; halfLife: number; now?: number };
+}
+
+/** Where a search's terms are in one field: each `[element, start, end]`, the element a list field's, in UTF-16 units */
+export type SearchHighlights = Record<string, ReadonlyArray<readonly [element: number, start: number, end: number]>>;
+
+/** What a search found in one entity */
+export interface SearchHit<E extends string = string> {
+  id: EARS.EntityId<E>;
+  /** Its relevance: BM25 over the index's fields at their weights, decayed by recency when asked */
+  score: number;
+  /** The index's words it matched: the query's, and those its prefixes and edits reached */
+  terms: string[];
+  /** With `highlights`, where the matched words are in each field */
+  highlights?: SearchHighlights;
+}
+
+/** What a `ranked` or a `rank` says of the scores its hits hold */
+export type RankBound =
+  /** A `ranked`: its index, and how far its scores may be from PageRank's, as an L1 distance */
+  | { index: string; error: number }
+  /** A `rank`: the rounds it ran, and whether its scores settled within them */
+  | { converged: boolean; iterations: number };
+
+/** Which of an entity's edges a walk follows (`pathTo`, `degrees`, `rank`): those out of it, those into it, or both */
+export type EdgeDirection = 'out' | 'in' | 'both';
+
+/**
+ * How `similar` scores two entities' neighbours: `jaccard`, the neighbours both have over those either has, or
+ * `adamicAdar`, each neighbour both have counting 1 / ln of how many entities link with it, so a rarely linked one
+ * counts for more than a hub
+ */
+export type SimilarityMeasure = 'jaccard' | 'adamicAdar';
+
+/** A `rank` seed: an entity, of weight 1, or an entity and its weight */
+export type RankSeed = EARS.EntityId | { id: EARS.EntityId; weight: number };
+
+/** What `ranked` does while its index isn't built yet */
+export interface RankedOptions {
+  /**
+   * `compute`, the default, answers the same as the index will, costing what a `rank` does on every read until the build
+   * ends. `refuse` throws `INDEX_BUILDING` instead, for a read too large or too frequent to pay that: a caller wanting
+   * nothing yet catches it, which keeps "still building" apart from a graph with nothing in it. A `watch` that refused
+   * runs again as the index's build commits, and answers once it ends
+   */
+  whileBuilding?: 'compute' | 'refuse';
+}
+
+/** How `rank` walks: the way it follows edges, where its walkers start, and whether it reads edges' weights */
+export interface RankOptions {
+  /** `out` unless `in` or `both` */
+  direction?: EdgeDirection;
+  /** Where walkers start and jump back to; every entity of the query when none are given */
+  seeds?: readonly RankSeed[];
+  /** Whether an edge of a kind declared `weighted` counts by its weight; true unless false */
+  weights?: boolean;
+}
+
+/** One stage of a query's plan as the database ran it: its start, a step or its terminal (`explain()`) */
+export interface QueryStage {
+  /** The stage's name: `types`, `ids` or `all` for the start, a step's (`where`, `orderBy`, …), the terminal's */
+  stage: string;
+  /** The value index it read, or `none: walks the type` for a lookup no built index covers */
+  index?: string;
+  /** What the stage before handed it, and what it read from the store itself */
+  visited: number;
+  /** What it handed on; for the terminal, what it answers */
+  kept: number;
+  /** Milliseconds spent in the stage's own work */
+  ms: number;
+  /** For a stage that read lists of places, or walked a type's rows: the places it was handed, each one walked or sought */
+  places?: number;
+  /** `and` for a stage that read the places several lists hold in common */
+  set?: string;
+  /** For a `search` that ran within its filters' places: how many */
+  within?: number;
+  /** For a `search`: the matches it held to rank them */
+  held?: number;
+  /** For a stage that could have read an index's order and didn't: why (`noRoom`, `building`) */
+  sorted?: string;
+  /** For an order read by testing the filters, for want of an index that reads it in order: the fields one would hold */
+  wants?: string;
+  /** For a stage that built a graph, which `explain()` reaches only through a `rank`: its entities */
+  nodes?: number;
+  /** For a stage that built a graph: the edges between its entities; for a `similar`, the edges it read */
+  edges?: number;
+  /** For a stage that built a graph and read weights (a `rank` or `communities` over a weighted kind): its edges' weights added up */
+  weight?: number;
+  /** For a `ranked`: the bound on the scores it read, the distance their share of all the scores may be from PageRank's */
+  error?: number;
+  /** For a `ranked` whose index isn't built yet: it computed the scores, costing what a `rank` does */
+  building?: boolean;
+  /** For a `rank`: the rounds it ran */
+  iterations?: number;
+  /** For a `rank`: whether its scores settled within the rounds it ran */
+  converged?: boolean;
+  /** For a `topological`: the cycles whose members it kept together */
+  cycles?: number;
+  /** For a `similar`: the neighbours of the entity it compared with */
+  neighbours?: number;
+  /** For a `similar`: the entities it scored, each sharing a neighbour with it */
+  candidates?: number;
+}
+
+/** A query's ids, and how the database found them: every stage of its plan, the entities it read, and its time */
+export interface QueryExplanation<E extends string = string> {
+  ids: EARS.EntityId<E>[];
+  /** Entities the plan read from the store, its index entries included */
+  visited: number;
+  /** Milliseconds the read took in the database */
+  ms: number;
+  stages: QueryStage[];
+}
+
+/**
+ * A short code, `<prefix>-<n>`: how a shape types `shortCode` for an entity type whose row rules declare the prefix
+ * (`RowRules.shortCode`). `create` numbers it, and nothing writes it after
+ */
+export type ShortCode<P extends string> = `${P}-${number}`;
+
+
+// ─── QueryBuilder fluent interface ─────────────────────────────────────
+
+/** `T` without being an inference site (TypeScript 5.4's NoInfer, for 5.3) */
+type NoInferType<T> = [T][T extends unknown ? 0 : never];
+
+/**
+ * What a typed builder is checked against, as one parameter: a program declares its own and names it, so an error or a
+ * hover names the schema rather than spelling out four types
+ */
+export interface EarsSchema {
+  /** The entity shapes reads and writes are typed against */
+  shapes: EntityShapes;
+  /** The entity names accepted as arguments */
+  names: string;
+  /** The relation kinds links, walks and edge reads take */
+  relKinds: string;
+  /** The relation kinds whose links take a weight: those declared `weighted`, `never` when none is */
+  weightedKinds: string;
+  /** The roles grants and `withRole` take */
+  roles: string;
+  /** The rank indexes `ranked` reads: those declared, `never` when none is */
+  rankIndexes: string;
+}
+
+/** No shapes and any name, kind or role: the untyped operations, the engine's own and any a program builds over it */
+export interface UntypedSchema extends EarsSchema {
+  shapes: {};
+  names: string;
+  relKinds: string;
+  weightedKinds: string;
+  roles: string;
+  rankIndexes: string;
+}
+
+/**
+ * The query builder, typed by `D` (`UntypedSchema` unchecked, or a program's own `EarsSchema` through `defineEars`).
+ *
+ * Field parameters stay `keyof ShapeOf<D['shapes'], E> & string` and picked rows `Pick<ShapeOf<D['shapes'], E>, K>`:
+ * that form is what gives editors field completions and lists the valid fields in a typo's error.
+ * Wrapping them in conditional or mapped types keeps everything compiling and passing type tests
+ * while breaking completions, which `tests/typed/completions.integration.spec.ts` asks a language service for.
+ * For a union shape (Node rows) only shared fields are accepted; a query over member-specific or runtime fields uses the untyped host `query`.
+ */
+export interface QueryBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
+  ofType<T extends string>(t: EntityNameArg<D['names'], T>): QueryBuilder<T, D>;
+  /** The entities among `ids` */
+  within(ids: readonly EARS.EntityId[]): QueryBuilder<E, D>;
+  /**
+   * The entities whose `k` is `v` (`===`) or a list holding it, or for which `v`, a function, answers true given the
+   * whole value. A primitive `v` is answered by the value index. `v` is required: `has` and `lacks` ask about presence.
+   */
+  where<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K, v: WhereValue<D['shapes'], E, K>): QueryBuilder<E, D>;
+  /** The entities with a value of `k` */
+  has<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
+  /** The entities with no value of `k` */
+  lacks<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
+  withRole(r: D['roles']): QueryBuilder<E, D>;
+  /**
+   * The entities with a `kind` edge to `other` — or, without it, to any entity this query could reach (a filter: the
+   * set stays these entities)
+   */
+  linkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
+  /** The entities `other` has a `kind` edge to — or, without it, that any entity this query could reach has one to */
+  linkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
+  /** The entities `linkedTo(kind, other?)` leaves out */
+  unlinkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
+  /** The entities `linkedFrom(kind, other?)` leaves out: a tree's roots are `unlinkedFrom(parentKind)` */
+  unlinkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
+  /** The entities with an edge of any kind, either way, to `other` (a filter) */
+  linkedWith(other: EARS.EntityId): QueryBuilder<E, D>;
+  /**
+   * Walks the entities' outgoing edges of the kinds to the entities at their other end — unlike `linkedTo`, which
+   * filters. The result holds `type` entities, not `E`; with `type` omitted the target is unknown.
+   */
+  out<T extends string>(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+  ): QueryBuilder<T, D>;
+  // Target absent — the resulting entity type is unknown. A target known only at runtime
+  // (typed string) takes the overload above and yields QueryBuilder<string>.
+  out(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+  /** Walks the entities' incoming edges of the kinds to the entities at their other end */
+  in<T extends string>(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+  ): QueryBuilder<T, D>;
+  in(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+  /** Walks the entities' edges of the kinds both ways, out and in, to the entities at their other end, each once */
+  both<T extends string>(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+  ): QueryBuilder<T, D>;
+  both(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
+  /**
+   * Every entity the set reaches through outgoing edges of the kinds, any number deep or at most `depth`: a subtree,
+   * nearest first, each once, never an entity of the set itself. `type` keeps the reached entities of the types.
+   */
+  descendants<T extends string>(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+    options?: { depth?: number },
+  ): QueryBuilder<T, D>;
+  descendants(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined, options?: { depth?: number }): QueryBuilder<string, D>;
+  /**
+   * Every entity that reaches the set through edges of the kinds, any number deep or at most `depth`: in a tree, the
+   * parent first and the root last, each once, never an entity of the set itself. `type` keeps the reached entities
+   * of the types.
+   */
+  ancestors<T extends string>(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined,
+    options?: { depth?: number },
+  ): QueryBuilder<T, D>;
+  ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined, options?: { depth?: number }): QueryBuilder<string, D>;
+  /**
+   * A shortest path through edges of the kinds from an entity of the set to `to`: its entities in order, both ends
+   * included, or none when there is no path (of at most `depth` edges, when given). Edges are followed `out` unless
+   * `direction` says `in` or `both`; of paths as short, the first found. Its entities may be of any type.
+   */
+  pathTo(to: EARS.EntityId, kinds: D['relKinds'] | readonly D['relKinds'][], options?: { direction?: EdgeDirection; depth?: number }): QueryBuilder<string, D>;
+  /**
+   * Each outgoing edge of the kinds whose target this query could reach (of `type`, when given): its relation row,
+   * `findRelations`' shape, one per edge
+   */
+  outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
+  /** Each incoming edge of the kinds whose source this query could reach: its relation row */
+  inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
+  /**
+   * Each entity's number of edges of the kinds, in query order, `0` included: those `outEdges` (or with `direction`,
+   * `inEdges`, or both) would answer, so only edges whose other end this query could reach, of `type` when given
+   */
+  degrees<T extends string = string>(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[],
+    options?: { direction?: EdgeDirection },
+  ): Map<EARS.EntityId<E>, number>;
+  /**
+   * The query's entities by how much they matter from `seeds`, highest first, ties in query order: personalized
+   * PageRank over the edges of the kinds between two of them, followed `out` unless `direction` says `in` or `both`. A
+   * walker follows one of an entity's edges, or jumps back to a seed; an entity's score is the share of its time spent
+   * there. With no `seeds` every entity is one, which ranks what is central overall. A seed is an id, or `{ id, weight }`
+   * to have walkers jump back to it in proportion to its weight (an id is weight 1, one named twice adds its weights, a
+   * weight above 0 and at most 2^960). Over a kind declared `weighted` a walker follows an edge in proportion to its
+   * weight among its entity's edges, an edge of any other kind weighing 1; `weights: false` weighs every edge 1. A seed
+   * the query doesn't reach is ignored, and none it reaches answers nothing. `hits()` answers each score, and `limit(n)`
+   * keeps the `n` highest.
+   */
+  rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: RankOptions): QueryBuilder<E, D>;
+  /**
+   * The query's entities by the scores a rank index holds, highest first, ties in query order: PageRank declared ahead
+   * of time and kept current by every commit, so reading it needs no walk. A query that starts from the index's types
+   * and keeps the first `n` with `limit(n)` costs `n`, not the graph. `hits()` answers each score, and `explain()` the
+   * bound on them. Every entity the query reaches must be one of the index's nodes, else `BATCH_INVALID`; an index no
+   * schema declares is `UNKNOWN_INDEX`. A newly declared index answers the same while its first build runs, costing what
+   * a `rank` does until it ends, which `explain()` reports as `building`; `whileBuilding: 'refuse'` throws `INDEX_BUILDING`
+   * instead
+   */
+  ranked(index: D['rankIndexes'], options?: RankedOptions): QueryBuilder<E, D>;
+  /**
+   * The query's entities in an order where each edge of the kinds between two of them, followed `out` unless
+   * `direction` says `in`, leads from an entity to a later one: with `blocks`, what blocks comes before what it blocks.
+   * The members of a cycle can't be ordered so, and stay together in query order where the cycle falls
+   * (`strongComponents` answers which they are). What the edges leave free keeps query order.
+   */
+  topological(kinds: D['relKinds'] | readonly D['relKinds'][], options?: { direction?: 'out' | 'in' }): QueryBuilder<E, D>;
+  /**
+   * The query's entities that share a neighbour with `to`, most alike first, ties in query order: an entity's
+   * neighbours are the far ends of its edges of the kinds, followed `out` unless `direction` says `in` or `both`,
+   * whether the query holds them or not. `measure` is `jaccard` unless it says `adamicAdar`. `to` itself, and an entity
+   * sharing nothing with it, aren't answered. `hits()` answers each score, and `limit(n)` keeps the `n` most alike.
+   * Unlike `like`, which ranks by embedding, this ranks by links.
+   */
+  similar(
+    to: EARS.EntityId,
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    options?: { direction?: EdgeDirection; measure?: SimilarityMeasure },
+  ): QueryBuilder<E, D>;
+  /**
+   * The query's weak components: its entities in groups joined by edges of the kinds between two of them, whichever way
+   * each points: each group's ids in query order, the largest group first, of two as large the one whose first entity
+   * comes first
+   */
+  weakComponents(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
+  /**
+   * The query's strong components: its entities in groups whose members each reach every other following the edges of
+   * the kinds between two of them in their direction, so an entity on no cycle is a group of its own and a larger group
+   * is a cycle. Each group's ids in query order, the largest group first, of two as large the one whose first entity
+   * comes first
+   */
+  strongComponents(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
+  /**
+   * The query's entities in Leiden communities by modularity over the edges of the kinds between two of them, whichever
+   * way each points: groups more densely linked inside than out, each connected, the largest first. A higher
+   * `resolution` (1 when not given) finds smaller communities, and 0 keeps each connected group whole. Leiden's order
+   * comes from `seed` (0), so the same data answers the same communities every time. A seed is a whole number from 0
+   * to 4294967295, and a resolution below 0 is refused. An edge of a kind declared `weighted` counts by its weight
+   * unless `weights` is false
+   */
+  communities(
+    kinds: D['relKinds'] | readonly D['relKinds'][],
+    options?: { resolution?: number; seed?: number; weights?: boolean },
+  ): EARS.EntityId<E>[][];
+  pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
+    fields: A,
+  ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]>)[];
+  /** The first entity's fields picked (a field it lacks left out), or undefined when the query reaches none */
+  pickOne<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
+    f: A,
+  ): ({ id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]>) | undefined;
+  /** The first entity's whole row (`pickAll`'s, `getRow`'s), or undefined when the query reaches none: `query.ids(id).pickOne()` is the live row with an id */
+  pickOne(): ShapeOf<D['shapes'], E> | undefined;
+  pickAll(): ShapeOf<D['shapes'], E>[];
+  orderBy(field: keyof ShapeOf<D['shapes'], E> & string, dir?: 'asc' | 'desc'): QueryBuilder<E, D>;
+  reverse(): QueryBuilder<E, D>;
+  limit(n: number): QueryBuilder<E, D>;
+  distinct(field?: keyof ShapeOf<D['shapes'], E> & string): QueryBuilder<E, D>;
+  /** The ids reached, by their value of `field`, each group in query order; `query.ids(ids)` queries a group on */
+  groupBy(field: keyof ShapeOf<D['shapes'], E> & string): Map<unknown, EARS.EntityId<E>[]>;
+  /**
+   * The entities the type's text index (its row rules' `search`) matches to `query`, most relevant first: words,
+   * every one of which matches; `"a phrase"`; `-word`, which no match holds; `field:word`; `a OR b`. After other
+   * steps it searches among the entities they reached
+   */
+  search(query: string, options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string>): QueryBuilder<E, D>;
+  /**
+   * The entities whose text, in a field of the type's trigram index (its row rules' `substrings`), holds `text`
+   * as it is written, or with `caseInsensitive` in any case: an error message, an id, a path. Unranked: the query keeps
+   * its order, and after other steps it filters the entities they reached
+   */
+  containing(text: string, options?: { caseInsensitive?: boolean }): QueryBuilder<E, D>;
+  /**
+   * The entities whose text, in a field of the type's trigram index, matches `pattern`, in Rust's `regex` syntax
+   * (`(?i)` ignores case), which has no look-around or backreferences: a pattern using them is refused
+   * (`PATTERN_INVALID`). Unranked, as `containing` is
+   */
+  matching(pattern: string): QueryBuilder<E, D>;
+  /**
+   * The `k` entities (10 unless given) whose embeddings in the type's vector index (its row rules' `embed`) are
+   * nearest `vector`, nearest first, each scored `1 / (1 + distance)` by its nearest chunk; after other steps, among the
+   * entities they reached. An entity whose chunks are pending is not found until they are embedded
+   */
+  near(vector: readonly number[], options?: { k?: number }): QueryBuilder<E, D>;
+  /** `near` the embedding the entity with `id` holds, itself excepted: more like it */
+  like(id: EARS.EntityId, options?: { k?: number }): QueryBuilder<E, D>;
+  /**
+   * The text index's matches to `query` and the vector index's nearest to `vector`, merged by reciprocal rank fusion:
+   * an entity both find ranks above one either finds alone. The `k` best (10 unless given)
+   */
+  hybrid(query: string, vector: readonly number[], options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string> & { k?: number }): QueryBuilder<E, D>;
+  /** The entities after `id` in the order so far: the page after one that ended at `id` */
+  after(id: EARS.EntityId): QueryBuilder<E, D>;
+  /**
+   * What the query's `search` (or `near`, `like`, `hybrid`, `rank` or `ranked`, whose hits hold no words) found in each entity it reaches: its score and matched words, with `highlights` where
+   * they are, and with `fields` its row's fields picked (`pick`'s)
+   */
+  hits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
+    options: { fields: A; highlights?: boolean },
+  ): Array<SearchHit<E> & { row: { id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]> }>;
+  hits(options?: { highlights?: boolean }): SearchHit<E>[];
+  /**
+   * `hits`, with what the query's `ranked` or `rank` says of their scores: a `ranked`'s `error`, the one number that tells
+   * a reader the index has fallen behind, without an `explain()` to ask. Refused (`NO_SEARCH`) for a query with neither
+   */
+  rankedHits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(
+    options: { fields: A },
+  ): { hits: Array<SearchHit<E> & { row: { id: EARS.EntityId<E> } & Pick<ShapeOf<D['shapes'], E>, A[number]> }>; bound: RankBound };
+  rankedHits(): { hits: SearchHit<E>[]; bound: RankBound };
+  ids(): EARS.EntityId<E>[];
+  /**
+   * The query's ids, with how the database found them: each stage of its plan — the index it read, the entities it
+   * visited and kept, its time. Refused (`NOT_EXPLAINABLE`) for a query with a `where` given a function, which runs
+   * outside the database's plan
+   */
+  explain(): QueryExplanation<E>;
+  count(): number;
+  /** The first entity's id, or undefined when the query reaches none */
+  first(): EARS.EntityId<E> | undefined;
+  /** The last entity's id, or undefined when the query reaches none */
+  last(): EARS.EntityId<E> | undefined;
+  exists(): boolean;
+  map<T>(fn: (id: EARS.EntityId<E>) => T): T[];
+  forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, D>;
+  reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
+}
+
+// ─── WriteBuilder fluent interface ─────────────────────────────────────
+
+/**
+ * How `link` makes an edge. What a kind's edges are held to — no cycle through it, at most one edge between two
+ * entities — is the kind's declaration (`RelationRules`), not a link's
+ */
+export interface LinkOptions {
+  /**
+   * Stored on the edge, replacing what an edge with the same identity held: the values of the kind's `key` fields are
+   * part of that identity, and the rest of the info is what the edge holds
+   */
+  info?: unknown;
+}
+
+/**
+ * How `link` makes an edge of a kind declared `weighted`: its info, and its weight, from 0 to 2^960, 1 when none is
+ * given. A weight is what the edge holds, never what identifies it: linking the same identity again with another
+ * weight replaces it. A keyed kind's edges of one pair, one per key value, add their weights in a `rank`
+ */
+export interface WeightedLinkOptions extends LinkOptions {
+  /** The edge's weight, from 0 to 2^960; 1 when none is given */
+  weight?: number;
+}
+
+/** What `updateRelation` changes of a relation: its ends, its info, its weight (a kind declared `weighted`'s) */
+export interface RelationPatch {
+  /** The end the relation moves from; it must exist when the unit commits */
+  source?: EARS.EntityId;
+  /** The end the relation moves to; it must exist when the unit commits */
+  target?: EARS.EntityId;
+  /** The edge's info, in place of what it holds */
+  info?: unknown;
+  /** The edge's weight, for a kind declared `weighted`: from 0 to 2^960 */
+  weight?: number;
+}
+
+/** What `create` is given besides the type */
+/**
+ * The engine's own fields a created row may carry beside its fields, none of which a field can be named: its id and
+ * its times, for an import keeping the ones it had
+ */
+export interface RowIdentity {
+  /** The new entity's id, in place of a generated one; one already in use is refused */
+  id?: EARS.EntityId;
+  /** When it was created, in place of now: an import keeping an original time */
+  createdAt?: number;
+  /** When it last changed, in place of its creation time: an import keeping an original time */
+  updatedAt?: number;
+}
+
+/**
+ * The short code a created row may bring as identity, in place of the next number — an import keeping the code it
+ * had: for a declared shape, its own `shortCode` type (`ShortCode<prefix>`), so another type's code fails to compile,
+ * and no such key when the shape has no short code; any string for an undeclared type. The engine holds every one to
+ * the type's `<prefix>-<n>` and to no other entity holding it at runtime
+ */
+export type ShortCodeIdentity<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S]
+    ? (ShapeOf<S, E> extends { shortCode?: infer C } ? { shortCode?: C } : {})
+    : { shortCode?: string };
+
+/** What `write` is given besides the entity */
+export interface WriteOptions {
+  /**
+   * Whether the builder's attribute writes stamp `updatedAt` (they do by default). `false` is for a write that is no
+   * edit of the entity — when it was last viewed, a position kept for later.
+   */
+  touch?: boolean;
+}
+
+/**
+ * The fields a write may name: when `S` declares `E`'s shape, its declared fields but the engine's own
+ * (`RESERVED_ATTRIBUTES`), and any name otherwise (an id with no entity type, or an untyped write)
+ */
+export type WritableField<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S] ? Exclude<keyof ShapeOf<S, E> & string, (typeof RESERVED_ATTRIBUTES)[number]> : string;
+
+/**
+ * The fields a write may remove: a declared shape's optional writable fields, since removing a required one would
+ * leave a row its shape misdescribes (`set` replaces it); any name otherwise
+ */
+export type OptionalField<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S]
+    ? Extract<{ [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never }[keyof ShapeOf<S, E>], WritableField<S, E>>
+    : string;
+
+/** The fields a declared shape requires: its writable fields that aren't optional, which `create` takes up front */
+export type RequiredField<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S] ? Exclude<WritableField<S, E>, OptionalField<S, E>> : never;
+
+/**
+ * The row `create` writes: for a declared shape, every required field and any optional one, so a row read back has
+ * what its shape says it has; any fields otherwise (an undeclared type, or one known only at runtime). The engine's
+ * own fields, the short code among them, are not fields of a row: an import brings them as its identity
+ * (`RowIdentity`, `ShortCodeIdentity`)
+ */
+export type CreateFields<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S]
+    ? { [K in keyof ShapeOf<S, E> as K extends RequiredField<S, E> ? K : never]: ShapeOf<S, E>[K] }
+      & { [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K] }
+    : Record<string, unknown>;
+
+/** What `where(k, v)` matches field `K` against: a value, one element of a list field, or a predicate */
+export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> =
+  | ShapeOf<S, E>[K]
+  | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never)
+  | ((value: ShapeOf<S, E>[K]) => boolean);
+
+/** What a write may store under field `K`: the declared field's type when `S` declares `E`'s shape, anything otherwise */
+export type FieldValue<S extends EntityShapes, E extends string, K extends string> =
+  [E] extends [keyof S] ? (K extends keyof ShapeOf<S, E> ? ShapeOf<S, E>[K] : unknown) : unknown;
+
+/** An element of a declared list field (`T[]`), and anything for a field that isn't declared as one */
+export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
+
+/** Fields for a batch write: a declared shape's writable fields with their declared types, any fields otherwise */
+export type FieldValues<S extends EntityShapes, E extends string> =
+  [E] extends [keyof S]
+    ? { [K in keyof ShapeOf<S, E> as K extends (typeof RESERVED_ATTRIBUTES)[number] ? never : K]?: ShapeOf<S, E>[K] }
+    : Record<string, unknown>;
+
+/**
+ * The writes to one entity, from `create`, `upsert` or `write`. `E` and `D` type them: started from a
+ * declared entity type or an id tagged with one, a write names only the shape's declared fields and stores
+ * their declared types; from a plain id (or from `@elmdb/ears`) every write is unchecked. The attributes the engine owns (`id`,
+ * `entityType`, `shortCode`, `createdAt`, `updatedAt`, `role`, `trashedAt`) are refused by every attribute write, and
+ * each attribute write stamps `updatedAt` once per builder unless it was started with `{ touch: false }`.
+ *
+ * A relation is no entity, so a relation's id (`EARS.RelationId`) is not written through this builder:
+ * `updateRelation(id, { source?, target?, info? })` changes one and `removeRelation(id)` removes it.
+ */
+export interface WriteBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
+  /**
+   * Replaces the attribute's value with `v` (a list is one array value). `null` is a value; `undefined` is refused,
+   * since `delete(k)` is what removes an attribute
+   */
+  set<K extends WritableField<D['shapes'], E>>(k: K, v: FieldValue<D['shapes'], E, K>): WriteBuilder<E, D>;
+  /** `set` for each field, leaving one whose value is `undefined` as it is; refuses them all, writing none, when one is the engine's */
+  setMany(attrs: FieldValues<D['shapes'], E>): WriteBuilder<E, D>;
+  /** Appends `v` to the attribute's list, starting one when it has none; refuses a value that isn't a list */
+  append<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
+  /** Merges `v` into the attribute's object, or sets it when either isn't a plain object */
+  merge<K extends WritableField<D['shapes'], E>>(k: K, v: Partial<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
+  /** Removes the field; a declared shape's required fields can't be removed, only replaced with `set` */
+  delete(k: OptionalField<D['shapes'], E>): WriteBuilder<E, D>;
+  /** Removes the list's element at `index`; refuses a value that isn't a list */
+  removeAt(k: WritableField<D['shapes'], E>, index: number): WriteBuilder<E, D>;
+  /** Removes the list's first element equal to `v` (for an object, the first holding each of `v`'s fields) */
+  removeValue<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
+  /**
+   * Links this entity to `target`. An edge is identified by its ends and the values of its kind's `key` fields in its
+   * `info` (none: the ends alone, one edge a pair), so linking to an identity an edge holds updates that edge, keeping
+   * its id and its place: a given `info` replaces its info and a given `weight` its weight. A kind declared `weighted` takes a `weight`
+   * too (`WeightedLinkOptions`), which the compiler refuses for any other kind and the engine at runtime
+   * (`VALUE_INVALID`). A kind declared `acyclic` refuses an edge that would close a cycle through it (`CYCLE`).
+   */
+  link<K extends D['relKinds']>(
+    kind: K,
+    target: EARS.EntityId,
+    // Not distributed over K: a kind typed as a union of weighted and other kinds takes no weight, and one cast to
+    // `never` takes the options any kind could
+    options?: [K] extends [D['weightedKinds']] ? WeightedLinkOptions : LinkOptions,
+  ): WriteBuilder<E, D>;
+  /** Removes this entity's edges of the kind, to `target` only when given */
+  unlink(kind: D['relKinds'], target?: EARS.EntityId): WriteBuilder<E, D>;
+  /** Removes every edge from this entity */
+  unlinkAll(): WriteBuilder<E, D>;
+  grant(role: D['roles']): WriteBuilder<E, D>;
+  revoke(role: D['roles']): WriteBuilder<E, D>;
+  /** Grants the role here and revokes it from every other entity in `among` */
+  grantExclusive(role: D['roles'], among: readonly EARS.EntityId[]): WriteBuilder<E, D>;
+  /**
+   * Puts the entity in the trash at `at` (now by default), marking it `trashedAt`: it stays stored, with its
+   * edges, and queries reach it only through `query.withTrashed` and `query.trashed`. Trashing it again keeps
+   * the first time.
+   */
+  trash(at?: number): WriteBuilder<E, D>;
+  /** Takes the entity out of the trash */
+  restore(): WriteBuilder<E, D>;
+  /** Deletes the entity and every edge to or from it */
+  destroy(): void;
+  id(): EARS.EntityId<E>;
+  /** The entity's whole row as the builder's writes left it (`getRow`'s): what a `create` reads back */
+  row(): ShapeOf<D['shapes'], E>;
+}
