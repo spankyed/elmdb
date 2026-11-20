@@ -756,7 +756,7 @@ impl Database {
             }
             // A thread for what is queued, where none runs: work a stopped thread put back waits for one
             if let Some(builders) = self.builders_of(Arc::clone(&store))? {
-                builders.queue(Vec::new());
+                builders.start(Vec::new())?;
             }
             // Let go of before the wait: a close waits for every hold on the store but its own
             drop(store);
@@ -834,7 +834,7 @@ impl Database {
             }
             owed_before = Some((owed.clone(), sequence));
             if let Some(builders) = self.builders_of(store)? {
-                builders.queue(owed);
+                builders.start(owed)?;
             }
         }
         let failures = self.building.failures();

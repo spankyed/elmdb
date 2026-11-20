@@ -154,7 +154,8 @@ no thread building, the data having perhaps changed since, as the next open woul
 what holds a build up while the builder waits that out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller
 to make again; with `INDEX_BUILD_FAILED`, naming each, when a build failed; while a unit is open and there is work
 to build (`UNIT_OPEN`), since a build waits for the unit to end; in a listener running on the builder's thread
-(`CALLBACK_ACTIVE`); and with `BUILDS_STOPPED` where a close at exit gave up on the database, letting its builder go
+(`CALLBACK_ACTIVE`); with `THREAD_REFUSED` where the system won't start the builder's thread, the work staying
+queued for the next to start; and with `BUILDS_STOPPED` where a close at exit gave up on the database, letting its builder go
 unjoined in a process that is exiting, and something is left unbuilt, failed or not: nothing more is built there,
 reads of an unbuilt index walk the rows, and the next open tries to build it. The read of what is unbuilt is refused as any read is
 (`SCHEMA_CHANGED`, `READERS_FULL`). While another process's replacement of every row is not adopted the wait is
@@ -165,7 +166,8 @@ A database has one building from its open until it is dropped: a queue, what wai
 building starts a thread itself, where there is work, none runs and no close is under way, so whoever asks there
 are never two; a close stops it, and one that gives up leaves the work queued for the next. Work a thread was on as
 it was told to stop goes back to the head of the queue, so a stop loses none: a piece that was finished is built
-again to no effect. A schema change tells the building that what it builds to is changing, which takes its work away
+again to no effect. A piece whose build panics is that index's failure, with what the panic said, and the
+thread goes on to the next. A schema change tells the building that what it builds to is changing, which takes its work away
 and tells the piece under way to stop, and then what the schema it leaves has to build: a wait under way, or asked
 for between the two, waits through both, so its answer is for the schema the database holds as it returns. A close
 under way is waited through too: closed, the wait is told `CLOSED`, as one asked of a closed database is; left open

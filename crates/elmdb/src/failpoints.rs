@@ -118,6 +118,8 @@ pub(crate) mod points {
     pub const CLOSE_TAKEN: &str = "database::close_taken";
     /// Runs once a close that gives up has put the store back, before it queues again what is left to build
     pub const CLOSE_GAVE_UP: &str = "database::close_gave_up";
+    /// The system refuses to start the index builder's thread
+    pub const THREAD_SPAWN: &str = "builder::thread_spawn";
     /// Runs before a load publishes its staged database
     pub const LOAD_PUBLISH: &str = "dump::before_load_publish";
     /// A load's sync fails after its database is published

@@ -157,7 +157,8 @@ export declare class Database {
   changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
   /**
    * Blocks until every index waiting to be built is built, as the database says once the builder is idle, throwing
-   * `INDEX_BUILD_FAILED` when a build failed, `BUILDS_STOPPED` where a close at exit gave up and left builds, or
+   * `INDEX_BUILD_FAILED` when a build failed, `BUILDS_STOPPED` where a close at exit gave up and left builds,
+   * `THREAD_REFUSED` where the system won't start the builder's thread (call it again to start it), or
    * throws what holds a build up while the builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again
    * after a pause to wait on. Refused with a unit open while there is something to build (`UNIT_OPEN`): commit
    * or abort it, then wait. Throws `CLOSED` on a closed database, and `DATA_REPLACED` while

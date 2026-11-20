@@ -312,7 +312,9 @@ Opened by having both halves in one repository, each to be decided on a reading,
      - what that read transaction keeps from reuse is bounded: a write past the bound waits for a sync, and is refused
        with `SYNC_BEHIND` once that sync has failed, and `waitForIndexBuilds` throws `SYNC_BEHIND` or `READERS_FULL`
        when the builder is held (#151), and since #182 `CLOSED` on a closed database, where it returned, and
-       `DATA_REPLACED` while another process's replacement of every row is not adopted. apack's `admin.waitForIndexBuilds()`
+       `DATA_REPLACED` while another process's replacement of every row is not adopted; since #198 `BUILDS_STOPPED`
+       where a close at exit gave up and left builds, and `THREAD_REFUSED` where the system won't start the
+       builder's thread. apack's `admin.waitForIndexBuilds()`
        passes it through and is called by specs alone, none after a close (read at apack's `master` on 2026-11-19),
        so the changeset of the pin's move names the two codes and nothing else changes;
      - a writable open in another mode than a live writer's is refused with `MODE_MISMATCH` (#156), which apack's specs

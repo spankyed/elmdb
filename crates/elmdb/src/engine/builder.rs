@@ -9,6 +9,7 @@
 //! they wrote into.
 
 use std::collections::{HashMap, VecDeque};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -187,6 +188,15 @@ impl Core {
     fn claimed(&self) -> &Self {
         self.lock().running = true;
         self
+    }
+
+    /// Gives up a claim `claim_start` answered true for, its thread not started
+    fn unclaim(&self) {
+        let mut state = self.lock();
+        state.running = false;
+        holds(&state);
+        drop(state);
+        self.changed.notify_all();
     }
 
     /// Whether a thread runs, or is claimed and about to
@@ -428,7 +438,10 @@ impl Core {
             if let Work::Rank { name } = &work {
                 self.await_quiet(name, generation);
             }
-            let built = build(&work, &|| self.over(generation));
+            // A build that panics is that work's failure, as one that answers an error is: the thread goes on to the
+            // next, where the panic would end it with the work under way, and a close would meet the panic
+            let built = catch_unwind(AssertUnwindSafe(|| build(&work, &|| self.over(generation))))
+                .unwrap_or_else(|panic| Err(crate::Error::new(ErrorCode::IndexBuildFailed, panicked(&*panic))));
             let mut state = self.lock();
             // Work over rows another process has replaced isn't owed any more: adopting that queues what is. Nor is
             // work for what the builder built to when it was taken: what it failed on may be what replaced that
@@ -520,6 +533,16 @@ impl Core {
     }
 }
 
+/// What a panic said, for the failure of the build it ended
+fn panicked(panic: &(dyn std::any::Any + Send)) -> String {
+    let said = panic
+        .downcast_ref::<&str>()
+        .map(|said| (*said).to_owned())
+        .or_else(|| panic.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a value that isn't text".to_owned());
+    format!("the build panicked, saying: {said}")
+}
+
 /// How a build's chunk and a drain's commit: the database's own commit, which delivers to the watches it wrote into
 pub type Commits =
     Arc<dyn Fn(&mut dyn FnMut(&mut Txn<'_, '_>) -> crate::Result<bool>) -> crate::Result<bool> + Send + Sync>;
@@ -562,11 +585,14 @@ impl Building {
 
     /// Starts the thread where one is needed: there is work, no thread runs, and no close is under way. What it
     /// builds to is `target`'s, asked only where nothing is built to yet. The caller holds the schema for reading or
-    /// writing, which a close takes for writing to begin, so no close begins as this starts one
-    pub fn start(&self, target: impl FnOnce() -> Target) {
+    /// writing, which a close takes for writing to begin, so no close begins as this starts one.
+    ///
+    /// Refused where the system won't start a thread (`THREAD_REFUSED`): the claim is given up, the work stays
+    /// queued, and the next to ask starts one
+    pub fn start(&self, target: impl FnOnce() -> Target) -> crate::Result<()> {
         let mut handle = self.handle();
         if !self.core.claim_start() {
-            return;
+            return Ok(());
         }
         {
             let mut built_to = self.target();
@@ -577,12 +603,18 @@ impl Building {
         let core = Arc::clone(&self.core);
         #[cfg(test)]
         let forged = super::order::forged();
-        let thread = {
+        let spawned = {
             let core = Arc::clone(&core);
             let target = Arc::clone(&self.target);
-            std::thread::Builder::new()
-                .name("elmdb-index".to_owned())
-                .spawn(move || {
+            #[cfg(test)]
+            let refused = crate::failpoints::fails_here(crate::failpoints::points::THREAD_SPAWN);
+            #[cfg(not(test))]
+            let refused = false;
+            let builder = std::thread::Builder::new().name("elmdb-index".to_owned());
+            if refused {
+                Err(std::io::Error::other("injected thread spawn failure"))
+            } else {
+                builder.spawn(move || {
                     // A stamp forged by the thread that opened the database is this thread's too
                     #[cfg(test)]
                     super::order::forge(forged);
@@ -617,10 +649,24 @@ impl Building {
                         }
                     });
                 })
-                .expect("the index thread starts")
+            }
+        };
+        let thread = match spawned {
+            Ok(thread) => thread,
+            Err(refused) => {
+                self.core.unclaim();
+                return Err(crate::Error::new(
+                    ErrorCode::ThreadRefused,
+                    format!(
+                        "The system refused to start the index builder's thread ({refused}): what is left to build \
+                         stays queued, and is started by the next write or wait for the builds"
+                    ),
+                ));
+            }
         };
         // One that ended before this was started was given up already, and is let go of
         *handle = Some(thread);
+        Ok(())
     }
 
     pub fn queue(&self, indexes: impl IntoIterator<Item = Work>) {
@@ -1365,6 +1411,38 @@ mod tests {
         let state = core.lock();
         assert!(state.queue.is_empty(), "an order put off was queued again, to begin before its wait is over");
         assert!(state.later.iter().any(|(_, work)| *work == order));
+    }
+
+    #[test]
+    fn a_build_that_panics_is_its_work_s_failure_and_the_thread_goes_on() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let runner = running(&core, |work, _| {
+            let Work::Index { index, .. } = work else { unreachable!() };
+            if index == "a" {
+                panic!("the stand-in's own");
+            }
+            Ok(())
+        });
+        core.queue([index("a"), index("b")]);
+        assert!(matches!(core.waited(true), Waited::Idle));
+        let failures = core.lock().failures.clone();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].work, index("a"));
+        assert!(failures[0].message.contains("the stand-in's own"), "{}", failures[0].message);
+        // The thread went on to `b`, and still runs
+        assert!(core.running() && core.lock().queue.is_empty());
+        core.stop();
+        runner.join().expect("the thread ended as told, not with the build's panic");
+    }
+
+    #[test]
+    fn a_claim_given_up_lets_the_next_asker_claim() {
+        let core = Core::new(Box::new(SystemClock));
+        core.queue([index("a")]);
+        assert!(core.claim_start());
+        core.unclaim();
+        assert!(!core.running());
+        assert!(core.claim_start(), "a claim given up held the building");
     }
 
     #[test]
