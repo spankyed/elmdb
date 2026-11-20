@@ -199,17 +199,13 @@ fn a_builder_with_an_earlier_declaration_refuses_before_writing_index_entries() 
     // A building of its own, over this handle's store and the schema it holds, which is the earlier one
     let building = crate::engine::Building::default();
     building.queue([crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() }]);
-    let builder = crate::database::start_builder(
-        &building,
-        &db.store().unwrap(),
-        &db.engine_schema(),
-        &db.tracks,
-        &db.observing_schema(),
-    );
+    let (store, schema) = (db.store().unwrap(), db.engine_schema());
+    building.start(|| crate::database::target(&store, &schema, &db.tracks, &db.observing_schema()));
+    drop(store);
     assert!(matches!(building.wait(true), crate::engine::Waited::Idle));
     let failures = building.failures();
     // With what it built to, which holds the store the close below waits for
-    drop((builder, building));
+    building.stop();
     assert_eq!(failures.len(), 1);
     assert!(failures[0].message.contains("schema") && failures[0].message.contains("reopen"));
     db.close().unwrap();
@@ -297,7 +293,7 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
     let lookup = crate::engine::Work::Index { entity_type: "Task".into(), index: "lookup".into() };
     db.pause_builder();
     db.building.queue([lookup]);
-    assert!(db.builder().is_none());
+    assert!(!db.building.running());
     crate::failpoints::run_once_here(crate::failpoints::points::SCHEMA_RECOVERY, || {
         crate::failpoints::fail_once_here(crate::failpoints::points::INDEX_REFRESH)
     });
@@ -307,7 +303,7 @@ fn interrupted_index_work_resumes_when_schema_change_and_refresh_both_fail() {
     assert!(error.message.contains("refreshing index state also failed"));
     // Handed back, it is work for a thread, which the change starts: a wait would else read what is unbuilt and
     // build it itself, so the thread is what is asked after
-    assert!(db.builder().is_some(), "the change didn't hand back the work it took");
+    assert!(db.building.running(), "the change didn't hand back the work it took");
     db.wait_for_index_builds().unwrap();
     assert!(db.index_status().unwrap().iter().all(|index| index.built));
     assert_eq!(db.schema(), Some(schema("a")));
@@ -381,18 +377,18 @@ fn a_schema_change_starts_a_builder_for_what_it_leaves_and_none_for_nothing() {
     .unwrap();
     let options = OpenOptions { schema: Some(plain), syncs: false, ..Default::default() };
     let db = Database::open(dir.path(), options).unwrap();
-    assert!(db.builder().is_none(), "nothing to build");
+    assert!(!db.building.running(), "nothing to build");
     // A field's type, which leaves nothing to build over no entities
     let wider = Schema::from_json(&json!({"$schema":crate::schema::SCHEMA_LANGUAGE, "types":{"Task":{
         "fields":{"a":{"type":"string"},"b":{"type":"string"},"c":{"type":"string","optional":true}}
     }}}))
     .unwrap();
     db.set_schema(wider).unwrap();
-    assert!(db.builder().is_none(), "a change that left nothing to build started a builder");
+    assert!(!db.building.running(), "a change that left nothing to build started a builder");
     write(&db, vec![json!({"op":"create","type":"Task","id":"Task-0","fields":{"a":"match","b":"other"}})]).unwrap();
-    assert!(db.builder().is_none(), "a write that left the builder no work started none");
+    assert!(!db.building.running(), "a write that left the builder no work started none");
     db.set_schema(schema("a")).unwrap();
-    assert!(db.builder().is_some(), "a change that left an index to build started no builder");
+    assert!(db.building.running(), "a change that left an index to build started no builder");
     db.wait_for_index_builds().unwrap();
     db.close().unwrap();
 }

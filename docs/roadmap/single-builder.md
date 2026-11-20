@@ -17,6 +17,26 @@ of it, and the next design should name the thing it wants and not a proxy.
 and no other is started beside it. A wait for the builds builds nothing and answers as it would with nothing left
 to build, saying only what had failed, in a process that is exiting.
 
+**After it: the building owns its thread, and a wait's `Ok` is the database's.** The thread is started by the
+building itself, under its own lock, only where there is work, none runs and no close is under way, so the slot
+`database.rs` kept and the three places that started a thread into it are gone, and the model holds that two that
+ask start one. A thread told to stop puts the work it was on back at the head of the queue, so a stop loses none. A
+wait for the builds reads what is unbuilt once the builder is idle and answers `Ok` only where that is nothing but
+what failed or is put off; the one case in which nothing more will be built, a close at exit that gave up, is now
+refused (`BUILDS_STOPPED`). `Change` and `Closing` are `#[must_use]`, and the builder's state is checked against its
+invariants after every change of it in a debug build. The engine's model harness (`engine/tests/model`) gained a
+step that closes and gives up as the builder works, and checks after every step that every index is built.
+
+**What holding the schema's lock through a change costs writes.** Measured on 2026-11-19, Apple M1 Pro, release,
+60,000 rows, twenty schema changes 60 ms apart each interrupting the build of a value index over them, a writer
+setting one field in a loop beside them, three runs of each build alternated (the program is in the pull request
+that brought this). Before #195 (7f1d1e6) a write's p50 was 3.05 to 3.08 ms and its p99 3.46 to 3.56 ms, and a
+schema change's p50 5.9 to 6.4 ms. After this work, a write's p50 was 2.93 to 3.01 ms and its p99 7.04 to 7.16 ms,
+and a schema change's p50 5.3 to 5.5 ms. A schema change is faster, waiting for no thread; a write that lands during
+one waits for all of it where it used to slip in while the change waited for the old thread, so the slowest writes
+during schema changes take about twice as long. The middle of the distribution doesn't move. Schema changes are
+rare, and this was kept: letting go of the lock is the window every defect above came through.
+
 The rest of this note is the design as it was written, before it was built.
 
 The index builder is a thread that builds what a schema declares over the entities that predate it, and drains a

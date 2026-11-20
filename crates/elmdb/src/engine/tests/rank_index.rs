@@ -2883,7 +2883,7 @@ fn work_queued_as_a_close_waits_for_the_store_is_built_once_the_close_gives_up()
     let held = db.store().unwrap();
     assert!(!db.close_within(Some(std::time::Duration::from_millis(5))).unwrap());
     drop(held);
-    assert!(db.builder().is_some(), "the close that gave up started no thread for what was queued as it waited");
+    assert!(db.building.running(), "the close that gave up started no thread for what was queued as it waited");
     db.wait_for_index_builds().unwrap();
     assert!(db.building.pending().is_empty());
     db.close().unwrap();

@@ -336,7 +336,7 @@ fn a_wait_for_the_builds_takes_up_what_no_builder_was_left() {
     let built = || db.index_status().unwrap().iter().find(|s| s.index == "one").unwrap().built;
     assert!(!built());
     db.pause_builder();
-    assert!(db.builder().is_none());
+    assert!(!db.building.running());
     // Still unbuildable, the wait says so again; and of a builder that fails it a second time, once
     let failed = || {
         let failed = db.wait_for_index_builds().unwrap_err();
@@ -644,8 +644,8 @@ fn a_close_at_exit_that_gives_up_leaves_nothing_building_and_no_wait_waiting() {
     assert!(db.is_open());
     write(&db, vec![json!({ "op": "set", "id": "Note-2", "fields": { "kind": "other" } })]).unwrap();
     let waited = db.wait_for_index_builds();
-    assert!(db.builder().is_none(), "a thread was started in a process that is exiting");
-    assert_eq!(waited.map_err(|refused| refused.code), Err(ErrorCode::IndexBuildFailed), "what failed is still said");
+    // The index can be built now, and isn't: the wait says so, where it would answer `Ok` or what failed before
+    assert_eq!(waited.map_err(|refused| refused.code), Err(ErrorCode::BuildsStopped));
 }
 
 #[test]

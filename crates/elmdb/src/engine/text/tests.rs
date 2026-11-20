@@ -631,7 +631,7 @@ fn a_close_that_gives_up_leaves_an_unbuilt_index_being_built() {
     // Given up on while an operation holds the store: the database is open, and builds what is left
     assert!(!db.close_within(Some(std::time::Duration::from_millis(5))).unwrap());
     drop(held);
-    assert!(db.builder().is_some(), "the close queued what is left, which a wait would otherwise take up itself");
+    assert!(db.building.running(), "the close queued what is left, which a wait would otherwise take up itself");
     db.wait_for_index_builds().unwrap();
     assert_eq!(search(&db, "Message", "lmdb", json!({})), json!(["Message-3", "Message-1"]));
 }

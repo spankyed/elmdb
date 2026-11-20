@@ -144,25 +144,32 @@ walk answers. A search naming an index its type lacks, or none on a type with no
 (`UNKNOWN_INDEX`). A `search`, a `hybrid` or a `suggest` over a text index still being built is refused
 (`INDEX_BUILDING`): its terms and statistics are the answer, with no rows to walk in their place as a value or a trigram
 index's are, so read part way it would answer from the entities filed so far and say nothing of the rest.
-`waitForIndexBuilds` blocks until it is built. It is refused with what holds a build up while the builder waits that
-out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller to make again; with `INDEX_BUILD_FAILED`, naming
-each, when a build failed; while a unit is open, once the database has started its index builder (`UNIT_OPEN`),
-since a build waits for the unit to end; and in a listener running on the builder's thread (`CALLBACK_ACTIVE`). With
-no thread building, it reads what is unbuilt: nothing, and it answers at once; something, left by a schema change that
-failed part way or a thread stopped with work left, and it queues that, which starts a thread, and waits for it. That read is refused as
-any is (`SCHEMA_CHANGED`, `READERS_FULL`). While another process's replacement of every row is not adopted the wait
-is refused (`DATA_REPLACED`), since no build commits over rows that are gone. A read-only database builds nothing,
-and answers at once whatever is unbuilt, which `indexStatus` says. A database has one building from its open until it is dropped: a queue, what waits for it, and a
-thread started with the first work queued, stopped by a close and started again where the close gave up. A schema change
-tells it that what it builds to is changing, which takes its work away and tells the piece under way to stop, and
-then what the schema it leaves has to build: a wait under way, or asked for between the two, waits through both, so
-its answer is for the schema the database holds as it returns. A close stops the builder's thread with builds left for the next
-open, and a wait under way waits for the close to say what became of the database: closed, the wait is told `CLOSED`,
-as one asked of a closed database is; left open by a close that gave up, it goes on to the builds that close queues
-again, for a thread started then. A close at exit that gives up leaves the database open in a process that is
-exiting, with the builder's thread let go of unjoined: nothing more is built there, and a wait starts nothing and
-answers as it would with nothing left to build, saying only what had failed. It is the one case in which the wait's
-`Ok` doesn't mean built. The order a value index keeps of its
+`waitForIndexBuilds` blocks until it is built, and its `Ok` is the database's to give: once the builder is idle the
+wait reads what is unbuilt, and answers `Ok` only where that is nothing, but for builds that failed and an order's
+build that is put off (below). What is unbuilt and owed it queues, which starts a thread where none runs, and waits
+for again; a builder that runs that work twice, with nothing committed between, and leaves it unbuilt lists it as
+failed, which the wait then answers (`INDEX_BUILD_FAILED`, and `indexStatus` says so), since it and the database
+disagree. A build that failed is tried again by a wait asked with
+no thread building, the data having perhaps changed since, as the next open would try it. The wait is refused with
+what holds a build up while the builder waits that out (`SYNC_BEHIND`, `READERS_FULL`), the wait being for the caller
+to make again; with `INDEX_BUILD_FAILED`, naming each, when a build failed; while a unit is open and there is work
+to build (`UNIT_OPEN`), since a build waits for the unit to end; in a listener running on the builder's thread
+(`CALLBACK_ACTIVE`); and with `BUILDS_STOPPED` where a close at exit gave up on the database, letting its builder go
+unjoined in a process that is exiting, and something is left unbuilt, failed or not: nothing more is built there,
+reads of an unbuilt index walk the rows, and the next open tries to build it. The read of what is unbuilt is refused as any read is
+(`SCHEMA_CHANGED`, `READERS_FULL`). While another process's replacement of every row is not adopted the wait is
+refused (`DATA_REPLACED`), since no build commits over rows that are gone. A read-only database builds nothing, and
+answers at once whatever is unbuilt, which `indexStatus` says.
+
+A database has one building from its open until it is dropped: a queue, what waits for it, and its thread. The
+building starts a thread itself, where there is work, none runs and no close is under way, so whoever asks there
+are never two; a close stops it, and one that gives up leaves the work queued for the next. Work a thread was on as
+it was told to stop goes back to the head of the queue, so a stop loses none: a piece that was finished is built
+again to no effect. A schema change tells the building that what it builds to is changing, which takes its work away
+and tells the piece under way to stop, and then what the schema it leaves has to build: a wait under way, or asked
+for between the two, waits through both, so its answer is for the schema the database holds as it returns. A close
+under way is waited through too: closed, the wait is told `CLOSED`, as one asked of a closed database is; left open
+by a close that gave up, it goes on to the builds that close queues again. The order a value index keeps of its
 strings is waited for with its index, but for a build of it that was put off (above, An order of strings is kept beside the
 index's entries): one that another elmdb's writes ended, which the builder begins again after a wait that doubles, to ten
 minutes at most. That is decided, not left over. Nothing is refused for such an order: the index is built, a read
