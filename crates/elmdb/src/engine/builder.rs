@@ -457,6 +457,9 @@ impl Core {
                 state.queue.push_front(work.clone());
             }
             state.active = None;
+            // mutant-skip: replace && with \|\| in Core::run
+            // Either busy with work queued; where they differ the thread goes on, and its next turn sets it from the
+            // queue before it sleeps, a waiter seeing it busy only in between
             state.busy = !state.stopping && !state.queue.is_empty();
             if state.stopping {
                 return ended(state);
@@ -1314,6 +1317,54 @@ mod tests {
         let state = core.lock();
         assert_eq!(state.failures.len(), 1, "a build stopped part way cleared what had failed");
         assert!(!state.busy && state.active.is_none(), "the thread ended with work under way");
+    }
+
+    #[test]
+    #[should_panic(expected = "work under way with the builder said to be idle")]
+    fn the_state_s_invariants_are_checked_in_a_debug_build() {
+        holds(&State { active: Some(index("a")), running: true, ..State::default() });
+    }
+
+    #[test]
+    fn a_failure_listed_by_hand_replaces_the_work_s_own_and_leaves_the_others() {
+        let building = Building::default();
+        building.fail(index("a"), "first".to_owned());
+        building.fail(index("b"), "other".to_owned());
+        building.fail(index("a"), "second".to_owned());
+        let failed: Vec<(Work, String)> =
+            building.failures().into_iter().map(|failure| (failure.work, failure.message)).collect();
+        assert_eq!(failed, [(index("b"), "other".to_owned()), (index("a"), "second".to_owned())]);
+    }
+
+    #[test]
+    fn a_wait_waits_through_a_change_with_no_thread_running() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        core.begin_change();
+        let (tell, told) = std::sync::mpsc::channel();
+        let waiting = Arc::clone(&core);
+        let waiter = std::thread::spawn(move || tell.send(matches!(waiting.waited(true), Waited::Idle)).unwrap());
+        assert!(told.recv_timeout(Duration::from_millis(200)).is_err(), "the wait answered with a change under way");
+        core.end_change(Vec::new(), true);
+        assert_eq!(told.recv_timeout(Duration::from_secs(5)), Ok(true));
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn work_put_off_as_its_thread_is_stopped_is_not_queued_again() {
+        let core = Arc::new(Core::new(Box::new(SystemClock)));
+        let within = Arc::clone(&core);
+        let order = Work::Order { entity_type: "Task".to_owned(), index: "a".to_owned() };
+        let put = order.clone();
+        let runner = running(&core, move |_, _| {
+            within.put_off(&put);
+            within.begin_close();
+            Ok(())
+        });
+        core.queue([order.clone()]);
+        runner.join().unwrap();
+        let state = core.lock();
+        assert!(state.queue.is_empty(), "an order put off was queued again, to begin before its wait is over");
+        assert!(state.later.iter().any(|(_, work)| *work == order));
     }
 
     #[test]
