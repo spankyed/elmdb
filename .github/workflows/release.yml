@@ -22,18 +22,25 @@ name: release
 #   4. on a tag, drafts a GitHub release holding both packages, the SBOMs and `SHA256SUMS`. Publishing the draft is the
 #      owner's, and so is publishing to npm, one command a package from the draft's files: `npm publish
 #      elmdb-<version>.tgz`, then `npm publish elmdb-ears-<version>.tgz`, whose manifest makes it public. Nothing here
-#      publishes to npm: no workflow holds an npm token or a registry login, and the version job fails one that would.
+#      publishes to npm: no workflow holds an npm token or a registry login, and the version job fails one that would;
+#   5. on each push to main, publishes the commit's two packages and their `SHA256SUMS` as a GitHub prerelease tagged
+#      `pkg-<commit>`, the full hash, which a consumer installs by URL instead of building elmdb from a checkout:
+#      `npm install https://github.com/<repository>/releases/download/pkg-<commit>/elmdb-<version>.tgz` and EARS' URL
+#      beside it. CI makes these itself, as the owner agreed (2026-11-21); they are prereleases, never the latest
+#      release, and a run for the same commit again replaces their files. A dispatch naming a commit on main, such as
+#      one from before this step, builds that commit and publishes its prerelease the same way.
 #
 # A pull request that changes this workflow, its smoke, the binding's package or loader, EARS' manifest or build
 # script, a crate's manifest or build
 # script, the workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs
 # steps 1 to 3 and keeps what they made as the run's artifacts, as do a dispatch on any branch and each Monday's run on
-# main. A change to Rust source alone, such as one calling a newer libc function, is first built here by that Monday's
-# run or by a tag. None checks the version or drafts a release, and none
-# gates a merge.
+# main. A change to Rust source alone, such as one calling a newer libc function, is first built here by each push to
+# main. None checks the tag or drafts a release, only a push to main or a dispatch naming a commit publishes a
+# prerelease, and none gates a merge.
 on:
   push:
     tags: ['v*']
+    branches: [main]
   pull_request:
     paths:
       - .github/workflows/release.yml
@@ -54,16 +61,25 @@ on:
   schedule:
     - cron: '0 6 * * 1'
   workflow_dispatch:
+    inputs:
+      commit:
+        description: A commit on main to build and publish as the prerelease pkg-<commit>; empty builds the branch alone
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
+# A pull request's runs replace each other; every other run is its commit's own, so that two pushes to main in a row
+# each publish their prerelease rather than the second cancelling the first while it waits
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || inputs.commit || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
+  # The commit built: a dispatch's `commit`, else the event's own
+  COMMIT: ${{ inputs.commit || github.sha }}
 
 jobs:
   version:
@@ -72,8 +88,16 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
+      commit: ${{ steps.version.outputs.commit }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COMMIT }}
+      # The workflows this run is made of, which a dispatch for an older commit takes from the branch dispatched on
+      - uses: actions/checkout@v4
+        with:
+          path: running
+          sparse-checkout: .github/workflows
       - id: version
         name: the tag names the version Cargo.toml and both packages hold
         run: |
@@ -92,12 +116,16 @@ jobs:
             exit 1
           fi
           echo "version=$cargo" >> "$GITHUB_OUTPUT"
+          # The full hash, which names the prerelease, whether a dispatch gave it whole or abbreviated
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       # **Nothing publishes to npm from CI.** The packages are publishable, `private` off, so that the owner's publish is
       # one command each; what keeps a workflow from publishing them is that none can: none runs npm's publishing
-      # commands, holds a token for a registry or asks for the OIDC token npm's trusted publishing takes
+      # commands, holds a token for a registry or asks for the OIDC token npm's trusted publishing takes. The GitHub
+      # prereleases below are written with the run's own `GITHUB_TOKEN`, which reaches no registry. It reads both the
+      # workflows this run is made of and the built commit's
       - name: no workflow publishes to npm
         run: |
-          if grep -nE '^[^#]*(npm[[:space:]]+(publish|unpublish|dist-tag|deprecate)|NPM_TOKEN|NODE_AUTH_TOKEN|registry-url|id-token:)' .github/workflows/*.yml; then
+          if grep -nE '^[^#]*(npm[[:space:]]+(publish|unpublish|dist-tag|deprecate)|NPM_TOKEN|NODE_AUTH_TOKEN|registry-url|id-token:)' running/.github/workflows/*.yml .github/workflows/*.yml; then
             echo "::error::A workflow above could publish to npm; publishing is the owner's, by hand"
             exit 1
           fi
@@ -120,6 +148,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COMMIT }}
       # No Rust cache: four of the seven builds run in containers, which a cache on the runner doesn't reach, and each
       # release build saved would push out the caches ci.yml's runs on main read
       #
@@ -219,6 +249,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COMMIT }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22.17.0
@@ -302,6 +334,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ env.COMMIT }}
           sparse-checkout: scripts/release-smoke.mjs
           sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
@@ -379,3 +412,61 @@ jobs:
           case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
           gh release create "$GITHUB_REF_NAME" out/* --verify-tag --draft "${prerelease[@]}" --title "elmdb $VERSION" \
             --notes "elmdb $VERSION for Node.js and Electron. \`elmdb-$VERSION.tgz\` is the npm package with the prebuilt binding for macOS (arm64, x64), Linux (x64, arm64; glibc 2.28 and later, and musl) and Windows x64, and \`elmdb-ears-$VERSION.tgz\` is EARS, \`@elmdb/ears\`, the fluent TypeScript API over it, which installs beside that binding alone: \`npm install <the binding's URL> <EARS' URL>\`. Each \`elmdb.<platform>.cdx.json\` is the CycloneDX SBOM of that platform's binary. \`SHA256SUMS\` holds every file's hash."
+
+  # **Each commit on main as packages a consumer installs by URL**: the two that were packed and installed on every
+  # target above, and their `SHA256SUMS`, on a prerelease `pkg-<commit>` at that commit. Its files are what the smoke
+  # installed, so a consumer's lockfile pins the bytes CI tested. A rerun for the commit replaces them; the release
+  # stays a prerelease and never becomes the latest, which only a `v<version>` the owner publishes is
+  commit-packages:
+    name: publish pkg-<commit>
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.commit != '')
+    needs: [version, pack, smoke]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: built
+      - name: Sums
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          mkdir out
+          cp "built/elmdb-$VERSION.tgz" "built/elmdb-ears-$VERSION.tgz" out/
+          (cd out && sha256sum -- * | tee SHA256SUMS)
+      - name: Publish pkg-${{ needs.version.outputs.commit }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          COMMIT: ${{ needs.version.outputs.commit }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          # A dispatch publishes a commit main holds and no other: one only a branch holds is no package of elmdb's
+          status=$(gh api "repos/$GH_REPO/compare/$COMMIT...main" --jq .status)
+          if [ "$status" != ahead ] && [ "$status" != identical ]; then
+            echo "::error::$COMMIT is not on main (main is $status of it); only main's commits are published"
+            exit 1
+          fi
+          tag="pkg-$COMMIT"
+          notes="elmdb $VERSION as built from $COMMIT on main, for a consumer to install by URL: \`elmdb-$VERSION.tgz\` is the binding with its prebuilt binary for each of the seven targets, and \`elmdb-ears-$VERSION.tgz\` is EARS, \`@elmdb/ears\`, which installs beside it: \`npm install https://github.com/$GH_REPO/releases/download/$tag/elmdb-$VERSION.tgz https://github.com/$GH_REPO/releases/download/$tag/elmdb-ears-$VERSION.tgz\`. \`SHA256SUMS\` holds both files' hashes. Made by CI for each commit on main; not a release of elmdb."
+          # A release that can't be read is not one that isn't there: only gh's `release not found` is taken as none
+          if gh release view "$tag" --json tagName > /dev/null 2> view.err; then
+            gh release upload "$tag" out/* --clobber
+            gh release edit "$tag" --prerelease --latest=false --title "elmdb $VERSION at ${COMMIT:0:7}" --notes "$notes"
+            # Files a rerun no longer makes, such as the packages of a version since changed at this commit, go
+            for held in $(gh release view "$tag" --json assets --jq '.assets[].name'); do
+              if [ ! -f "out/$held" ]; then gh release delete-asset "$tag" "$held" --yes; fi
+            done
+          elif grep -q 'release not found' view.err; then
+            gh release create "$tag" out/* --target "$COMMIT" --prerelease --latest=false \
+              --title "elmdb $VERSION at ${COMMIT:0:7}" --notes "$notes"
+          else
+            cat view.err
+            exit 1
+          fi
+          gh release view "$tag" --json url,isPrerelease,assets --jq '{url, isPrerelease, assets: [.assets[].name]}'
