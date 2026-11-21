@@ -1,5 +1,5 @@
-// Packs the binding as npm installs it: one package per target, `elmdb-<platform>`, holding that target's `.node` file
-// and the notices its binary's licenses ask a redistribution to carry, and the binding's own package, `elmdb`, which
+// Packs the binding as npm installs it: one package per target, `@elmdb/binding-<platform>`, holding that target's
+// `.node` file and the notices its binary's licenses ask a redistribution to carry, and the binding's own package, `elmdb`, which
 // holds the loader, the declarations, the thin client and the protocol and no binary, and names each platform package as
 // an optional dependency. npm installs the one whose `os`, `cpu` and `libc` match the machine and skips the rest, so a
 // consumer gets one binary; napi's loader (`crates/elmdb-node/index.js`) takes the binary from its own directory first,
@@ -14,9 +14,14 @@
 //
 // **The source manifest names versions; a commit's prerelease names URLs.** The versions are what the npm registry
 // would resolve, once the packages are published there. Nothing is yet: with `--release-url`, `pack` writes the
-// binding's package alone, naming each platform package by `<url>/elmdb-<platform>-<version>.tgz`, the release the
+// binding's package alone, naming each platform package by `<url>/elmdb-binding-<platform>-<version>.tgz`, the release the
 // platform packages are attached to beside it (`pkg-<commit>`), so installing the binding by its URL installs that
 // commit's binary for the machine and nothing else, and the lockfile records each URL with its integrity.
+//
+// **The platform packages are scoped**, `napi.packageName` naming them `@elmdb/binding-<platform>`, which napi's
+// generated loader requires. Only the scope's owner can publish under `@elmdb`, so no one else can publish a package
+// by one of these names, which an install of elmdb would fetch as its optional dependency and load: an unscoped
+// name, not yet on the registry, anyone could.
 import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -29,7 +34,7 @@ export const BINDING_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)
 
 /**
  * Each target the binding is built for, by the name napi's loader gives its platform (`elmdb.<platform>.node`, and the
- * package `elmdb-<platform>`), with the `os`, `cpu` and `libc` npm installs that package on. A target missing here is
+ * package `@elmdb/binding-<platform>`), with the `os`, `cpu` and `libc` npm installs that package on. A target missing here is
  * one this script can't pack, and `check` says so rather than leaving it out
  */
 export const TARGETS = {
@@ -45,14 +50,21 @@ export const TARGETS = {
 /** The notices each binary goes with: the crates', LMDB's, the Rust standard library's and elmdb's own licenses */
 export const NOTICES = ['LICENSE-MIT', 'LICENSE-APACHE', 'LICENSE-OPENLDAP', 'THIRD-PARTY-NOTICES', 'COPYRIGHT-rust-library.html'];
 
-/** The file `npm pack` writes for an unscoped package */
-export const tarballName = (name, version) => `${name}-${version}.tgz`;
+/** The scope every platform package is published under, which only elmdb's owner can publish in */
+export const SCOPE = '@elmdb/';
+
+/** The file `npm pack` writes for a package: a scope's `@` dropped and its `/` made a `-` */
+export const tarballName = (name, version) => `${name.replace(/^@/, '').replace('/', '-')}-${version}.tgz`;
 
 /** The platforms of the manifest's `napi.targets`, in its order; a target this script doesn't know fails */
 export function platforms(manifest) {
+  const prefix = manifest.napi?.packageName;
+  if (typeof prefix !== 'string' || !prefix.startsWith(SCOPE)) {
+    throw new Error(`package.json's napi.packageName is ${JSON.stringify(prefix)}, and is to name a package in ${SCOPE}`);
+  }
   return (manifest.napi?.targets ?? []).map((target) => {
     if (!TARGETS[target]) throw new Error(`package.json's napi.targets names ${target}, which release-pack.mjs doesn't know`);
-    return { target, ...TARGETS[target], name: `${manifest.name}-${TARGETS[target].platform}` };
+    return { target, ...TARGETS[target], name: `${prefix}-${TARGETS[target].platform}` };
   });
 }
 
@@ -90,6 +102,7 @@ export function platformManifest(main, { platform, os: osName, cpu, libc, name }
     main: binary,
     files: [binary, ...NOTICES],
     engines: main.engines,
+    publishConfig: { access: 'public' },
   };
 }
 
@@ -110,7 +123,7 @@ function npm(args, cwd) {
 }
 
 function packStaged(name, files, manifest, out) {
-  const stage = fs.mkdtempSync(path.join(os.tmpdir(), `${name}-`));
+  const stage = fs.mkdtempSync(path.join(os.tmpdir(), `${name.replace(/^@/, '').replace('/', '-')}-`));
   for (const [to, from] of files) {
     fs.mkdirSync(path.dirname(path.join(stage, to)), { recursive: true });
     fs.copyFileSync(from, path.join(stage, to));

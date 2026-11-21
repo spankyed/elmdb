@@ -638,14 +638,17 @@ and so is `models.yml` (Concurrency models). `model-mutants.yml` runs each week 
 ## Releases
 
 A release is npm packages at one version: the binding, `elmdb`; a platform package for each of its targets,
-`elmdb-<platform>`, holding that target's binary; and EARS, `@elmdb/ears`, whose peer `elmdb` names that version
+`@elmdb/binding-<platform>`, holding that target's binary; and EARS, `@elmdb/ears`, whose peer `elmdb` names that version
 exactly, so npm installs EARS beside that binding and no other. The binding's package holds no binary: it names each
 platform package as an optional dependency at exactly its version, and npm installs the one whose `os`, `cpu` and, on
 Linux, `libc` match the machine and skips the others, so an install holds one binary rather than seven. napi's loader
 takes the binary from the binding's own directory first, where an in-repo build leaves it, and else from the platform
-package. `cargo xtask check-versions`, which `ci.yml`'s repo job and `pre-push` run, fails unless the workspace's
+package. The platform packages are in elmdb's own npm scope, named by `napi.packageName` in the binding's
+`package.json`, from which napi's generated loader takes the names it requires: only the scope's owner can publish
+there, while an unscoped name the registry doesn't hold yet anyone could publish, and an install of elmdb would fetch
+that package as its optional dependency and load its binary. `cargo xtask check-versions`, which `ci.yml`'s repo job and `pre-push` run, fails unless the workspace's
 `Cargo.toml`, both `package.json`s, EARS' peer and each of the binding's optional dependencies hold one version, and
-unless those name the platform package of every target in `napi.targets` and nothing else.
+unless those name the platform package of every target in `napi.targets` and nothing else, in the `@elmdb` scope.
 
 A tag `v<version>` starts `.github/workflows/release.yml`, and the tag is the owner's. It fails unless the tag names
 that version, which its first job reads again from the four places, and unless no workflow runs npm's publishing
@@ -661,7 +664,7 @@ each of `package.json`'s seven `napi.targets` on a runner of that OS and archite
 - the Windows one with the C runtime linked in (`+crt-static`), as Node's own is. A check of its imports fails on the
   Visual C++ redistributable's `VCRUNTIME140.dll`, which a dynamically linked build needs and many machines lack.
 
-`scripts/release-pack.mjs` packs each binary into its platform package, `elmdb-<platform>-<version>.tgz`, with the
+`scripts/release-pack.mjs` packs each binary into its platform package, `elmdb-binding-<platform>-<version>.tgz`, with the
 notices `check-notices` holds to the lockfile, and the binding, without a binary, into `elmdb-<version>.tgz`; the
 platform packages' manifests are written from the binding's at pack time, so none is committed. It writes each
 target's CycloneDX SBOM with cargo-cyclonedx, `elmdb.<platform>.cdx.json`, and builds EARS' `dist` from the checkout
@@ -678,7 +681,7 @@ every file the run would upload; a draft missing one, which a run that failed wh
 release that can't be read, other than one that isn't there, fails the draft rather than counting as none.
 
 Publishing the draft is the owner's, and so is publishing to npm, from the draft's files, which are what the smoke
-installed: `npm publish` of each `elmdb-<platform>-<version>.tgz`, then `npm publish elmdb-<version>.tgz`, whose
+installed: `npm publish` of each `elmdb-binding-<platform>-<version>.tgz`, then `npm publish elmdb-<version>.tgz`, whose
 optional dependencies name them, then `npm publish elmdb-ears-<version>.tgz`, whose `publishConfig` makes the scoped
 package public. No package is `private`, which would make npm refuse the publish; nothing in CI publishes them. Until
 the platform packages are published, an install of the workspace asks the registry for them and, finding none, skips
@@ -687,7 +690,7 @@ them, as npm does an optional dependency it can't fetch; `package-lock.json` rec
 ### Each commit's packages
 
 Each push to `main` runs the build, the pack and every target's smoke for that commit, and then publishes its
-packages, `elmdb-<version>.tgz`, each `elmdb-<platform>-<version>.tgz` and `elmdb-ears-<version>.tgz`, with their
+packages, `elmdb-<version>.tgz`, each `elmdb-binding-<platform>-<version>.tgz` and `elmdb-ears-<version>.tgz`, with their
 `SHA256SUMS`, as a GitHub prerelease tagged `pkg-<commit>`, the commit's full hash. The binding's tarball there is
 packed again with its optional dependencies naming the platform packages' tarballs on that same prerelease by URL,
 rather than by version, which no registry holds yet; the source manifest keeps the versions, for npm. A consumer, apack

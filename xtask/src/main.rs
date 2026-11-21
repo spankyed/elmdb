@@ -745,7 +745,7 @@ fn version_mismatches(workspace: &str, binding: &serde_json::Value, ears: &serde
     problems
 }
 
-/// Each target's platform package, by the name napi's loader requires it by (`elmdb-<platform>`), as
+/// Each target's platform, which names its package `<napi.packageName>-<platform>` as napi's loader requires it, as
 /// `scripts/release-pack.mjs`'s `TARGETS` names them
 const PLATFORMS: [(&str, &str); 7] = [
     ("aarch64-apple-darwin", "darwin-arm64"),
@@ -758,13 +758,22 @@ const PLATFORMS: [(&str, &str); 7] = [
 ];
 
 /// What of the binding's `optionalDependencies` doesn't name each of its `napi.targets`' platform package, and only
-/// those, at exactly `version`
+/// those, at exactly `version`. The platform packages are named in elmdb's own npm scope (`napi.packageName`), where
+/// only its owner can publish: an unscoped name not yet on the registry anyone could publish, and an install of elmdb
+/// would fetch that stranger's package as its optional dependency and load its binary
 fn platform_package_mismatches(version: &str, binding: &serde_json::Value) -> Vec<String> {
     let mut problems = Vec::new();
     let mut expected = Vec::new();
+    let prefix = binding["napi"]["packageName"].as_str().filter(|name| name.starts_with("@elmdb/"));
+    let Some(prefix) = prefix else {
+        return vec![format!(
+            "crates/elmdb-node/package.json's `napi.packageName` is {}, and is to name a package in the `@elmdb` scope",
+            binding["napi"]["packageName"]
+        )];
+    };
     for target in binding["napi"]["targets"].as_array().into_iter().flatten() {
         match PLATFORMS.iter().find(|(triple, _)| target.as_str() == Some(triple)) {
-            Some((_, platform)) => expected.push(format!("elmdb-{platform}")),
+            Some((_, platform)) => expected.push(format!("{prefix}-{platform}")),
             None => problems.push(format!(
                 "crates/elmdb-node/package.json's `napi.targets` names {target}, which has no platform package"
             )),
@@ -968,12 +977,15 @@ mod tests {
     #[test]
     fn the_pair_is_held_to_the_workspace_version_and_the_peer_to_exactly_it() {
         let workspace = "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\nversion = \"0.1.0\"\n\n[x]\nversion = \"9.9.9\"\n";
-        let binding = serde_json::json!({ "version": "0.1.0" });
+        let binding = serde_json::json!({ "version": "0.1.0", "napi": { "packageName": "@elmdb/binding" } });
         let ears = |version: &str, peer: serde_json::Value| serde_json::json!({ "version": version, "peerDependencies": { "elmdb": peer } });
         assert_eq!(version_mismatches(workspace, &binding, &ears("0.1.0", "0.1.0".into())), Vec::<String>::new());
         // Each of the three told apart, a range is not the version, and a missing peer is named
-        let mismatches =
-            version_mismatches(workspace, &serde_json::json!({ "version": "0.2.0" }), &ears("0.1.1", "^0.1.0".into()));
+        let mismatches = version_mismatches(
+            workspace,
+            &serde_json::json!({ "version": "0.2.0", "napi": { "packageName": "@elmdb/binding" } }),
+            &ears("0.1.1", "^0.1.0".into()),
+        );
         assert_eq!(mismatches.len(), 3, "{mismatches:?}");
         assert!(mismatches[0].starts_with("crates/elmdb-node/package.json's `version` is \"0.2.0\""), "{mismatches:?}");
         assert!(mismatches[1].starts_with("packages/ears/package.json's `version` is \"0.1.1\""), "{mismatches:?}");
@@ -989,17 +1001,22 @@ mod tests {
 
     #[test]
     fn each_target_has_its_platform_package_at_exactly_the_version_and_nothing_else_is_named() {
-        let binding = |targets: serde_json::Value, optional: serde_json::Value| serde_json::json!({ "napi": { "targets": targets }, "optionalDependencies": optional });
+        let binding = |targets: serde_json::Value, optional: serde_json::Value| serde_json::json!({ "napi": { "packageName": "@elmdb/binding", "targets": targets }, "optionalDependencies": optional });
         let targets = serde_json::json!(["aarch64-apple-darwin", "x86_64-unknown-linux-musl"]);
-        let both = serde_json::json!({ "elmdb-darwin-arm64": "0.1.0", "elmdb-linux-x64-musl": "0.1.0" });
+        let both =
+            serde_json::json!({ "@elmdb/binding-darwin-arm64": "0.1.0", "@elmdb/binding-linux-x64-musl": "0.1.0" });
         assert_eq!(platform_package_mismatches("0.1.0", &binding(targets.clone(), both)), Vec::<String>::new());
         // A range, a missing package, one no target builds and a target with no platform package are each named
-        let wrong = serde_json::json!({ "elmdb-darwin-arm64": "^0.1.0", "elmdb-linux-x64-gnu": "0.1.0" });
+        let wrong =
+            serde_json::json!({ "@elmdb/binding-darwin-arm64": "^0.1.0", "@elmdb/binding-linux-x64-gnu": "0.1.0" });
         let problems = platform_package_mismatches("0.1.0", &binding(targets, wrong));
         assert_eq!(problems.len(), 3, "{problems:?}");
-        assert!(problems[0].contains("`optionalDependencies.elmdb-darwin-arm64` is \"^0.1.0\""), "{problems:?}");
-        assert!(problems[1].contains("`optionalDependencies.elmdb-linux-x64-musl` is null"), "{problems:?}");
-        assert!(problems[2].contains("elmdb-linux-x64-gnu` is the package of no target"), "{problems:?}");
+        assert!(
+            problems[0].contains("`optionalDependencies.@elmdb/binding-darwin-arm64` is \"^0.1.0\""),
+            "{problems:?}"
+        );
+        assert!(problems[1].contains("`optionalDependencies.@elmdb/binding-linux-x64-musl` is null"), "{problems:?}");
+        assert!(problems[2].contains("@elmdb/binding-linux-x64-gnu` is the package of no target"), "{problems:?}");
         let unknown = platform_package_mismatches(
             "0.1.0",
             &binding(serde_json::json!(["riscv64gc-unknown-linux-gnu"]), serde_json::json!({})),
@@ -1009,9 +1026,18 @@ mod tests {
         // No optional dependencies at all is every target's package missing
         let none = platform_package_mismatches(
             "0.1.0",
-            &serde_json::json!({ "napi": { "targets": ["x86_64-apple-darwin"] } }),
+            &serde_json::json!({ "napi": { "packageName": "@elmdb/binding", "targets": ["x86_64-apple-darwin"] } }),
         );
         assert_eq!(none.len(), 1, "{none:?}");
+        // Platform packages outside elmdb's scope, or with no name given, which napi takes from the package's own, are
+        // refused whatever the optional dependencies hold
+        for name in [serde_json::json!("elmdb"), serde_json::Value::Null, serde_json::json!("@other/binding")] {
+            let unscoped = serde_json::json!({ "napi": { "packageName": name, "targets": ["x86_64-apple-darwin"] },
+                "optionalDependencies": { "elmdb-darwin-x64": "0.1.0" } });
+            let refused = platform_package_mismatches("0.1.0", &unscoped);
+            assert_eq!(refused.len(), 1, "{refused:?}");
+            assert!(refused[0].contains("`napi.packageName`"), "{refused:?}");
+        }
     }
 
     #[test]

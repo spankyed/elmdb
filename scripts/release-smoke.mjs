@@ -1,7 +1,7 @@
 // The binding and EARS installed as a user installs them, into an empty project on the platform this runs on, and a
 // database run through each:
 //
-//   node scripts/release-smoke.mjs <elmdb-x.y.z.tgz> <elmdb-ears-x.y.z.tgz> <elmdb-<platform>-x.y.z.tgz>...
+//   node scripts/release-smoke.mjs <elmdb-x.y.z.tgz> <elmdb-ears-x.y.z.tgz> <elmdb-binding-<platform>-x.y.z.tgz>...
 //   node scripts/release-smoke.mjs <elmdb's URL> <EARS' URL>
 //
 // The binding's package holds no binary: it names one platform package per target as an optional dependency, and npm
@@ -24,22 +24,22 @@ const [tarball, earsTarball, ...platformTarballs] = process.argv.slice(2);
 const isUrl = (spec) => /^https:\/\//.test(spec ?? '');
 const specs = [tarball, earsTarball, ...platformTarballs];
 if (!specs.every((spec) => spec && (isUrl(spec) || fs.existsSync(spec))) || platformTarballs.some(isUrl)) {
-  console.error('usage: node scripts/release-smoke.mjs <elmdb-x.y.z.tgz | URL> <elmdb-ears-x.y.z.tgz | URL> [<elmdb-<platform>-x.y.z.tgz>...]');
+  console.error('usage: node scripts/release-smoke.mjs <elmdb-x.y.z.tgz | URL> <elmdb-ears-x.y.z.tgz | URL> [<elmdb-binding-<platform>-x.y.z.tgz>...]');
   process.exit(2);
 }
 const resolved = (spec) => (isUrl(spec) ? spec : path.resolve(spec));
 
-// The platform package napi's loader requires on this machine: `elmdb-<platform>-<arch>`, with the C library on Linux
-// and the toolchain on Windows
+// The platform package napi's loader requires on this machine: `@elmdb/binding-<platform>-<arch>`, with the C library
+// on Linux and the toolchain on Windows
 const libc = process.platform !== 'linux' ? '' : process.report.getReport().header.glibcVersionRuntime ? '-gnu' : '-musl';
-const expected = `elmdb-${process.platform}-${process.arch}${libc}${process.platform === 'win32' ? '-msvc' : ''}`;
+const platform = `binding-${process.platform}-${process.arch}${libc}${process.platform === 'win32' ? '-msvc' : ''}`;
+const expected = `@elmdb/${platform}`;
 
-// Each platform tarball's package, `elmdb-<platform>`, by its file name: `npm pack`'s `<name>-<version>.tgz`
+// Each platform tarball's package, `@elmdb/binding-<platform>`, as its own manifest names it
 const overrides = Object.fromEntries(
   platformTarballs.map((file) => {
-    const name = path.basename(file).match(/^(.+?)-\d+\.\d+\.\d+[^/]*\.tgz$/)?.[1];
-    if (!name) throw new Error(`${file} isn't named as npm packs a package`);
-    return [name, `file:${path.resolve(file).replaceAll('\\', '/')}`];
+    const manifest = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/package.json'], { encoding: 'utf8' }));
+    return [manifest.name, `file:${path.resolve(file).replaceAll('\\', '/')}`];
   }),
 );
 if (platformTarballs.length > 0 && !(expected in overrides)) {
@@ -59,7 +59,10 @@ execFileSync('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error', '
 });
 
 // This platform's package and no other's, and no binary in the binding's own package
-const installed = fs.readdirSync(path.join(project, 'node_modules')).filter((name) => /^elmdb-/.test(name));
+const installed = [
+  ...fs.readdirSync(path.join(project, 'node_modules')).filter((name) => /^elmdb-/.test(name)),
+  ...fs.readdirSync(path.join(project, 'node_modules', '@elmdb')).filter((name) => /^binding-/.test(name)).map((name) => `@elmdb/${name}`),
+];
 if (installed.length !== 1 || installed[0] !== expected) {
   throw new Error(`npm installed [${installed.join(', ')}] beside elmdb, and this machine's platform package is ${expected}`);
 }

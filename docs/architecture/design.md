@@ -167,7 +167,7 @@ The binding's package opens only these paths (its `package.json`'s `exports`): `
 declarations; `elmdb/client` and `elmdb/client.js`, the thin client; `elmdb/protocol/<Name>` and
 `elmdb/protocol/<Name>.js`, the generated types, which are declarations alone and resolve for a type import only;
 `elmdb/protocol/schema-1.json`, the schema's JSON Schema; and `elmdb/package.json`. The `.node` binaries are not in
-it: each target's is in its own package, `elmdb-<platform>`, which the binding names as an optional dependency, so npm
+it: each target's is in its own package, `@elmdb/binding-<platform>`, which the binding names as an optional dependency, so npm
 installs the machine's alone, and which the loader alone requires (`testing.md`, Releases). EARS' are `@elmdb/ears`
 and `@elmdb/ears/database` (`ears.md`). The two are released as a pair at one version, the workspace's, which EARS'
 peer names exactly (`cargo xtask check-versions`; `testing.md`, Releases).
