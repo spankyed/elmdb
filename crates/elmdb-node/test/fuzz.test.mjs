@@ -110,7 +110,7 @@ test('arguments of the wrong type to every method throw rather than crash', (t) 
   const targets = [
     ['write', db], ['read', db], ['bulkLoad', db], ['backup', db], ['replaceWith', db], ['rebuild', db],
     ['purge', db], ['renameType', db], ['renameField', db], ['renameRelation', db],
-    ['write', unit], ['read', unit], ['savepoint', unit], ['rollbackTo', unit], ['release', unit],
+    ['write', unit], ['read', unit], ['savepoint', unit], ['rollbackTo', unit], ['release', unit], ['releaseChecked', unit],
   ];
   for (let seed = 1; seed <= 200; seed++) {
     const r = rng(seed);

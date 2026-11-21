@@ -76,7 +76,9 @@ export interface Ears {
   /**
    * Runs `fn` as one unit: if it throws, every write it made is undone; if it returns, its writes commit together.
    * Reads inside see its own writes. `fn` must be synchronous, and a unit inside another commits into it. A
-   * `durable` unit is on disk when it returns, rather than with the database's next sync.
+   * `durable` unit is on disk when it returns, rather than with the database's next sync. A `checked` unit inside
+   * another is held as it ends to what a commit checks, that every relation it wrote has both its ends, and fails alone;
+   * the outermost unit is checked as it commits, whatever it says.
    */
   transact<T>(fn: () => T, options?: UnitOptions): T;
   /** Whether `name` is an entity type the engine's schema declares */

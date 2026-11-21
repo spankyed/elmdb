@@ -577,7 +577,9 @@ The operations:
   info, its weight) and remove one, destroy, take a label (the next `<base> <n>` of a type), and embed (a caller's vector
   for a chunk, answered `stale` if its text changed).
 - **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
-  it, and `unit.release(depth)` keeps its writes in the unit around it, as EARS' nested `transact` does. A savepoint
+  it, and `unit.release(depth)` keeps its writes in the unit around it, as EARS' nested `transact` does.
+  `unit.releaseChecked(depth)` is `release` once the checks deferred since the savepoint pass, and they are not made
+  again at the commit; one that fails undoes the savepoint instead, alone, and is thrown. A savepoint
   is an undo log of each key's previous value, so rolling one back costs what it wrote. A write that has just read a
   key hands the log what it read, so the log reads it again only where the write didn't: a field write reads what the
   field held once, and the entity's place once for all the indexes covering it (`engine/tests/field_writes.rs` counts

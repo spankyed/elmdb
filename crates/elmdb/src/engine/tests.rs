@@ -1151,6 +1151,58 @@ mod units {
     }
 
     #[test]
+    fn a_savepoint_released_checked_fails_alone_on_what_it_deferred_and_is_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+        let mut unit = db.begin().unwrap();
+        unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })])).unwrap();
+        let depth = unit.savepoint().unwrap();
+        // A link to a target no entity has: its check waits
+        unit.write(&batch(vec![
+            json!({ "op": "set", "id": "Task-1", "fields": { "b": 1 } }),
+            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-9" }),
+        ]))
+        .unwrap();
+        assert_eq!(unit.release_checked(depth).unwrap_err().code, ErrorCode::NoSuchEntity);
+        assert_eq!(unit.savepoint().unwrap(), depth, "refused, it was closed");
+        // Everything since it went, its check included, and nothing before it
+        unit.commit(false).unwrap();
+        let r = row(&db, "Task-1").unwrap();
+        assert_eq!((r["a"].clone(), r.get("b").cloned()), (json!(1), None));
+        assert_eq!(edges(&db), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_savepoint_released_checked_is_held_to_what_it_deferred_and_not_to_what_was_deferred_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+        let mut unit = db.begin().unwrap();
+        // Deferred before any savepoint: the unit's own, to a target written last
+        unit.write(&batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-3" })]))
+            .unwrap();
+        let depth = unit.savepoint().unwrap();
+        // Inside it, a link whose target is written after the link
+        unit.write(&batch(vec![
+            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+            json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+        ]))
+        .unwrap();
+        let deferred = |unit: &mut crate::Unit| unit.read_with(|t| Ok(t.state.checks.len())).unwrap();
+        assert_eq!(deferred(&mut unit), 2);
+        unit.release_checked(depth).unwrap();
+        assert_eq!(deferred(&mut unit), 1, "the one it passed is settled, and the unit's own still waits");
+        // A depth no savepoint is open at closes nothing and checks nothing, the unit's loose link included
+        unit.release_checked(depth).unwrap();
+        unit.release_checked(0).unwrap();
+        assert_eq!(deferred(&mut unit), 1);
+        unit.write(&batch(vec![json!({ "op": "create", "type": "Task", "id": "Task-3" })])).unwrap();
+        unit.commit(false).unwrap();
+        assert_eq!(edges(&db).len(), 2);
+    }
+
+    #[test]
     fn a_released_savepoint_is_undone_with_the_unit_around_it() {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);

@@ -175,9 +175,9 @@ fn apply_all(t: &mut Txn<'_, '_>, batch: &Batch) -> Result<BatchResult> {
     Ok(BatchResult { results })
 }
 
-/// The checks a unit deferred to its commit
-fn run_checks(t: &Txn<'_, '_>) -> Result<()> {
-    for check in &t.state.checks {
+/// The checks a unit deferred, from the one at `from` on: all of them as it commits
+fn run_checks(t: &Txn<'_, '_>, from: usize) -> Result<()> {
+    for check in &t.state.checks[from..] {
         match check {
             Check::Ends { relation, via } => relations::check_ends(t, relation, via)?,
         }
@@ -1072,7 +1072,7 @@ impl Database {
                 let mut state = UnitState::new(logging);
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 let results = apply_all(&mut t, batch)?;
-                run_checks(&t)?;
+                run_checks(&t, 0)?;
                 vector::flush(&mut t)?;
                 let waiting = work_at_commit(&mut t)?;
                 store.deposit(std::mem::take(&mut state.edges));
@@ -1338,11 +1338,37 @@ impl Unit {
         Ok(())
     }
 
+    /// Closes the savepoint at `depth` as `release` does, once the checks deferred since it pass; one that fails
+    /// undoes everything since the savepoint, closing it, and is what this answers. So what a savepoint left
+    /// inconsistent is refused where it can be undone alone, rather than with the whole unit at its commit. A depth
+    /// no savepoint is open at closes nothing and checks nothing, as `release` closes nothing.
+    ///
+    /// A check that passed is not made again at the commit. A relation can't lose an end after it: destroying an
+    /// entity removes its relations (`relations::remove_all_of`), and moving a relation defers a check of its own
+    pub fn release_checked(&mut self, depth: usize) -> Result<()> {
+        let mut t = self.view(0.0)?;
+        let from = t.state.checks_from(depth);
+        match run_checks(&t, from) {
+            Ok(()) => {
+                t.state.checks.truncate(from);
+                t.release(depth);
+                Ok(())
+            }
+            Err(error) => {
+                // As a write's rollback: a unit whose rollback failed can't go on
+                if t.rollback_to(depth).is_err() {
+                    self.poisoned = Some(error.clone());
+                }
+                Err(error)
+            }
+        }
+    }
+
     /// Commits the unit, after its deferred checks; a check that fails aborts the whole unit. `durable` waits for the
     /// commit's sync
     pub fn commit(mut self, durable: bool) -> Result<ChangeSet> {
         let checked = self.view(0.0).and_then(|mut t| {
-            run_checks(&t)?;
+            run_checks(&t, 0)?;
             vector::flush(&mut t)?;
             work_at_commit(&mut t)
         });
