@@ -247,6 +247,11 @@ export declare class Unit {
   rollbackTo(depth: number): void
   /** Closes the savepoint at `depth`, keeping its writes */
   release(depth: number): void
+  /**
+   * Makes the checks deferred since the savepoint at `depth` now, throwing what one refuses and leaving the
+   * savepoint open: the commit makes them again
+   */
+  checkSince(depth: number): void
   /** Commits the unit after its deferred checks, answering msgpack bytes of its `ChangeSet`; a failed check aborts it */
   commit(durable?: boolean | undefined | null): Buffer
   /** Ends the unit, keeping nothing of it */

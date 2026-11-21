@@ -1151,6 +1151,46 @@ mod units {
     }
 
     #[test]
+    fn a_savepoint_asked_makes_the_checks_deferred_since_it_and_is_rolled_back_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+        let mut unit = db.begin().unwrap();
+        unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })])).unwrap();
+        let outer = unit.savepoint().unwrap();
+        // A link to a target no entity has: its check waits
+        unit.write(&batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-9" })]))
+            .unwrap();
+        let inner = unit.savepoint().unwrap();
+        unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "b": 1 } })])).unwrap();
+        unit.check_since(inner).unwrap();
+        assert_eq!(unit.check_since(outer).unwrap_err().code, ErrorCode::NoSuchEntity, "the link was deferred since it");
+        assert_eq!(unit.check_since(0).unwrap_err().code, ErrorCode::NoSuchEntity, "and since the unit began");
+        // Refused, it is still open, and rolls back with what it held and nothing before it
+        unit.rollback_to(outer).unwrap();
+        unit.check_since(0).unwrap();
+        unit.commit(false).unwrap();
+        let r = row(&db, "Task-1").unwrap();
+        assert_eq!((r["a"].clone(), r.get("b").cloned()), (json!(1), None));
+        assert_eq!(edges(&db), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_depth_no_savepoint_is_open_at_asks_for_every_check_and_a_passed_one_is_made_again_at_the_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+        let mut unit = db.begin().unwrap();
+        unit.write(&batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-9" })]))
+            .unwrap();
+        let depth = unit.savepoint().unwrap();
+        unit.check_since(depth).unwrap();
+        assert_eq!(unit.check_since(depth + 1).unwrap_err().code, ErrorCode::NoSuchEntity);
+        unit.release(depth).unwrap();
+        assert_eq!(unit.commit(false).unwrap_err().code, ErrorCode::NoSuchEntity, "asking a savepoint settled nothing");
+    }
+
+    #[test]
     fn a_released_savepoint_is_undone_with_the_unit_around_it() {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);

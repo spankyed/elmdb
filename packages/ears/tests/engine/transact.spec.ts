@@ -142,6 +142,44 @@ describe('a unit inside another', () => {
     expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'outer' });
   });
 
+  it('left unchecked, lets a link to no entity through, and the outer one fails with it as it commits', () => {
+    expect(() => e.transact(() => {
+      e.write(other).set('title', 'outer');
+      e.transact(() => e.write(task).link('blocks', 'Task-nowhere' as Id));
+    })).toThrow(expect.objectContaining({ code: 'NO_SUCH_ENTITY' }));
+    expect(committed()).toBe(0);
+    expect(e.getAttr(other, 'title')).toBe('b');
+  });
+
+  it('checked, fails alone on a link to no entity: its writes are undone and the outer commits its own', () => {
+    e.transact(() => {
+      e.write(other).set('title', 'outer');
+      expect(() => e.transact(() => {
+        e.write(task).set('title', 'inner');
+        e.write(task).link('blocks', 'Task-nowhere' as Id);
+      }, { checked: true })).toThrow(expect.objectContaining({ code: 'NO_SUCH_ENTITY' }));
+      expect(e.getAttr(task, 'title')).toBe('a');
+    });
+    expect(committed()).toBe(1);
+    expect([e.getAttr(task, 'title'), e.getAttr(other, 'title')]).toEqual(['a', 'outer']);
+    expect(e.findRelations({ source: task, kind: 'blocks' })).toEqual([]);
+  });
+
+  it('checked, is asked only for what it wrote: an end written later inside it is there, and the outer\'s own link waits', () => {
+    const later = 'Task-later' as Id;
+    e.transact(() => {
+      // The outer links to an entity it creates last: no unit inside it is asked about that
+      e.write(other).link('blocks', later);
+      e.transact(() => {
+        e.write(task).link('blocks', 'Task-inside' as Id);
+        e.create('Task', { id: 'Task-inside' as Id }).set('title', 'inside');
+      }, { checked: true });
+      e.create('Task', { id: later }).set('title', 'later');
+    });
+    expect(committed()).toBe(1);
+    expect(e.findRelations({ kind: 'blocks' }).map((found) => found.target).sort()).toEqual(['Task-inside', 'Task-later']);
+  });
+
   it('that throws, having held every write the outer made, leaves the outer nothing to commit', () => {
     const sequence = e.lastCommit();
     e.transact(() => {

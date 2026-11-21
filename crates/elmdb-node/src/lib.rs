@@ -874,6 +874,13 @@ impl Unit {
         self.run("Unit.release", |unit| unit.open()?.release(depth as usize).map_err(to_js))
     }
 
+    /// Makes the checks deferred since the savepoint at `depth` now, throwing what one refuses and leaving the
+    /// savepoint open: the commit makes them again
+    #[napi]
+    pub fn check_since(&mut self, depth: u32) -> Result<(), Code> {
+        self.run("Unit.checkSince", |unit| unit.open()?.check_since(depth as usize).map_err(to_js))
+    }
+
     /// Commits the unit after its deferred checks, answering msgpack bytes of its `ChangeSet`; a failed check aborts it
     #[napi]
     pub fn commit<'env>(&mut self, env: &'env Env, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {

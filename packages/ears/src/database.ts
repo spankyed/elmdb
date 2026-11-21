@@ -26,6 +26,12 @@ import { createOperationObservation, type EarsOperationObserver } from './observ
 export interface UnitOptions {
   /** On disk when `transact` returns, rather than with the database's next sync */
   durable?: boolean;
+  /**
+   * For a unit inside another: what the database leaves to check until a unit commits, that both ends of a relation
+   * exist, is checked of this unit's writes as it ends, so one that fails is undone alone and throws here rather than
+   * failing the outermost unit as it commits. The commit checks again
+   */
+  checked?: boolean;
 }
 
 /** An elmdb unit held open across calls (`elmdb`'s `Unit`) */
@@ -35,6 +41,8 @@ export interface EarsUnit {
   savepoint(): number;
   rollbackTo(depth: number): void;
   release(depth: number): void;
+  /** Makes the checks deferred since the savepoint at `depth` now, throwing what one refuses */
+  checkSince(depth: number): void;
   commit(durable?: boolean | null): Uint8Array;
   /** What the unit has changed so far: msgpack of elmdb's `ChangeSet` */
   pendingChanges(): Uint8Array;
@@ -516,6 +524,11 @@ export function createConnection(
         throw new Error('transact() takes a synchronous function: an await inside it would split the unit');
       }
       if (outermost && unit && hook && !hookPaused) hook.run();
+      if (!outermost && options?.checked && unit && level.savepoint !== undefined) {
+        const held = unit;
+        const depth = level.savepoint;
+        crossing(() => held.checkSince(depth));
+      }
     } catch (error) {
       levels.pop();
       const held = unit;

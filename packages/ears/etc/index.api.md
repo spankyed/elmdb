@@ -434,6 +434,7 @@ export interface EarsUnit {
     abort(): void;
     changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
     checkpoint(name: string): Uint8Array | null;
+    checkSince(depth: number): void;
     // (undocumented)
     commit(durable?: boolean | null): Uint8Array;
     // (undocumented)
@@ -1037,6 +1038,7 @@ export type TypeName<T extends string> = T extends `${string}-${string}` ? never
 
 // @public
 export interface UnitOptions {
+    checked?: boolean;
     durable?: boolean;
 }
 

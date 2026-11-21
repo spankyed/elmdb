@@ -248,7 +248,8 @@ Held by the types and the specs, which say more than a rule over names could:
 - **Units.** `transact(fn, { durable? })` runs `fn` as one unit of the database, opened at its first write, so a
   reader sees all of it or none and a unit that writes nothing commits nothing. Writes inside it read their own
   writes. If `fn` throws, the unit is aborted and keeps nothing; if it returns, it commits. A unit inside another is a
-  savepoint. `durable: true` commits with a sync rather than leaving it to group commit. An `async fn` is refused,
+  savepoint, and with `checked: true` is held as it ends to the one thing a commit checks, that each relation it wrote
+  has both its ends, so that it fails alone rather than with the outermost. `durable: true` commits with a sync rather than leaving it to group commit. An `async fn` is refused,
   since an `await` would split the unit. `admin.clear()` inside a unit is refused too. Outside a unit each write is its
   own unit, committed as it returns.
 - **Typed facades.** `defineEars<Schema>(engine)` returns `query`, `create`, `upsert`, `write`, `transact`, `newId`

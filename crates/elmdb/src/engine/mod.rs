@@ -175,9 +175,9 @@ fn apply_all(t: &mut Txn<'_, '_>, batch: &Batch) -> Result<BatchResult> {
     Ok(BatchResult { results })
 }
 
-/// The checks a unit deferred to its commit
-fn run_checks(t: &Txn<'_, '_>) -> Result<()> {
-    for check in &t.state.checks {
+/// The checks a unit deferred to its commit: those deferred since the savepoint at `depth`, or with 0 all of them
+fn run_checks(t: &Txn<'_, '_>, depth: usize) -> Result<()> {
+    for check in t.state.checks_since(depth) {
         match check {
             Check::Ends { relation, via } => relations::check_ends(t, relation, via)?,
         }
@@ -1072,7 +1072,7 @@ impl Database {
                 let mut state = UnitState::new(logging);
                 let mut t = Txn { txn, db, state: &mut state, schema: &schema, now };
                 let results = apply_all(&mut t, batch)?;
-                run_checks(&t)?;
+                run_checks(&t, 0)?;
                 vector::flush(&mut t)?;
                 let waiting = work_at_commit(&mut t)?;
                 store.deposit(std::mem::take(&mut state.edges));
@@ -1338,11 +1338,17 @@ impl Unit {
         Ok(())
     }
 
+    /// Makes the checks deferred since the savepoint at `depth` now, as the commit will make them again: what one
+    /// refuses is refused while the savepoint can still be rolled back alone. The savepoint stays open either way
+    pub fn check_since(&mut self, depth: usize) -> Result<()> {
+        run_checks(&self.view(0.0)?, depth)
+    }
+
     /// Commits the unit, after its deferred checks; a check that fails aborts the whole unit. `durable` waits for the
     /// commit's sync
     pub fn commit(mut self, durable: bool) -> Result<ChangeSet> {
         let checked = self.view(0.0).and_then(|mut t| {
-            run_checks(&t)?;
+            run_checks(&t, 0)?;
             vector::flush(&mut t)?;
             work_at_commit(&mut t)
         });
