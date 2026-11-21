@@ -624,8 +624,9 @@ where their database can't be fetched, `pre-push` says they weren't read and goe
 yanked from crates.io warns and doesn't fail, cargo-deny's default.
 
 Seven workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
-or its test, as no required check (Power loss). `release.yml` runs on a tag, each Monday, and on a pull request that
-changes the binding's package or the workspace's build configuration (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
+or its test, as no required check (Power loss). `release.yml` runs on a tag, on each push to `main`, where it publishes the
+commit's packages as a prerelease, each Monday, and on a pull request that changes the binding's package or the
+workspace's build configuration (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
 `mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
 LMDB (`scripts/lmdb-upstream.py`). `advisories.yml` runs each day and fails on a RustSec advisory against a crate in
 the lockfile (`cargo deny check advisories`), or an npm advisory of high severity or above against the binding's build
@@ -663,20 +664,41 @@ project on Node 22.17.0, with npm's strict peers, and runs a database through th
 binding's manifest through the binding's `exports`. The glibc targets install in AlmaLinux 8, at glibc 2.28, and the
 musl ones in Alpine; macOS on macOS 15 and Windows on Windows Server 2022. On a tag it drafts a GitHub release holding
 both packages, the SBOMs and `SHA256SUMS`. A tag whose release is published fails, and so does one whose draft holds
-every file the run would upload; a draft missing one, which a run that failed while uploading leaves, is made again.
+every file the run would upload; a draft missing one, which a run that failed while uploading leaves, is made again. A
+release that can't be read, other than one that isn't there, fails the draft rather than counting as none.
 
 Publishing the draft is the owner's, and so is publishing to npm, from the draft's files, which are what the smoke
 installed: `npm publish elmdb-<version>.tgz`, then `npm publish elmdb-ears-<version>.tgz`, whose `publishConfig` makes
 the scoped package public. Neither package is `private`, which would make npm refuse the publish; nothing in CI
 publishes them.
 
+### Each commit's packages
+
+Each push to `main` runs the build, the pack and every target's smoke for that commit, and then publishes its two
+packages, `elmdb-<version>.tgz` and `elmdb-ears-<version>.tgz`, with their `SHA256SUMS`, as a GitHub prerelease tagged
+`pkg-<commit>`, the commit's full hash. A consumer, apack among them, depends on a commit's packages by URL rather than
+building elmdb from a checkout:
+
+```bash
+npm install https://github.com/spankyed/elmdb/releases/download/pkg-<commit>/elmdb-0.1.0.tgz \
+  https://github.com/spankyed/elmdb/releases/download/pkg-<commit>/elmdb-ears-0.1.0.tgz
+```
+
+EARS' peer names the binding's version exactly, which the binding installed from its URL beside it holds, so npm's
+strict peers accept the pair; the lockfile records each URL and its integrity, and `npm ci` installs those bytes again.
+The files are the ones every target's smoke installed. CI makes these prereleases itself, with the run's own
+`GITHUB_TOKEN` and `contents: write` in that job alone, which the owner agreed to on 2026-11-21; the rule that no one
+tags or creates releases (`CLAUDE.md`) is for people and agents, and a `v<version>` release is still the owner's. A
+`pkg-<commit>` is a prerelease and never the latest release, so it isn't taken for one. A run again for the same
+commit replaces its files and removes any it no longer makes. A dispatch with `commit` set to a commit on `main`, such
+as one from before this, builds that commit and publishes its prerelease the same way; one naming a commit `main`
+doesn't hold fails. Nothing goes to npm.
+
 A pull request that changes the workflow, its smoke, the binding's package or loader, EARS' manifest or build, a
 crate's manifest or build script, the workspace's manifest, lockfile or Cargo configuration, the root package's tooling
-or the toolchain runs everything but the tag's check and the draft, and keeps the packages and SBOMs as the run's
-artifacts; so do a
-dispatch, on any branch, and a run each Monday on main. A change to Rust source alone is first built for every target
-by that Monday's run or by a tag. On a tag, a release that can't be read, other than one that isn't there, fails the
-draft rather than counting as none.
+or the toolchain runs everything but the tag's check, the draft and the prerelease, and keeps the packages and SBOMs as
+the run's artifacts; so do a dispatch, on any branch, with no `commit`, and a run each Monday on main. A change to Rust
+source alone is first built for every target by the push to `main` that merges it.
 
 What an SBOM lists is what Cargo builds that target's binary from. LMDB appears as `lmdb-master-sys`, the crate that
 compiles it, and the Rust standard library not at all; both are credited in the package's notices.

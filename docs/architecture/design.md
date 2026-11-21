@@ -173,8 +173,9 @@ peer names exactly (`cargo xtask check-versions`; `testing.md`, Releases).
 
 apack keeps what is its own: the database it binds and the operations over it (its SDK's `ears` entry), the schema
 assembled from its packs' manifests, codegen and the entity names it generates, its import and its backup, and the
-checks of its codegen over built packs. It consumes EARS as it consumes the binding, linked from its pinned checkout of
-this repository, once its switch from the copy it held is finished there (phase 2 of `../archive/roadmap/ears.md`).
+checks of its codegen over built packs. It consumes EARS as it consumes the binding, once its switch from the copy it held is finished there (phase 2 of
+`../archive/roadmap/ears.md`): from a pinned checkout of this repository, or from the two packages CI publishes for each
+commit on `main` as the prerelease `pkg-<commit>`, installed by URL (`testing.md`, Each commit's packages).
 
 `badd720` (2026-10-24) drew this line the other way, leaving the builders in apack because they changed with its
 vocabulary, until they settled and another program wanted them. The repositories' owner moved them here on
