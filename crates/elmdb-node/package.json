@@ -13,6 +13,28 @@
   "type": "commonjs",
   "main": "index.js",
   "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./client": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    },
+    "./client.js": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    },
+    "./protocol/schema-1.json": "./protocol/schema-1.json",
+    "./protocol/*.js": {
+      "types": "./protocol/*.d.ts"
+    },
+    "./protocol/*": {
+      "types": "./protocol/*.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "index.js",
     "index.d.ts",
