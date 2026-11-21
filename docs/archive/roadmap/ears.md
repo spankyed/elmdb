@@ -20,7 +20,12 @@ boundary with apack `../../architecture/design.md`.
   `2bebc9d` (#207's merge), apack's packages depend on the linked `@elmdb/ears`, and `packages/apack-ears` and what
   "Goes from apack" lists are deleted. `git log 92b4a7e387..<the deletion's parent> -- packages/apack-ears` in apack
   is empty. The packaged app's native smoke test opens a database and answers a query through the EARS it ships, and
-  apack's strict chain (unit, integration, native, acceptance and end-to-end) passed on the branch.
+  apack's strict chain (unit, integration, native, acceptance and end-to-end) passed on the branch. On a scratch copy
+  of the app packaged from `develop` at `375e00a563` with EARS' `msgpackr` removed, the smoke test fails on EARS'
+  probe (`Cannot find package 'msgpackr'`) while the binding's passes; on the app as built, both pass (2026-11-21).
+  apack's whole gate, `npm run chain` (native and end-to-end included; the chain has no `--e2e` flag, which phase 0's
+  done-when named), passed on `develop` at `375e00a563`, 32 steps in 3,890 s on a 10-core M1 Pro (2026-11-21), as did
+  its strict chain on GitHub.
 - **Phase 3 is done**: the documents name `@elmdb/ears`, and this plan is archived.
 
 EARS, the entity-attribute-relation system, is the fluent TypeScript API over an elmdb database: what a program
@@ -380,7 +385,7 @@ Opened by having both halves in one repository, each to be decided on a reading,
    - **The specs under "Written here, not moved" are written beside EARS.**
 
    Done when:
-   - apack's gate with its end-to-end suite added, `npm run chain -- --e2e`, passes on the new pin, with EARS using no
+   - apack's gate with its end-to-end suite added, `npm run chain`, which holds it, passes on the new pin, with EARS using no
      setup file from another package;
    - a database the old pin wrote, rebuilt as above, has no derived key missing, extra or differing in the new pin's
      `check()`, and a copy of it not rebuilt is shown with some (shown in `91c92659c1`: 854, and none after);
