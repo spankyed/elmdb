@@ -1,8 +1,10 @@
 name: release
 
-# **A release of elmdb: the npm package with a prebuilt binding for each of its seven targets, and an SBOM of each.**
-# Pushing a tag `v<version>` starts it, and the tag is the owner's (`CLAUDE.md`). The tag must name the version the
-# workspace's `Cargo.toml` and the binding's `package.json` both hold. The run:
+# **A release of elmdb: its two npm packages, the binding with a prebuilt binary for each of its seven targets and EARS
+# beside it, and an SBOM of each binary.** Pushing a tag `v<version>` starts it, and the tag is the owner's
+# (`CLAUDE.md`). The tag must name the version the workspace's `Cargo.toml`, the binding's `package.json` and EARS'
+# all hold, which EARS' peer `elmdb` names exactly (`cargo xtask check-versions`, which ci.yml runs on every change).
+# The run:
 #
 #   1. builds the binding for every target in `package.json`'s `napi.targets`, each on a runner of its own OS and
 #      architecture. The glibc Linux binaries are built in manylinux_2_28 (AlmaLinux 8), so they need no glibc past
@@ -12,13 +14,18 @@ name: release
 #      carry (`cargo xtask notices`), and writes each target's CycloneDX SBOM, `elmdb.<platform>.cdx.json`: every crate
 #      that target's binary is built from, as cargo-cyclonedx reads them from the lockfile, build scripts' dependencies
 #      left out. LMDB is there as `lmdb-master-sys`, the crate that compiles it; the Rust standard library is listed
-#      nowhere, and its notices ship in the package (`COPYRIGHT-rust-library.html`);
-#   3. installs that package into an empty project on each target, with the Node floor the package's `engines` names,
-#      and runs a database through it (`scripts/release-smoke.mjs`): the glibc ones in AlmaLinux 8, at glibc 2.28;
-#   4. on a tag, drafts a GitHub release holding the package, the SBOMs and `SHA256SUMS`. Publishing the draft is the
-#      owner's; nothing is published to npm.
+#      nowhere, and its notices ship in the package (`COPYRIGHT-rust-library.html`); and packs EARS, `@elmdb/ears`, as
+#      `elmdb-ears-<version>.tgz`, its `dist` built from this checkout;
+#   3. installs both packages into an empty project on each target, with the Node floor their `engines` name, and runs
+#      a database through the binding and another through EARS (`scripts/release-smoke.mjs`): the glibc ones in
+#      AlmaLinux 8, at glibc 2.28;
+#   4. on a tag, drafts a GitHub release holding both packages, the SBOMs and `SHA256SUMS`. Publishing the draft is the
+#      owner's, and so is publishing to npm, one command a package from the draft's files: `npm publish
+#      elmdb-<version>.tgz`, then `npm publish elmdb-ears-<version>.tgz`, whose manifest makes it public. Nothing here
+#      publishes to npm: no workflow holds an npm token or a registry login, and the version job fails one that would.
 #
-# A pull request that changes this workflow, its smoke, the binding's package or loader, a crate's manifest or build
+# A pull request that changes this workflow, its smoke, the binding's package or loader, EARS' manifest or build
+# script, a crate's manifest or build
 # script, the workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs
 # steps 1 to 3 and keeps what they made as the run's artifacts, as do a dispatch on any branch and each Monday's run on
 # main. A change to Rust source alone, such as one calling a newer libc function, is first built here by that Monday's
@@ -33,6 +40,9 @@ on:
       - scripts/release-smoke.mjs
       - crates/elmdb-node/package.json
       - crates/elmdb-node/index.js
+      - packages/ears/package.json
+      - packages/ears/scripts/build.mjs
+      - packages/ears/tsconfig.package.json
       - crates/*/Cargo.toml
       - crates/*/build.rs
       - Cargo.toml
@@ -65,19 +75,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: version
-        name: the tag names the version Cargo.toml and package.json hold
+        name: the tag names the version Cargo.toml and both packages hold
         run: |
           cargo=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
-          npm=$(node -p "require('./crates/elmdb-node/package.json').version")
-          if [ "$cargo" != "$npm" ]; then
-            echo "::error::Cargo.toml's workspace version is $cargo and crates/elmdb-node/package.json's is $npm: make them one"
-            exit 1
-          fi
+          # As `cargo xtask check-versions`, without building it: the binding's version, EARS' and EARS' peer `elmdb`
+          for held in "crates/elmdb-node/package.json's version:$(node -p "require('./crates/elmdb-node/package.json').version")" \
+            "packages/ears/package.json's version:$(node -p "require('./packages/ears/package.json').version")" \
+            "packages/ears/package.json's peer elmdb:$(node -p "require('./packages/ears/package.json').peerDependencies?.elmdb")"; do
+            if [ "${held##*:}" != "$cargo" ]; then
+              echo "::error::Cargo.toml's workspace version is $cargo and ${held%:*} is ${held##*:}: make them one"
+              exit 1
+            fi
+          done
           if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$cargo" ]; then
             echo "::error::The tag is $GITHUB_REF_NAME and the version is $cargo: tag v$cargo, or set the version to the tag's"
             exit 1
           fi
           echo "version=$cargo" >> "$GITHUB_OUTPUT"
+      # **Nothing publishes to npm from CI.** The packages are publishable, `private` off, so that the owner's publish is
+      # one command each; what keeps a workflow from publishing them is that none can: none runs npm's publishing
+      # commands, holds a token for a registry or asks for the OIDC token npm's trusted publishing takes
+      - name: no workflow publishes to npm
+        run: |
+          if grep -nE '^[^#]*(npm[[:space:]]+(publish|unpublish|dist-tag|deprecate)|NPM_TOKEN|NODE_AUTH_TOKEN|registry-url|id-token:)' .github/workflows/*.yml; then
+            echo "::error::A workflow above could publish to npm; publishing is the owner's, by hand"
+            exit 1
+          fi
 
   build:
     name: build ${{ matrix.target }}
@@ -212,8 +235,7 @@ jobs:
       - run: cargo xtask check-notices
       # **One package for every target**: napi's loader takes the binary named for the platform it runs on from the
       # package's own directory, so the package holds all seven and installs with no optional dependency to resolve.
-      # It is the binding's `package.json` unchanged, its `private` included: `npm pack` makes the file, and nothing
-      # here publishes it
+      # It is the binding's `package.json` unchanged: `npm pack` makes the file, and nothing here publishes it
       - name: Pack
         run: |
           expected=$(node -e "
@@ -236,6 +258,15 @@ jobs:
           (cd crates/elmdb-node && npm pack --pack-destination ../../out)
           test -f "out/elmdb-${{ needs.version.outputs.version }}.tgz"
           tar -tzf "out/elmdb-${{ needs.version.outputs.version }}.tgz" | sort
+      # EARS, its `dist` built here from this checkout by its own build, which refuses a tree missing an export's target
+      # or importing a package its manifest doesn't declare; the root's tooling holds the TypeScript it builds with
+      - name: Pack EARS
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build:ears
+          (cd packages/ears && npm pack --pack-destination ../../out)
+          test -f "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz"
+          tar -tzf "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz" | sort
       - name: SBOMs
         run: |
           for pair in aarch64-apple-darwin:darwin-arm64 x86_64-apple-darwin:darwin-x64 \
@@ -283,7 +314,7 @@ jobs:
           node-version: 22.17.0
       - if: ${{ !matrix.musl && !matrix.glibc }}
         shell: bash
-        run: node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz"
+        run: node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz"
       # At the glibc floor the binary is built for: AlmaLinux 8's 2.28, with Node 22.17.0's own Linux build, which
       # needs the same
       - if: matrix.glibc
@@ -294,12 +325,12 @@ jobs:
             curl -fsSL "https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-$arch.tar.gz" | tar -xz -C /opt
             export PATH="/opt/node-v22.17.0-linux-$arch/bin:$PATH"
             ldd --version | head -1
-            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz"
+            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz"
           '
       - if: matrix.musl
         run: |
           docker run --rm -v "$PWD:/w" -w /w node:22.17.0-alpine \
-            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz"
+            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz"
 
   release:
     name: draft the release
@@ -347,4 +378,4 @@ jobs:
           prerelease=()
           case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
           gh release create "$GITHUB_REF_NAME" out/* --verify-tag --draft "${prerelease[@]}" --title "elmdb $VERSION" \
-            --notes "elmdb $VERSION for Node.js and Electron. \`elmdb-$VERSION.tgz\` is the npm package with the prebuilt binding for macOS (arm64, x64), Linux (x64, arm64; glibc 2.28 and later, and musl) and Windows x64: \`npm install <its URL>\`. Each \`elmdb.<platform>.cdx.json\` is the CycloneDX SBOM of that platform's binary. \`SHA256SUMS\` holds every file's hash."
+            --notes "elmdb $VERSION for Node.js and Electron. \`elmdb-$VERSION.tgz\` is the npm package with the prebuilt binding for macOS (arm64, x64), Linux (x64, arm64; glibc 2.28 and later, and musl) and Windows x64, and \`elmdb-ears-$VERSION.tgz\` is EARS, \`@elmdb/ears\`, the fluent TypeScript API over it, which installs beside that binding alone: \`npm install <the binding's URL> <EARS' URL>\`. Each \`elmdb.<platform>.cdx.json\` is the CycloneDX SBOM of that platform's binary. \`SHA256SUMS\` holds every file's hash."

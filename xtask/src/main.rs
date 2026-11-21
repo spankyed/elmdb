@@ -8,6 +8,8 @@
 //!   template beside it; the Rust standard library's, from the toolchain; and copies of the repository's license files.
 //! - `check-notices`: fails when what `notices` would write differs from what is committed, or when package.json's
 //!   `files` leaves one of those files out of the package.
+//! - `check-versions`: fails unless the workspace's `Cargo.toml`, the binding's `package.json` and EARS' hold one
+//!   version, and EARS' peer `elmdb` names exactly it, so the pair a release packs installs only together.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
 //! - `check-exact`: fails unless every ICU crate the lockfile holds, and each crate whose output an index stores
 //!   (`INDEXED`), is a dependency of `elmdb` required at exactly the locked version, so whoever builds elmdb builds the
@@ -56,6 +58,7 @@ fn main() -> ExitCode {
         Some("check-generated") => check_generated(),
         Some("notices") => write_notices(&workspace_root()),
         Some("check-notices") => check_notices(&workspace_root()),
+        Some("check-versions") => check_versions(&workspace_root()),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
         Some("check-exact") => check_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
@@ -73,6 +76,7 @@ fn main() -> ExitCode {
                 &std::env::args().skip(2).collect::<Vec<_>>(),
                 &[
                     ("generated protocol", &check_generated),
+                    ("one version", &|| check_versions(&root)),
                     ("one LMDB", &|| check_one_lmdb(&root)),
                     ("exact crates", &|| check_exact(&root)),
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
@@ -86,7 +90,7 @@ fn main() -> ExitCode {
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
+            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-versions | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
                 .to_owned(),
         ),
     };
@@ -694,6 +698,47 @@ fn check_generated() -> Result<(), String> {
     }
 }
 
+/// The workspace's `Cargo.toml`, the binding's `package.json` and EARS' hold one version, and EARS' peer `elmdb` is
+/// exactly it. EARS is built against one binding's protocol and a process holds one binding, so the pair is released
+/// at one version, and the peer, an exact version and no range, lets npm install EARS beside that binding alone
+fn check_versions(root: &Path) -> Result<(), String> {
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"));
+    let json = |path: &str| -> Result<serde_json::Value, String> {
+        serde_json::from_str(&read(path)?).map_err(|e| format!("{path}: {e}"))
+    };
+    let problems = version_mismatches(
+        &read("Cargo.toml")?,
+        &json("crates/elmdb-node/package.json")?,
+        &json("packages/ears/package.json")?,
+    );
+    match problems.is_empty() {
+        true => Ok(()),
+        false => Err(format!(
+            "The binding and EARS are released as a pair, at the version Cargo.toml's [workspace.package] holds:\n  {}",
+            problems.join("\n  ")
+        )),
+    }
+}
+
+/// What of the binding's and EARS' manifests doesn't name the workspace's version, each said with the fix
+fn version_mismatches(workspace: &str, binding: &serde_json::Value, ears: &serde_json::Value) -> Vec<String> {
+    let cargo = table(workspace, "[workspace.package]")
+        .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
+        .map(str::to_owned);
+    let Some(cargo) = cargo else {
+        return vec!["Cargo.toml's [workspace.package] holds no `version = \"…\"`".to_owned()];
+    };
+    let held = [
+        ("crates/elmdb-node/package.json's `version`", &binding["version"]),
+        ("packages/ears/package.json's `version`", &ears["version"]),
+        ("packages/ears/package.json's `peerDependencies.elmdb`", &ears["peerDependencies"]["elmdb"]),
+    ];
+    held.into_iter()
+        .filter(|(_, value)| value.as_str() != Some(cargo.as_str()))
+        .map(|(what, value)| format!("{what} is {value}, and is to be \"{cargo}\""))
+        .collect()
+}
+
 /// Every LMDB `-sys` crate in the build, by name and version. Two copies of LMDB linked into one binary share no locks,
 /// and nothing at link time refuses them (heed's `lmdb-master-sys` declares no `links` key), so this does.
 fn check_one_lmdb(root: &Path) -> Result<(), String> {
@@ -868,7 +913,34 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 mod tests {
     use super::{Skip, exclude_res, skips_in, stale_exclusions, with_skips};
     use super::{UNMODELLED, direct_dependencies, lmdb_sys_crates, locks_outside_sync, unmodelled_files};
-    use super::{check_deny, workspace_root};
+    use super::{check_deny, version_mismatches, workspace_root};
+
+    #[test]
+    fn the_pair_is_held_to_the_workspace_version_and_the_peer_to_exactly_it() {
+        let workspace = "[workspace]\nmembers = []\n\n[workspace.package]\nedition = \"2024\"\nversion = \"0.1.0\"\n\n[x]\nversion = \"9.9.9\"\n";
+        let binding = serde_json::json!({ "version": "0.1.0" });
+        let ears = |version: &str, peer: serde_json::Value| serde_json::json!({ "version": version, "peerDependencies": { "elmdb": peer } });
+        assert_eq!(version_mismatches(workspace, &binding, &ears("0.1.0", "0.1.0".into())), Vec::<String>::new());
+        // Each of the three told apart, a range is not the version, and a missing peer is named
+        let mismatches =
+            version_mismatches(workspace, &serde_json::json!({ "version": "0.2.0" }), &ears("0.1.1", "^0.1.0".into()));
+        assert_eq!(mismatches.len(), 3, "{mismatches:?}");
+        assert!(mismatches[0].starts_with("crates/elmdb-node/package.json's `version` is \"0.2.0\""), "{mismatches:?}");
+        assert!(mismatches[1].starts_with("packages/ears/package.json's `version` is \"0.1.1\""), "{mismatches:?}");
+        assert!(mismatches[2].contains("`peerDependencies.elmdb` is \"^0.1.0\""), "{mismatches:?}");
+        let missing = version_mismatches(workspace, &binding, &serde_json::json!({ "version": "0.1.0" }));
+        assert_eq!(missing, ["packages/ears/package.json's `peerDependencies.elmdb` is null, and is to be \"0.1.0\""]);
+        // A workspace with no version of its own is refused, not read as matching nothing
+        let unversioned =
+            version_mismatches("[workspace.package]\nedition = \"2024\"\n", &binding, &ears("0.1.0", "0.1.0".into()));
+        assert_eq!(unversioned.len(), 1);
+        assert!(unversioned[0].contains("holds no `version"), "{unversioned:?}");
+    }
+
+    #[test]
+    fn the_checkout_holds_one_version() {
+        super::check_versions(&workspace_root()).unwrap();
+    }
 
     #[test]
     fn without_cargo_deny_the_check_refuses_and_says_how_to_install_it() {

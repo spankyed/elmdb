@@ -562,7 +562,7 @@ and a watch a commit marks not set to run again 42. Mutating EARS' TypeScript is
 CI (`.github/workflows/ci.yml`): format, clippy and tests on every push to `main` and every pull request, on Linux.
 Its jobs there: `checks` (on Node 23: format, clippy with and without the `diagnostics` feature, the workspace's suite,
 the engine's with `diagnostics`, the doc tests); `heap` (the maintenance heap bound and the benchmarks' smoke runs);
-`repo` (on Node 23: `cargo xtask check-generated`, `check-notices`, `check-one-lmdb`, `check-exact`,
+`repo` (on Node 23: `cargo xtask check-generated`, `check-versions`, `check-notices`, `check-one-lmdb`, `check-exact`,
 `check-diagnostics-off`, `check-leiden-serial`, `check-sync`, `check-commits` and `check-mutant-exclusions`;
 `cargo deny check bans sources`, and `cargo deny check advisories` for a change to `Cargo.lock` or `deny.toml`
 (Dependencies, below); the
@@ -635,9 +635,15 @@ and so is `models.yml` (Concurrency models). `model-mutants.yml` runs each week 
 
 ## Releases
 
+A release is two npm packages at one version: the binding, `elmdb`, and EARS, `@elmdb/ears`, whose peer `elmdb` names
+that version exactly, so npm installs EARS beside that binding and no other. `cargo xtask check-versions`, which
+`ci.yml`'s repo job and `pre-push` run, fails unless the workspace's `Cargo.toml`, both `package.json`s and EARS' peer
+hold one version.
+
 A tag `v<version>` starts `.github/workflows/release.yml`, and the tag is the owner's. It fails unless the tag names
-the version the workspace's `Cargo.toml` and the binding's `package.json` both hold. It builds the binding for each of
-`package.json`'s seven `napi.targets` on a runner of that OS and architecture:
+that version, which its first job reads again from the four places, and unless no workflow runs npm's publishing
+commands, holds a registry token or asks for the OIDC token npm's trusted publishing takes. It builds the binding for
+each of `package.json`'s seven `napi.targets` on a runner of that OS and architecture:
 
 - the glibc Linux binaries in manylinux_2_28 (AlmaLinux 8), so they need no glibc past 2.28, which Node 22's own Linux
   builds need too. A check of each binary's undefined symbols fails on one versioned past 2.28, and on one with no
@@ -650,17 +656,24 @@ the version the workspace's `Cargo.toml` and the binding's `package.json` both h
 
 It packs all seven into one npm package, `elmdb-<version>.tgz`, whose loader takes the binary named for the platform it
 runs on, with the notices `check-notices` holds to the lockfile, and writes each target's CycloneDX SBOM with
-cargo-cyclonedx, `elmdb.<platform>.cdx.json`. Then, on each target, `scripts/release-smoke.mjs` installs the package
-into an empty project on Node 22.17.0 and runs a database through it: a text search, a rank and `check()`. The glibc
-targets install in AlmaLinux 8, at glibc 2.28, and the musl ones in Alpine; macOS on macOS 15 and Windows on Windows
-Server 2022. On a tag it drafts a GitHub release holding the package, the SBOMs and `SHA256SUMS`. A tag whose release is
-published fails, and so does one whose draft holds every file the run would upload; a draft missing one, which a run
-that failed while uploading leaves, is made again. Publishing the draft is the owner's, and nothing goes
-to npm.
+cargo-cyclonedx, `elmdb.<platform>.cdx.json`. It builds EARS' `dist` from the checkout and packs it,
+`elmdb-ears-<version>.tgz`. Then, on each target, `scripts/release-smoke.mjs` installs both packages into an empty
+project on Node 22.17.0, with npm's strict peers, and runs a database through the binding, a text search, a rank and
+`check()`, and another through EARS, its README's example through both its entries; it reads the thin client and the
+binding's manifest through the binding's `exports`. The glibc targets install in AlmaLinux 8, at glibc 2.28, and the
+musl ones in Alpine; macOS on macOS 15 and Windows on Windows Server 2022. On a tag it drafts a GitHub release holding
+both packages, the SBOMs and `SHA256SUMS`. A tag whose release is published fails, and so does one whose draft holds
+every file the run would upload; a draft missing one, which a run that failed while uploading leaves, is made again.
 
-A pull request that changes the workflow, its smoke, the binding's package or loader, a crate's manifest or build
-script, the workspace's manifest, lockfile or Cargo configuration, the root package's tooling or the toolchain runs
-everything but the version check and the draft, and keeps the package and SBOMs as the run's artifacts; so do a
+Publishing the draft is the owner's, and so is publishing to npm, from the draft's files, which are what the smoke
+installed: `npm publish elmdb-<version>.tgz`, then `npm publish elmdb-ears-<version>.tgz`, whose `publishConfig` makes
+the scoped package public. Neither package is `private`, which would make npm refuse the publish; nothing in CI
+publishes them.
+
+A pull request that changes the workflow, its smoke, the binding's package or loader, EARS' manifest or build, a
+crate's manifest or build script, the workspace's manifest, lockfile or Cargo configuration, the root package's tooling
+or the toolchain runs everything but the tag's check and the draft, and keeps the packages and SBOMs as the run's
+artifacts; so do a
 dispatch, on any branch, and a run each Monday on main. A change to Rust source alone is first built for every target
 by that Monday's run or by a tag. On a tag, a release that can't be read, other than one that isn't there, fails the
 draft rather than counting as none.

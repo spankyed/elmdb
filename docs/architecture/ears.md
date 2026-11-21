@@ -23,7 +23,8 @@ Vocabulary).
   and terminal is written whole as a literal of the generated type, so a field elmdb renames fails the build where it
   is written; `src/lmdb/port.test-d.ts` holds each member of the port to the binding's answer, `Buffer` read as
   `Uint8Array`, and the error table in `database.ts` names every generated `ErrorCode`, mapped or passed through.
-- **`elmdb` is a peer, at exactly the version EARS was built with** (`0.0.0` while both are unpublished), since one
+- **`elmdb` is a peer, at exactly the version EARS was built with** (`0.1.0`, the workspace's, which `cargo xtask
+  check-versions` holds both manifests to), since one
   process holds one binding (`design.md`, principle 5) and a peer is installed once, beside its dependents. In this
   repository the workspace links it to `crates/elmdb-node`. `msgpackr`, which encodes what crosses to the database,
   is EARS' one dependency; the manifest names no tooling, which is the root `package.json`'s.

@@ -1,6 +1,6 @@
 {
   "name": "elmdb",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Embedded database for Node.js and Electron: typed entities and relations, text and vector search, and live queries, all in one transaction. Rust on LMDB.",
   "keywords": ["embedded-database", "lmdb", "vector-search", "full-text-search", "electron", "local-first", "reactive"],
   "license": "MIT OR Apache-2.0",
@@ -9,10 +9,31 @@
     "url": "git+https://github.com/spankyed/elmdb.git",
     "directory": "crates/elmdb-node"
   },
-  "private": true,
   "type": "commonjs",
   "main": "index.js",
   "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./index.js"
+    },
+    "./client": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    },
+    "./client.js": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    },
+    "./protocol/schema-1.json": "./protocol/schema-1.json",
+    "./protocol/*.js": {
+      "types": "./protocol/*.d.ts"
+    },
+    "./protocol/*": {
+      "types": "./protocol/*.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "index.js",
     "index.d.ts",
