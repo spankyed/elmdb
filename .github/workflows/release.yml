@@ -1,34 +1,43 @@
 name: release
 
-# **A release of elmdb: its two npm packages, the binding with a prebuilt binary for each of its seven targets and EARS
-# beside it, and an SBOM of each binary.** Pushing a tag `v<version>` starts it, and the tag is the owner's
-# (`CLAUDE.md`). The tag must name the version the workspace's `Cargo.toml`, the binding's `package.json` and EARS'
-# all hold, which EARS' peer `elmdb` names exactly (`cargo xtask check-versions`, which ci.yml runs on every change).
+# **A release of elmdb: its npm packages, the binding, a platform package holding the prebuilt binary of each of its
+# seven targets, and EARS beside them, and an SBOM of each binary.** Pushing a tag `v<version>` starts it, and the tag
+# is the owner's (`CLAUDE.md`). The tag must name the version the workspace's `Cargo.toml`, the binding's
+# `package.json` and EARS' all hold, which EARS' peer `elmdb` and each of the binding's optional dependencies on its
+# platform packages name exactly (`cargo xtask check-versions`, which ci.yml runs on every change).
 # The run:
 #
 #   1. builds the binding for every target in `package.json`'s `napi.targets`, each on a runner of its own OS and
 #      architecture. The glibc Linux binaries are built in manylinux_2_28 (AlmaLinux 8), so they need no glibc past
 #      2.28, which Node 22's own Linux builds need too; the musl ones in Alpine; the Windows one with the C runtime
 #      linked in, as Node's own is, so it needs no Visual C++ redistributable;
-#   2. packs them into one npm package, `elmdb-<version>.tgz`, with the notices their licenses ask a redistribution to
-#      carry (`cargo xtask notices`), and writes each target's CycloneDX SBOM, `elmdb.<platform>.cdx.json`: every crate
+#   2. packs each binary into its platform package, `elmdb-<platform>-<version>.tgz`, with the notices their licenses
+#      ask a redistribution to carry (`cargo xtask notices`), and the binding into `elmdb-<version>.tgz`, which holds no
+#      binary and names each platform package as an optional dependency, so npm installs the machine's alone
+#      (`scripts/release-pack.mjs`); writes each target's CycloneDX SBOM, `elmdb.<platform>.cdx.json`: every crate
 #      that target's binary is built from, as cargo-cyclonedx reads them from the lockfile, build scripts' dependencies
 #      left out. LMDB is there as `lmdb-master-sys`, the crate that compiles it; the Rust standard library is listed
 #      nowhere, and its notices ship in the package (`COPYRIGHT-rust-library.html`); and packs EARS, `@elmdb/ears`, as
 #      `elmdb-ears-<version>.tgz`, its `dist` built from this checkout;
-#   3. installs both packages into an empty project on each target, with the Node floor their `engines` name, and runs
-#      a database through the binding and another through EARS (`scripts/release-smoke.mjs`): the glibc ones in
+#   3. installs the binding and EARS into an empty project on each target, with the Node floor their `engines` name,
+#      npm choosing among the platform packages' tarballs, fails unless it installed that target's alone, and runs a
+#      database through the binding and another through EARS (`scripts/release-smoke.mjs`): the glibc ones in
 #      AlmaLinux 8, at glibc 2.28;
-#   4. on a tag, drafts a GitHub release holding both packages, the SBOMs and `SHA256SUMS`. Publishing the draft is the
-#      owner's, and so is publishing to npm, one command a package from the draft's files: `npm publish
-#      elmdb-<version>.tgz`, then `npm publish elmdb-ears-<version>.tgz`, whose manifest makes it public. Nothing here
+#   4. on a tag, drafts a GitHub release holding the packages, the SBOMs and `SHA256SUMS`. Publishing the draft is the
+#      owner's, and so is publishing to npm, one command a package from the draft's files: `npm publish` of each
+#      `elmdb-<platform>-<version>.tgz`, then of `elmdb-<version>.tgz`, whose optional dependencies name those at its
+#      version, then `npm publish elmdb-ears-<version>.tgz`, whose manifest makes it public. Nothing here
 #      publishes to npm: no workflow holds an npm token or a registry login, and the version job fails one that would;
-#   5. on each push to main, publishes the commit's two packages and their `SHA256SUMS` as a GitHub prerelease tagged
+#   5. on each push to main, publishes the commit's packages and their `SHA256SUMS` as a GitHub prerelease tagged
 #      `pkg-<commit>`, the full hash, which a consumer installs by URL instead of building elmdb from a checkout:
 #      `npm install https://github.com/<repository>/releases/download/pkg-<commit>/elmdb-<version>.tgz` and EARS' URL
-#      beside it. CI makes these itself, as the owner agreed (2026-11-21); they are prereleases, never the latest
-#      release, and a run for the same commit again replaces their files. A dispatch naming a commit on main, such as
-#      one from before this step, builds that commit and publishes its prerelease the same way.
+#      beside it. The binding's tarball there is packed again with its optional dependencies naming the platform
+#      packages' tarballs on that same release by URL, so the install fetches the machine's binary and no other; the
+#      source manifest keeps versions, for npm. Then, on Linux x64 and macOS arm64, it installs the two by those URLs
+#      and fails unless the platform package came with them, which npm skips without failing when it can't fetch it.
+#      CI makes these itself, as the owner agreed (2026-11-21); they are prereleases, never the latest release, and a
+#      run for the same commit again replaces their files. A dispatch naming a commit on main, such as one whose run
+#      failed, builds that commit and publishes its prerelease the same way, from the platform packages' commit on.
 #
 # A pull request that changes this workflow, its smoke, the binding's package or loader, EARS' manifest or build
 # script, a crate's manifest or build
@@ -45,6 +54,7 @@ on:
     paths:
       - .github/workflows/release.yml
       - scripts/release-smoke.mjs
+      - scripts/release-pack.mjs
       - crates/elmdb-node/package.json
       - crates/elmdb-node/index.js
       - packages/ears/package.json
@@ -102,7 +112,7 @@ jobs:
         name: the tag names the version Cargo.toml and both packages hold
         run: |
           cargo=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml', 'rb'))['workspace']['package']['version'])")
-          # As `cargo xtask check-versions`, without building it: the binding's version, EARS' and EARS' peer `elmdb`
+          # As `cargo xtask check-versions`, without building it: the binding's version, EARS' and EARS' peer `elmdb`,
           for held in "crates/elmdb-node/package.json's version:$(node -p "require('./crates/elmdb-node/package.json').version")" \
             "packages/ears/package.json's version:$(node -p "require('./packages/ears/package.json').version")" \
             "packages/ears/package.json's peer elmdb:$(node -p "require('./packages/ears/package.json').peerDependencies?.elmdb")"; do
@@ -111,6 +121,8 @@ jobs:
               exit 1
             fi
           done
+          # And the binding's optional dependencies: each target's platform package, at exactly that version
+          node scripts/release-pack.mjs check
           if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$cargo" ]; then
             echo "::error::The tag is $GITHUB_REF_NAME and the version is $cargo: tag v$cargo, or set the version to the tag's"
             exit 1
@@ -258,38 +270,32 @@ jobs:
         with:
           pattern: binding-*
           merge-multiple: true
-          path: crates/elmdb-node
+          path: binaries
       # The notices the package carries are the lockfile's and the toolchain's, as ci.yml's repo job holds them on main
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-about@0.9.3,cargo-cyclonedx@0.5.10
       - run: cargo fetch --locked
       - run: cargo xtask check-notices
-      # **One package for every target**: napi's loader takes the binary named for the platform it runs on from the
-      # package's own directory, so the package holds all seven and installs with no optional dependency to resolve.
-      # It is the binding's `package.json` unchanged: `npm pack` makes the file, and nothing here publishes it
+      # **A package for each target, and the binding's naming them**: napi's loader requires the platform package
+      # `elmdb-<platform>` for the platform it runs on, which holds that target's binary and its notices, and the
+      # binding's package holds none, naming each platform package at its own version as an optional dependency, of
+      # which npm installs the one whose `os`, `cpu` and `libc` match. Every target's binary must be there to pack.
+      # `npm pack` makes the files, and nothing here publishes them. For a commit's prerelease, the binding is packed
+      # again into `commit/`, naming each platform package by its tarball's URL on that prerelease
       - name: Pack
+        env:
+          REPO: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ needs.version.outputs.commit }}
         run: |
-          expected=$(node -e "
-            const { napi } = require('./crates/elmdb-node/package.json');
-            const platforms = { 'aarch64-apple-darwin': 'darwin-arm64', 'x86_64-apple-darwin': 'darwin-x64',
-              'x86_64-unknown-linux-gnu': 'linux-x64-gnu', 'aarch64-unknown-linux-gnu': 'linux-arm64-gnu',
-              'x86_64-unknown-linux-musl': 'linux-x64-musl', 'aarch64-unknown-linux-musl': 'linux-arm64-musl',
-              'x86_64-pc-windows-msvc': 'win32-x64-msvc' };
-            const names = napi.targets.map((target) => {
-              if (!platforms[target]) throw new Error('package.json names ' + target + ', which this workflow does not build');
-              return 'elmdb.' + platforms[target] + '.node';
-            });
-            console.log(names.sort().join('\n'));")
-          held=$(find crates/elmdb-node -maxdepth 1 -name '*.node' -exec basename {} \; | sort)
-          if [ "$expected" != "$held" ]; then
-            echo "::error::The package would hold:"$'\n'"$held"$'\n'"and package.json's targets are:"$'\n'"$expected"
-            exit 1
-          fi
-          mkdir -p out
-          (cd crates/elmdb-node && npm pack --pack-destination ../../out)
-          test -f "out/elmdb-${{ needs.version.outputs.version }}.tgz"
-          tar -tzf "out/elmdb-${{ needs.version.outputs.version }}.tgz" | sort
+          ls -l binaries
+          node scripts/release-pack.mjs pack --binaries binaries --out out
+          node scripts/release-pack.mjs pack --out commit \
+            --release-url "https://github.com/$REPO/releases/download/pkg-$RELEASE_COMMIT"
+          for tarball in out/*.tgz commit/*.tgz; do
+            echo "$tarball:"; tar -tzvf "$tarball" | awk '{ print "  " $3 "  " $NF }'
+          done
+          tar -xOzf "commit/elmdb-${{ needs.version.outputs.version }}.tgz" package/package.json | grep -A8 optionalDependencies
       # EARS, its `dist` built here from this checkout by its own build, which refuses a tree missing an export's target
       # or importing a package its manifest doesn't declare; the root's tooling holds the TypeScript it builds with
       - name: Pack EARS
@@ -313,6 +319,11 @@ jobs:
         with:
           name: release
           path: out/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: commit-binding
+          path: commit/*
           if-no-files-found: error
 
   smoke:
@@ -347,7 +358,7 @@ jobs:
           node-version: 22.17.0
       - if: ${{ !matrix.musl && !matrix.glibc }}
         shell: bash
-        run: node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz"
+        run: node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz" out/elmdb-*-*-${{ needs.version.outputs.version }}.tgz
       # At the glibc floor the binary is built for: AlmaLinux 8's 2.28, with Node 22.17.0's own Linux build, which
       # needs the same
       - if: matrix.glibc
@@ -358,12 +369,12 @@ jobs:
             curl -fsSL "https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-$arch.tar.gz" | tar -xz -C /opt
             export PATH="/opt/node-v22.17.0-linux-$arch/bin:$PATH"
             ldd --version | head -1
-            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz"
+            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz" out/elmdb-*-*-${{ needs.version.outputs.version }}.tgz
           '
       - if: matrix.musl
         run: |
           docker run --rm -v "$PWD:/w" -w /w node:22.17.0-alpine \
-            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz"
+            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz" out/elmdb-*-*-${{ needs.version.outputs.version }}.tgz
 
   release:
     name: draft the release
@@ -411,7 +422,7 @@ jobs:
           prerelease=()
           case "$VERSION" in *-*) prerelease=(--prerelease) ;; esac
           gh release create "$GITHUB_REF_NAME" out/* --verify-tag --draft "${prerelease[@]}" --title "elmdb $VERSION" \
-            --notes "elmdb $VERSION for Node.js and Electron. \`elmdb-$VERSION.tgz\` is the npm package with the prebuilt binding for macOS (arm64, x64), Linux (x64, arm64; glibc 2.28 and later, and musl) and Windows x64, and \`elmdb-ears-$VERSION.tgz\` is EARS, \`@elmdb/ears\`, the fluent TypeScript API over it, which installs beside that binding alone: \`npm install <the binding's URL> <EARS' URL>\`. Each \`elmdb.<platform>.cdx.json\` is the CycloneDX SBOM of that platform's binary. \`SHA256SUMS\` holds every file's hash."
+            --notes "elmdb $VERSION for Node.js and Electron. \`elmdb-$VERSION.tgz\` is the npm package of the binding, and each \`elmdb-<platform>-$VERSION.tgz\` the package of its prebuilt binary for one platform, macOS (arm64, x64), Linux (x64, arm64; glibc 2.28 and later, and musl) or Windows x64, which the binding names as optional dependencies at its version, so that npm installs the one the machine needs once all are published, and \`elmdb-ears-$VERSION.tgz\` is EARS, \`@elmdb/ears\`, the fluent TypeScript API over it, which installs beside that binding alone. Each \`elmdb.<platform>.cdx.json\` is the CycloneDX SBOM of that platform's binary. \`SHA256SUMS\` holds every file's hash."
 
   # **Each commit on main as packages a consumer installs by URL**: the two that were packed and installed on every
   # target above, and their `SHA256SUMS`, on a prerelease `pkg-<commit>` at that commit. Its files are what the smoke
@@ -432,12 +443,18 @@ jobs:
         with:
           name: release
           path: built
+      - uses: actions/download-artifact@v4
+        with:
+          name: commit-binding
+          path: commit
+      # The binding as packed naming its platform packages by their URLs here, beside the platform packages and EARS
+      # the smoke installed
       - name: Sums
         env:
           VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir out
-          cp "built/elmdb-$VERSION.tgz" "built/elmdb-ears-$VERSION.tgz" out/
+          cp "commit/elmdb-$VERSION.tgz" "built/elmdb-ears-$VERSION.tgz" built/elmdb-*-*-"$VERSION".tgz out/
           (cd out && sha256sum -- * | tee SHA256SUMS)
       - name: Publish pkg-${{ needs.version.outputs.commit }}
         env:
@@ -453,7 +470,7 @@ jobs:
             exit 1
           fi
           tag="pkg-$COMMIT"
-          notes="elmdb $VERSION as built from $COMMIT on main, for a consumer to install by URL: \`elmdb-$VERSION.tgz\` is the binding with its prebuilt binary for each of the seven targets, and \`elmdb-ears-$VERSION.tgz\` is EARS, \`@elmdb/ears\`, which installs beside it: \`npm install https://github.com/$GH_REPO/releases/download/$tag/elmdb-$VERSION.tgz https://github.com/$GH_REPO/releases/download/$tag/elmdb-ears-$VERSION.tgz\`. \`SHA256SUMS\` holds both files' hashes. Made by CI for each commit on main; not a release of elmdb."
+          notes="elmdb $VERSION as built from $COMMIT on main, for a consumer to install by URL: \`elmdb-$VERSION.tgz\` is the binding, which installs the prebuilt binary of the machine it is installed on from its platform package here, \`elmdb-<platform>-$VERSION.tgz\`, and \`elmdb-ears-$VERSION.tgz\` is EARS, \`@elmdb/ears\`, which installs beside it: \`npm install https://github.com/$GH_REPO/releases/download/$tag/elmdb-$VERSION.tgz https://github.com/$GH_REPO/releases/download/$tag/elmdb-ears-$VERSION.tgz\`. \`SHA256SUMS\` holds every file's hash. Made by CI for each commit on main; not a release of elmdb."
           # A release that can't be read is not one that isn't there: only gh's `release not found` is taken as none
           if gh release view "$tag" --json tagName > /dev/null 2> view.err; then
             gh release upload "$tag" out/* --clobber
@@ -470,3 +487,31 @@ jobs:
             exit 1
           fi
           gh release view "$tag" --json url,isPrerelease,assets --jq '{url, isPrerelease, assets: [.assets[].name]}'
+
+  # **A commit's packages as a consumer installs them**: by their URLs on the prerelease just published, on the two
+  # platforms apack builds on. The smoke fails unless npm installed this machine's platform package beside the binding,
+  # fetched from the URL the binding's manifest names, and the binary that answers is that package's
+  installed-by-url:
+    name: install pkg-<commit> on ${{ matrix.platform }}
+    needs: [version, commit-packages]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64-gnu, runner: ubuntu-24.04 }
+          - { platform: darwin-arm64, runner: macos-15 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.COMMIT }}
+          sparse-checkout: scripts/release-smoke.mjs
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+      - env:
+          URL: https://github.com/${{ github.repository }}/releases/download/pkg-${{ needs.version.outputs.commit }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: node scripts/release-smoke.mjs "$URL/elmdb-$VERSION.tgz" "$URL/elmdb-ears-$VERSION.tgz"

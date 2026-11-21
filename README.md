@@ -135,8 +135,9 @@ rest of its API, is in [ears.md](docs/architecture/ears.md).
 ## Status
 
 Running under apack, and not yet published to npm, so build it from source. Both packages are at 0.1.0, which a
-release packs as `elmdb-0.1.0.tgz` and `elmdb-ears-0.1.0.tgz` and smoke-tests on each of the seven targets, but no
-release is tagged. The storage format stays at 1, edited in place,
+release packs as `elmdb-0.1.0.tgz`, a platform package `elmdb-<platform>-0.1.0.tgz` holding each of the seven
+targets' binaries, of which npm installs the machine's alone, and `elmdb-ears-0.1.0.tgz`, and smoke-tests on each
+target, but no release is tagged. The storage format stays at 1, edited in place,
 until a release has users, so nothing here is a stable API yet.
 
 ```sh

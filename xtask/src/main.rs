@@ -9,7 +9,8 @@
 //! - `check-notices`: fails when what `notices` would write differs from what is committed, or when package.json's
 //!   `files` leaves one of those files out of the package.
 //! - `check-versions`: fails unless the workspace's `Cargo.toml`, the binding's `package.json` and EARS' hold one
-//!   version, and EARS' peer `elmdb` names exactly it, so the pair a release packs installs only together.
+//!   version, EARS' peer `elmdb` names exactly it, so the pair a release packs installs only together, and the
+//!   binding's `optionalDependencies` name each of its `napi.targets`' platform package at exactly it.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
 //! - `check-exact`: fails unless every ICU crate the lockfile holds, and each crate whose output an index stores
 //!   (`INDEXED`), is a dependency of `elmdb` required at exactly the locked version, so whoever builds elmdb builds the
@@ -700,7 +701,9 @@ fn check_generated() -> Result<(), String> {
 
 /// The workspace's `Cargo.toml`, the binding's `package.json` and EARS' hold one version, and EARS' peer `elmdb` is
 /// exactly it. EARS is built against one binding's protocol and a process holds one binding, so the pair is released
-/// at one version, and the peer, an exact version and no range, lets npm install EARS beside that binding alone
+/// at one version, and the peer, an exact version and no range, lets npm install EARS beside that binding alone. The
+/// binding's binaries are its platform packages, one per target (`scripts/release-pack.mjs`), packed at its version,
+/// so its `optionalDependencies` name each at exactly that version, which napi's loader takes the binary from
 fn check_versions(root: &Path) -> Result<(), String> {
     let read = |path: &str| std::fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"));
     let json = |path: &str| -> Result<serde_json::Value, String> {
@@ -733,10 +736,57 @@ fn version_mismatches(workspace: &str, binding: &serde_json::Value, ears: &serde
         ("packages/ears/package.json's `version`", &ears["version"]),
         ("packages/ears/package.json's `peerDependencies.elmdb`", &ears["peerDependencies"]["elmdb"]),
     ];
-    held.into_iter()
+    let mut problems: Vec<String> = held
+        .into_iter()
         .filter(|(_, value)| value.as_str() != Some(cargo.as_str()))
         .map(|(what, value)| format!("{what} is {value}, and is to be \"{cargo}\""))
-        .collect()
+        .collect();
+    problems.extend(platform_package_mismatches(&cargo, binding));
+    problems
+}
+
+/// Each target's platform package, by the name napi's loader requires it by (`elmdb-<platform>`), as
+/// `scripts/release-pack.mjs`'s `TARGETS` names them
+const PLATFORMS: [(&str, &str); 7] = [
+    ("aarch64-apple-darwin", "darwin-arm64"),
+    ("x86_64-apple-darwin", "darwin-x64"),
+    ("x86_64-unknown-linux-gnu", "linux-x64-gnu"),
+    ("aarch64-unknown-linux-gnu", "linux-arm64-gnu"),
+    ("x86_64-unknown-linux-musl", "linux-x64-musl"),
+    ("aarch64-unknown-linux-musl", "linux-arm64-musl"),
+    ("x86_64-pc-windows-msvc", "win32-x64-msvc"),
+];
+
+/// What of the binding's `optionalDependencies` doesn't name each of its `napi.targets`' platform package, and only
+/// those, at exactly `version`
+fn platform_package_mismatches(version: &str, binding: &serde_json::Value) -> Vec<String> {
+    let mut problems = Vec::new();
+    let mut expected = Vec::new();
+    for target in binding["napi"]["targets"].as_array().into_iter().flatten() {
+        match PLATFORMS.iter().find(|(triple, _)| target.as_str() == Some(triple)) {
+            Some((_, platform)) => expected.push(format!("elmdb-{platform}")),
+            None => problems.push(format!(
+                "crates/elmdb-node/package.json's `napi.targets` names {target}, which has no platform package"
+            )),
+        }
+    }
+    let named = binding["optionalDependencies"].as_object();
+    for name in &expected {
+        let held = named.and_then(|named| named.get(name)).unwrap_or(&serde_json::Value::Null);
+        if held.as_str() != Some(version) {
+            problems.push(format!(
+                "crates/elmdb-node/package.json's `optionalDependencies.{name}` is {held}, and is to be \"{version}\""
+            ));
+        }
+    }
+    for name in named.into_iter().flat_map(|named| named.keys()) {
+        if !expected.contains(name) {
+            problems.push(format!(
+                "crates/elmdb-node/package.json's `optionalDependencies.{name}` is the package of no target in `napi.targets`"
+            ));
+        }
+    }
+    problems
 }
 
 /// Every LMDB `-sys` crate in the build, by name and version. Two copies of LMDB linked into one binary share no locks,
@@ -913,7 +963,7 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 mod tests {
     use super::{Skip, exclude_res, skips_in, stale_exclusions, with_skips};
     use super::{UNMODELLED, direct_dependencies, lmdb_sys_crates, locks_outside_sync, unmodelled_files};
-    use super::{check_deny, version_mismatches, workspace_root};
+    use super::{check_deny, platform_package_mismatches, version_mismatches, workspace_root};
 
     #[test]
     fn the_pair_is_held_to_the_workspace_version_and_the_peer_to_exactly_it() {
@@ -935,6 +985,33 @@ mod tests {
             version_mismatches("[workspace.package]\nedition = \"2024\"\n", &binding, &ears("0.1.0", "0.1.0".into()));
         assert_eq!(unversioned.len(), 1);
         assert!(unversioned[0].contains("holds no `version"), "{unversioned:?}");
+    }
+
+    #[test]
+    fn each_target_has_its_platform_package_at_exactly_the_version_and_nothing_else_is_named() {
+        let binding = |targets: serde_json::Value, optional: serde_json::Value| serde_json::json!({ "napi": { "targets": targets }, "optionalDependencies": optional });
+        let targets = serde_json::json!(["aarch64-apple-darwin", "x86_64-unknown-linux-musl"]);
+        let both = serde_json::json!({ "elmdb-darwin-arm64": "0.1.0", "elmdb-linux-x64-musl": "0.1.0" });
+        assert_eq!(platform_package_mismatches("0.1.0", &binding(targets.clone(), both)), Vec::<String>::new());
+        // A range, a missing package, one no target builds and a target with no platform package are each named
+        let wrong = serde_json::json!({ "elmdb-darwin-arm64": "^0.1.0", "elmdb-linux-x64-gnu": "0.1.0" });
+        let problems = platform_package_mismatches("0.1.0", &binding(targets, wrong));
+        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert!(problems[0].contains("`optionalDependencies.elmdb-darwin-arm64` is \"^0.1.0\""), "{problems:?}");
+        assert!(problems[1].contains("`optionalDependencies.elmdb-linux-x64-musl` is null"), "{problems:?}");
+        assert!(problems[2].contains("elmdb-linux-x64-gnu` is the package of no target"), "{problems:?}");
+        let unknown = platform_package_mismatches(
+            "0.1.0",
+            &binding(serde_json::json!(["riscv64gc-unknown-linux-gnu"]), serde_json::json!({})),
+        );
+        assert_eq!(unknown.len(), 1);
+        assert!(unknown[0].contains("riscv64gc-unknown-linux-gnu"), "{unknown:?}");
+        // No optional dependencies at all is every target's package missing
+        let none = platform_package_mismatches(
+            "0.1.0",
+            &serde_json::json!({ "napi": { "targets": ["x86_64-apple-darwin"] } }),
+        );
+        assert_eq!(none.len(), 1, "{none:?}");
     }
 
     #[test]

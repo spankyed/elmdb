@@ -166,8 +166,9 @@ elmdb's public API is its protocol: schemas, plans, batches, results, change set
 The binding's package opens only these paths (its `package.json`'s `exports`): `elmdb`, the loader and its
 declarations; `elmdb/client` and `elmdb/client.js`, the thin client; `elmdb/protocol/<Name>` and
 `elmdb/protocol/<Name>.js`, the generated types, which are declarations alone and resolve for a type import only;
-`elmdb/protocol/schema-1.json`, the schema's JSON Schema; and `elmdb/package.json`. The loader's own files, the
-`.node` binaries among them, are reached by the loader and by nothing that imports the package. EARS' are `@elmdb/ears`
+`elmdb/protocol/schema-1.json`, the schema's JSON Schema; and `elmdb/package.json`. The `.node` binaries are not in
+it: each target's is in its own package, `elmdb-<platform>`, which the binding names as an optional dependency, so npm
+installs the machine's alone, and which the loader alone requires (`testing.md`, Releases). EARS' are `@elmdb/ears`
 and `@elmdb/ears/database` (`ears.md`). The two are released as a pair at one version, the workspace's, which EARS'
 peer names exactly (`cargo xtask check-versions`; `testing.md`, Releases).
 
