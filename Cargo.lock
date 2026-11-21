@@ -641,7 +641,7 @@ dependencies = [
 
 [[package]]
 name = "elmdb"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "charabia",
  "criterion",
@@ -698,7 +698,7 @@ dependencies = [
 
 [[package]]
 name = "elmdb-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "clap",
  "elmdb",
@@ -710,7 +710,7 @@ dependencies = [
 
 [[package]]
 name = "elmdb-node"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "elmdb",
  "libc",
@@ -2960,7 +2960,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "elmdb",
  "libc",

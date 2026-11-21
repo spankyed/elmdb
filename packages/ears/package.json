@@ -1,6 +1,6 @@
 {
   "name": "@elmdb/ears",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "EARS, the fluent TypeScript API over an elmdb database: query and write builders, watches and typed facades",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -41,7 +41,7 @@
     }
   },
   "peerDependencies": {
-    "elmdb": "0.0.0"
+    "elmdb": "0.1.0"
   },
   "dependencies": {
     "msgpackr": "^2.1.4"
