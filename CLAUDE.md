@@ -42,6 +42,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo nextest run --workspace  # each test in its own process, under .config/nextest.toml's deadlines
 cargo test --workspace --doc
 cargo xtask check-generated      # the protocol's TypeScript matches the Rust types
+cargo xtask check-versions       # Cargo.toml, the binding's package.json and EARS' (its peer elmdb too) hold one version
 cargo xtask check-notices        # the npm package's third-party notices match the lockfile (needs cargo-about 0.9.3)
 cargo deny check bans sources advisories  # deny.toml: no banned crate, crates.io alone, no RustSec advisory (needs cargo-deny 0.21.0 and, for advisories, the network; name the checks, a bare `check` fails on licenses, which about.toml owns)
 cargo xtask check-one-lmdb       # exactly one LMDB -sys crate in the dependency tree
@@ -109,4 +110,7 @@ The toolchain is pinned in `rust-toolchain.toml`, which is also the minimum supp
   mutate the working tree to do it.
 - **A figure in prose carries its date and conditions**, or names the record or command that derives it.
 - **Commits:** conventional messages, no attribution lines, one logical change each. Stage only your own files and read
-  `git diff --cached` first. Never tag, publish to npm or crates.io, or create releases.
+  `git diff --cached` first. Never tag, publish to npm or crates.io, or create releases: that is the owner's, and the
+  rule binds every person and agent working here. CI alone makes releases on its own: `release.yml` publishes each
+  `main` commit's packages as the prerelease `pkg-<commit>` (`testing.md`, Each commit's packages), and drafts a
+  release for a `v<version>` tag the owner pushes.
