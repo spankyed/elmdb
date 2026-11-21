@@ -1,6 +1,6 @@
 # EARS in elmdb's repository
 
-Status: phases 0, 1 and 3 done, 2026-11-20; phase 2 in progress in apack. Planned 2026-11-14, revised 2026-11-15
+Status: done, 2026-11-20: every phase merged. Planned 2026-11-14, revised 2026-11-15
 and its list of what changed read again on 2026-11-16. It went through six drafts: five independent reads, each
 against both repositories, changed the five before it (What the reviews changed, at the end). The rest of this
 document is the plan as it stood before the move; how EARS works now is `../../architecture/ears.md`, and the
@@ -16,8 +16,11 @@ boundary with apack `../../architecture/design.md`.
 - **Phase 1 is merged as elmdb#207**: `packages/apack-ears` split at apack's `92b4a7e387` into `ad7bd9d7`, merged
   under `packages/ears` by a merge commit. The EARS job took 3 min 51 s on Linux, 5 min 43 s on macOS and 6 min 50 s
   on Windows (2026-11-20), and added no wall time to the pull request.
-- **Phase 2 is in progress in apack**: apack switches to the linked `@elmdb/ears` and deletes `packages/apack-ears`,
-  and the phase is being finished there.
+- **Phase 2 is merged in apack as #586**, into its `develop` at `375e00a563`: the pin names this repository's
+  `2bebc9d` (#207's merge), apack's packages depend on the linked `@elmdb/ears`, and `packages/apack-ears` and what
+  "Goes from apack" lists are deleted. `git log 92b4a7e387..<the deletion's parent> -- packages/apack-ears` in apack
+  is empty. The packaged app's native smoke test opens a database and answers a query through the EARS it ships, and
+  apack's strict chain (unit, integration, native, acceptance and end-to-end) passed on the branch.
 - **Phase 3 is done**: the documents name `@elmdb/ears`, and this plan is archived.
 
 EARS, the entity-attribute-relation system, is the fluent TypeScript API over an elmdb database: what a program
@@ -441,14 +444,16 @@ Settled by phase 1 (elmdb#207, 2026-11-20):
 - **The binding's jobs got `:binding` scripts** (`build:binding`, `typecheck:binding`, `test:binding`) once the root's
   `npm test` ran vitest, which their Node 23 doesn't support.
 
-Still open, for phase 2:
+Settled by phase 2: apack's API and CLI bundles inline the linked `dist`, which its strict chain's app,
+acceptance and end-to-end suites ran on (apack#586, 2026-11-20).
+
+Still open after the move:
 
 - That EARS can leave apack's shared-instance list once packs import it only through the SDK. The harness that runs
-  a pack's dependencies shares EARS by name. Until a pack built that way is shown loading one copy, EARS stays on
-  the list under its new name.
-- That apack's API bundle and its CLI bundle, which inline EARS from source today, inline a linked `dist`, with
-  source maps good enough for the call sites `calls.ts` reports; and that the renderer's dev server serves a linked
-  `dist` from outside its root.
+  a pack's dependencies shares EARS by name, and a pack's built facade can name `@elmdb/ears` for an inferred type.
+  Until a pack built that way is shown loading one copy, EARS stays on the list under its new name.
+- That the linked `dist`'s source maps are good enough for the call sites `calls.ts` reports, and that the
+  renderer's dev server serves it from outside its root: neither was checked on its own.
 
 ## What the reviews changed
 
