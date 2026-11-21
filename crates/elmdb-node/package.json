@@ -9,7 +9,6 @@
     "url": "git+https://github.com/spankyed/elmdb.git",
     "directory": "crates/elmdb-node"
   },
-  "private": true,
   "type": "commonjs",
   "main": "index.js",
   "types": "index.d.ts",
