@@ -630,16 +630,25 @@ workspace's build configuration (Releases). `lmdb-upstream.yml` runs each Monday
 `mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
 LMDB (`scripts/lmdb-upstream.py`). `advisories.yml` runs each day and fails on a RustSec advisory against a crate in
 the lockfile (`cargo deny check advisories`), or an npm advisory of high severity or above against the binding's build
-tooling (`npm audit --audit-level=high`, the root `package-lock.json`; the npm package itself depends on nothing).
+tooling (`npm audit --audit-level=high`, the root `package-lock.json`; the npm package itself depends only on its own
+platform packages).
 `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
 and so is `models.yml` (Concurrency models). `model-mutants.yml` runs each week and on dispatch (Mutation testing).
 
 ## Releases
 
-A release is two npm packages at one version: the binding, `elmdb`, and EARS, `@elmdb/ears`, whose peer `elmdb` names
-that version exactly, so npm installs EARS beside that binding and no other. `cargo xtask check-versions`, which
-`ci.yml`'s repo job and `pre-push` run, fails unless the workspace's `Cargo.toml`, both `package.json`s and EARS' peer
-hold one version.
+A release is npm packages at one version: the binding, `elmdb`; a platform package for each of its targets,
+`@elmdb/binding-<platform>`, holding that target's binary; and EARS, `@elmdb/ears`, whose peer `elmdb` names that version
+exactly, so npm installs EARS beside that binding and no other. The binding's package holds no binary: it names each
+platform package as an optional dependency at exactly its version, and npm installs the one whose `os`, `cpu` and, on
+Linux, `libc` match the machine and skips the others, so an install holds one binary rather than seven. napi's loader
+takes the binary from the binding's own directory first, where an in-repo build leaves it, and else from the platform
+package. The platform packages are in elmdb's own npm scope, named by `napi.packageName` in the binding's
+`package.json`, from which napi's generated loader takes the names it requires: only the scope's owner can publish
+there, while an unscoped name the registry doesn't hold yet anyone could publish, and an install of elmdb would fetch
+that package as its optional dependency and load its binary. `cargo xtask check-versions`, which `ci.yml`'s repo job and `pre-push` run, fails unless the workspace's
+`Cargo.toml`, both `package.json`s, EARS' peer and each of the binding's optional dependencies hold one version, and
+unless those name the platform package of every target in `napi.targets` and nothing else, in the `@elmdb` scope.
 
 A tag `v<version>` starts `.github/workflows/release.yml`, and the tag is the owner's. It fails unless the tag names
 that version, which its first job reads again from the four places, and unless no workflow runs npm's publishing
@@ -655,11 +664,15 @@ each of `package.json`'s seven `napi.targets` on a runner of that OS and archite
 - the Windows one with the C runtime linked in (`+crt-static`), as Node's own is. A check of its imports fails on the
   Visual C++ redistributable's `VCRUNTIME140.dll`, which a dynamically linked build needs and many machines lack.
 
-It packs all seven into one npm package, `elmdb-<version>.tgz`, whose loader takes the binary named for the platform it
-runs on, with the notices `check-notices` holds to the lockfile, and writes each target's CycloneDX SBOM with
-cargo-cyclonedx, `elmdb.<platform>.cdx.json`. It builds EARS' `dist` from the checkout and packs it,
-`elmdb-ears-<version>.tgz`. Then, on each target, `scripts/release-smoke.mjs` installs both packages into an empty
-project on Node 22.17.0, with npm's strict peers, and runs a database through the binding, a text search, a rank and
+`scripts/release-pack.mjs` packs each binary into its platform package, `elmdb-binding-<platform>-<version>.tgz`, with the
+notices `check-notices` holds to the lockfile, and the binding, without a binary, into `elmdb-<version>.tgz`; the
+platform packages' manifests are written from the binding's at pack time, so none is committed. It writes each
+target's CycloneDX SBOM with cargo-cyclonedx, `elmdb.<platform>.cdx.json`, and builds EARS' `dist` from the checkout
+and packs it, `elmdb-ears-<version>.tgz`. Then, on each target, `scripts/release-smoke.mjs` installs the binding and
+EARS into an empty project on Node 22.17.0, with npm's strict peers and each platform package overridden by its
+tarball, so npm chooses among the packed platform packages as it would among published ones; it fails unless npm
+installed that target's platform package and no other, and the binary that answers is that package's. It runs a
+database through the binding, a text search, a rank and
 `check()`, and another through EARS, its README's example through both its entries; it reads the thin client and the
 binding's manifest through the binding's `exports`. The glibc targets install in AlmaLinux 8, at glibc 2.28, and the
 musl ones in Alpine; macOS on macOS 15 and Windows on Windows Server 2022. On a tag it drafts a GitHub release holding
@@ -668,16 +681,21 @@ every file the run would upload; a draft missing one, which a run that failed wh
 release that can't be read, other than one that isn't there, fails the draft rather than counting as none.
 
 Publishing the draft is the owner's, and so is publishing to npm, from the draft's files, which are what the smoke
-installed: `npm publish elmdb-<version>.tgz`, then `npm publish elmdb-ears-<version>.tgz`, whose `publishConfig` makes
-the scoped package public. Neither package is `private`, which would make npm refuse the publish; nothing in CI
-publishes them.
+installed: `npm publish` of each `elmdb-binding-<platform>-<version>.tgz`, then `npm publish elmdb-<version>.tgz`, whose
+optional dependencies name them, then `npm publish elmdb-ears-<version>.tgz`, whose `publishConfig` makes the scoped
+package public. No package is `private`, which would make npm refuse the publish; nothing in CI publishes them. Until
+the platform packages are published, an install of the workspace asks the registry for them and, finding none, skips
+them, as npm does an optional dependency it can't fetch; `package-lock.json` records them so, unresolved.
 
 ### Each commit's packages
 
-Each push to `main` runs the build, the pack and every target's smoke for that commit, and then publishes its two
-packages, `elmdb-<version>.tgz` and `elmdb-ears-<version>.tgz`, with their `SHA256SUMS`, as a GitHub prerelease tagged
-`pkg-<commit>`, the commit's full hash. A consumer, apack among them, depends on a commit's packages by URL rather than
-building elmdb from a checkout:
+Each push to `main` runs the build, the pack and every target's smoke for that commit, and then publishes its
+packages, `elmdb-<version>.tgz`, each `elmdb-binding-<platform>-<version>.tgz` and `elmdb-ears-<version>.tgz`, with their
+`SHA256SUMS`, as a GitHub prerelease tagged `pkg-<commit>`, the commit's full hash. The binding's tarball there is
+packed again with its optional dependencies naming the platform packages' tarballs on that same prerelease by URL,
+rather than by version, which no registry holds yet; the source manifest keeps the versions, for npm. A consumer, apack
+among them, depends on a commit's packages by URL rather than building elmdb from a checkout, and installs the binding's
+and EARS' URLs alone, which bring the machine's platform package with them:
 
 ```bash
 npm install https://github.com/spankyed/elmdb/releases/download/pkg-<commit>/elmdb-0.1.0.tgz \
@@ -685,8 +703,12 @@ npm install https://github.com/spankyed/elmdb/releases/download/pkg-<commit>/elm
 ```
 
 EARS' peer names the binding's version exactly, which the binding installed from its URL beside it holds, so npm's
-strict peers accept the pair; the lockfile records each URL and its integrity, and `npm ci` installs those bytes again.
-The files are the ones every target's smoke installed. CI makes these prereleases itself, with the run's own
+strict peers accept the pair; the lockfile records each URL and its integrity, the platform package's among them, and
+`npm ci` installs those bytes again. The platform packages and EARS are the files every target's smoke installed, and
+the binding's differs from the one it installed in its manifest's optional dependencies alone. Then, on Linux x64 and
+macOS arm64, the workflow installs the two by their URLs on the published prerelease and runs the smoke again, which
+fails unless the platform package came with them: npm skips an optional dependency it fails to fetch without failing
+the install, and the binding would then load nothing. CI makes these prereleases itself, with the run's own
 `GITHUB_TOKEN` and `contents: write` in that job alone, which the owner agreed to on 2026-11-21; the rule that no one
 tags or creates releases (`CLAUDE.md`) is for people and agents, and a `v<version>` release is still the owner's. A
 `pkg-<commit>` is a prerelease and never the latest release, so it isn't taken for one. A run again for the same

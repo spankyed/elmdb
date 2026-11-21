@@ -1,32 +1,74 @@
-// The release's two npm packages installed as a user installs them, into an empty project on the platform this runs on,
-// and a database run through each: `node scripts/release-smoke.mjs <elmdb-x.y.z.tgz> <elmdb-ears-x.y.z.tgz>`. Nothing
-// of this checkout is loaded, so what answers is the binary the binding's package carries for this platform, found by
-// napi's loader in the package's own directory, and EARS' built `dist`, resolving `elmdb` as its peer. It fails when
-// the binding's package holds no binary for this platform, when that binary doesn't load on this system's libc or OS
-// release, when npm won't install EARS beside that binding, or when either answers wrongly. Run by
-// `.github/workflows/release.yml` on each target, with the Node the packages' `engines` name as their floor.
+// The binding and EARS installed as a user installs them, into an empty project on the platform this runs on, and a
+// database run through each:
+//
+//   node scripts/release-smoke.mjs <elmdb-x.y.z.tgz> <elmdb-ears-x.y.z.tgz> <elmdb-binding-<platform>-x.y.z.tgz>...
+//   node scripts/release-smoke.mjs <elmdb's URL> <EARS' URL>
+//
+// The binding's package holds no binary: it names one platform package per target as an optional dependency, and npm
+// installs the one whose `os`, `cpu` and `libc` match this machine (`scripts/release-pack.mjs`). Given the platform
+// packages' tarballs, the project overrides each by its file, so npm chooses among the tarballs this run packed as it
+// would among the published packages; given URLs, the binding's manifest names the platform packages by their release
+// URLs, and npm fetches them. Either way it fails unless exactly this platform's package was installed, since npm skips
+// an optional dependency it fails to fetch or that doesn't match without a word, and unless the binary loaded is that
+// package's. Nothing of this checkout is loaded, so what answers is that binary, and EARS' built `dist`, resolving
+// `elmdb` as its peer. It fails when that binary doesn't load on this system's libc or OS release, when npm won't
+// install EARS beside that binding, or when either answers wrongly. Run by `.github/workflows/release.yml` on each
+// target, with the Node the packages' `engines` name as their floor, and after a commit's packages are published, by
+// their URLs.
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-const [tarball, earsTarball] = process.argv.slice(2);
-if (![tarball, earsTarball].every((file) => file && fs.existsSync(file))) {
-  console.error('usage: node scripts/release-smoke.mjs <elmdb-x.y.z.tgz> <elmdb-ears-x.y.z.tgz>');
+const [tarball, earsTarball, ...platformTarballs] = process.argv.slice(2);
+const isUrl = (spec) => /^https:\/\//.test(spec ?? '');
+const specs = [tarball, earsTarball, ...platformTarballs];
+if (!specs.every((spec) => spec && (isUrl(spec) || fs.existsSync(spec))) || platformTarballs.some(isUrl)) {
+  console.error('usage: node scripts/release-smoke.mjs <elmdb-x.y.z.tgz | URL> <elmdb-ears-x.y.z.tgz | URL> [<elmdb-binding-<platform>-x.y.z.tgz>...]');
   process.exit(2);
+}
+const resolved = (spec) => (isUrl(spec) ? spec : path.resolve(spec));
+
+// The platform package napi's loader requires on this machine: `@elmdb/binding-<platform>-<arch>`, with the C library
+// on Linux and the toolchain on Windows
+const libc = process.platform !== 'linux' ? '' : process.report.getReport().header.glibcVersionRuntime ? '-gnu' : '-musl';
+const platform = `binding-${process.platform}-${process.arch}${libc}${process.platform === 'win32' ? '-msvc' : ''}`;
+const expected = `@elmdb/${platform}`;
+
+// Each platform tarball's package, `@elmdb/binding-<platform>`, as its own manifest names it
+const overrides = Object.fromEntries(
+  platformTarballs.map((file) => {
+    const manifest = JSON.parse(execFileSync('tar', ['-xOzf', file, 'package/package.json'], { encoding: 'utf8' }));
+    return [manifest.name, `file:${path.resolve(file).replaceAll('\\', '/')}`];
+  }),
+);
+if (platformTarballs.length > 0 && !(expected in overrides)) {
+  throw new Error(`No tarball given is ${expected}'s, the platform package this machine installs`);
 }
 
 const project = fs.mkdtempSync(path.join(os.tmpdir(), 'elmdb-release-smoke-'));
-fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
-// msgpackr is the codec the README's example writes with; elmdb itself depends on nothing, and EARS on msgpackr, which
-// npm resolves from the registry. Both packages in one install, as a user adds them: npm refuses EARS unless the
-// binding beside it is the version its peer names
-const packages = [path.resolve(tarball), path.resolve(earsTarball), 'msgpackr@2.1.4'];
+fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ private: true, type: 'module', overrides }));
+// msgpackr is the codec the README's example writes with; elmdb itself depends on nothing but its platform packages,
+// and EARS on msgpackr, which npm resolves from the registry. Both packages in one install, as a user adds them: npm
+// refuses EARS unless the binding beside it is the version its peer names
+const packages = [resolved(tarball), resolved(earsTarball), 'msgpackr@2.1.4'];
 execFileSync('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error', '--strict-peer-deps', ...packages], {
   cwd: project,
   stdio: 'inherit',
   shell: process.platform === 'win32',
 });
+
+// This platform's package and no other's, and no binary in the binding's own package
+const installed = [
+  ...fs.readdirSync(path.join(project, 'node_modules')).filter((name) => /^elmdb-/.test(name)),
+  ...fs.readdirSync(path.join(project, 'node_modules', '@elmdb')).filter((name) => /^binding-/.test(name)).map((name) => `@elmdb/${name}`),
+];
+if (installed.length !== 1 || installed[0] !== expected) {
+  throw new Error(`npm installed [${installed.join(', ')}] beside elmdb, and this machine's platform package is ${expected}`);
+}
+const strays = fs.readdirSync(path.join(project, 'node_modules', 'elmdb')).filter((file) => file.endsWith('.node'));
+if (strays.length > 0) throw new Error(`elmdb's own package holds ${strays.join(', ')}; its binaries are the platform packages'`);
+console.log(`npm installed ${expected} alone beside elmdb`);
 
 // A text index exercises the tokenizer and the collation compiled into the binary, a relation and a rank the graph
 // code, and `check()` every derived key against the primary data the write left
@@ -36,9 +78,11 @@ import { Packr } from 'msgpackr';
 import * as assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import { createRequire } from 'node:module';
+import * as path from 'node:path';
 
 const loaded = createRequire(import.meta.url).resolve('elmdb');
 assert.ok(loaded.startsWith(fs.realpathSync('node_modules/elmdb')), 'elmdb resolved outside the installed package: ' + loaded);
+const require = createRequire(import.meta.url);
 const msgpack = new Packr({ useRecords: false, mapsAsObjects: true, int64AsType: 'auto' });
 const db = Database.open('db', {
   schema: {
@@ -65,7 +109,11 @@ assert.deepEqual(top.ids, ['Note-a']);
 const report = db.check();
 assert.deepEqual([report.differences, report.violations], [[], []], JSON.stringify(report));
 db.close();
-console.log('elmdb from ' + loaded + ' answered on ' + process.platform + '-' + process.arch + ', Node ' + process.version);
+// The binary that answered is the platform package's; msgpackr's native extract is another's, and is left out
+const platformPackage = fs.realpathSync('node_modules/${expected}');
+const binaries = Object.keys(require.cache).filter((file) => /^elmdb\\..*\\.node$/.test(path.basename(file)));
+assert.ok(binaries.length === 1 && binaries[0].startsWith(platformPackage), 'the binary loaded is ' + binaries.join(', ') + ', and is to be ${expected}' + "'s");
+console.log('elmdb from ' + loaded + ' with ' + binaries[0] + ' answered on ' + process.platform + '-' + process.arch + ', Node ' + process.version);
 `;
 // EARS as its README's example runs it, through its two entries: the builders compile to plans and batches, and
 // `@elmdb/ears/database` opens the database through the binding installed beside it, which is the one the program
