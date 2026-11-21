@@ -29,7 +29,7 @@ export interface UnitOptions {
   /**
    * For a unit inside another: what the database leaves to check until a unit commits, that both ends of a relation
    * exist, is checked of this unit's writes as it ends, so one that fails is undone alone and throws here rather than
-   * failing the outermost unit as it commits. The commit checks again
+   * failing the outermost unit as it commits. It says nothing of the outermost unit, which its commit checks
    */
   checked?: boolean;
 }
@@ -41,8 +41,8 @@ export interface EarsUnit {
   savepoint(): number;
   rollbackTo(depth: number): void;
   release(depth: number): void;
-  /** Makes the checks deferred since the savepoint at `depth` now, throwing what one refuses */
-  checkSince(depth: number): void;
+  /** `release` once the checks deferred since the savepoint pass; one that fails undoes it instead, and is thrown */
+  releaseChecked(depth: number): void;
   commit(durable?: boolean | null): Uint8Array;
   /** What the unit has changed so far: msgpack of elmdb's `ChangeSet` */
   pendingChanges(): Uint8Array;
@@ -524,11 +524,6 @@ export function createConnection(
         throw new Error('transact() takes a synchronous function: an await inside it would split the unit');
       }
       if (outermost && unit && hook && !hookPaused) hook.run();
-      if (!outermost && options?.checked && unit && level.savepoint !== undefined) {
-        const held = unit;
-        const depth = level.savepoint;
-        crossing(() => held.checkSince(depth));
-      }
     } catch (error) {
       levels.pop();
       const held = unit;
@@ -545,7 +540,11 @@ export function createConnection(
     const held = unit;
     if (!outermost) {
       // A unit inside another commits with the outermost
-      if (held && level.savepoint !== undefined) crossing(() => held.release(level.savepoint!));
+      // A checked one that fails its checks is undone by the database as it throws, and has kept nothing
+      if (held && level.savepoint !== undefined) {
+        const depth = level.savepoint;
+        crossing(() => (options?.checked ? held.releaseChecked(depth) : held.release(depth)));
+      }
       if (level.kept) levels.at(-1)!.kept = true;
       return value;
     }

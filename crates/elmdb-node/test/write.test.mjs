@@ -79,19 +79,21 @@ test('a unit reads its own writes, refuses a write beside it, and commits its ch
   write(db, [{ op: 'set', id: 'Note-1', fields: { title: 'after' } }]);
 });
 
-test('a savepoint asked for its checks throws what one refuses, stays open, and rolls back alone', (t) => {
+test('a savepoint released checked throws what a check refuses and is undone alone, and the unit goes on', (t) => {
   const db = open(t);
   write(db, [{ op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } }]);
   const unit = db.begin();
-  const depth = unit.savepoint();
+  write(unit, [{ op: 'set', id: 'Note-1', fields: { title: 'before' } }]);
+  const loose = unit.savepoint();
   write(unit, [{ op: 'link', source: 'Note-1', kind: 'refs', target: 'Note-9' }]);
-  assert.throws(() => unit.checkSince(depth), { code: 'NO_SUCH_ENTITY' });
+  assert.throws(() => unit.releaseChecked(loose), { code: 'NO_SUCH_ENTITY' });
   assert.equal(unit.isOpen, true);
-  unit.rollbackTo(depth);
-  unit.checkSince(0);
-  write(unit, [{ op: 'set', id: 'Note-1', fields: { title: 'kept' } }]);
+  const whole = unit.savepoint();
+  assert.equal(whole, loose, 'the refused savepoint was closed');
+  write(unit, [{ op: 'create', type: 'Note', id: 'Note-2', fields: { title: 'two' } }, { op: 'link', source: 'Note-1', kind: 'refs', target: 'Note-2' }]);
+  unit.releaseChecked(whole);
   unit.commit();
-  assert.equal(db.stats().relations.refs, undefined);
+  assert.equal(db.stats().relations.refs, 1);
 });
 
 test('reads answer on this thread and on the pool, the same, and a unit reads its own writes', async (t) => {

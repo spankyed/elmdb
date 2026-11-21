@@ -248,10 +248,10 @@ export declare class Unit {
   /** Closes the savepoint at `depth`, keeping its writes */
   release(depth: number): void
   /**
-   * Makes the checks deferred since the savepoint at `depth` now, throwing what one refuses and leaving the
-   * savepoint open: the commit makes them again
+   * Closes the savepoint at `depth`, keeping its writes, once the checks deferred since it pass; one that fails
+   * undoes everything since the savepoint, closing it, and is thrown
    */
-  checkSince(depth: number): void
+  releaseChecked(depth: number): void
   /** Commits the unit after its deferred checks, answering msgpack bytes of its `ChangeSet`; a failed check aborts it */
   commit(durable?: boolean | undefined | null): Buffer
   /** Ends the unit, keeping nothing of it */

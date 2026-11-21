@@ -434,7 +434,6 @@ export interface EarsUnit {
     abort(): void;
     changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
     checkpoint(name: string): Uint8Array | null;
-    checkSince(depth: number): void;
     // (undocumented)
     commit(durable?: boolean | null): Uint8Array;
     // (undocumented)
@@ -445,6 +444,7 @@ export interface EarsUnit {
     read(reads: Uint8Array): Uint8Array;
     // (undocumented)
     release(depth: number): void;
+    releaseChecked(depth: number): void;
     // (undocumented)
     rollbackTo(depth: number): void;
     // (undocumented)

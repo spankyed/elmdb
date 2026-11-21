@@ -15,7 +15,7 @@ use crate::sync::PlainMutex;
 use super::changes::Event;
 
 /// A check made when the outermost unit commits: what a unit may leave inconsistent part way, it may not commit. A
-/// savepoint may be asked for the ones deferred since it (`Unit::check_since`), and they are made again at the commit
+/// savepoint may be held to the ones deferred since it as it is released (`Unit::release_checked`)
 #[derive(Debug, Clone, PartialEq)]
 pub enum Check {
     /// The relation, if it still exists, has both its ends
@@ -86,11 +86,10 @@ impl UnitState {
         self.levels.len()
     }
 
-    /// The checks deferred since the savepoint at `depth` was opened; every one of the unit's where no savepoint is
-    /// open at that depth
-    pub(super) fn checks_since(&self, depth: usize) -> &[Check] {
-        let from = depth.checked_sub(1).and_then(|at| self.levels.get(at)).map_or(0, |level| level.checks);
-        &self.checks[from..]
+    /// Where the checks deferred since the savepoint at `depth` begin among the unit's: past the last of them when no
+    /// savepoint is open at that depth, which has deferred none
+    pub(super) fn checks_from(&self, depth: usize) -> usize {
+        depth.checked_sub(1).and_then(|at| self.levels.get(at)).map_or(self.checks.len(), |level| level.checks)
     }
 }
 
