@@ -1164,7 +1164,11 @@ mod units {
         let inner = unit.savepoint().unwrap();
         unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "b": 1 } })])).unwrap();
         unit.check_since(inner).unwrap();
-        assert_eq!(unit.check_since(outer).unwrap_err().code, ErrorCode::NoSuchEntity, "the link was deferred since it");
+        assert_eq!(
+            unit.check_since(outer).unwrap_err().code,
+            ErrorCode::NoSuchEntity,
+            "the link was deferred since it"
+        );
         assert_eq!(unit.check_since(0).unwrap_err().code, ErrorCode::NoSuchEntity, "and since the unit began");
         // Refused, it is still open, and rolls back with what it held and nothing before it
         unit.rollback_to(outer).unwrap();
