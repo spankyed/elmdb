@@ -142,44 +142,6 @@ describe('a unit inside another', () => {
     expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'outer' });
   });
 
-  it('left unchecked, lets a link to no entity through, and the outer one fails with it as it commits', () => {
-    expect(() => e.transact(() => {
-      e.write(other).set('title', 'outer');
-      e.transact(() => e.write(task).link('blocks', 'Task-nowhere' as Id));
-    })).toThrow(expect.objectContaining({ code: 'NO_SUCH_ENTITY' }));
-    expect(committed()).toBe(0);
-    expect(e.getAttr(other, 'title')).toBe('b');
-  });
-
-  it('checked, fails alone on a link to no entity: its writes are undone and the outer commits its own', () => {
-    e.transact(() => {
-      e.write(other).set('title', 'outer');
-      expect(() => e.transact(() => {
-        e.write(task).set('title', 'inner');
-        e.write(task).link('blocks', 'Task-nowhere' as Id);
-      }, { checked: true })).toThrow(expect.objectContaining({ code: 'NO_SUCH_ENTITY' }));
-      expect(e.getAttr(task, 'title')).toBe('a');
-    });
-    expect(committed()).toBe(1);
-    expect([e.getAttr(task, 'title'), e.getAttr(other, 'title')]).toEqual(['a', 'outer']);
-    expect(e.findRelations({ source: task, kind: 'blocks' })).toEqual([]);
-  });
-
-  it('checked, is asked only for what it wrote: an end written later inside it is there, and the outer\'s own link waits', () => {
-    const later = 'Task-later' as Id;
-    e.transact(() => {
-      // The outer links to an entity it creates last: no unit inside it is asked about that
-      e.write(other).link('blocks', later);
-      e.transact(() => {
-        e.write(task).link('blocks', 'Task-inside' as Id);
-        e.create('Task', { id: 'Task-inside' as Id }).set('title', 'inside');
-      }, { checked: true });
-      e.create('Task', { id: later }).set('title', 'later');
-    });
-    expect(committed()).toBe(1);
-    expect(e.findRelations({ kind: 'blocks' }).map((found) => found.target).sort()).toEqual(['Task-inside', 'Task-later']);
-  });
-
   it('that throws, having held every write the outer made, leaves the outer nothing to commit', () => {
     const sequence = e.lastCommit();
     e.transact(() => {
@@ -222,31 +184,44 @@ describe('a link\'s target', () => {
     expect(committed()).toBe(0);
   });
 
-  it('may be created later in the same unit: a forward reference', () => {
-    let later!: Id;
-    e.transact(() => {
-      e.write(task).link('refers', 'Task-later' as Id);
-      later = e.create('Task', { id: 'Task-later' as Id }).set('title', 'later').id();
-    });
-    expect(e.findRelations({ source: task, kind: 'refers' }).map((r) => r.target)).toEqual([later]);
-  });
-
-  it('missing when the unit commits rolls the whole unit back, a nested unit\'s links included', () => {
+  it('must exist when the link is made inside a unit too: one written later in the unit is not there yet', () => {
     const before = state();
     expect(() => e.transact(() => {
-      e.write(task).set('title', 'changed');
-      e.transact(() => { e.write(other).link('refers', 'Task-never' as Id); });
-    })).toThrow(/link\(refers, "Task-never"\): no entity has this id/);
+      e.write(task).link('refers', 'Task-later' as Id);
+      e.create('Task', { id: 'Task-later' as Id }).set('title', 'later');
+    })).toThrow(/link\(refers, "Task-later"\): no entity has this id/);
     expect(state()).toEqual(before);
     expect(committed()).toBe(0);
   });
 
-  it('missing at commit is checked on this link\'s own edge, not on another entity\'s', () => {
+  it('written first in the unit is there to link to', () => {
+    let later!: Id;
+    e.transact(() => {
+      later = e.create('Task', { id: 'Task-later' as Id }).set('title', 'later').id();
+      e.write(task).link('refers', later);
+    });
+    expect(e.findRelations({ source: task, kind: 'refers' }).map((r) => r.target)).toEqual([later]);
+  });
+
+  it('missing in a unit inside another fails that unit alone, where the link is written, and the outer commits its own', () => {
+    e.transact(() => {
+      e.write(task).set('title', 'changed');
+      expect(() => e.transact(() => {
+        e.write(other).set('title', 'inner');
+        e.write(other).link('refers', 'Task-never' as Id);
+      })).toThrow(/link\(refers, "Task-never"\): no entity has this id/);
+      expect(e.getAttr(other, 'title')).toBe('b');
+    });
+    expect(committed()).toBe(1);
+    expect([e.getAttr(task, 'title'), e.getAttr(other, 'title')]).toEqual(['changed', 'b']);
+    expect(e.findRelations({ source: other, kind: 'refers' })).toEqual([]);
+  });
+
+  it('is asked of the link being written, not of a relation to nothing that loaded data brought', () => {
     // A relation to nothing that came with loaded data, from an entity this unit doesn't touch
     e.admin.addRelation(other, 'refers', 'Task-ghost' as Id);
     e.transact(() => {
-      e.write(task).link('refers', 'Task-ghost' as Id);
-      e.write(task).unlink('refers', 'Task-ghost' as Id);
+      e.write(task).link('refers', other);
       e.write(task).set('title', 'committed');
     });
     expect(e.query.ids(task).pickOne()).toMatchObject({ title: 'committed' });
@@ -270,23 +245,16 @@ describe('a moved relation\'s ends', () => {
     expect(committed()).toBe(0);
   });
 
-  it('may be one created later in the same unit', () => {
-    let later!: Id;
+  it('must exist when it is moved inside a unit too, and the unit goes on with the relation where it was', () => {
     e.transact(() => {
-      e.updateRelation(rel, { target: 'Task-later' as Id });
-      later = e.create('Task', { id: 'Task-later' as Id }).id();
-    });
-    expect(e.findRelations({ source: project, kind: 'contains' }).map((r) => r.target)).toEqual([later]);
-  });
-
-  it('missing when the unit commits rolls the unit back', () => {
-    const before = state();
-    expect(() => e.transact(() => {
       e.write(task).set('title', 'changed');
-      e.updateRelation(rel, { target: 'Task-never' as Id });
-    })).toThrow(/no entity has the id "Task-never"/);
-    expect(state()).toEqual(before);
-    expect(committed()).toBe(0);
+      expect(() => e.updateRelation(rel, { target: 'Task-later' as Id })).toThrow(/no entity has the id "Task-later"/);
+      const later = e.create('Task', { id: 'Task-later' as Id }).id();
+      e.updateRelation(rel, { target: later });
+    });
+    expect(committed()).toBe(1);
+    expect(e.findRelations({ source: project, kind: 'contains' }).map((r) => r.target)).toEqual(['Task-later']);
+    expect(e.getAttr(task, 'title')).toBe('changed');
   });
 });
 

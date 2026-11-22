@@ -19,7 +19,7 @@ use super::changes::{Ends, Event};
 use super::entities;
 use super::keys;
 use super::mirror::EdgeDelta;
-use super::unit::{Check, Read, Txn};
+use super::unit::{Read, Txn};
 use super::{ids, values};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -417,6 +417,7 @@ pub fn link(
         return Ok((relation, false));
     }
     check_rules(t, &def, kind, source, target, None)?;
+    require_ends(t, source, target, |_| format!("link({kind}, {target:?}): no entity has this id"))?;
     let seq = entities::next_seq(t)?;
     let relation = ids::new_relation_id(t.now, seq);
     let stored = Stored {
@@ -437,8 +438,6 @@ pub fn link(
         source: source.to_owned(),
         target: target.to_owned(),
     });
-    // A relation has two ends when it commits; a unit may link to an entity it creates later
-    t.defer(Check::Ends { relation: relation.clone(), via: "link" });
     Ok((relation, true))
 }
 
@@ -552,12 +551,14 @@ pub fn update(
     }
     if moved {
         check_rules(t, &def, &next.kind, &next.source, &next.target, Some(relation))?;
+        require_ends(t, &next.source, &next.target, |end| {
+            format!("updateRelation({relation:?}): no entity has the id {end:?}")
+        })?;
         unfile(t, &before)?;
         super::ranks::edge_changed(t, &before.kind, &before.source, &before.target, Some(before.weight), None)?;
         next.seq = entities::next_seq(t)?;
         file(t, relation, &next)?;
         super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, None, Some(next.weight))?;
-        t.defer(Check::Ends { relation: relation.to_owned(), via: "updateRelation" });
     } else if next.weight != before.weight {
         file_edges(t, relation, &next)?;
         super::ranks::edge_changed(t, &next.kind, &next.source, &next.target, Some(before.weight), Some(next.weight))?;
@@ -590,16 +591,12 @@ pub fn remove_all_of(t: &mut Txn<'_, '_>, entity: &str) -> Result<()> {
     Ok(())
 }
 
-/// The deferred check of a relation's ends
-pub fn check_ends(t: &impl Read, relation: &str, via: &str) -> Result<()> {
-    let Some(stored) = get(t, relation)? else { return Ok(()) };
-    for end in [&stored.source, &stored.target] {
+/// Refuses a relation to or from an id no entity has, before anything of it is written: a relation has both its ends
+/// from the write that makes it or moves it, so nothing is left to find when a unit commits
+fn require_ends(t: &impl Read, source: &str, target: &str, missing: impl Fn(&str) -> String) -> Result<()> {
+    for end in [source, target] {
         if entities::record(t, end)?.is_none() {
-            let message = match via {
-                "link" => format!("link({}, {:?}): no entity has this id", stored.kind, stored.target),
-                _ => format!("{via}({relation:?}): no entity has the id {end:?}"),
-            };
-            return Err(Error::new(ErrorCode::NoSuchEntity, message));
+            return Err(Error::new(ErrorCode::NoSuchEntity, missing(end)));
         }
     }
     Ok(())

@@ -874,14 +874,7 @@ impl Unit {
         self.run("Unit.release", |unit| unit.open()?.release(depth as usize).map_err(to_js))
     }
 
-    /// Closes the savepoint at `depth`, keeping its writes, once the checks deferred since it pass; one that fails
-    /// undoes everything since the savepoint, closing it, and is thrown
-    #[napi]
-    pub fn release_checked(&mut self, depth: u32) -> Result<(), Code> {
-        self.run("Unit.releaseChecked", |unit| unit.open()?.release_checked(depth as usize).map_err(to_js))
-    }
-
-    /// Commits the unit after its deferred checks, answering msgpack bytes of its `ChangeSet`; a failed check aborts it
+    /// Commits the unit, answering msgpack bytes of its `ChangeSet`
     #[napi]
     pub fn commit<'env>(&mut self, env: &'env Env, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.commit", |unit| {

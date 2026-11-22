@@ -1712,8 +1712,8 @@ fn rename_type_refuses_a_rename_whose_rows_the_schema_refuses_under_the_new_name
         vec![
             create("Note-1", json!({})),
             create("Task-1", json!({})),
-            json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": "Note-1" }),
             create("Task-2", json!({})),
+            json!({ "op": "link", "source": "Task-1", "kind": "cites", "target": "Task-2", "info": "Note-1" }),
         ],
     )
     .unwrap();

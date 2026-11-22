@@ -577,9 +577,7 @@ The operations:
   info, its weight) and remove one, destroy, take a label (the next `<base> <n>` of a type), and embed (a caller's vector
   for a chunk, answered `stale` if its text changed).
 - **Savepoints:** `unit.savepoint()` opens one and answers its depth; `unit.rollbackTo(depth)` undoes everything since
-  it, and `unit.release(depth)` keeps its writes in the unit around it, as EARS' nested `transact` does.
-  `unit.releaseChecked(depth)` is `release` once the checks deferred since the savepoint pass, and they are not made
-  again at the commit; one that fails undoes the savepoint instead, alone, and is thrown. A savepoint
+  it, and `unit.release(depth)` keeps its writes in the unit around it, as EARS' nested `transact` does. A savepoint
   is an undo log of each key's previous value, so rolling one back costs what it wrote. A write that has just read a
   key hands the log what it read, so the log reads it again only where the write didn't: a field write reads what the
   field held once, and the entity's place once for all the indexes covering it (`engine/tests/field_writes.rs` counts
@@ -597,8 +595,8 @@ The operations:
   (`VALUE_INVALID`), a time that isn't a finite number, the batch's `now`, a create's `createdAt` or `updatedAt` or a
   trash's `at` (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
   counts every edge, a trashed entity's included, since restoring it would close the cycle), or an edge
-  moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are checked at commit, so a unit may link
-  to an entity it creates later. A relation moved by `updateRelation` is held to its kind's rules as an edge at its new
+  moved, or its key changed, onto another edge's identity: its ends and key values (`DUPLICATE_EDGE`). A relation's ends are entities
+  when it is linked or moved (`NO_SUCH_ENTITY`), in a unit as outside one, so nothing of it waits for a commit to refuse. A relation moved by `updateRelation` is held to its kind's rules as an edge at its new
   ends, its edge as it was counting for nothing: one turned round closes no cycle through itself. A write of several
   fields of one value index, `updatedAt` counted where the write stamps it, files the entity under the values it
   leaves, once, and is held to those: not to the values

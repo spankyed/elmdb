@@ -937,19 +937,30 @@ fn unlink_and_remove_relation_remove_edges_and_their_keys_update_relation_moves_
 }
 
 #[test]
-fn a_link_target_must_exist_at_commit_and_may_be_created_later_in_the_unit() {
+fn a_link_target_must_exist_when_it_is_linked_whatever_the_batch_writes_after_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
     write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
     let e = refused(&db, vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-later" })]);
     assert_eq!(e.code, ErrorCode::NoSuchEntity);
-    assert_eq!(edges(&db), Vec::<String>::new());
-    // A forward reference: the target arrives later in the same batch
-    write(
+    assert_eq!(e.message, "link(refs, \"Task-later\"): no entity has this id");
+    // A target that arrives later in the same batch is not there yet: the batch is refused, and keeps nothing
+    let e = refused(
         &db,
         vec![
             json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-later" }),
             json!({ "op": "create", "type": "Task", "id": "Task-later" }),
+        ],
+    );
+    assert_eq!(e.code, ErrorCode::NoSuchEntity);
+    assert!(row(&db, "Task-later").is_none());
+    assert_eq!(edges(&db), Vec::<String>::new());
+    // Written first, it is
+    write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Task", "id": "Task-later" }),
+            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-later" }),
         ],
     )
     .unwrap();
@@ -1135,74 +1146,6 @@ mod units {
     }
 
     #[test]
-    fn a_savepoint_rolled_back_keeps_the_checks_deferred_before_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = open(&dir);
-        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
-        let mut unit = db.begin().unwrap();
-        // A link to a target no entity has: its check waits for the commit
-        unit.write(&batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-9" })]))
-            .unwrap();
-        let depth = unit.savepoint().unwrap();
-        unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })])).unwrap();
-        unit.rollback_to(depth).unwrap();
-        assert_eq!(unit.commit(false).unwrap_err().code, ErrorCode::NoSuchEntity, "the check from before it still ran");
-        assert_eq!(edges(&db), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_savepoint_released_checked_fails_alone_on_what_it_deferred_and_is_undone() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = open(&dir);
-        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
-        let mut unit = db.begin().unwrap();
-        unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })])).unwrap();
-        let depth = unit.savepoint().unwrap();
-        // A link to a target no entity has: its check waits
-        unit.write(&batch(vec![
-            json!({ "op": "set", "id": "Task-1", "fields": { "b": 1 } }),
-            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-9" }),
-        ]))
-        .unwrap();
-        assert_eq!(unit.release_checked(depth).unwrap_err().code, ErrorCode::NoSuchEntity);
-        assert_eq!(unit.savepoint().unwrap(), depth, "refused, it was closed");
-        // Everything since it went, its check included, and nothing before it
-        unit.commit(false).unwrap();
-        let r = row(&db, "Task-1").unwrap();
-        assert_eq!((r["a"].clone(), r.get("b").cloned()), (json!(1), None));
-        assert_eq!(edges(&db), Vec::<String>::new());
-    }
-
-    #[test]
-    fn a_savepoint_released_checked_is_held_to_what_it_deferred_and_not_to_what_was_deferred_before_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = open(&dir);
-        write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
-        let mut unit = db.begin().unwrap();
-        // Deferred before any savepoint: the unit's own, to a target written last
-        unit.write(&batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-3" })]))
-            .unwrap();
-        let depth = unit.savepoint().unwrap();
-        // Inside it, a link whose target is written after the link
-        unit.write(&batch(vec![
-            json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
-            json!({ "op": "create", "type": "Task", "id": "Task-2" }),
-        ]))
-        .unwrap();
-        let deferred = |unit: &mut crate::Unit| unit.read_with(|t| Ok(t.state.checks.len())).unwrap();
-        assert_eq!(deferred(&mut unit), 2);
-        unit.release_checked(depth).unwrap();
-        assert_eq!(deferred(&mut unit), 1, "the one it passed is settled, and the unit's own still waits");
-        // A depth no savepoint is open at closes nothing and checks nothing, the unit's loose link included
-        unit.release_checked(depth).unwrap();
-        unit.release_checked(0).unwrap();
-        assert_eq!(deferred(&mut unit), 1);
-        unit.write(&batch(vec![json!({ "op": "create", "type": "Task", "id": "Task-3" })])).unwrap();
-        unit.commit(false).unwrap();
-        assert_eq!(edges(&db).len(), 2);
-    }
-
-    #[test]
     fn a_released_savepoint_is_undone_with_the_unit_around_it() {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);
@@ -1217,17 +1160,51 @@ mod units {
     }
 
     #[test]
-    fn a_link_target_missing_when_the_unit_commits_rolls_the_whole_unit_back() {
+    fn a_link_to_a_missing_target_is_refused_where_it_is_written_and_the_unit_goes_on() {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);
         write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
         let mut unit = db.begin().unwrap();
         unit.write(&batch(vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })])).unwrap();
-        unit.write(&batch(vec![json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-never" })]))
-            .unwrap();
-        assert_eq!(unit.commit(false).unwrap_err().code, ErrorCode::NoSuchEntity);
-        assert!(row(&db, "Task-1").unwrap().get("a").is_none());
-        db.write(&batch(vec![]), false).unwrap();
+        // The batch that links to nothing is refused whole, its other write with it, and nothing waits for the commit
+        let refused = unit
+            .write(&batch(vec![
+                json!({ "op": "set", "id": "Task-1", "fields": { "b": 1 } }),
+                json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-never" }),
+            ]))
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::NoSuchEntity);
+        unit.commit(false).unwrap();
+        let r = row(&db, "Task-1").unwrap();
+        assert_eq!((r["a"].clone(), r.get("b").cloned()), (json!(1), None));
+        assert_eq!(edges(&db), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_relation_moved_to_a_missing_end_is_refused_where_it_is_moved_and_stays_where_it_was() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir);
+        let made = write(
+            &db,
+            vec![
+                json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+                json!({ "op": "create", "type": "Task", "id": "Task-2" }),
+                json!({ "op": "link", "source": "Task-1", "kind": "refs", "target": "Task-2" }),
+            ],
+        )
+        .unwrap();
+        let relation = match &made[2] {
+            OpResult::Relation { id, .. } => id.clone(),
+            other => panic!("a link answers its relation, not {other:?}"),
+        };
+        let mut unit = db.begin().unwrap();
+        let refused = unit
+            .write(&batch(vec![json!({ "op": "updateRelation", "relation": relation, "target": "Task-never" })]))
+            .unwrap_err();
+        assert_eq!(refused.code, ErrorCode::NoSuchEntity);
+        assert_eq!(refused.message, format!("updateRelation({relation:?}): no entity has the id \"Task-never\""));
+        unit.commit(false).unwrap();
+        assert_eq!(edges(&db), ["Task-1|refs|Task-2"]);
     }
 
     #[test]

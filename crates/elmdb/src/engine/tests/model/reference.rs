@@ -24,8 +24,6 @@ pub(super) struct Model {
     pub(super) edges: BTreeSet<(String, String, String)>,
     /// Each `cites` edge by its ends and key: one a pair for each value of `n`
     pub(super) keyed: BTreeSet<(String, String, u8)>,
-    /// The edges a unit linked, whose targets must exist when it commits
-    pub(super) pending: Vec<(String, String, String)>,
     pub(super) next_seq: u64,
     pub(super) refuse_next: bool,
 }
@@ -47,7 +45,7 @@ pub(super) fn code_of(reason: Refusal) -> crate::ErrorCode {
     use crate::ErrorCode as Code;
     match reason {
         "id in use" => Code::IdInUse,
-        "no such entity" | "link target missing at commit" => Code::NoSuchEntity,
+        "no such entity" => Code::NoSuchEntity,
         "not a list" => Code::NotAList,
         "self link" => Code::SelfLink,
         "no such relation" => Code::NoSuchRelation,
@@ -105,19 +103,17 @@ impl Model {
                 if id == target {
                     return Err("self link");
                 }
-                let edge = (id.to_string(), kind.to_string(), target.to_string());
-                if self.edges.insert(edge.clone()) {
-                    self.pending.push(edge);
-                }
+                // A relation has both its ends from the link that makes it
+                self.exists(target)?;
+                self.edges.insert((id.to_string(), kind.to_string(), target.to_string()));
             }
             Step::LinkKeyed { id, target, n } => {
                 self.exists(id)?;
                 if id == target {
                     return Err("self link");
                 }
-                if self.keyed.insert((id.to_string(), target.to_string(), *n)) {
-                    self.pending.push((id.to_string(), KEYED.to_owned(), target.to_string()));
-                }
+                self.exists(target)?;
+                self.keyed.insert((id.to_string(), target.to_string(), *n));
             }
             Step::Rekey { id, target, from, to } => {
                 let held = (id.to_string(), target.to_string(), *from);
@@ -217,9 +213,11 @@ impl Model {
                 if moved != edge && self.edges.contains(&moved) {
                     return Err("duplicate edge");
                 }
+                if moved != edge {
+                    self.exists(to)?;
+                }
                 self.edges.remove(&edge);
-                self.edges.insert(moved.clone());
-                self.pending.push(moved);
+                self.edges.insert(moved);
             }
             Step::TakeLabel { .. } => {}
             Step::Destroy { id } => {
@@ -273,18 +271,6 @@ impl Model {
         Ok(())
     }
 
-    /// The deferred check: every edge the unit linked that still exists has its target
-    pub(super) fn check_pending(&self) -> Result<(), Refusal> {
-        for edge in &self.pending {
-            let held = self.edges.contains(edge)
-                || (edge.1 == KEYED && self.keyed.iter().any(|(s, t, _)| *s == edge.0 && *t == edge.2));
-            if held && !self.entities.contains_key(&edge.2) {
-                return Err("link target missing at commit");
-            }
-        }
-        Ok(())
-    }
-
     /// Applies a step at the top, where every write commits: what `Database::write` and a committed unit do
     pub(super) fn step(&mut self, step: &Step) -> Result<(), Refusal> {
         if let Step::RefuseNext = step {
@@ -303,7 +289,6 @@ impl Model {
             if std::mem::take(&mut self.refuse_next) {
                 return Err("the store refused the commit");
             }
-            self.pending.clear();
             return Ok(());
         }
         if let Step::PurgeField = step {
@@ -346,7 +331,6 @@ impl Model {
             if std::mem::take(&mut self.refuse_next) {
                 return Err("the store refused the commit");
             }
-            self.pending.clear();
             for (id, entity) in self.entities.iter_mut() {
                 if crate::engine::ids::type_of(id) == "Task"
                     && let Some(value) = entity.fields.remove(*from)
@@ -373,7 +357,6 @@ impl Model {
             if std::mem::take(&mut self.refuse_next) {
                 return Err("the store refused the commit");
             }
-            self.pending.clear();
             for (source, kind, target) in moving {
                 self.edges.remove(&(source.clone(), kind, target.clone()));
                 self.edges.insert((source, to.to_string(), target));
@@ -399,7 +382,6 @@ impl Model {
             self.entities = saved.entities;
             self.edges = saved.edges;
             self.keyed = saved.keyed;
-            self.pending.clear();
             return Ok(());
         }
         if let Step::Reset = step {
@@ -409,21 +391,19 @@ impl Model {
             self.entities.clear();
             self.edges.clear();
             self.keyed.clear();
-            self.pending.clear();
             return Ok(());
         }
         let saved = self.clone();
-        self.pending.clear();
         let applied = match step {
             Step::Unit { steps, throws, .. } => {
                 let outcome = steps.iter().try_for_each(|s| self.apply(s));
                 match (outcome, throws) {
                     (Err(e), _) => Err(e),
                     (Ok(()), true) => Err("the unit threw"),
-                    (Ok(()), false) => self.check_pending(),
+                    (Ok(()), false) => Ok(()),
                 }
             }
-            write => self.apply(write).and_then(|()| self.check_pending()),
+            write => self.apply(write),
         };
         match applied {
             Ok(()) if self.refuse_next => {
