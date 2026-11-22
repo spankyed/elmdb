@@ -26,12 +26,6 @@ import { createOperationObservation, type EarsOperationObserver } from './observ
 export interface UnitOptions {
   /** On disk when `transact` returns, rather than with the database's next sync */
   durable?: boolean;
-  /**
-   * For a unit inside another: what the database leaves to check until a unit commits, that both ends of a relation
-   * exist, is checked of this unit's writes as it ends, so one that fails is undone alone and throws here rather than
-   * failing the outermost unit as it commits. It says nothing of the outermost unit, which its commit checks
-   */
-  checked?: boolean;
 }
 
 /** An elmdb unit held open across calls (`elmdb`'s `Unit`) */
@@ -41,8 +35,6 @@ export interface EarsUnit {
   savepoint(): number;
   rollbackTo(depth: number): void;
   release(depth: number): void;
-  /** `release` once the checks deferred since the savepoint pass; one that fails undoes it instead, and is thrown */
-  releaseChecked(depth: number): void;
   commit(durable?: boolean | null): Uint8Array;
   /** What the unit has changed so far: msgpack of elmdb's `ChangeSet` */
   pendingChanges(): Uint8Array;
@@ -540,11 +532,7 @@ export function createConnection(
     const held = unit;
     if (!outermost) {
       // A unit inside another commits with the outermost
-      // A checked one that fails its checks is undone by the database as it throws, and has kept nothing
-      if (held && level.savepoint !== undefined) {
-        const depth = level.savepoint;
-        crossing(() => (options?.checked ? held.releaseChecked(depth) : held.release(depth)));
-      }
+      if (held && level.savepoint !== undefined) crossing(() => held.release(level.savepoint!));
       if (level.kept) levels.at(-1)!.kept = true;
       return value;
     }

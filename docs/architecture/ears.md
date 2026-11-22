@@ -168,9 +168,9 @@ Held by the types and the specs, which say more than a rule over names could:
   keeps its id and its place, and `updateRelation` onto another edge's identity is refused (`DUPLICATE_EDGE`). A
   kind's declaration holds the rest: an `acyclic` kind refuses a link that would close a cycle (`CYCLE`), and no kind
   links an entity to itself (`SELF_LINK`). A `weighted` kind's edge takes a `weight` (`RelationRules.weighted`): from
-  0 to 2^960, 1 when none is given, and refused on any other kind (`VALUE_INVALID`). **A relation has two ends when it
-  is committed** (`NO_SUCH_ENTITY`): outside a unit `link` refuses a target that isn't there before writing anything;
-  inside one the check is deferred to the unit's commit, so a unit may link to an entity it creates later.
+  0 to 2^960, 1 when none is given, and refused on any other kind (`VALUE_INVALID`). **A relation has two ends from when it
+  is written** (`NO_SUCH_ENTITY`): `link` refuses a target that isn't there before writing anything, in a unit as
+  outside one, so an entity is written before the links to it and a unit's commit has nothing left to refuse.
   `updateRelation` is held to the same rule for the ends it moves a relation to. A relation loaded from files can
   still have a missing end (`admin.addRelation` and `admin.updateRelation` take any), and the readers step around one.
 - **EARS owns `updatedAt`.** `create` stamps it with the creation time (a row's own `updatedAt` keeps an import's),
@@ -248,8 +248,7 @@ Held by the types and the specs, which say more than a rule over names could:
 - **Units.** `transact(fn, { durable? })` runs `fn` as one unit of the database, opened at its first write, so a
   reader sees all of it or none and a unit that writes nothing commits nothing. Writes inside it read their own
   writes. If `fn` throws, the unit is aborted and keeps nothing; if it returns, it commits. A unit inside another is a
-  savepoint, and with `checked: true` is held as it ends to the one thing a commit checks, that each relation it wrote
-  has both its ends, so that it fails alone rather than with the outermost. `durable: true` commits with a sync rather than leaving it to group commit. An `async fn` is refused,
+  savepoint. `durable: true` commits with a sync rather than leaving it to group commit. An `async fn` is refused,
   since an `await` would split the unit. `admin.clear()` inside a unit is refused too. Outside a unit each write is its
   own unit, committed as it returns.
 - **Typed facades.** `defineEars<Schema>(engine)` returns `query`, `create`, `upsert`, `write`, `transact`, `newId`

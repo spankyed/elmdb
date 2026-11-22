@@ -469,14 +469,13 @@ fn generated_workloads_complete_every_kind_of_step_and_make_every_refusal() {
     use proptest::test_runner::TestRunner;
     use proptest_state_machine::ReferenceStateMachine;
     // Each reason `Model::apply` and `Model::step` refuse with
-    const REFUSALS: [&str; 16] = [
+    const REFUSALS: [&str; 15] = [
         "id in use",
         "no such entity",
         "not a list",
         "self link",
         "no such relation",
         "duplicate edge",
-        "link target missing at commit",
         "the unit threw",
         "the store refused the commit",
         "the spare field is declared",

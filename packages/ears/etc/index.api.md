@@ -444,7 +444,6 @@ export interface EarsUnit {
     read(reads: Uint8Array): Uint8Array;
     // (undocumented)
     release(depth: number): void;
-    releaseChecked(depth: number): void;
     // (undocumented)
     rollbackTo(depth: number): void;
     // (undocumented)
@@ -1038,7 +1037,6 @@ export type TypeName<T extends string> = T extends `${string}-${string}` ? never
 
 // @public
 export interface UnitOptions {
-    checked?: boolean;
     durable?: boolean;
 }
 

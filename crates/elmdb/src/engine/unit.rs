@@ -1,5 +1,5 @@
 //! A unit's write transaction as the engine writes through it: reads that see the unit's own writes, an undo log per
-//! savepoint, the checks a unit defers to its commit, and the log of what it changed.
+//! savepoint, and the log of what it changed.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -14,25 +14,16 @@ use crate::sync::PlainMutex;
 
 use super::changes::Event;
 
-/// A check made when the outermost unit commits: what a unit may leave inconsistent part way, it may not commit. A
-/// savepoint may be held to the ones deferred since it as it is released (`Unit::release_checked`)
-#[derive(Debug, Clone, PartialEq)]
-pub enum Check {
-    /// The relation, if it still exists, has both its ends
-    Ends { relation: String, via: &'static str },
-}
-
 /// What a savepoint undoes: each key first written since it, with what the key held before (`None`: nothing)
 #[derive(Debug, Default)]
 struct Level {
     undo: Vec<(Vec<u8>, Option<Vec<u8>>)>,
     recorded: HashSet<Vec<u8>>,
     events: usize,
-    checks: usize,
     edges: usize,
 }
 
-/// What a unit carries from one call to the next: its savepoints, deferred checks and events
+/// What a unit carries from one call to the next: its savepoints and events
 #[derive(Debug, Default)]
 pub struct UnitState {
     /// Whether the unit loads data unchecked (`bulkLoad`, a dump's load): a unique index then takes what it is given
@@ -42,7 +33,6 @@ pub struct UnitState {
     /// each field under values the entity only passes through
     pub(super) refiled_after: Vec<String>,
     levels: Vec<Level>,
-    pub(super) checks: Vec<Check>,
     pub(super) events: Vec<Event>,
     /// The edge entries the unit filed and unfiled, in order, which its commit hands the store for the edge mirror
     pub(crate) edges: Vec<super::mirror::EdgeDelta>,
@@ -73,23 +63,12 @@ impl UnitState {
 
     /// Opens a savepoint, returning its depth
     pub fn savepoint(&mut self) -> usize {
-        self.levels.push(Level {
-            events: self.events.len(),
-            checks: self.checks.len(),
-            edges: self.edges.len(),
-            ..Default::default()
-        });
+        self.levels.push(Level { events: self.events.len(), edges: self.edges.len(), ..Default::default() });
         self.levels.len()
     }
 
     pub fn depth(&self) -> usize {
         self.levels.len()
-    }
-
-    /// Where the checks deferred since the savepoint at `depth` begin among the unit's: past the last of them when no
-    /// savepoint is open at that depth, which has deferred none
-    pub(super) fn checks_from(&self, depth: usize) -> usize {
-        depth.checked_sub(1).and_then(|at| self.levels.get(at)).map_or(self.checks.len(), |level| level.checks)
     }
 }
 
@@ -470,10 +449,6 @@ impl Txn<'_, '_> {
         self.state.events.push(event);
     }
 
-    pub fn defer(&mut self, check: Check) {
-        self.state.checks.push(check);
-    }
-
     /// Undoes everything since the savepoint at `depth` and closes it and every one inside it
     pub fn rollback_to(&mut self, depth: usize) -> Result<()> {
         while self.state.levels.len() >= depth && depth > 0 {
@@ -487,7 +462,6 @@ impl Txn<'_, '_> {
                 }
             }
             self.state.events.truncate(level.events);
-            self.state.checks.truncate(level.checks);
             self.state.edges.truncate(level.edges);
         }
         Ok(())

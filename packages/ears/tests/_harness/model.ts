@@ -91,38 +91,29 @@ export class Model {
   /** Applies one op outside any unit; returns whether the engine must refuse it, leaving the model as it was */
   apply(op: Op): Refusal {
     const draft = this.clone();
-    const refusal = op.op === 'unit' ? draft.unit(op, true) : draft.write(op, false);
+    const refusal = op.op === 'unit' ? draft.unit(op) : draft.write(op);
     if (refusal) return refusal;
     this.adopt(draft);
     return undefined;
   }
 
-  /**
-   * A unit: its writes in order, refused whole if one is refused or if it throws, and — the outermost only, where
-   * the unit commits — if an edge it leaves has a missing end. A unit inside it that is refused rolls back alone
-   */
-  private unit(op: Extract<Op, { op: 'unit' }>, outermost: boolean): Refusal {
+  /** A unit: its writes in order, refused whole if one is refused or if it throws. A unit inside it that is refused rolls back alone */
+  private unit(op: Extract<Op, { op: 'unit' }>): Refusal {
     for (const inner of op.ops) {
       if (inner.op === 'unit') {
         const nested = this.clone();
-        const refused = nested.unit(inner, false);
+        const refused = nested.unit(inner);
         if (!refused) this.adopt(nested);
         continue;
       }
-      const refusal = this.write(inner, true);
+      const refusal = this.write(inner);
       if (refusal) return refusal;
     }
     if (op.throws) return 'the unit threw';
-    if (outermost) {
-      for (const e of this.edges) {
-        const [, , target] = e.split('|');
-        if (!this.entities.has(target)) return `an edge to ${target}, which no entity has, at the unit's end`;
-      }
-    }
     return undefined;
   }
 
-  private write(op: Op, inUnit: boolean): Refusal {
+  private write(op: Op): Refusal {
     if (op.op === 'unit') return undefined;
     if (op.op === 'create') {
       if (this.entities.has(op.id)) return `${op.id} is in use`;
@@ -144,8 +135,8 @@ export class Model {
       }
       case 'link': {
         if (op.id === op.target) return 'a self link';
-        // Outside a unit the target must exist now; inside one, when the unit commits
-        if (!inUnit && !this.entities.has(op.target)) return `no entity has ${op.target}`;
+        // The target exists when the link is written, in a unit as outside one
+        if (!this.entities.has(op.target)) return `no entity has ${op.target}`;
         const added = edge(op.id, op.kind, op.target);
         this.edges.add(added);
         return undefined;
