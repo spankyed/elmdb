@@ -47,9 +47,15 @@ export interface Watching {
    * otherwise when the run that is owed has ended, whatever that run delivered. It waits for this watch and no
    * other, so it resolves under a stream of commits that keeps other watches behind, where `watchesSettled` waits
    * for a moment with none behind, which may not come. It resolves too when the watch is stopped or its database
-   * closed, with nothing more to be delivered. It changes nothing about when the watch runs.
+   * closed, with nothing more to be delivered.
+   *
+   * `soon` says something is blocked on the answer. The run that is owed is then held to the gap its own cost
+   * sets and not to the floor of a frame, and goes first in its flush: a read that costs a tenth of a millisecond
+   * is due four tenths after its last run, where it would have waited sixteen. The floor is for a watch nobody is
+   * waiting on, where a frame is as soon as anyone looks. The factor is what bounds a watch's share of the thread,
+   * and it stays. Without `soon` a wait changes nothing about when the watch runs.
    */
-  caughtUp(): Promise<void>;
+  caughtUp(options?: { soon?: boolean }): Promise<void>;
 }
 
 /** The clock a scheduler reads and the timers it sets: the process's, or a test's */
@@ -97,6 +103,8 @@ interface Watch {
   owed: boolean;
   /** What `caughtUp` is waiting to resolve, once the run that is owed has ended */
   waiters: Array<() => void>;
+  /** Whether something blocked is waiting on the run that is owed, which is then not held to the floor */
+  soon: boolean;
 }
 
 export interface Watches {
@@ -147,7 +155,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   let unlisten: (() => void) | undefined;
 
   const dueAt = (watch: Watch) => (watch.ranAt < 0 ? -Infinity
-    : watch.ranAt + Math.max(schedule.minimumGapMs, schedule.delayFactor * watch.costMs));
+    : watch.ranAt + Math.max(watch.soon ? 0 : schedule.minimumGapMs, schedule.delayFactor * watch.costMs));
 
   /** Queues what the dirty watches need: a flush for those due now, a timer for the first of the rest */
   const plan = (soon: boolean) => {
@@ -207,6 +215,8 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     // What waited before this run began is answered by it, however it ends. A commit landing while it runs is
     // owed a run of its own, and what waits from then on waits for that one
     watch.owed = false;
+    // What was blocked is answered by this run: the next one has its whole gap unless something waits again
+    watch.soon = false;
     const waited = watch.waiters;
     watch.waiters = [];
     try {
@@ -291,7 +301,8 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     flushing = true;
     const started = clock.now();
     // Commits the runs make mark the next set, so nothing marked here runs twice in this flush
-    const batch = dirty;
+    // Those something blocked is waiting on go first, so the slice is spent on them before any other
+    const batch = [...dirty].sort((a, b) => Number(b.soon) - Number(a.soon));
     dirty = new Set();
     const left: Watch[] = [];
     let ranOne = false;
@@ -350,6 +361,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         warned: false,
         owed: true,
         waiters: [],
+        soon: false,
       };
       open.set(watch.token, watch);
       unlisten ??= connection.onCommit(onCommit);
@@ -373,12 +385,14 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
           }
           if (!flushing) settleWaiting();
         },
-        caughtUp() {
+        caughtUp(options) {
           if (watch.stopped || !watch.owed) return Promise.resolve();
           return new Promise((resolve) => {
             watch.waiters.push(resolve);
             caughtUpWaiting++;
-            // A timer set for its gap before anything waited is set again as one to stay alive for
+            if (options?.soon) watch.soon = true;
+            // A timer set for its gap before anything waited is set again: as one to stay alive for, and for
+            // sooner where the wait lifted the floor
             if (!flushing) plan(true);
           });
         },
