@@ -43,15 +43,17 @@ export interface Watching {
   /** Ends the watch: nothing is delivered after it */
   stop(): void;
   /**
-   * Resolves once the watch has been handed everything committed before the call: at once when it has, and
+   * Resolves once the watch has been handed everything this engine committed before the call: at once when it has, and
    * otherwise when the run that is owed has ended, whatever that run delivered. It waits for this watch and no
    * other, so it resolves under a stream of commits that keeps other watches behind, where `watchesSettled` waits
    * for a moment with none behind, which may not come. It resolves too when the watch is stopped or its database
-   * closed, with nothing more to be delivered.
+   * closed, with nothing more to be delivered. A commit another process made is one the engine hears of later, so
+   * a wait may resolve before it is handed over.
    *
    * `soon` says something is blocked on the answer. The run that is owed is then held to the gap its own cost
-   * sets and not to the floor of a frame, and goes first in its flush: a read that costs a tenth of a millisecond
-   * is due four tenths after its last run, where it would have waited sixteen. The floor is for a watch nobody is
+   * sets and not to the floor of a frame, and goes first in its flush, brought forward if it was put off to a later turn:
+   * a read that costs a tenth of a millisecond is due four tenths after its last run, where it would have waited
+   * sixteen, though the process's timers fire no sooner than a millisecond. The floor is for a watch nobody is
    * waiting on, where a frame is as soon as anyone looks. The factor is what bounds a watch's share of the thread,
    * and it stays. Without `soon` a wait changes nothing about when the watch runs.
    */
@@ -145,10 +147,13 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   let nextToken = 1;
   /** Watches waiting to run, in the order they run: those a flush left over first, then by when they were marked */
   let dirty = new Set<Watch>();
-  /** A flush queued for a microtask or a later turn, and the timer set for the earliest watch still in its gap */
-  let queued = false;
+  /**
+   * A flush queued, for a microtask or for a later turn of the event loop, and the timer set for the earliest watch
+   * still in its gap. A flush a sooner one replaced still comes, and finds whatever is left to it, often nothing
+   */
+  let queued: { later: boolean } | undefined;
   let timer: { handle: unknown; at: number; held: boolean } | undefined;
-  /** How many `caughtUp` calls wait, over every watch: while any does, the timer for a gap is one to stay alive for */
+  /** How many `caughtUp` calls wait, over every watch: while any does, or `settled` is waited on, the timer for a gap is one to stay alive for */
   let caughtUpWaiting = 0;
   let flushing = false;
   let waiting: Array<() => void> = [];
@@ -158,7 +163,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     : watch.ranAt + Math.max(watch.soon ? 0 : schedule.minimumGapMs, schedule.delayFactor * watch.costMs));
 
   /** Queues what the dirty watches need: a flush for those due now, a timer for the first of the rest */
-  const plan = (soon: boolean) => {
+  const plan = (soon: boolean, blocked = false) => {
     const now = clock.now();
     let earliest = Infinity;
     for (const watch of dirty) earliest = Math.min(earliest, dueAt(watch));
@@ -169,13 +174,15 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         clock.clearTimeout(timer.handle);
         timer = undefined;
       }
-      if (queued) return;
-      queued = true;
+      // A flush put off to a later turn was put off for other work's sake. Something blocked on a watch that is due
+      // is not other work: its flush comes now, and the one put off finds nothing of its own to do
+      if (queued && !(blocked && queued.later)) return;
+      queued = { later: !soon };
       if (soon) queueMicrotask(flush);
       else later(flush);
       return;
     }
-    const held = caughtUpWaiting > 0;
+    const held = caughtUpWaiting > 0 || waiting.length > 0;
     if (timer && timer.at <= earliest && timer.held === held) return;
     if (timer) clock.clearTimeout(timer.handle);
     timer = {
@@ -290,13 +297,13 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       clock.clearTimeout(timer.handle);
       timer = undefined;
     }
-    queued = false;
+    queued = undefined;
     settleWaiting();
     return true;
   }
 
   function flush() {
-    queued = false;
+    queued = undefined;
     if (closed()) return;
     flushing = true;
     const started = clock.now();
@@ -393,7 +400,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
             if (options?.soon) watch.soon = true;
             // A timer set for its gap before anything waited is set again: as one to stay alive for, and for
             // sooner where the wait lifted the floor
-            if (!flushing) plan(true);
+            if (!flushing) plan(true, watch.soon);
           });
         },
       };
@@ -401,7 +408,11 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     settled() {
       // A flush under way still holds watches it hasn't run, which it settles when it ends
       if (!flushing && !queued && !timer && dirty.size === 0) return Promise.resolve();
-      return new Promise((resolve) => { waiting.push(resolve); });
+      return new Promise((resolve) => {
+        waiting.push(resolve);
+        // A timer set for a gap before anything waited is set again, as one to stay alive for
+        if (!flushing) plan(true);
+      });
     },
     stats: () => {
       const { keys, ranges } = connection.trackStats();

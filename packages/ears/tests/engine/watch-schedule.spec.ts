@@ -479,6 +479,22 @@ describe('waiting for one watch to catch up', () => {
     expect(third.seen).toHaveLength(1);
   });
 
+  it('keeps the timer for a gap as one to stay alive for while the watches are waited on to settle, and not after', async () => {
+    watching(1);
+    await drain();
+    commit();
+    await turn();
+    expect(time.held(), 'nothing waits yet').toEqual([false]);
+    const settling = watches.settled();
+    expect(time.held(), 'the timer is set again, held').toEqual([true]);
+    time.advance(gap);
+    await turn();
+    expect(await resolved(settling)).toBe(true);
+    commit();
+    await turn();
+    expect(time.held(), 'and the next one is not').toEqual([false]);
+  });
+
   it('keeps the timer for a gap as one to stay alive for while something waits on it, and not after', async () => {
     const watch = watching(1);
     await drain();
@@ -573,6 +589,20 @@ describe('waiting for one watch to catch up', () => {
     time.advance(2);
     await turn();
     expect(watch.runs() - before).toBe(1);
+  });
+
+  it('brings forward a flush put off to a later turn, for a watch something is blocked on and for no other wait', async () => {
+    watching(5, 'first');
+    watching(5, 'second');
+    const third = watching(5, 'third');
+    // The first flush has no time for the third, and puts the rest off to a later turn of the event loop
+    expect(await resolved(third.caughtUp())).toBe(false);
+    expect(await resolved(third.caughtUp()), 'a wait nothing is blocked on leaves the flush where it was put').toBe(false);
+    expect(third.runs()).toBe(0);
+    expect(await resolved(third.caughtUp({ soon: true })), 'run without the event loop turning').toBe(true);
+    expect(third.runs()).toBe(1);
+    await drain();
+    expect(third.runs(), 'the flush that was put off runs nothing twice').toBe(1);
   });
 
   it('runs what is blocked on first in a flush that has no time for all of it', async () => {
