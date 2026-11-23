@@ -220,8 +220,11 @@ Held by the types and the specs, which say more than a rule over names could:
   name the touched tokens of (`admin.clear`, `admin.replaceWith`, `admin.setSchema`, `admin.declare`, a load) is heard
   as touching every watch. Deliveries never come inside a write: re-runs wait for a microtask, so a burst of commits is
   one. A unit that throws notifies nothing. A read that throws delivers to `observer.error` and stays watched. **A
-  watched read is a pure read of the EARS engine**: what it reads elsewhere isn't tracked. `admin.watchesSettled()`
-  resolves once every commit before it has been delivered, and `admin.watchStats()` counts the watches and what the
+  watched read is a pure read of the EARS engine**: what it reads elsewhere isn't tracked. A watch's own
+  `caughtUp()` resolves once that watch has been handed everything committed before the call, by the run it is owed,
+  or by its ending: it waits for the one watch, so it resolves under a stream of commits that keeps others behind.
+  `admin.watchesSettled()` resolves once no watch at all is waiting to run, a moment such a stream may not leave, so
+  it is for a spec or a tool that has stopped writing. `admin.watchStats()` counts the watches and what the
   database has filed. The model-based harness checks the contract: every watch, after every op, holds what its read
   answers afresh.
 - **One row shape.** A row is `{ id, entityType, ...attributes }` (`EntityRow`) wherever a read returns one.

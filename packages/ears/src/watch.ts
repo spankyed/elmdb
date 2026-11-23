@@ -42,12 +42,21 @@ export interface WatchOptions {
 export interface Watching {
   /** Ends the watch: nothing is delivered after it */
   stop(): void;
+  /**
+   * Resolves once the watch has been handed everything committed before the call: at once when it has, and
+   * otherwise when the run that is owed has ended, whatever that run delivered. It waits for this watch and no
+   * other, so it resolves under a stream of commits that keeps other watches behind, where `watchesSettled` waits
+   * for a moment with none behind, which may not come. It resolves too when the watch is stopped or its database
+   * closed, with nothing more to be delivered. It changes nothing about when the watch runs.
+   */
+  caughtUp(): Promise<void>;
 }
 
 /** The clock a scheduler reads and the timers it sets: the process's, or a test's */
 export interface WatchClock {
   now(): number;
-  setTimeout(fn: () => void, ms: number): unknown;
+  /** `held` says something is waiting on what the timer is for: the process's clock then keeps the process alive for it */
+  setTimeout(fn: () => void, ms: number, held?: boolean): unknown;
   clearTimeout(handle: unknown): void;
 }
 
@@ -84,6 +93,10 @@ interface Watch {
   /** Flushes in a row whose run of it took more than the slice, and whether that has been warned about */
   overBudget: number;
   warned: boolean;
+  /** Whether a run is owed: a commit wrote into what it read since its last run began, or it has never run */
+  owed: boolean;
+  /** What `caughtUp` is waiting to resolve, once the run that is owed has ended */
+  waiters: Array<() => void>;
 }
 
 export interface Watches {
@@ -109,10 +122,10 @@ const later = (fn: () => void) => {
 
 const PROCESS_CLOCK: WatchClock = {
   now: () => performance.now(),
-  // A re-run waiting out its gap is no reason for a process to stay alive
-  setTimeout: (fn, ms) => {
+  // A re-run waiting out its gap is no reason for a process to stay alive, unless something waits on the run
+  setTimeout: (fn, ms, held) => {
     const handle = setTimeout(fn, ms);
-    (handle as { unref?: () => void }).unref?.();
+    if (!held) (handle as { unref?: () => void }).unref?.();
     return handle;
   },
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
@@ -126,7 +139,9 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   let dirty = new Set<Watch>();
   /** A flush queued for a microtask or a later turn, and the timer set for the earliest watch still in its gap */
   let queued = false;
-  let timer: { handle: unknown; at: number } | undefined;
+  let timer: { handle: unknown; at: number; held: boolean } | undefined;
+  /** How many `caughtUp` calls wait, over every watch: while any does, the timer for a gap is one to stay alive for */
+  let caughtUpWaiting = 0;
   let flushing = false;
   let waiting: Array<() => void> = [];
   let unlisten: (() => void) | undefined;
@@ -152,16 +167,18 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       else later(flush);
       return;
     }
-    if (timer && timer.at <= earliest) return;
+    const held = caughtUpWaiting > 0;
+    if (timer && timer.at <= earliest && timer.held === held) return;
     if (timer) clock.clearTimeout(timer.handle);
     timer = {
       at: earliest,
+      held,
       handle: clock.setTimeout(() => {
         timer = undefined;
         if (closed()) return;
         plan(true);
         settleWaiting();
-      }, earliest - now),
+      }, earliest - now, held),
     };
   };
 
@@ -169,6 +186,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     const marked = commit.touched === 'all' ? [...open.values()]
       : [...commit.touched].flatMap((token) => open.get(token) ?? []);
     for (const watch of marked) {
+      watch.owed = true;
       watch.causes?.add(commit.sequence);
       // A commit landing on a watch already waiting is one whose state the coming run skips
       if (dirty.has(watch)) connection.tally()?.watchSkipped(watch.label);
@@ -179,7 +197,26 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     if (marked.length > 0) plan(!flushing);
   };
 
+  /** Resolves `caughtUp` calls: each is answered once, by the run it waited for or by the watch ending */
+  const answer = (waiters: Array<() => void>) => {
+    caughtUpWaiting -= waiters.length;
+    for (const caughtUp of waiters) caughtUp();
+  };
+
   const run = (watch: Watch) => {
+    // What waited before this run began is answered by it, however it ends. A commit landing while it runs is
+    // owed a run of its own, and what waits from then on waits for that one
+    watch.owed = false;
+    const waited = watch.waiters;
+    watch.waiters = [];
+    try {
+      runOnce(watch);
+    } finally {
+      answer(waited);
+    }
+  };
+
+  const runOnce = (watch: Watch) => {
     // What the token held was the last run's: this run's reads replace it
     connection.untrack(watch.token);
     const started = clock.now();
@@ -231,7 +268,10 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
    */
   function closed(): boolean {
     if (connection.database.isOpen) return false;
-    for (const watch of open.values()) watch.stopped = true;
+    for (const watch of open.values()) {
+      watch.stopped = true;
+      answer(watch.waiters.splice(0));
+    }
     open.clear();
     dirty.clear();
     unlisten?.();
@@ -308,6 +348,8 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         costMs: 0,
         overBudget: 0,
         warned: false,
+        owed: true,
+        waiters: [],
       };
       open.set(watch.token, watch);
       unlisten ??= connection.onCommit(onCommit);
@@ -317,6 +359,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         stop() {
           if (watch.stopped) return;
           watch.stopped = true;
+          answer(watch.waiters.splice(0));
           open.delete(watch.token);
           dirty.delete(watch);
           connection.untrack(watch.token);
@@ -329,6 +372,15 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
             timer = undefined;
           }
           if (!flushing) settleWaiting();
+        },
+        caughtUp() {
+          if (watch.stopped || !watch.owed) return Promise.resolve();
+          return new Promise((resolve) => {
+            watch.waiters.push(resolve);
+            caughtUpWaiting++;
+            // A timer set for its gap before anything waited is set again as one to stay alive for
+            if (!flushing) plan(true);
+          });
         },
       };
     },
