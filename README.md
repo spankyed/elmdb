@@ -216,5 +216,6 @@ notices beside its `.node` files: the crates' in `THIRD-PARTY-NOTICES`, the Rust
 `COPYRIGHT-rust-library.html`, and LMDB's alone in `LICENSE-OPENLDAP`. The `elmdb` command owes the same notices for
 what it is built from.
 
-Unless you explicitly state otherwise, any contribution you intentionally submit for inclusion in this work, as defined in
-the Apache-2.0 license, is dual-licensed as above, without any additional terms or conditions.
+A contribution is made under [elmdb's Contributor License Agreement](CLA.md), which a contributor signs once in their
+first pull request ([CONTRIBUTING.md](CONTRIBUTING.md)): each stays available under the license above, and the
+maintainer may license it under other terms as well.
