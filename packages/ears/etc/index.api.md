@@ -1078,6 +1078,7 @@ export interface WatchCount {
 
 // @public
 export interface Watching {
+    caughtUp(): Promise<void>;
     stop(): void;
 }
 
