@@ -89,7 +89,8 @@ repository checks `xtask/src/main.rs` hands it, is the list.
   for and the Valgrind readings, runs once a pull request is ready for review: marking it ready starts the full tier
   and leaves the fast tier's run alone. Open a pull request as a draft while iterating, mark it ready (`gh pr ready`)
   for the full tier, and merge when the three required checks are green: `ci-pass`, `full-pass`, and `mutants-pass`,
-  which a surviving mutant fails.
+  which a surviving mutant fails. A pull request with a commit by anyone but the maintainer also waits on
+  `CLAAssistant`: each such author signs [CLA.md](CLA.md) once (`.github/workflows/cla.yml`, `CONTRIBUTING.md`).
 
 The toolchain is pinned in `rust-toolchain.toml`, which is also the minimum supported Rust version.
 

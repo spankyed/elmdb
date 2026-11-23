@@ -1,0 +1,67 @@
+name: CLA
+
+# **Every contributor other than the maintainer signs elmdb's Contributor License Agreement (`CLA.md`) once**, by
+# posting its sentence in a pull request; this workflow records the signature and reports `CLAAssistant`, which fails
+# while an author of the pull request's commits hasn't signed. `CONTRIBUTING.md` is what a contributor reads.
+#
+# It runs on `pull_request_target`, in the base repository with a token that can write, so that it can record a
+# signature from a fork's pull request. It checks out nothing and runs none of the pull request's code: what it reads
+# is the pull request's commit authors and comments, through the API.
+#
+# Signatures are kept in `signatures/version1/cla.json` on the `cla-signatures` branch, which no branch protection
+# covers: the action commits to it. The first run makes the branch from `main` when it isn't there. A new version of
+# CLA.md, one that asks every contributor to sign again, takes a new file (`version2/…`).
+#
+# The action, contributor-assistant/github-action, is archived and read-only since 2026: v2.6.1 is pinned by its
+# commit, and it declares Node 20, which GitHub runs on Node 24.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  CLAAssistant:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+        (github.event.comment.body == 'recheck' ||
+         github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: The signatures' branch is there
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh api "repos/$GH_REPO/branches/cla-signatures" > /dev/null 2> branch.err; then exit 0; fi
+          if ! grep -q 'Branch not found' branch.err; then
+            cat branch.err
+            exit 1
+          fi
+          main=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+          gh api "repos/$GH_REPO/git/refs" -f ref=refs/heads/cla-signatures -f sha="$main" > /dev/null
+          echo "made cla-signatures from main at $main"
+      - name: CLA Assistant
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-signatures: signatures/version1/cla.json
+          path-to-document: https://github.com/spankyed/elmdb/blob/main/CLA.md
+          branch: cla-signatures
+          # The maintainer, who holds the copyright, and bots, which can't sign
+          allowlist: spankyed,*[bot]
+          create-file-commit-message: 'chore(cla): the file that records CLA signatures'
+          signed-commit-message: 'chore(cla): $contributorName signed the CLA in $owner/$repo#$pullRequestNo'

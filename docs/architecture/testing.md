@@ -587,6 +587,12 @@ push reports the full tier's last job under another name, because a check on a d
 pull request is marked ready, and the run that starts then reports its own only after its last job. A pull request
 that is ready therefore merges only after the full tier passed on its head.
 
+`.github/workflows/cla.yml` reports `CLAAssistant` on every pull request: it passes when every author of the pull
+request's commits has signed elmdb's Contributor License Agreement (`CLA.md`), or is the maintainer or a bot, and fails
+until each other author posts the agreement's sentence in the pull request. It records a signature in
+`signatures/version1/cla.json` on the `cla-signatures` branch, which it makes from `main` the first time. It runs on
+`pull_request_target`, in the base repository, and checks out nothing of the pull request.
+
 Changing a pull request's base starts no workflow. Its checks stay the ones its head earned against the old base, the
 mutants of the old diff among them, so after a base change a push comes before the merge.
 
