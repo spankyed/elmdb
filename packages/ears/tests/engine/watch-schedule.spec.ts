@@ -73,7 +73,7 @@ function watching(costMs: number, label = `costs ${costMs} ms`) {
     time.spend(costMs);
     return rows();
   }, (value) => { seen.push(value); }, { label });
-  return { seen, runs: () => runs, last: () => seen.at(-1), stop: () => handle.stop(), caughtUp: () => handle.caughtUp() };
+  return { seen, runs: () => runs, last: () => seen.at(-1), stop: () => handle.stop(), caughtUp: (options?: { soon?: boolean }) => handle.caughtUp(options) };
 }
 
 /** Lets every pending run happen: turns and timers, until nothing waits */
@@ -479,6 +479,22 @@ describe('waiting for one watch to catch up', () => {
     expect(third.seen).toHaveLength(1);
   });
 
+  it('keeps the timer for a gap as one to stay alive for while the watches are waited on to settle, and not after', async () => {
+    watching(1);
+    await drain();
+    commit();
+    await turn();
+    expect(time.held(), 'nothing waits yet').toEqual([false]);
+    const settling = watches.settled();
+    expect(time.held(), 'the timer is set again, held').toEqual([true]);
+    time.advance(gap);
+    await turn();
+    expect(await resolved(settling)).toBe(true);
+    commit();
+    await turn();
+    expect(time.held(), 'and the next one is not').toEqual([false]);
+  });
+
   it('keeps the timer for a gap as one to stay alive for while something waits on it, and not after', async () => {
     const watch = watching(1);
     await drain();
@@ -495,12 +511,119 @@ describe('waiting for one watch to catch up', () => {
     expect(time.held(), 'and the next one is not').toEqual([false]);
   });
 
+  it('said to be blocked on, is held to four times what the read costs and not to a frame', async () => {
+    const factor = WATCH_SCHEDULE.delayFactor;
+    const watch = watching(1);
+    await drain();
+    commit();
+    const waiting = watch.caughtUp({ soon: true });
+    time.advance(factor * 1 - 1);
+    await turn();
+    expect(await resolved(waiting), 'inside four times its cost').toBe(false);
+    time.advance(1);
+    await turn();
+    expect(await resolved(waiting)).toBe(true);
+    expect(watch.last()).toEqual(['Row-1']);
+  });
+
+  it('leaves a watch beside it, waited on without that word or not at all, to the frame', async () => {
+    const blocked = watching(1, 'blocked on');
+    const waited = watching(1, 'waited on');
+    const alone = watching(1, 'not waited on');
+    await drain();
+    const before = alone.runs();
+    commit();
+    const soon = blocked.caughtUp({ soon: true });
+    const plain = waited.caughtUp();
+    // Past four times a read's cost for each of the three, and short of a frame for any
+    time.advance(gap - 6);
+    await turn();
+    expect([await resolved(soon), await resolved(plain), alone.runs() - before]).toEqual([true, false, 0]);
+    time.advance(gap);
+    await turn();
+    expect([await resolved(plain), alone.runs() - before]).toEqual([true, 1]);
+  });
+
+  it('lifts nothing for a wait on a watch that was owed nothing', async () => {
+    const watch = watching(1);
+    await drain();
+    expect(await resolved(watch.caughtUp({ soon: true }))).toBe(true);
+    const before = watch.runs();
+    commit();
+    time.advance(gap - 6);
+    await turn();
+    expect(watch.runs() - before, 'the commit after it waits out the frame, nothing being blocked on it').toBe(0);
+    time.advance(gap);
+    await turn();
+    expect(watch.runs() - before).toBe(1);
+  });
+
+  it('holds a costly read to its own gap whether or not something is blocked on it', async () => {
+    const cost = 10;
+    const own = WATCH_SCHEDULE.delayFactor * cost;
+    const watch = watching(cost);
+    await drain();
+    commit();
+    const waiting = watch.caughtUp({ soon: true });
+    time.advance(own - 1);
+    await turn();
+    expect(await resolved(waiting), `inside ${own} ms of its last run`).toBe(false);
+    time.advance(1);
+    await turn();
+    expect(await resolved(waiting)).toBe(true);
+  });
+
+  it('gives the run after the one that was blocked on its whole gap again', async () => {
+    const watch = watching(1);
+    await drain();
+    commit();
+    const waiting = watch.caughtUp({ soon: true });
+    time.advance(gap);
+    await turn();
+    expect(await resolved(waiting)).toBe(true);
+    const before = watch.runs();
+    commit();
+    time.advance(gap - 2);
+    await turn();
+    expect(watch.runs() - before, 'nothing waits, so it is in its gap').toBe(0);
+    time.advance(2);
+    await turn();
+    expect(watch.runs() - before).toBe(1);
+  });
+
+  it('brings forward a flush put off to a later turn, for a watch something is blocked on and for no other wait', async () => {
+    watching(5, 'first');
+    watching(5, 'second');
+    const third = watching(5, 'third');
+    // The first flush has no time for the third, and puts the rest off to a later turn of the event loop
+    expect(await resolved(third.caughtUp())).toBe(false);
+    expect(await resolved(third.caughtUp()), 'a wait nothing is blocked on leaves the flush where it was put').toBe(false);
+    expect(third.runs()).toBe(0);
+    expect(await resolved(third.caughtUp({ soon: true })), 'run without the event loop turning').toBe(true);
+    expect(third.runs()).toBe(1);
+    await drain();
+    expect(third.runs(), 'the flush that was put off runs nothing twice').toBe(1);
+  });
+
+  it('runs what is blocked on first in a flush that has no time for all of it', async () => {
+    const ran: string[] = [];
+    const reading = (label: string) => watches.watch(() => { ran.push(label); time.spend(5); return rows(); }, () => {});
+    reading('first');
+    reading('second');
+    const third = reading('third');
+    const waiting = third.caughtUp({ soon: true });
+    expect(await resolved(waiting)).toBe(true);
+    expect(ran[0], 'the one blocked on ran before those made before it').toBe('third');
+    await drain();
+    expect(ran).toEqual(['third', 'first', 'second']);
+  });
+
   it('holds for any run of commits, waits, stops and time passing: every wait ends, having been handed what was committed before it', async () => {
-    type Op = { do: 'commit' } | { do: 'wait'; watch: number } | { do: 'pass'; ms: number } | { do: 'turn' } | { do: 'stop'; watch: number };
+    type Op = { do: 'commit' } | { do: 'wait'; watch: number; soon: boolean } | { do: 'pass'; ms: number } | { do: 'turn' } | { do: 'stop'; watch: number };
     const costs = [1, 5, 20];
     const op = fc.oneof(
       { weight: 4, arbitrary: fc.constant<Op>({ do: 'commit' }) },
-      { weight: 4, arbitrary: fc.nat(costs.length - 1).map((watch): Op => ({ do: 'wait', watch })) },
+      { weight: 4, arbitrary: fc.tuple(fc.nat(costs.length - 1), fc.boolean()).map(([watch, soon]): Op => ({ do: 'wait', watch, soon })) },
       { weight: 3, arbitrary: fc.nat(40).map((ms): Op => ({ do: 'pass', ms })) },
       { weight: 3, arbitrary: fc.constant<Op>({ do: 'turn' }) },
       { weight: 1, arbitrary: fc.nat(costs.length - 1).map((watch): Op => ({ do: 'stop', watch })) },
@@ -508,6 +631,10 @@ describe('waiting for one watch to catch up', () => {
     await fc.assert(fc.asyncProperty(fc.array(op, { minLength: 5, maxLength: 60 }), async (ops) => {
       fresh();
       const stopped = costs.map(() => false);
+      /** Whether something has said it is blocked on each watch since that watch last ran */
+      const blockedOn = costs.map(() => false);
+      /** Whether each watch is owed a run, as the spec itself knows it: never run, or committed to since it last began one */
+      const owedARun = costs.map(() => true);
       /** When each watch's last run ended and what it cost, to hold the next run to its gap */
       const gaps: string[] = [];
       const made = costs.map((cost, at) => {
@@ -515,7 +642,10 @@ describe('waiting for one watch to catch up', () => {
         let endedAt = -1;
         const handle = watches.watch(() => {
           const began = time.clock.now();
-          if (endedAt >= 0 && began < endedAt + Math.max(gap, WATCH_SCHEDULE.delayFactor * cost)) gaps.push(`watch ${at} ran ${began - endedAt} ms after a run that cost ${cost}`);
+          const held = Math.max(blockedOn[at] ? 0 : gap, WATCH_SCHEDULE.delayFactor * cost);
+          if (endedAt >= 0 && began < endedAt + held) gaps.push(`watch ${at} ran ${began - endedAt} ms after a run that cost ${cost}, ${blockedOn[at] ? 'blocked on' : 'not blocked on'}`);
+          blockedOn[at] = false;
+          owedARun[at] = false;
           time.spend(cost);
           endedAt = time.clock.now();
           return rows();
@@ -524,14 +654,16 @@ describe('waiting for one watch to catch up', () => {
       });
       const waits: Array<{ watch: number; committed: number; ended?: { handed: number; stopped: boolean } }> = [];
       for (const each of ops) {
-        if (each.do === 'commit') commit();
+        if (each.do === 'commit') { commit(); owedARun.fill(true); }
         else if (each.do === 'pass') time.advance(each.ms);
         else if (each.do === 'turn') await turn();
         else if (each.do === 'stop') { stopped[each.watch] = true; made[each.watch]!.handle.stop(); }
         else {
           const wait: (typeof waits)[number] = { watch: each.watch, committed: sequence };
           waits.push(wait);
-          void made[each.watch]!.handle.caughtUp().then(() => {
+          // A wait on a watch that is owed nothing, or is stopped, resolves at once and lifts nothing
+          if (each.soon && owedARun[each.watch] && !stopped[each.watch]) blockedOn[each.watch] = true;
+          void made[each.watch]!.handle.caughtUp({ soon: each.soon }).then(() => {
             wait.ended = { handed: made[wait.watch]!.seen.at(-1)?.length ?? 0, stopped: stopped[wait.watch]! };
           });
         }

@@ -1078,7 +1078,9 @@ export interface WatchCount {
 
 // @public
 export interface Watching {
-    caughtUp(): Promise<void>;
+    caughtUp(options?: {
+        soon?: boolean;
+    }): Promise<void>;
     stop(): void;
 }
 
