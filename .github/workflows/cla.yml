@@ -12,6 +12,9 @@ name: CLA
 # covers: the action commits to it. The first run makes the branch from `main` when it isn't there. A new version of
 # CLA.md, one that asks every contributor to sign again, takes a new file (`version2/…`).
 #
+# A corporation signs `CLA-CORPORATE.md` off GitHub. Its Designated Employees' accounts are then listed in
+# `.github/cla-corporate.json`, read from `main` on each run and added to the allowlist, so they don't sign one by one.
+#
 # The action, contributor-assistant/github-action, is archived and read-only since 2026: v2.6.1 is pinned by its
 # commit, and it declares Node 20, which GitHub runs on Node 24.
 on:
@@ -53,6 +56,17 @@ jobs:
           main=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
           gh api "repos/$GH_REPO/git/refs" -f ref=refs/heads/cla-signatures -f sha="$main" > /dev/null
           echo "made cla-signatures from main at $main"
+      # Read from main, not from the pull request, which could otherwise list its own author
+      - name: The accounts a corporate agreement covers
+        id: corporate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          accounts=$(gh api "repos/$GH_REPO/contents/.github/cla-corporate.json?ref=main" --jq .content | base64 -d \
+            | jq -r '[.corporations[].accounts[]] | join(",")')
+          echo "accounts=$accounts" >> "$GITHUB_OUTPUT"
+          echo "covered by a corporate agreement: ${accounts:-none}"
       - name: CLA Assistant
         uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
@@ -61,7 +75,7 @@ jobs:
           path-to-signatures: signatures/version1/cla.json
           path-to-document: https://github.com/spankyed/elmdb/blob/main/CLA.md
           branch: cla-signatures
-          # The maintainer, who holds the copyright, and bots, which can't sign
-          allowlist: spankyed,*[bot]
+          # The maintainer, who holds the copyright; bots, which can't sign; and the accounts a corporate agreement covers
+          allowlist: spankyed,*[bot]${{ steps.corporate.outputs.accounts && format(',{0}', steps.corporate.outputs.accounts) || '' }}
           create-file-commit-message: 'chore(cla): the file that records CLA signatures'
           signed-commit-message: 'chore(cla): $contributorName signed the CLA in $owner/$repo#$pullRequestNo'

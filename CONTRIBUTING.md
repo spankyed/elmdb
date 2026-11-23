@@ -19,6 +19,11 @@ under the license elmdb has when it is accepted, MIT OR Apache-2.0. Read [CLA.md
 If someone else, such as your employer, has rights in what you write, make sure you may contribute it before signing:
 the agreement asks you to say so.
 
+A company whose employees contribute can sign [elmdb's Corporate Contributor License Agreement](CLA-CORPORATE.md)
+once instead. Someone authorized to sign for it opens an issue titled "Corporate CLA: <company>", and signing is
+arranged privately from there. The GitHub accounts it lists are then recorded in `.github/cla-corporate.json`, and
+their pull requests pass the check without an individual signature.
+
 ## Making a change
 
 Read [`docs/architecture/design.md`](docs/architecture/design.md) first, and the document that owns the part you are
