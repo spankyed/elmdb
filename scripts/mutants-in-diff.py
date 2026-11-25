@@ -20,9 +20,11 @@ several shares run again, tests only what is left. What was caught is kept in `t
 beside the diff it was caught in, and forgotten when the diff is another.
 
 `--file`, `--re` and `--test-filter` narrow a local iteration without bypassing the 20 GB disk floor or exclusions:
-`--file` limits mutation to matching paths or globs within the diff, `--re` filters mutant names (not combined with
-`--windows-only`), and `--test-filter` hands a cargo-nextest `-E` expression to cargo-mutants in place of the default
-suite filter. Outside CI, unlocked `cargo-mutants-*` temp copies idle past an hour are swept before the disk check.
+`--file` limits mutation to matching Rust paths or globs in the diff (refusing filters that match no changed file),
+`--re` filters mutant names (not combined with `--windows-only`), and `--test-filter` hands a cargo-nextest `-E`
+expression to cargo-mutants in place of the default suite filter (requiring a single crate in scope). Outside CI, when
+no `cargo-mutants` process is running, unlocked `cargo-mutants-*` temp copies idle past an hour are swept before the
+disk check.
 
 `--shard K/N` tests the Kth of N shares of the mutants, so N runners split them; each runs the unmutated baseline,
 which is what its timeouts are measured from. `--windows-only` mutates only the code that compiles on Windows alone,
@@ -243,13 +245,44 @@ def _rmtree_force(entry):
     shutil.rmtree(entry)
 
 
-def sweep_orphaned_copies(tmp_root, now=None, min_age_secs=IN_USE_SECS):
+def _ps_has_cargo_mutants(ps_output, self_pid=None):
+    """Whether `ps -A -o pid=,comm=` output lists a running `cargo-mutants` process."""
+    for line in ps_output.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2:
+            continue
+        pid_text, comm = parts
+        if self_pid is not None and pid_text.isdigit() and int(pid_text) == self_pid:
+            continue
+        if PurePosixPath(comm.strip()).name == "cargo-mutants":
+            return True
+    return False
+
+
+def cargo_mutants_running():
+    """Whether any `cargo-mutants` process is running on this host (fails closed as True if `ps` fails)."""
+    try:
+        probe = subprocess.run(
+            ["ps", "-A", "-o", "pid=,comm="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return True
+    if probe.returncode != 0:
+        return True
+    return _ps_has_cargo_mutants(probe.stdout, self_pid=os.getpid())
+
+
+def sweep_orphaned_copies(tmp_root, now=None, min_age_secs=IN_USE_SECS, is_running=cargo_mutants_running):
     """Remove orphaned `cargo-mutants-*` temp copies idle past `min_age_secs` whose `.cargo-lock`s are unheld.
 
-    Holds every nested `.cargo-lock` exclusively across removal on Unix so a concurrent Cargo build is never cut short.
-    Returns the paths removed.
+    Skips sweeping entirely while any `cargo-mutants` process is running (Cargo releases `.cargo-lock` once tests
+    start, and a machine sleep can push a live run past `min_age_secs`). Holds every nested `.cargo-lock` exclusively
+    across removal on Unix as defense-in-depth. Returns the paths removed.
     """
-    if fcntl is None:
+    if fcntl is None or is_running():
         return []
     now = time.time() if now is None else now
     removed = []
@@ -345,48 +378,79 @@ def _glob_matches(path, pattern):
     return re.match("".join(parts), path) is not None
 
 
-def select_crate_files(crates, scope, file_filters, root=None):
+def _owner_crate(file_path, crates_by_specificity):
+    """Return the owning crate name for repo-relative `file_path`, matching the longest crate path first."""
+    for name, path, _ in crates_by_specificity:
+        if file_path.startswith(f"{path}/"):
+            return name
+    return None
+
+
+def select_crate_files(crates, changed_rust, scope, file_filters, root=None):
     """Map each workspace crate name to the `--file` arguments to hand to cargo-mutants.
 
-    When `file_filters` is empty, preserves the default crate-wide (or `--windows-only`) selection.
-    When `file_filters` is given, validates that every filter targets a workspace crate, expands directory targets to
-    `<dir>/**` (since cargo-mutants matches `--file` against file paths), and narrows selection to it.
+    Without `file_filters`, selects every crate that has changed `.rs` files in `changed_rust` (or in `scope` under
+    `--windows-only`). With `file_filters`, matches each path or glob (including cross-crate globs) against
+    `changed_rust`, refusing any filter that matches no changed workspace Rust file, and routes matched files to their
+    owning crate (intersected with `scope` under `--windows-only`).
     """
-    if not file_filters:
-        return {
-            name: ([f"{path}/**"] if scope is None else [file for file in scope if file.startswith(f"{path}/")])
-            for name, path, _ in crates
-        }
     by_crate = {name: [] for name, _, _ in crates}
-    # Match longest crate path first so nested crates would win over an enclosing one
+    # Match longest crate path first so nested crates win over an enclosing one
     crates_by_specificity = sorted(crates, key=lambda item: len(item[1]), reverse=True)
+    crate_paths = {path for _, path, _ in crates}
+
+    if not file_filters:
+        if scope is not None:
+            for file in scope:
+                owner = _owner_crate(file, crates_by_specificity)
+                if owner is not None and file not in by_crate[owner]:
+                    by_crate[owner].append(file)
+            return by_crate
+        touched_crates = {
+            owner
+            for file in changed_rust
+            if (owner := _owner_crate(file, crates_by_specificity)) is not None
+        }
+        return {name: ([f"{path}/**"] if name in touched_crates else []) for name, path, _ in crates}
+
+    workspace_rust = [
+        (file, owner)
+        for file in changed_rust
+        if (owner := _owner_crate(file, crates_by_specificity)) is not None
+    ]
+    scope_set = None if scope is None else set(scope)
     for raw in file_filters:
         raw_posix = raw.replace("\\", "/")
         had_trailing_slash = raw_posix.endswith("/")
         pure = PurePosixPath(raw_posix)
         pattern = pure.as_posix()
         if not pattern or pattern == "." or pure.is_absolute() or ".." in pure.parts:
-            raise ValueError(f"--file {raw!r} must be a repo-relative path or glob inside a workspace crate")
-        matched_crate = None
-        matched_path = None
-        for name, path, _ in crates_by_specificity:
-            if pattern == path or pattern.startswith(f"{path}/"):
-                matched_crate = name
-                matched_path = path
-                break
-        if matched_crate is None:
-            raise ValueError(f"--file {raw!r} does not match any workspace crate")
+            raise ValueError(f"--file {raw!r} must be a repo-relative path or glob inside the workspace")
         is_glob = any(ch in pattern for ch in "*?[")
-        if pattern == matched_path or had_trailing_slash or (not is_glob and root is not None and (Path(root) / pattern).is_dir()):
+        if pattern in crate_paths or had_trailing_slash or (not is_glob and root is not None and (Path(root) / pattern).is_dir()):
             pattern = f"{pattern}/**"
-        if pattern not in by_crate[matched_crate]:
-            by_crate[matched_crate].append(pattern)
-    if scope is not None:
-        return {
-            name: [file for file in scope if any(_glob_matches(file, pat) for pat in patterns)]
-            for name, patterns in by_crate.items()
-        }
+        matched = [(file, owner) for file, owner in workspace_rust if _glob_matches(file, pattern)]
+        if not matched:
+            raise ValueError(f"--file {raw!r} matches no workspace Rust file changed in the diff")
+        for file, owner in matched:
+            if scope_set is not None and file not in scope_set:
+                continue
+            if file not in by_crate[owner]:
+                by_crate[owner].append(file)
     return by_crate
+
+
+def validate_test_filter_scope(crate_files, test_filter):
+    """Refuse `--test-filter` when multiple crates are in scope, since one nextest expression cannot fit every crate."""
+    if test_filter is None:
+        return
+    active_crates = [name for name, files in crate_files.items() if files]
+    if len(active_crates) > 1:
+        joined = ", ".join(active_crates)
+        raise ValueError(
+            f"--test-filter applies to a single crate, but this selection spans multiple crates ({joined}): "
+            "pass --file to narrow to one crate"
+        )
 
 
 def build_mutants_command(jobs, out_dir, selection, chosen, crate_name, with_features, test_filter=None):
@@ -479,7 +543,8 @@ def main(argv=None):
     assert crates, "the workspace names no crate"
 
     try:
-        crate_files = select_crate_files(crates, scope, args.files, root=root)
+        crate_files = select_crate_files(crates, rust, scope, args.files, root=root)
+        validate_test_filter_scope(crate_files, args.test_filter)
     except ValueError as error:
         sys.exit(str(error))
     has_work = any(crate_files.values())
