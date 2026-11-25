@@ -126,8 +126,8 @@ export interface CallTally {
   report(counting: boolean): CallReport;
 }
 
-export function createCallTally(): CallTally {
-  const started = performance.now();
+export function createCallTally(now: () => number = () => performance.now()): CallTally {
+  const started = now();
   const sites = new Map<string, CallSite>();
   const watches = new Map<string, WatchCount>();
   const watchOf = (label: string) => {
@@ -173,7 +173,7 @@ export function createCallTally(): CallTally {
       }
       return {
         counting,
-        elapsedMs: performance.now() - started,
+        elapsedMs: now() - started,
         totals,
         sites: [...sites.values()].map((entry) => ({ ...entry })).sort((a, b) => b.ms - a.ms),
         watches: [...watches.values()].map((watch) => ({ ...watch })).sort((a, b) => b.ms - a.ms),

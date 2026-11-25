@@ -257,6 +257,12 @@ export interface EarsAdmin {
 }
 
 // @public
+export interface EarsClock {
+    after(ms: number, run: () => void): () => void;
+    now(): number;
+}
+
+// @public
 export interface EarsDatabase {
     acknowledgeRestore(): void;
     adoptReplacement(epoch: number): boolean;
@@ -414,8 +420,10 @@ export interface EarsOperationResult {
 // @public
 export interface EARSRuntimeDeps {
     callSites?: CallSiteNaming;
+    clock?: EarsClock;
     database: EarsDatabase;
     freeze?: boolean;
+    schedule?: WatchSchedule;
     warn?: (message: string, warning: EarsWarning) => void;
 }
 

@@ -12,7 +12,7 @@ import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
 import { declaredNames, toElmdbSchema, withDeclarations, type EngineSchema } from './schema.ts';
 import { idSuffix } from './ids.ts';
-import { createWatches, type WatchDiagnostics, type WatchObserver, type WatchOptions, type WatchReadContext, type Watching } from './watch.ts';
+import { createWatches, watchClockOf, type WatchDiagnostics, type WatchObserver, type WatchOptions, type WatchReadContext, type Watching } from './watch.ts';
 import { RESERVED_ENTITY_TYPES } from './errors.ts';
 
 /** An entity as a read gives it: its id and type, and every attribute it holds */
@@ -248,15 +248,16 @@ export interface EarsEngine extends Ears {
 }
 
 /** A relation id for an unchecked load: a relation is no entity, but its id has an entity id's form */
-const newRelationId = () => `${RESERVED_ENTITY_TYPES.relation}-${idSuffix()}` as EARS.RelationId;
+const newRelationId = (now?: () => number) => `${RESERVED_ENTITY_TYPES.relation}-${idSuffix(now)}` as EARS.RelationId;
 
 /**
  * A new engine over `database`, which holds everything the engine does: its entity types, relation kinds and roles
  * are those the database's schema declares. Whoever holds the engine calls its operations on it; a program that binds
  * one engine for code that holds none passes it a getter of that engine (`defineEars`).
  */
-export function createEarsEngine({ database, warn, freeze, callSites }: EARSRuntimeDeps): EarsEngine {
-  const connection = createConnection(database, { freeze, callSites });
+export function createEarsEngine({ database, warn, freeze, callSites, clock, schedule }: EARSRuntimeDeps): EarsEngine {
+  const wallNow = clock ? () => clock.now() : undefined;
+  const connection = createConnection(database, { freeze, callSites, clock });
   // A write's result names what it touched. An index's own commits have no result to read, so a watch over a `ranked`
   // would otherwise hold its answer until something writes. One engine to a database: elmdb refuses a second listener
   database.hearBuilderCommits((commit) => connection.heard(commit, 'builder'));
@@ -285,7 +286,7 @@ export function createEarsEngine({ database, warn, freeze, callSites }: EARSRunt
   };
 
   const query = createQuery({
-    read, isEntityType, names, warn,
+    read, isEntityType, names, warn, now: wallNow,
     indexed: (type, field) => declared.indexed.get(type)?.has(field) ?? false,
   });
   const { create, upsert, write, updateRelation, removeRelation } = createWrites({
@@ -293,6 +294,7 @@ export function createEarsEngine({ database, warn, freeze, callSites }: EARSRunt
     write: connection.write,
     getRow,
     names,
+    now: wallNow,
     exists: (id) => {
       const [entity, relation] = read([{ read: 'field', id, field: 'entityType' }, { read: 'relation', id }]);
       return { entity: entity!.present === true, relation: relation!.relation !== null };
@@ -335,7 +337,7 @@ export function createEarsEngine({ database, warn, freeze, callSites }: EARSRunt
     };
   };
 
-  const watches = createWatches(connection, { warn });
+  const watches = createWatches(connection, { clock: clock ? watchClockOf(clock) : undefined, schedule, warn });
 
   const operations: Ears = {
     query, create, upsert, write, isEntityType, isRelationKind, isRole,
@@ -418,7 +420,7 @@ export function createEarsEngine({ database, warn, freeze, callSites }: EARSRunt
     putAttr: entityLoad,
     deleteAttr: (id, kind) => load({ load: 'unset', id, field: kind }),
     addRelation(source, kind, target, info, weight) {
-      const id = newRelationId();
+      const id = newRelationId(wallNow);
       load({ load: 'relation', id, kind, source, target, info, weight: storedWeight(weight) });
       return id;
     },

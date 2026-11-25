@@ -3,8 +3,8 @@ import type { EARS } from './entities.ts';
 const random64 = (): string => crypto.getRandomValues(new BigUint64Array(1))[0]!.toString(36);
 
 /** A new entity id's suffix: a base-36 timestamp and 64 random bits */
-export function idSuffix(): string {
-  return Date.now().toString(36) + random64();
+export function idSuffix(now: () => number = Date.now): string {
+  return Math.floor(Math.max(0, now())).toString(36) + random64();
 }
 
 /**
@@ -13,8 +13,8 @@ export function idSuffix(): string {
  *
  * @internal
  */
-export const newId = <E extends EARS.Entity>(t: E): EARS.EntityId =>
-  `${t}-${idSuffix()}` as EARS.EntityId;
+export const newId = <E extends EARS.Entity>(t: E, now?: () => number): EARS.EntityId =>
+  `${t}-${idSuffix(now)}` as EARS.EntityId;
 
 /**
  * An entity's type, from its id: the one record of it. `newId` builds `<Type>-<suffix>`, `create`

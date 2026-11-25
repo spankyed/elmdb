@@ -10,6 +10,18 @@ import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { RESERVED_ATTRIBUTES } from './errors.ts';
 import type { EarsDatabase } from './database.ts';
 import type { CallSiteNaming } from './calls.ts';
+import type { WatchSchedule } from './watch.ts';
+
+/**
+ * Wall time and monotonic timers for an engine (`EARSRuntimeDeps.clock`): structurally compatible with external
+ * virtual clocks so deterministic tests run without uncontrolled real timers or wall-clock reads
+ */
+export interface EarsClock {
+  /** Monotonically clamped wall time in milliseconds since 1970. */
+  now(): number;
+  /** Runs `run` after `ms` milliseconds on a monotonic timer. Returns what cancels it before it runs. */
+  after(ms: number, run: () => void): () => void;
+}
 
 /**
  * An id as `write` takes it: an entity's, plain or tagged with its type, and never a relation's (`EARS.RelationId`),
@@ -50,6 +62,13 @@ export interface EARSRuntimeDeps {
   warn?: (message: string, warning: EarsWarning) => void;
   /** How a counted call (`admin.calls`), or a watch given no label, names the code that made it (`CallSiteNaming`) */
   callSites?: CallSiteNaming;
+  /**
+   * Wall time and timers for entity timestamps, generated id prefixes, call durations, recency queries and watches.
+   * Uses the process's wall clock, monotonic clock and timers when omitted
+   */
+  clock?: EarsClock;
+  /** Watch coalescing gaps and flush slice (`WATCH_SCHEDULE` by default) */
+  schedule?: WatchSchedule;
 }
 
 /** What the engine warns its creator of (`EARSRuntimeDeps.warn`), as data */

@@ -13,7 +13,9 @@ import { WatchCauses } from './observation.ts';
 // once. A flush spends at most a slice of time on runs, and the watches left over run first in the next one; a watch
 // whose last run would overrun what is left waits for that, so an expensive watch never holds a cheap one back.
 import type { Commit, Connection } from './database.ts';
-import type { EARSRuntimeDeps } from './runtime.ts';
+import type { EarsClock, EARSRuntimeDeps } from './runtime.ts';
+
+export type { EarsClock };
 
 /** What a watch delivers to: each changed result, and what a read threw, with the commit it reflects */
 export interface WatchObserver<T> {
@@ -123,6 +125,8 @@ export interface WatchClock {
   /** `held` says something is waiting on what the timer is for: the process's clock then keeps the process alive for it */
   setTimeout(fn: () => void, ms: number, held?: boolean): unknown;
   clearTimeout(handle: unknown): void;
+  /** Defers `fn` to a later turn, returning an optional cancel function; defaults to `setImmediate` / `setTimeout(fn, 0)` */
+  later?(fn: () => void): (() => void) | void;
 }
 
 /**
@@ -192,10 +196,24 @@ export interface WatchScope {
 }
 
 /** Runs `fn` on a later turn of the event loop, after other work: what a flush that ran out of time waits for */
-const later = (fn: () => void) => {
-  if (typeof setImmediate === 'function') setImmediate(fn);
-  else setTimeout(fn, 0);
+const processLater = (fn: () => void): (() => void) => {
+  if (typeof setImmediate === 'function') {
+    const handle = setImmediate(fn);
+    return () => clearImmediate(handle);
+  }
+  const handle = setTimeout(fn, 0);
+  return () => clearTimeout(handle);
 };
+
+/** Adapts a structural `EarsClock` to the watch scheduler's clock, routing both gaps and `later` yields through `clock.after` */
+export function watchClockOf(clock: EarsClock): WatchClock {
+  return {
+    now: () => clock.now(),
+    setTimeout: (fn, ms) => clock.after(ms, fn),
+    clearTimeout: (handle) => (handle as () => void)(),
+    later: (fn) => clock.after(0, fn),
+  };
+}
 
 const PROCESS_CLOCK: WatchClock = {
   now: () => performance.now(),
@@ -209,6 +227,7 @@ const PROCESS_CLOCK: WatchClock = {
 };
 
 export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, schedule = WATCH_SCHEDULE, warn }: WatchScope = {}): Watches {
+  const defer = clock.later ?? processLater;
   const open = new Map<number, Watch>();
   /** Tokens name watches to elmdb; one is never reused, so a commit naming a stopped watch's names nothing */
   let nextToken = 1;
@@ -218,9 +237,10 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   let earliestDue: number | undefined = Infinity;
   /**
    * A flush queued, for a microtask or for a later turn of the event loop, and the timer set for the earliest watch
-   * still in its gap. A flush a sooner one replaced still comes, and finds whatever is left to it, often nothing
+   * still in its gap. A flush a sooner one replaced is cancelled where its scheduler supports it, and otherwise finds
+   * nothing of its own to do
    */
-  let queued: { later: boolean } | undefined;
+  let queued: { later: boolean; cancel?: () => void } | undefined;
   let timer: { handle: unknown; at: number; held: boolean } | undefined;
   /** How many `caughtUp` calls wait, over every watch: while any does, or `settled` is waited on, the timer for a gap is one to stay alive for */
   let caughtUpWaiting = 0;
@@ -294,16 +314,18 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         timer = undefined;
       }
       // A flush put off to a later turn was put off for other work's sake. Something blocked on a watch that is due
-      // is not other work: its flush comes now, and the one put off ignores itself when it arrives
+      // is not other work: its flush comes now, cancelling the put-off turn where possible and ignoring it otherwise
       if (queued && !(blocked && queued.later)) return;
-      const entry = { later: !soon };
+      queued?.cancel?.();
+      const entry: { later: boolean; cancel?: () => void } = { later: !soon };
       queued = entry;
       const runFlush = () => {
         if (queued !== entry) return;
+        entry.cancel = undefined;
         flush();
       };
       if (soon) queueMicrotask(runFlush);
-      else later(runFlush);
+      else entry.cancel = defer(runFlush) ?? undefined;
       return;
     }
     const held = caughtUpWaiting > 0 || waiting.length > 0;
@@ -464,12 +486,14 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       clock.clearTimeout(timer.handle);
       timer = undefined;
     }
+    queued?.cancel?.();
     queued = undefined;
     settleWaiting();
     return true;
   }
 
   function flush() {
+    queued?.cancel?.();
     queued = undefined;
     if (closed()) return;
     flushing = true;
@@ -621,6 +645,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
                 clock.clearTimeout(timer.handle);
                 timer = undefined;
               }
+              queued?.cancel?.();
               queued = undefined;
             } else if (timer) {
               const held = caughtUpWaiting > 0 || waiting.length > 0;
@@ -645,7 +670,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
             return new Promise((resolve) => {
               watch.waiters.push(resolve);
               caughtUpWaiting++;
-              later(() => {
+              defer(() => {
                 if (closed() || watch.stopped) return;
                 const index = watch.waiters.indexOf(resolve);
                 if (index === -1) return;
@@ -696,7 +721,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         if (open.size === 0 || currentCommit <= lastSeenCommit) return Promise.resolve();
         return new Promise((resolve) => {
           waiting.push(resolve);
-          later(() => {
+          defer(() => {
             if (closed()) return;
             if (!flushing && !queued && !timer && dirty.size === 0 && currentCommit > lastSeenCommit) {
               lastSeenCommit = currentCommit;

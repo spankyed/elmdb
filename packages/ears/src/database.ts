@@ -21,6 +21,7 @@ import { createCallSites, createCallTally, type CallCounting, type CallReport, t
 import { EarsError, type EarsErrorCode } from './errors.ts';
 import { setField } from './ids.ts';
 import { createOperationObservation, type EarsOperationObserver } from './observation.ts';
+import type { EarsClock } from './runtime.ts';
 
 /** How `transact` commits */
 export interface UnitOptions {
@@ -407,8 +408,10 @@ export interface Connection {
 
 export function createConnection(
   database: EarsDatabase,
-  { freeze = false, callSites }: { freeze?: boolean; callSites?: CallSiteNaming } = {},
+  { freeze = false, callSites, clock }: { freeze?: boolean; callSites?: CallSiteNaming; clock?: EarsClock } = {},
 ): Connection {
+  const wallNow = clock ? () => clock.now() : () => Date.now();
+  const monotonicNow = clock ? () => clock.now() : () => performance.now();
   const callSite = createCallSites(callSites);
   /**
    * The units `transact` is inside, outermost first. elmdb's unit opens at the first write, so a unit that writes
@@ -523,11 +526,11 @@ export function createConnection(
   const timedInUnit = <T>(fn: () => T): T => {
     const into = counted;
     if (!into) return fn();
-    const start = performance.now();
+    const start = monotonicNow();
     try {
       return fn();
     } finally {
-      into.ms += performance.now() - start;
+      into.ms += monotonicNow() - start;
     }
   };
 
@@ -621,11 +624,11 @@ export function createConnection(
     // A write inside a unit is the unit's, counted with it; one inside a unit begun before counting is not counted
     const inUnit = kind === 'write' && levels.length > 0;
     const site = inUnit ? undefined : callSite();
-    const start = performance.now();
+    const start = monotonicNow();
     try {
       return fn();
     } finally {
-      const ms = performance.now() - start;
+      const ms = monotonicNow() - start;
       if (site !== undefined) tally?.record(kind, site, tracking !== undefined, ops, ms);
       else if (counted) {
         counted.writes += 1;
@@ -639,14 +642,14 @@ export function createConnection(
   let stopped: CallReport | undefined;
   const calls: CallCounting = {
     start() {
-      tally = createCallTally();
+      tally = createCallTally(monotonicNow);
       stopped = undefined;
       // A unit begun before this count started isn't the count's, as one begun before counting at all isn't
       counted = undefined;
     },
-    report: () => tally?.report(true) ?? stopped ?? createCallTally().report(false),
+    report: () => tally?.report(true) ?? stopped ?? createCallTally(monotonicNow).report(false),
     stop() {
-      stopped = (tally ?? createCallTally()).report(false);
+      stopped = (tally ?? createCallTally(monotonicNow)).report(false);
       tally = undefined;
       counted = undefined;
       return stopped;
@@ -662,7 +665,7 @@ export function createConnection(
         return freeze ? answers.map(freezeValues) : answers;
       });
     },
-    write(ops, now = Date.now()) {
+    write(ops, now = wallNow()) {
       // A write the hook has to see runs in a unit of its own. One it doesn't pays for this check and nothing else
       if (hook && !hookPaused && levels.length === 0 && ops.some((op) => opWantsHook(op, hook!.wants))) {
         return transact(() => connection.write(ops, now));
