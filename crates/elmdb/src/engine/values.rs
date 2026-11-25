@@ -100,18 +100,35 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Maximum zstd window log accepted when streaming a stored value: 2^26 = 64 MiB, matching `MAX_VALUE_BYTES`
+/// (zstd's default decoder window limit is 2^27 = 128 MiB)
+const MAX_WINDOW_LOG: u32 = 26;
+
 fn decompress_stream(frame: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
-    let decoder = zstd::stream::Decoder::new(frame)?;
+    let mut decoder = zstd::stream::Decoder::new(frame)?;
+    decoder.window_log_max(MAX_WINDOW_LOG)?;
     let mut out = Vec::new();
-    decoder.take(limit as u64 + 1).read_to_end(&mut out)?;
-    if out.len() > limit {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("decompressed value exceeds {limit} bytes"),
-        ));
+    let mut chunk = [0u8; 65_536];
+    loop {
+        let n = decoder.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(out);
+        }
+        let needed = out.len() + n;
+        if needed > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("decompressed value exceeds {limit} bytes"),
+            ));
+        }
+        if needed > out.capacity() {
+            // Double capacity up to `limit`, never past it, avoiding `Vec`'s 2x growth past the cap
+            let next = out.capacity().saturating_mul(2).clamp(needed, limit);
+            out.reserve_exact(next - out.len());
+        }
+        out.extend_from_slice(&chunk[..n]);
     }
-    Ok(out)
 }
 
 fn decompress(frame: &[u8]) -> std::io::Result<Vec<u8>> {
@@ -679,6 +696,46 @@ mod tests {
         let over = stream_compress(&vec![b'x'; 513]);
         assert_eq!(decompress_stream(&over, 512).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 
+        // Power-of-2 chunk boundary: capacity stays within `limit` rather than doubling to `2 * limit`
+        let exact_chunk = stream_compress(&vec![b'y'; 65_536]);
+        let decoded = decompress_stream(&exact_chunk, 65_536).unwrap();
+        assert_eq!(decoded.len(), 65_536);
+        assert!(decoded.capacity() <= 65_536, "capacity {} exceeded limit 65536", decoded.capacity());
+        let over_chunk = stream_compress(&vec![b'y'; 65_537]);
+        assert_eq!(decompress_stream(&over_chunk, 65_536).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+
+        // Multi-chunk growth clamps to `limit` instead of `Vec`'s default 2x doubling (65_536 -> 131_072)
+        let bounded_input: Vec<u8> = (0..100_000usize).map(|i| (i % 251) as u8).collect();
+        let bounded_frame = stream_compress(&bounded_input);
+        let bounded = decompress_stream(&bounded_frame, 100_000).unwrap();
+        assert!(bounded == bounded_input);
+        assert!(bounded.capacity() <= 100_000, "capacity {} exceeded limit 100000", bounded.capacity());
+
+        // Reaching exact current capacity on a later chunk does not pre-emptively double again
+        let four_chunks = stream_compress(&vec![b'z'; 262_144]);
+        let exact_cap = decompress_stream(&four_chunks, 524_288).unwrap();
+        assert_eq!(exact_cap.len(), 262_144);
+        assert!(exact_cap.capacity() <= 262_144, "capacity {} grew past 262144", exact_cap.capacity());
+
+        // Window log boundary: 2^26 (64 MiB) matches `MAX_VALUE_BYTES` and is accepted; 2^27 (128 MiB) is refused
+        assert_eq!(1usize << MAX_WINDOW_LOG, MAX_VALUE_BYTES);
+        let frame_with_window = |window_log: u32| {
+            let mut enc = zstd::stream::Encoder::new(vec![COMPRESSED], 3).unwrap();
+            enc.include_contentsize(false).unwrap();
+            enc.window_log(window_log).unwrap();
+            enc.write_all(b"window-check").unwrap();
+            enc.finish().unwrap()
+        };
+        let ok_window = frame_with_window(26);
+        assert_eq!(unstored(&ok_window).unwrap().as_ref(), b"window-check");
+        let wide_window = frame_with_window(27);
+        // Valid under zstd's default 128 MiB window, proving our 64 MiB cap rejects it
+        let mut default_dec = zstd::stream::Decoder::new(&wide_window[1..]).unwrap();
+        let mut check = Vec::new();
+        std::io::Read::read_to_end(&mut default_dec, &mut check).unwrap();
+        assert_eq!(check, b"window-check");
+        assert_eq!(unstored(&wide_window).unwrap_err().code, ErrorCode::Corrupted);
+
         // Full `unstored` rejects a streaming zstd bomb past `MAX_VALUE_BYTES` as `CORRUPTED`
         let mut enc = zstd::stream::Encoder::new(vec![COMPRESSED], 3).unwrap();
         enc.include_contentsize(false).unwrap();
@@ -689,6 +746,31 @@ mod tests {
         let bomb = enc.finish().unwrap();
         assert!(bomb.len() < 32_768, "bomb frame is tiny on disk: {} bytes", bomb.len());
         assert_eq!(unstored(&bomb).unwrap_err().code, ErrorCode::Corrupted);
+    }
+
+    #[test]
+    fn an_incompressible_value_of_the_most_a_field_holds_reads_back_whole_and_one_byte_more_is_refused() {
+        // Binary of this length has a five-byte msgpack header, reaching `MAX_VALUE_BYTES` exactly
+        let mut raw = vec![0u8; MAX_VALUE_BYTES - 5];
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for chunk in raw.as_chunks_mut::<8>().0 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *chunk = state.to_le_bytes();
+        }
+        let most = Value::Binary(raw);
+        let stored_most = stored(&most).unwrap();
+        assert_ne!(stored_most[0], COMPRESSED);
+        assert_eq!(stored_most.len(), MAX_VALUE_BYTES);
+        let read = decode_stored(&stored_most).unwrap();
+        assert!(read == most, "the incompressible value read back is the value written");
+        drop(stored_most);
+        drop(read);
+        let Value::Binary(mut raw) = most else { unreachable!() };
+        raw.push(0xaa);
+        let past = Value::Binary(raw);
+        assert_eq!(stored(&past).unwrap_err().code, ErrorCode::ValueTooLarge);
     }
 
     #[test]
