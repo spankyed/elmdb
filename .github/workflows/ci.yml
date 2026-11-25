@@ -163,6 +163,7 @@ jobs:
           npm run test:binding
           node crates/elmdb-node/bench/reads.mjs --json --runs 2 > "$RUNNER_TEMP/read-codecs.json"
           python3 -B scripts/test-read-profile.py
+          python3 -B scripts/test-mutants-in-diff.py
           python3 scripts/check-read-profile.py --allocations "$RUNNER_TEMP/read-allocations.json" --codecs "$RUNNER_TEMP/read-codecs.json"
           node crates/elmdb-node/bench/against-sqlite.mjs --json --notes 2000 > "$RUNNER_TEMP/against-sqlite.json"
       - name: preserve read measurement reports
