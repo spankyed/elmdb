@@ -590,7 +590,8 @@ The operations:
   (`UNKNOWN_TYPE`), no such entity or relation (`NO_SUCH_ENTITY`, `NO_SUCH_RELATION`), a reserved field
   (`RESERVED_FIELD`), a value that isn't a list (`NOT_A_LIST`), an invalid or taken code (`INVALID_SHORT_CODE`,
   `SHORT_CODE_IN_USE`; a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that
-  would pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
+  would pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a value past
+  the 64 MiB of msgpack a field holds (`VALUE_TOO_LARGE`; `format.md`, Values), a field its type doesn't declare
   (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
   (`VALUE_INVALID`), a time that isn't a finite number, the batch's `now`, a create's `createdAt` or `updatedAt` or a
   trash's `at` (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle
@@ -921,10 +922,11 @@ unit is open.
   Renaming a type rewrites its entities' ids, the relations joining them and the declared `ref` fields naming them, its own included, and moves its embeddings.
 - `bulkLoad(loads)`: entities, relations under their own ids, sequences, embeddings and fields taken away, applied in
   one durable unit without a write's checks (no schema, no refusals, a unique index taking duplicates), for imports, a
-  dump's load, and specs that need data the checks would refuse. The value spec is no such check: a value outside it,
-  a weight or a vector's component that isn't finite among them, is refused (`VALUE_INVALID`) and the unit keeps
-  nothing, since every reader of the store takes a stored value to be inside it. The derived keys are kept as a write keeps them, and
-  `check()` reports what the rules refuse.
+  dump's load, and specs that need data the checks would refuse. The value spec and a field's size cap are no such
+  checks: a value outside the spec, a weight or a vector's component that isn't finite among them, is refused
+  (`VALUE_INVALID`), and a field's value past `MAX_VALUE_BYTES` of msgpack is refused (`VALUE_TOO_LARGE`; `format.md`,
+  Values), with the unit keeping nothing, since every reader of the store takes a stored value to be inside both. The
+  derived keys are kept as a write keeps them, and `check()` reports what the rules refuse.
 - `primary_loads` (Rust), `elmdb dump` and `elmdb load`: a database's primary data as the loads that make it again, in
   one moment and the order it was made, written to a file and read into a new database (`format.md`, Dumps).
 

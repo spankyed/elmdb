@@ -81,6 +81,11 @@ A value is msgpack bytes, written by the caller and stored as given:
 - the engine decodes a value only where it must: to index it, to check a required field, to filter by it, to extract
   text.
 
+A field's value is at most 64 MiB of msgpack (`MAX_VALUE_BYTES`, `crates/elmdb/src/engine/values.rs`): a write of one
+past it is refused (`VALUE_TOO_LARGE`) before anything of its batch is written, and a read refuses a stored frame that
+expands past it as `CORRUPTED`, whatever size the frame records, so no stored bytes make a read hold more and every
+value written reads back.
+
 A field's value of `COMPRESS_FROM` bytes of msgpack or more (`crates/elmdb/src/engine/values.rs`) is stored compressed
 when that is smaller: the byte `0xc1`, which no msgpack value starts with and which a write's value therefore never
 does (a write holding it is no msgpack, and refused), followed by a zstd frame (level 3) of the value's msgpack. Every
@@ -143,7 +148,8 @@ and a load by the build after it. That is how our databases are converted once, 
   A publication-sync error reports that the complete database is visible; never delete or overwrite it blindly.
   Unix syncs affected directories; Windows requests write-through publication. A dump that fails removes its file.
   The data's violations of schema rules remain `check()`'s to report, as after any unchecked load; a value outside the
-  value spec is no such violation, and refuses the load (`VALUE_INVALID`).
+  value spec (`VALUE_INVALID`) or past `MAX_VALUE_BYTES` of msgpack (`VALUE_TOO_LARGE`) is no such violation, and
+  refuses the load.
   An abruptly killed process can leave an unpublished `.elmdb-load-*` directory. A retry starts new private staging
   and never adopts the partial database. Remove abandoned staging only after confirming its owner has stopped and
   coordinating exclusive destination ownership; preserve unrelated files.

@@ -409,7 +409,7 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
             let Some(value) = entities::get(t, &id, &name)? else { continue };
             let next = rewritten(&value);
             if next != value {
-                t.put(&keys::value(&id, &name), &values::stored(&next))?;
+                t.put(&keys::value(&id, &name), &values::stored(&next)?)?;
                 // A field of another type's entity, written as any write of it is
                 t.event(Event::Field { id, field: name.clone() });
             }

@@ -32,11 +32,22 @@ pub const COMPRESS_FROM: usize = 256;
 /// zstd's level: within a few percent of its smallest output on apack's text, and its fastest to encode and decode
 const ZSTD_LEVEL: i32 = 3;
 
-/// A field's value as it is stored: its msgpack, compressed from `COMPRESS_FROM` bytes when that is smaller
-pub fn stored(value: &Value) -> Vec<u8> {
+/// A field's value as it is stored: its msgpack, compressed from `COMPRESS_FROM` bytes when that is smaller. A value
+/// past `MAX_VALUE_BYTES` of msgpack is refused (`VALUE_TOO_LARGE`), so every value stored reads back
+pub fn stored(value: &Value) -> Result<Vec<u8>> {
     let plain = encode(value);
+    if plain.len() > MAX_VALUE_BYTES {
+        return Err(Error::new(
+            ErrorCode::ValueTooLarge,
+            format!(
+                "A value is {} bytes as msgpack, past the {MAX_VALUE_BYTES} a field holds; split it across fields or \
+                 entities, or keep it outside the database",
+                plain.len()
+            ),
+        ));
+    }
     if plain.len() < COMPRESS_FROM {
-        return plain;
+        return Ok(plain);
     }
     match zstd::bulk::compress(&plain, ZSTD_LEVEL) {
         // mutant-skip: replace (< with <=|\+ with -|\+ with \*) in stored
@@ -48,9 +59,9 @@ pub fn stored(value: &Value) -> Vec<u8> {
             let mut out = Vec::with_capacity(frame.len() + 1);
             out.push(COMPRESSED);
             out.extend_from_slice(&frame);
-            out
+            Ok(out)
         }
-        _ => plain,
+        _ => Ok(plain),
     }
 }
 
@@ -76,9 +87,10 @@ pub fn unstored_owned(bytes: Vec<u8>) -> Result<Vec<u8>> {
 // the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
 const ONE_CALL_UP_TO: u64 = 16 << 20;
 
-/// The largest stored value a streaming decompression will expand to: a damaged or crafted frame expanding past this is
-/// refused as `CORRUPTED` rather than exhausting memory
-pub const MAX_DECOMPRESSED_BYTES: usize = 64 << 20;
+/// The most msgpack a field's value holds. `stored` refuses a value past it, and a read refuses a frame that expands past
+/// it as `CORRUPTED`, whatever size the frame records: no stored bytes make a read hold more, and every value written
+/// reads back
+pub const MAX_VALUE_BYTES: usize = 64 << 20;
 
 thread_local! {
     /// One decompression context a thread, for every value it reads: a context costs about 100 KB to allocate, where
@@ -88,24 +100,43 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// Maximum zstd window log accepted when streaming a stored value: 2^26 = 64 MiB, matching `MAX_VALUE_BYTES`
+/// (zstd's default decoder window limit is 2^27 = 128 MiB)
+const MAX_WINDOW_LOG: u32 = 26;
+
 fn decompress_stream(frame: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
-    let decoder = zstd::stream::Decoder::new(frame)?;
+    let mut decoder = zstd::stream::Decoder::new(frame)?;
+    decoder.window_log_max(MAX_WINDOW_LOG)?;
     let mut out = Vec::new();
-    decoder.take(limit as u64 + 1).read_to_end(&mut out)?;
-    if out.len() > limit {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("decompressed value exceeds {limit} bytes"),
-        ));
+    let mut chunk = [0u8; 65_536];
+    loop {
+        let n = decoder.read(&mut chunk)?;
+        if n == 0 {
+            return Ok(out);
+        }
+        let needed = out.len() + n;
+        if needed > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("decompressed value exceeds {limit} bytes"),
+            ));
+        }
+        if needed > out.capacity() {
+            // Double capacity up to `limit`, never past it, avoiding `Vec`'s 2x growth past the cap
+            let next = out.capacity().saturating_mul(2).clamp(needed, limit);
+            out.reserve_exact(next - out.len());
+        }
+        out.extend_from_slice(&chunk[..n]);
     }
-    Ok(out)
 }
 
 fn decompress(frame: &[u8]) -> std::io::Result<Vec<u8>> {
     let size = match zstd::zstd_safe::get_frame_content_size(frame) {
         Ok(Some(size)) if size <= ONE_CALL_UP_TO => size as usize,
-        _ => return decompress_stream(frame, MAX_DECOMPRESSED_BYTES),
+        // Read as a stream up to the most a field holds, never the size the frame records, which a damaged or crafted
+        // frame sets as it likes: memory grows only as the frame gives bytes, so a damaged size asks for nothing up front
+        _ => return decompress_stream(frame, MAX_VALUE_BYTES),
     };
     DECOMPRESSOR.with(|context| {
         let mut context = context.borrow_mut();
@@ -665,7 +696,47 @@ mod tests {
         let over = stream_compress(&vec![b'x'; 513]);
         assert_eq!(decompress_stream(&over, 512).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 
-        // Full `unstored` rejects a streaming zstd bomb past `MAX_DECOMPRESSED_BYTES` as `CORRUPTED`
+        // Power-of-2 chunk boundary: capacity stays within `limit` rather than doubling to `2 * limit`
+        let exact_chunk = stream_compress(&vec![b'y'; 65_536]);
+        let decoded = decompress_stream(&exact_chunk, 65_536).unwrap();
+        assert_eq!(decoded.len(), 65_536);
+        assert!(decoded.capacity() <= 65_536, "capacity {} exceeded limit 65536", decoded.capacity());
+        let over_chunk = stream_compress(&vec![b'y'; 65_537]);
+        assert_eq!(decompress_stream(&over_chunk, 65_536).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+
+        // Multi-chunk growth clamps to `limit` instead of `Vec`'s default 2x doubling (65_536 -> 131_072)
+        let bounded_input: Vec<u8> = (0..100_000usize).map(|i| (i % 251) as u8).collect();
+        let bounded_frame = stream_compress(&bounded_input);
+        let bounded = decompress_stream(&bounded_frame, 100_000).unwrap();
+        assert!(bounded == bounded_input);
+        assert!(bounded.capacity() <= 100_000, "capacity {} exceeded limit 100000", bounded.capacity());
+
+        // Reaching exact current capacity on a later chunk does not pre-emptively double again
+        let four_chunks = stream_compress(&vec![b'z'; 262_144]);
+        let exact_cap = decompress_stream(&four_chunks, 524_288).unwrap();
+        assert_eq!(exact_cap.len(), 262_144);
+        assert!(exact_cap.capacity() <= 262_144, "capacity {} grew past 262144", exact_cap.capacity());
+
+        // Window log boundary: 2^26 (64 MiB) matches `MAX_VALUE_BYTES` and is accepted; 2^27 (128 MiB) is refused
+        assert_eq!(1usize << MAX_WINDOW_LOG, MAX_VALUE_BYTES);
+        let frame_with_window = |window_log: u32| {
+            let mut enc = zstd::stream::Encoder::new(vec![COMPRESSED], 3).unwrap();
+            enc.include_contentsize(false).unwrap();
+            enc.window_log(window_log).unwrap();
+            enc.write_all(b"window-check").unwrap();
+            enc.finish().unwrap()
+        };
+        let ok_window = frame_with_window(26);
+        assert_eq!(unstored(&ok_window).unwrap().as_ref(), b"window-check");
+        let wide_window = frame_with_window(27);
+        // Valid under zstd's default 128 MiB window, proving our 64 MiB cap rejects it
+        let mut default_dec = zstd::stream::Decoder::new(&wide_window[1..]).unwrap();
+        let mut check = Vec::new();
+        std::io::Read::read_to_end(&mut default_dec, &mut check).unwrap();
+        assert_eq!(check, b"window-check");
+        assert_eq!(unstored(&wide_window).unwrap_err().code, ErrorCode::Corrupted);
+
+        // Full `unstored` rejects a streaming zstd bomb past `MAX_VALUE_BYTES` as `CORRUPTED`
         let mut enc = zstd::stream::Encoder::new(vec![COMPRESSED], 3).unwrap();
         enc.include_contentsize(false).unwrap();
         let chunk = vec![0u8; 1 << 20];
@@ -678,13 +749,62 @@ mod tests {
     }
 
     #[test]
+    fn an_incompressible_value_of_the_most_a_field_holds_reads_back_whole_and_one_byte_more_is_refused() {
+        // Binary of this length has a five-byte msgpack header, reaching `MAX_VALUE_BYTES` exactly
+        let mut raw = vec![0u8; MAX_VALUE_BYTES - 5];
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        for chunk in raw.as_chunks_mut::<8>().0 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *chunk = state.to_le_bytes();
+        }
+        let most = Value::Binary(raw);
+        let stored_most = stored(&most).unwrap();
+        assert_ne!(stored_most[0], COMPRESSED);
+        assert_eq!(stored_most.len(), MAX_VALUE_BYTES);
+        let read = decode_stored(&stored_most).unwrap();
+        assert!(read == most, "the incompressible value read back is the value written");
+        drop(stored_most);
+        drop(read);
+        let Value::Binary(mut raw) = most else { unreachable!() };
+        raw.push(0xaa);
+        let past = Value::Binary(raw);
+        assert_eq!(stored(&past).unwrap_err().code, ErrorCode::ValueTooLarge);
+    }
+
+    #[test]
+    fn a_value_of_the_most_a_field_holds_reads_back_whole_and_one_byte_more_is_refused() {
+        // A string this long is five bytes longer as msgpack. Repetitive, so it compresses to a few kilobytes, stored
+        // as a frame that records its size past the one-call size, and read as a stream
+        let most = Value::from("x".repeat(MAX_VALUE_BYTES - 5));
+        let stored_most = stored(&most).unwrap();
+        assert_eq!(stored_most[0], COMPRESSED);
+        assert!(stored_most.len() < 1 << 20);
+        let read = decode_stored(&stored_most).unwrap();
+        assert!(read == most, "the value read back is the value written");
+        let past = Value::from("x".repeat(MAX_VALUE_BYTES - 4));
+        assert_eq!(stored(&past).unwrap_err().code, ErrorCode::ValueTooLarge);
+    }
+
+    #[test]
+    fn a_frame_that_records_its_size_past_the_most_a_field_holds_is_refused_as_corrupted() {
+        // What a write never stores, and a damaged or crafted file can hold: the size the frame records bounds nothing
+        let frame = zstd::bulk::compress(&vec![0u8; MAX_VALUE_BYTES + 1], 3).unwrap();
+        assert_eq!(zstd::zstd_safe::get_frame_content_size(&frame).unwrap(), Some(MAX_VALUE_BYTES as u64 + 1));
+        let mut bytes = vec![COMPRESSED];
+        bytes.extend_from_slice(&frame);
+        assert_eq!(unstored(&bytes).unwrap_err().code, ErrorCode::Corrupted);
+    }
+
+    #[test]
     fn compresses_from_the_threshold_on() {
         // A string's msgpack is two bytes longer than it, for these lengths
         let below = Value::from("a".repeat(COMPRESS_FROM - 3));
-        assert_eq!(stored(&below), encode(&below));
+        assert_eq!(stored(&below).unwrap(), encode(&below));
         let at = Value::from("a".repeat(COMPRESS_FROM - 2));
         assert_eq!(encode(&at).len(), COMPRESS_FROM);
-        assert_eq!(stored(&at)[0], COMPRESSED);
+        assert_eq!(stored(&at).unwrap()[0], COMPRESSED);
     }
 
     #[test]

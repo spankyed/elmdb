@@ -93,7 +93,7 @@ fn a_large_value_is_stored_compressed_a_small_or_dense_one_as_its_msgpack() {
         })
         .collect();
     let dense = rmpv::Value::Binary(random);
-    assert_eq!(values::stored(&dense), values::encode(&dense));
+    assert_eq!(values::stored(&dense).unwrap(), values::encode(&dense));
 }
 
 #[test]
@@ -152,7 +152,7 @@ fn a_frame_with_or_without_its_size_or_past_one_call_reads_back_and_one_cut_shor
     use std::io::Write;
     let value = rmpv::Value::from(prose());
     let plain = values::encode(&value);
-    let sized = values::stored(&value);
+    let sized = values::stored(&value).unwrap();
     assert_eq!(sized[0], values::COMPRESSED);
     assert_eq!(values::unstored(&sized).unwrap().as_ref(), plain.as_slice());
 
@@ -164,7 +164,7 @@ fn a_frame_with_or_without_its_size_or_past_one_call_reads_back_and_one_cut_shor
     assert_eq!(values::unstored(&streamed).unwrap().as_ref(), plain.as_slice());
 
     let large = rmpv::Value::from("a".repeat(17 << 20));
-    let stored = values::stored(&large);
+    let stored = values::stored(&large).unwrap();
     assert!(zstd::zstd_safe::get_frame_content_size(&stored[1..]).unwrap().unwrap() > 16 << 20);
     assert_eq!(values::unstored(&stored).unwrap().as_ref(), values::encode(&large).as_slice());
 
@@ -186,4 +186,94 @@ fn a_frame_claiming_more_than_any_buffer_holds_is_corrupted_without_allocating_i
     frame.extend_from_slice(b"data");
     assert_eq!(zstd::zstd_safe::get_frame_content_size(&frame[1..]).unwrap(), Some(1 << 63));
     assert_eq!(values::unstored(&frame).unwrap_err().code, crate::ErrorCode::Corrupted);
+}
+
+/// A write of a value past the most a field holds is refused, and leaves nothing of its batch
+#[test]
+fn a_write_of_a_value_past_the_most_a_field_holds_is_refused_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // Five bytes longer as msgpack: one byte past the most
+    let past = "x".repeat(values::MAX_VALUE_BYTES - 4);
+    let refused = super::write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Message", "id": "Message-ok", "fields": { "text": "kept out" } }),
+            json!({ "op": "create", "type": "Message", "id": "Message-big", "fields": { "blob": past } }),
+        ],
+    );
+    assert_eq!(refused.unwrap_err().code, crate::ErrorCode::ValueTooLarge);
+    let (ok_entity, big_entity, big_value) = db
+        .snapshot(|r| {
+            Ok((
+                crate::engine::unit::Read::get(r, &keys::entity("Message-ok"))?,
+                crate::engine::unit::Read::get(r, &keys::entity("Message-big"))?,
+                crate::engine::unit::Read::get(r, &keys::value("Message-big", "blob"))?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(ok_entity, None);
+    assert_eq!(big_entity, None);
+    assert_eq!(big_value, None);
+}
+
+/// Growing an existing field past `MAX_VALUE_BYTES` via `append` or `merge` is refused and leaves the field untouched
+#[test]
+fn growing_a_field_past_the_most_a_field_holds_via_append_or_merge_is_refused_and_leaves_it_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let near = "x".repeat(values::MAX_VALUE_BYTES - 20);
+    super::write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Message", "id": "Message-list", "fields": { "blob": [near] } }),
+            json!({ "op": "create", "type": "Message", "id": "Message-map", "fields": { "blob": { "a": near } } }),
+        ],
+    )
+    .unwrap();
+    let list_before = stored(&db, "Message-list", "blob");
+    let map_before = stored(&db, "Message-map", "blob");
+
+    let refused_append = super::write(
+        &db,
+        vec![json!({ "op": "append", "id": "Message-list", "field": "blob", "value": "0123456789abcdef0123" })],
+    );
+    assert_eq!(refused_append.unwrap_err().code, crate::ErrorCode::ValueTooLarge);
+    assert_eq!(stored(&db, "Message-list", "blob"), list_before);
+
+    let refused_merge = super::write(
+        &db,
+        vec![json!({ "op": "merge", "id": "Message-map", "field": "blob", "value": { "b": "0123456789abcdef0123" } })],
+    );
+    assert_eq!(refused_merge.unwrap_err().code, crate::ErrorCode::ValueTooLarge);
+    assert_eq!(stored(&db, "Message-map", "blob"), map_before);
+}
+
+/// `bulk_load` refuses an entity whose field exceeds `MAX_VALUE_BYTES` and writes nothing of its unit
+#[test]
+fn a_bulk_load_of_a_value_past_the_most_a_field_holds_is_refused_and_writes_nothing() {
+    use crate::engine::maintenance::Load;
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let ok = Load::Entity {
+        id: "Message-load-ok".into(),
+        fields: [("text".into(), rmpv::Value::from("kept out"))].into_iter().collect(),
+        trashed: false,
+    };
+    let big = Load::Entity {
+        id: "Message-load-big".into(),
+        fields: [("blob".into(), rmpv::Value::from("x".repeat(values::MAX_VALUE_BYTES - 4)))].into_iter().collect(),
+        trashed: false,
+    };
+    assert_eq!(db.bulk_load(&[ok, big]).unwrap_err().code, crate::ErrorCode::ValueTooLarge);
+    let (ok_entity, big_entity) = db
+        .snapshot(|r| {
+            Ok((
+                crate::engine::unit::Read::get(r, &keys::entity("Message-load-ok"))?,
+                crate::engine::unit::Read::get(r, &keys::entity("Message-load-big"))?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(ok_entity, None);
+    assert_eq!(big_entity, None);
 }
