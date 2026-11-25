@@ -76,8 +76,9 @@ pub fn unstored_owned(bytes: Vec<u8>) -> Result<Vec<u8>> {
 // the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
 const ONE_CALL_UP_TO: u64 = 16 << 20;
 
-/// The largest stored value a streaming decompression will expand to: a damaged or crafted frame expanding past this is
-/// refused as `CORRUPTED` rather than exhausting memory
+/// The largest stored value a frame that records no size expands to: one expanding past this is refused as `CORRUPTED`
+/// rather than exhausting memory. Every frame `stored` writes records its size, which bounds it instead, so no value
+/// written is ever refused for its size when read
 pub const MAX_DECOMPRESSED_BYTES: usize = 64 << 20;
 
 thread_local! {
@@ -105,6 +106,9 @@ fn decompress_stream(frame: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
 fn decompress(frame: &[u8]) -> std::io::Result<Vec<u8>> {
     let size = match zstd::zstd_safe::get_frame_content_size(frame) {
         Ok(Some(size)) if size <= ONE_CALL_UP_TO => size as usize,
+        // Read as a stream up to the size it records, which zstd holds its output to: memory grows only as the frame
+        // gives bytes, so a damaged size asks for nothing up front
+        Ok(Some(size)) => return decompress_stream(frame, usize::try_from(size).unwrap_or(usize::MAX)),
         _ => return decompress_stream(frame, MAX_DECOMPRESSED_BYTES),
     };
     DECOMPRESSOR.with(|context| {
@@ -675,6 +679,16 @@ mod tests {
         let bomb = enc.finish().unwrap();
         assert!(bomb.len() < 32_768, "bomb frame is tiny on disk: {} bytes", bomb.len());
         assert_eq!(unstored(&bomb).unwrap_err().code, ErrorCode::Corrupted);
+    }
+
+    #[test]
+    fn a_value_stored_past_the_streaming_bound_reads_back_whole() {
+        // Repetitive, so it compresses to a few kilobytes and is stored as a frame that records its size
+        let large = Value::from("x".repeat(MAX_DECOMPRESSED_BYTES + (6 << 20)));
+        let stored = stored(&large);
+        assert_eq!(stored[0], COMPRESSED);
+        assert!(stored.len() < 1 << 20);
+        assert_eq!(decode_stored(&stored).unwrap(), large);
     }
 
     #[test]
