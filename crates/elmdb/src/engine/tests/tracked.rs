@@ -191,6 +191,7 @@ fn an_untrack_while_a_unit_holds_a_tracked_read_cancels_it() {
     unit.read(&reads(vec![row("Task-1")], Some(3))).unwrap();
     db.untrack(3);
     unit.commit(false).unwrap();
+    assert!(db.tracks.lock().is_empty(), "the canceled read is neither filed nor left registered");
     assert_eq!(db.track_stats().0, 0);
     assert!(touched(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })]).is_empty());
 }
@@ -205,9 +206,11 @@ fn a_unit_that_fails_to_commit_or_is_dropped_files_none_of_its_tracked_reads() {
     unit.write(&batch(vec![json!({ "op": "create", "type": "Task", "id": "Task-2" })])).unwrap();
     crate::failpoints::fail_once_here(crate::failpoints::points::COMMIT);
     assert!(unit.commit(false).is_err());
+    assert!(db.tracks.lock().is_empty(), "a unit whose commit failed leaves no read registered");
     let mut unit = db.begin().unwrap();
     unit.read(&reads(vec![row("Task-1")], Some(4))).unwrap();
     drop(unit);
+    assert!(db.tracks.lock().is_empty(), "a dropped unit leaves no read registered");
     assert_eq!(db.track_stats().0, 0);
     assert!(touched(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })]).is_empty());
 }

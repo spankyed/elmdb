@@ -1348,11 +1348,8 @@ impl Unit {
         // The unit's tracked reads are filed once its commit has landed and before the writer is let go: a writer that
         // commits after this unit then names their tokens. Not filed when the commit fails, nor by an aborted unit
         let pending = std::mem::take(&mut self.pending_tracks);
-        let committed = held.commit_then(&self.store, || {
-            for (read, reads) in pending {
-                read.file(reads);
-            }
-        });
+        let tracks = &self.tracks;
+        let committed = held.commit_then(&self.store, || watch::PendingRead::file_all(tracks, pending));
         self.ended = true;
         self.store.end_unit();
         run_point!(UNIT_COMMITTED);

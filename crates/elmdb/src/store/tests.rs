@@ -1281,6 +1281,27 @@ fn a_replacement_that_failed_before_committing_vouches_for_no_later_write() {
 }
 
 #[test]
+fn a_unit_s_commit_lets_the_gate_go_before_what_runs_once_it_landed_and_keeps_the_writer() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    let mut held = store.begin().unwrap();
+    put_meta(&mut held.txn, store.db.main, "probe", b"1").unwrap();
+    let (mut adoptable, mut writer_free) = (None, None);
+    held.commit_then(&store, || {
+        // What runs here may wait on a thread whose read waits for a growth to be taken, which takes the gate for
+        // writing: it has to be free. The writer isn't, so no later writer of this process commits first
+        std::thread::scope(|scope| {
+            adoptable = Some(scope.spawn(|| super::gate_to_adopt(&store.gate).is_some()).join().unwrap());
+            writer_free = Some(store.writers.turn_is_free());
+        });
+    })
+    .unwrap();
+    store.end_unit();
+    assert_eq!(adoptable, Some(true), "the gate is free once the commit has landed");
+    assert_eq!(writer_free, Some(false), "the writer is held until what runs once it landed has run");
+}
+
+#[test]
 fn asking_whether_another_committed_adopts_the_map_another_process_grew_the_file_past() {
     let dir = tempfile::tempdir().unwrap();
     let page = 16 << 10;

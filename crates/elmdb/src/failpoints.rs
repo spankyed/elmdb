@@ -101,8 +101,8 @@ pub(crate) mod points {
     pub const UNIT_HELD: &str = "engine::unit_held";
     /// Runs in a unit's commit, once the commit has taken the unit's transaction
     pub const UNIT_COMMITTING: &str = "engine::unit_committing";
-    /// Runs in a unit's commit once the commit has landed and the unit has let the writer go, before its change set is
-    /// made: another writer may commit here
+    /// Runs in a unit's commit once it has ended, landed or failed, and the unit has let the writer go, before its
+    /// change set is made: another writer may commit here
     pub const UNIT_COMMITTED: &str = "engine::unit_committed";
     /// Runs once a backup's compacted copy is complete, before it is published
     pub const BACKUP_READY: &str = "backup::ready";
