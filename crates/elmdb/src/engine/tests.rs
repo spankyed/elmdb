@@ -16,6 +16,7 @@ mod filters;
 mod graph;
 mod lifecycle;
 mod maintenance;
+mod migration_crash;
 mod model;
 mod order;
 mod ordered;
