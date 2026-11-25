@@ -626,3 +626,68 @@ fn check_names_a_relation_outside_its_endpoints_a_second_target_and_every_holder
     assert_eq!(unique.len(), 1, "one violation names every holder: {said:?}");
     assert_eq!(unique[0].0, "Task-1, Task-2, Task-3");
 }
+
+#[test]
+fn a_backup_refuses_a_target_another_process_has_open_and_goes_on_once_it_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    // Another process's open holds the presence lock of the database's directory shared for as long as it is open: a
+    // handle of its own here locks it as that open would, since the lock belongs to the handle
+    let elsewhere = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(target.path().join("open.lock"))
+        .unwrap();
+    elsewhere.lock_shared().unwrap();
+    let refused = db.backup(target.path()).unwrap_err();
+    assert_eq!(refused.code, crate::ErrorCode::TargetInUse, "{}", refused.message);
+    assert!(!target.path().join("data.mdb").exists(), "nothing was published beneath the open");
+    drop(elsewhere);
+    db.backup(target.path()).unwrap();
+    let copy = Database::open(target.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    assert!(row(&copy, "Task-1").is_some());
+}
+
+#[test]
+fn a_directory_is_written_in_once_an_open_has_written_there_and_never_by_a_backup_or_a_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    assert!(!crate::written_in(dir.path()).unwrap(), "an empty directory");
+    let db = open(&dir);
+    assert!(crate::written_in(dir.path()).unwrap(), "a writable open's");
+    db.backup(target.path()).unwrap();
+    assert!(!crate::written_in(target.path()).unwrap(), "a backup");
+    Database::open(target.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap().close().unwrap();
+    assert!(!crate::written_in(target.path()).unwrap(), "a backup a read-only open read");
+    for mode in [
+        OpenOptions { sync_each_commit: true, ..Default::default() },
+        OpenOptions { syncs: false, ..Default::default() },
+    ] {
+        let other = tempfile::tempdir().unwrap();
+        Database::open(other.path(), mode).unwrap().close().unwrap();
+        assert!(crate::written_in(other.path()).unwrap(), "a writable open's in each mode");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_backup_is_refused_where_a_lock_file_an_open_made_can_t_be_opened() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let lock = target.path().join("open.lock");
+    std::fs::write(&lock, b"").unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root opens it all the same, and nothing here can make it fail to
+    if std::fs::File::open(&lock).is_ok() {
+        return;
+    }
+    // Not taken for a directory no database was opened in: one may be open there, behind a lock this can't take
+    assert_eq!(db.backup(target.path()).unwrap_err().code, crate::ErrorCode::Io);
+    assert!(!target.path().join("data.mdb").exists());
+}

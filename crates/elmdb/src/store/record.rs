@@ -37,6 +37,26 @@ pub(super) const fn mode_lock(mode: Mode) -> &'static str {
     }
 }
 
+/// Whether `dir` holds a database an open has written in place: the record, or a mode's lock, which every writable open
+/// leaves and a backup never makes. A backup a read-only open has read leaves neither. A file that can't be looked for
+/// is an error, never taken as absent
+pub fn written_in(dir: &Path) -> Result<bool> {
+    for name in std::iter::once(RECORD).chain(Mode::ALL.map(mode_lock)) {
+        if dir.join(name).try_exists()? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether `name`, in a directory, is what a backup leaves there or a read-only open of its copy does: the data file,
+/// LMDB's lock file, the decision and presence locks, the listeners' `wake`, and the staged copy of a backup that
+/// stopped before publishing it (`docs/architecture/format.md`, Beside the data file)
+pub fn left_by_a_backup(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else { return false };
+    matches!(name, "data.mdb" | "lock.mdb" | PRESENCE | RECORD_LOCK | "wake") || name.starts_with(".elmdb-backup-")
+}
+
 /// The bytes of LMDB's `MDB_meta`, which follow a meta page's header: the magic, the version, the fixed address, the
 /// map's size, the free and main trees, the last page and the transaction that committed it
 pub(super) const BODY: usize = 136;

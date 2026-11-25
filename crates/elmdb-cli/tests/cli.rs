@@ -194,7 +194,7 @@ fn rebuilds_derived_data_that_differs_from_what_primary_data_derives() {
 }
 
 #[test]
-fn backup_allows_new_or_empty_directories_and_refuses_existing_files_symlinks_and_non_empty_directories() {
+fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_writing_or_what_no_backup_leaves() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
     let schema = elmdb::schema::Schema::from_json(&json!({
@@ -211,54 +211,94 @@ fn backup_allows_new_or_empty_directories_and_refuses_existing_files_symlinks_an
         db.write(&batch, true).unwrap();
         db.close().unwrap();
     };
-    write_note(&source, "Note-src", "source");
+    let notes = |path: &std::path::Path| {
+        let db = Database::open(path, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+        let live = db.stats().unwrap().types["Note"].live;
+        db.close().unwrap();
+        live
+    };
+    write_note(&source, "Note-1", "first");
     let src = source.to_str().unwrap();
 
-    // A non-existent path succeeds
-    let fresh = dir.path().join("fresh");
-    let (code, out) = elmdb(&["backup", src, fresh.to_str().unwrap()]);
+    // A new directory, then the same one again: an earlier backup, read since and left a copy a stopped run made, is
+    // replaced
+    let backups = dir.path().join("backups");
+    let (code, out) = elmdb(&["backup", src, backups.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
-    assert!(fresh.join("data.mdb").is_file());
+    let (code, out) = elmdb(&["check", backups.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    std::fs::write(backups.join(".elmdb-backup-stopped"), b"partial").unwrap();
+    write_note(&source, "Note-2", "second");
+    let (code, out) = elmdb(&["backup", src, backups.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(notes(&backups), 2, "the earlier backup was replaced");
 
-    // An existing empty directory succeeds
+    // An existing empty directory, and one reached through a symbolic link
     let empty = dir.path().join("empty");
     std::fs::create_dir(&empty).unwrap();
     let (code, out) = elmdb(&["backup", src, empty.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     assert!(empty.join("data.mdb").is_file());
+    #[cfg(unix)]
+    {
+        let linked = dir.path().join("linked");
+        std::fs::create_dir(&linked).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&linked, &link).unwrap();
+        let (code, out) = elmdb(&["backup", src, link.to_str().unwrap()]);
+        assert_eq!(code, 0, "{out}");
+        assert!(linked.join("data.mdb").is_file());
+    }
 
-    // An existing regular file is refused without modifying it
+    // A file is refused without being changed
     let file = dir.path().join("existing-file");
     std::fs::write(&file, b"keep-me").unwrap();
     let (code, out) = elmdb(&["backup", src, file.to_str().unwrap()]);
     assert_eq!(code, 2, "{out}");
-    assert!(out.contains("ID_IN_USE"), "{out}");
-    assert!(out.contains("not a directory"), "{out}");
+    assert!(out.contains("IO") && out.contains("is a file"), "{out}");
     assert_eq!(std::fs::read(&file).unwrap(), b"keep-me");
-
-    // An existing non-empty directory holding a database is refused without touching `data.mdb` or `synced`
-    let existing_db = dir.path().join("existing-db");
-    write_note(&existing_db, "Note-dst", "destination");
-    let data_before = std::fs::read(existing_db.join("data.mdb")).unwrap();
-    let synced_before = std::fs::read(existing_db.join("synced")).unwrap();
-    let (code, out) = elmdb(&["backup", src, existing_db.to_str().unwrap()]);
-    assert_eq!(code, 2, "{out}");
-    assert!(out.contains("ID_IN_USE"), "{out}");
-    assert!(out.contains("not empty"), "{out}");
-    assert_eq!(std::fs::read(existing_db.join("data.mdb")).unwrap(), data_before);
-    assert_eq!(std::fs::read(existing_db.join("synced")).unwrap(), synced_before);
-
-    // A symlink (even to an empty directory) is refused without writing through it
+    // A target that can't be looked at is refused as that, never taken as absent: one under a file, which unix answers
+    // as not a directory (Windows answers it as not found)
     #[cfg(unix)]
     {
-        let link_target = dir.path().join("link-target");
-        std::fs::create_dir(&link_target).unwrap();
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&link_target, &link).unwrap();
-        let (code, out) = elmdb(&["backup", src, link.to_str().unwrap()]);
+        let under_file = file.join("backup");
+        let (code, out) = elmdb(&["backup", src, under_file.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
-        assert!(out.contains("ID_IN_USE"), "{out}");
-        assert!(out.contains("not a directory"), "{out}");
-        assert!(std::fs::read_dir(&link_target).unwrap().next().is_none(), "backup wrote through symlink");
+        assert!(out.contains("IO") && out.contains("Cannot look at"), "{out}");
+        assert_eq!(std::fs::read(&file).unwrap(), b"keep-me");
+    }
+
+    // A database opened for writing is refused without touching `data.mdb` or `synced`: the backup an earlier run
+    // made, once opened to write, is one too
+    let existing_db = dir.path().join("existing-db");
+    write_note(&existing_db, "Note-dst", "destination");
+    write_note(&empty, "Note-3", "written in place");
+    for target in [&existing_db, &empty] {
+        let data_before = std::fs::read(target.join("data.mdb")).unwrap();
+        let synced_before = std::fs::read(target.join("synced")).unwrap();
+        let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("TARGET_IN_USE") && out.contains("opened for writing"), "{out}");
+        assert_eq!(std::fs::read(target.join("data.mdb")).unwrap(), data_before);
+        assert_eq!(std::fs::read(target.join("synced")).unwrap(), synced_before);
+    }
+
+    // A directory holding anything a backup doesn't leave is refused untouched: a project's, named where its backup
+    // directory was meant, and another program's LMDB database, whose `data.mdb` a backup would replace
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("package.json"), b"{}").unwrap();
+    let other_lmdb = dir.path().join("other-lmdb");
+    std::fs::create_dir(&other_lmdb).unwrap();
+    std::fs::write(other_lmdb.join("data.mdb"), b"another program's").unwrap();
+    std::fs::write(other_lmdb.join("lock.mdb"), b"").unwrap();
+    std::fs::write(other_lmdb.join("notes.txt"), b"").unwrap();
+    for (target, held) in [(&project, "package.json"), (&other_lmdb, "notes.txt")] {
+        let before: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("TARGET_IN_USE") && out.contains(held) && out.contains("no backup leaves"), "{out}");
+        let after: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(after, before, "nothing made or replaced");
     }
 }

@@ -24,7 +24,7 @@ enum Command {
     /// Deletes every index's derived data and writes what primary data derives, in one durable unit: what a database
     /// an older elmdb built needs once its format changed derived data in place. Opens the database to write
     Rebuild { dir: PathBuf },
-    /// A compacted copy of a database into a new or empty directory
+    /// A compacted copy of a database into a new directory, an empty one, or an earlier backup, which it replaces
     Backup { dir: PathBuf, target: PathBuf },
     /// A database's schema and primary data into a new file, which `load` makes a database of again
     Dump { dir: PathBuf, target: PathBuf },
@@ -64,26 +64,51 @@ fn told(db: Database) -> elmdb::Result<Database> {
     Ok(db)
 }
 
-/// Refuses a backup target that already exists unless it is an empty directory: overwriting files in place is unsafe
-/// if another process has a database open at `target`
+/// Refuses a backup target that is a file, or a directory holding a database an open has written in place or anything
+/// else no backup leaves: the command copies into a new directory, an empty one or an earlier backup, which it
+/// replaces, and never over what a target named in the wrong place holds. The engine refuses one another process has
+/// open
 fn check_backup_target(target: &Path) -> elmdb::Result<()> {
-    let Ok(meta) = std::fs::symlink_metadata(target) else {
-        return Ok(());
+    let meta = match std::fs::metadata(target) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(elmdb::Error::new(
+                elmdb::ErrorCode::Io,
+                format!("Cannot look at {}: {error}", target.display()),
+            ));
+        }
     };
     if !meta.is_dir() {
         return Err(elmdb::Error::new(
-            elmdb::ErrorCode::IdInUse,
+            elmdb::ErrorCode::Io,
+            format!("{} is a file; back up into a new directory, an empty one or an earlier backup", target.display()),
+        ));
+    }
+    if elmdb::written_in(target)? {
+        return Err(elmdb::Error::new(
+            elmdb::ErrorCode::TargetInUse,
             format!(
-                "{} exists and is not a directory; a backup writes into a new or empty directory",
+                "{} holds a database that has been opened for writing, which a backup would replace; back up into a \
+                 new directory, an empty one or an earlier backup",
                 target.display()
             ),
         ));
     }
-    if std::fs::read_dir(target)?.next().transpose()?.is_some() {
-        return Err(elmdb::Error::new(
-            elmdb::ErrorCode::IdInUse,
-            format!("{} is not empty; a backup writes into a new or empty directory", target.display()),
-        ));
+    for entry in std::fs::read_dir(target)? {
+        let name = entry?.file_name();
+        // Finder's, beside anything a person has looked at on macOS
+        if !elmdb::left_by_a_backup(&name) && name != ".DS_Store" {
+            return Err(elmdb::Error::new(
+                elmdb::ErrorCode::TargetInUse,
+                format!(
+                    "{} holds {}, which no backup leaves, so it may not be a backup; back up into a new directory, an \
+                     empty one or an earlier backup",
+                    target.display(),
+                    name.to_string_lossy()
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -108,8 +133,10 @@ fn run(command: Command) -> elmdb::Result<bool> {
             Ok(true)
         }
         Command::Backup { dir, target } => {
-            check_backup_target(&target)?;
             let db = read_only(&dir)?;
+            // Once the source is open, which can take a while, so that the target is looked at as close to the backup
+            // as can be
+            check_backup_target(&target)?;
             db.backup(&target)?;
             println!("{} copied to {}", dir.display(), target.display());
             Ok(true)
