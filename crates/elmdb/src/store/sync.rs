@@ -34,6 +34,23 @@ pub struct Policy {
 /// The least time between a sync that failed without being final and the next, however short the cap
 const RETRY_FLOOR: Duration = Duration::from_millis(100);
 
+/// Ten years, used to clamp a caller-supplied wait that would otherwise overflow `Instant`
+const MAX_DEADLINE_WAIT: Duration = Duration::from_secs(315_360_000);
+
+/// Adds `wait` to `now` without overflowing `Instant`, clamping to `MAX_DEADLINE_WAIT` when `now + wait` exceeds
+/// what `Instant` can represent
+pub(crate) fn deadline_from(now: Instant, wait: Duration) -> Instant {
+    now.checked_add(wait).or_else(|| now.checked_add(MAX_DEADLINE_WAIT)).unwrap_or(now)
+}
+
+/// The earlier of two optional deadlines, where `None` stands for no finite deadline
+fn min_instant(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 impl Policy {
     pub fn new(idle: Duration, cap: Duration) -> Self {
         Self { idle, cap, first_unsynced: None, last_commit: None, forced: None, retry: None }
@@ -52,7 +69,7 @@ impl Policy {
     /// A sync failed without being final: the commits it was to sync are owed still, and the next is due the cap from
     /// now, or the floor where the cap is shorter, so that a sync failing at once isn't tried again at once
     pub fn on_retry(&mut self, now: Instant) {
-        self.retry = Some(now + self.cap.max(RETRY_FLOOR));
+        self.retry = now.checked_add(self.cap.max(RETRY_FLOOR));
     }
 
     /// A sync began: the commits before it are its, and the next commit starts the timers again
@@ -65,14 +82,12 @@ impl Policy {
 
     /// When the next sync is due, or `None` while nothing was committed since the last began and none failed to retry
     pub fn due_at(&self) -> Option<Instant> {
-        let timed = self.last_commit.zip(self.first_unsynced).map(|(last, first)| {
-            let timed = (last + self.idle).min(first + self.cap);
-            self.forced.map_or(timed, |forced| forced.min(timed))
+        let timed = self.last_commit.zip(self.first_unsynced).and_then(|(last, first)| {
+            let idle = last.checked_add(self.idle);
+            let cap = first.checked_add(self.cap);
+            min_instant(min_instant(idle, cap), self.forced)
         });
-        match (timed, self.retry) {
-            (Some(timed), Some(retry)) => Some(timed.min(retry)),
-            (timed, retry) => timed.or(retry),
-        }
+        min_instant(timed, self.retry)
     }
 }
 
@@ -161,7 +176,7 @@ pub struct Durable {
 }
 
 impl GroupCommit {
-    pub fn start(policy: Policy, syncer: Box<dyn Syncer>, clock: Box<dyn Clock>) -> Self {
+    pub fn start(policy: Policy, syncer: Box<dyn Syncer>, clock: Box<dyn Clock>) -> Result<Self> {
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
                 committed: 0,
@@ -182,12 +197,9 @@ impl GroupCommit {
         });
         let worker = {
             let shared = Arc::clone(&shared);
-            std::thread::Builder::new()
-                .name("elmdb-sync".to_owned())
-                .spawn(move || run(&shared))
-                .expect("the sync thread starts")
+            std::thread::Builder::new().name("elmdb-sync".to_owned()).spawn(move || run(&shared))?
         };
-        Self { shared, worker: Some(worker) }
+        Ok(Self { shared, worker: Some(worker) })
     }
 
     /// A unit committed
@@ -266,7 +278,7 @@ impl GroupCommit {
     /// The caller syncs what is owed on its own thread. The worker is told to stop and left to end with the process,
     /// and the syncer dropped if its lock comes free within `wait`, which a worker ended mid-sync holds for good
     pub fn stop_at_exit(mut self, wait: Duration) {
-        let deadline = Instant::now() + wait;
+        let deadline = deadline_from(Instant::now(), wait);
         if let Some(mut state) = lock_before(&self.shared.state, deadline) {
             state.closing = true;
             self.shared.changed.notify_all();

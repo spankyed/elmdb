@@ -80,12 +80,10 @@ fn answers_beside_a_unit_begun_as_it_met_a_growth(
         })
     };
     held.recv_timeout(ANSWER).expect("the work met the grown map");
-    let (txn, gate, writer) = store.begin().unwrap();
+    let held_unit = store.begin().unwrap();
     opened.send(()).unwrap();
     let answer = answer.recv_timeout(ANSWER);
-    txn.abort();
-    drop(gate);
-    writer.release();
+    held_unit.abort();
     store.end_unit();
     match answer {
         Ok(answered) => answered.unwrap(),

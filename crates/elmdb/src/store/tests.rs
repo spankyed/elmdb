@@ -373,26 +373,22 @@ fn a_wait_for_the_write_transaction_ends_when_the_unit_does_or_when_it_is_stoppe
     let quiet_for = Duration::from_millis(100);
 
     // Ended by the unit's end
-    let (txn, gate, writer) = store.begin().unwrap();
+    let held = store.begin().unwrap();
     let ended = waiter(Arc::new(AtomicBool::new(false)));
     assert!(ended.recv_timeout(quiet_for).is_err(), "returned while the unit was open");
-    txn.abort();
-    drop(gate);
-    writer.release();
+    held.abort();
     store.end_unit();
     ended.recv_timeout(crate::waits::ARRIVES).expect("returned once the unit ended");
 
     // Ended by its stop, the unit still open
-    let (txn, gate, writer) = store.begin().unwrap();
+    let held = store.begin().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let ended = waiter(Arc::clone(&stop));
     assert!(ended.recv_timeout(quiet_for).is_err(), "returned while the unit was open");
     stop.store(true, Ordering::SeqCst);
     store.wake_unit_waiters();
     ended.recv_timeout(crate::waits::ARRIVES).expect("returned once stopped");
-    txn.abort();
-    drop(gate);
-    writer.release();
+    held.abort();
     store.end_unit();
 }
 
@@ -524,7 +520,7 @@ fn a_read_runs_while_a_growth_waits_for_the_open_unit() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(Store::open(dir.path(), quiet()).unwrap());
     put(&store, "a", b"1").unwrap();
-    let (txn, gate, writer) = store.begin().unwrap();
+    let held = store.begin().unwrap();
     let grower = {
         let store = Arc::clone(&store);
         std::thread::spawn(move || store.grow())
@@ -538,9 +534,7 @@ fn a_read_runs_while_a_growth_waits_for_the_open_unit() {
     }
     let value = read.recv_timeout(crate::waits::ARRIVES).expect("a read ran while a growth waited for the unit");
     assert_eq!(value.as_deref(), Some(&b"1"[..]));
-    txn.abort();
-    drop(gate);
-    writer.release();
+    held.abort();
     store.end_unit();
     grower.join().unwrap().unwrap();
 }
@@ -891,10 +885,8 @@ fn a_unit_grows_the_map_first_once_the_map_is_more_than_half_used() {
         n += 1;
     }
     let before = store.map_size();
-    let (txn, gate, writer) = store.begin().unwrap();
-    txn.abort();
-    drop(gate);
-    writer.release();
+    let held = store.begin().unwrap();
+    held.abort();
     store.end_unit();
     assert!(store.map_size() > before, "the map grew from {before} before the unit began");
 }
@@ -926,11 +918,9 @@ fn room_is_made_by_growing_the_map_to_as_many_times_what_is_in_use() {
     store.make_room(9).unwrap();
     assert_eq!(store.map_size(), grown);
     // With a unit open nothing grows, and the call returns: a growth would wait for the unit to end
-    let (txn, gate, writer) = store.begin().unwrap();
+    let held = store.begin().unwrap();
     store.make_room(1000).unwrap();
-    txn.abort();
-    drop(gate);
-    writer.release();
+    held.abort();
     store.end_unit();
     assert_eq!(store.map_size(), grown);
     drop(store);
@@ -1021,10 +1011,8 @@ fn a_unit_that_finds_the_map_grown_elsewhere_holds_no_turn_while_it_adopts_the_s
         let (store, free) = (Arc::clone(&store), Rc::clone(&free));
         move || free.set(Some(store.writers.turn_is_free()))
     });
-    let (txn, gate, writer) = store.begin().unwrap();
-    txn.abort();
-    drop(gate);
-    writer.release();
+    let held = store.begin().unwrap();
+    held.abort();
     store.end_unit();
     assert_eq!(free.get(), Some(true), "whether the unit found the map grown, and its turn free by then");
     assert!(store.map_size() > small, "the unit adopted the map the other process grew");
@@ -1056,13 +1044,11 @@ fn a_reset_s_checkpoint_is_refused_while_a_unit_is_open_and_runs_once_it_has_end
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), quiet()).unwrap();
     put(&store, "a", b"1").unwrap();
-    let (txn, gate, writer) = store.begin().unwrap();
+    let held = store.begin().unwrap();
     // Refused, on the thread that holds the unit's turn: a checkpoint that went on to wait its turn would wait for good
     let refused = store.recycle_reset_pages().unwrap_err();
     assert_eq!(refused.code, ErrorCode::UnitOpen, "{refused}");
-    txn.abort();
-    drop(gate);
-    writer.release();
+    held.abort();
     store.end_unit();
     store.recycle_reset_pages().unwrap();
     assert_eq!(get(&store, "a").as_deref(), Some(&b"1"[..]));
@@ -1289,8 +1275,9 @@ fn a_replacement_that_failed_before_committing_vouches_for_no_later_write() {
         ErrorCode::DataReplaced,
         "refused, the replacement not its own"
     );
-    let (txn, _gate, _writer) = store.begin().unwrap();
-    assert_eq!(store.commit_txn(txn).unwrap_err().code, ErrorCode::DataReplaced, "a unit refused too");
+    let held = store.begin().unwrap();
+    assert_eq!(held.commit(&store).unwrap_err().code, ErrorCode::DataReplaced, "a unit refused too");
+    store.end_unit();
 }
 
 #[test]
@@ -1822,4 +1809,142 @@ fn the_page_size_read_from_a_real_file_is_the_one_lmdb_uses() {
     let data = dir.path().join("data.mdb");
     let from_file = super::page_size_of(&mut std::fs::File::open(&data).unwrap(), &data).unwrap();
     assert_eq!(from_file, store.page_size());
+}
+
+#[test]
+fn file_bytes_for_pages_and_map_size_arithmetic_reject_overflow() {
+    let data = Path::new("data.mdb");
+    assert_eq!(super::file_bytes_for_pages(10, 4096, data).unwrap(), 11 * 4096);
+    assert_eq!(super::file_bytes_for_pages(u64::MAX, 4096, data).unwrap_err().code, ErrorCode::Corrupted);
+    assert_eq!(super::file_bytes_for_pages(u64::MAX / 4096, 4096, data).unwrap_err().code, ErrorCode::Corrupted);
+
+    assert_eq!(super::initial_map_size(u64::MAX), super::MAX_MAP_SIZE);
+    assert!(
+        super::MAX_MAP_SIZE > 0
+            && super::MAX_MAP_SIZE.is_multiple_of(super::MAP_STEP)
+            && super::MAX_MAP_SIZE > usize::MAX - super::MAP_STEP
+    );
+    assert_eq!(super::next_map_size(super::MAP_STEP), Some(2 * super::MAP_STEP));
+    assert_eq!(super::next_map_size(usize::MAX), None);
+    assert_eq!(super::next_map_size(usize::MAX / 2), None);
+    assert_eq!(super::next_map_size(super::MAX_MAP_SIZE), None);
+}
+
+#[test]
+fn sequence_at_u64_max_is_refused_as_corrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    let mut txn = store.env.write_txn().unwrap();
+    put_meta(&mut txn, store.db.main, meta::SEQUENCE, &u64::MAX.to_be_bytes()).unwrap();
+    txn.commit().unwrap();
+    let err = put(&store, "a", b"1").unwrap_err();
+    assert_eq!(err.code, ErrorCode::Corrupted, "{err}");
+    store.close().unwrap();
+}
+
+#[test]
+fn panic_inside_write_aborts_txn_before_releasing_writer_and_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "kept", b"1").unwrap();
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = store.write_committed::<()>(
+            |txn, db| {
+                db.put(txn, b"lost", b"2")?;
+                panic!("simulated write panic");
+            },
+            false,
+        );
+    }));
+    assert!(panicked.is_err());
+    assert!(store.writers.turn_is_free(), "writer lock released on unwind");
+    assert_eq!(get(&store, "lost"), None, "panicking write was aborted");
+    store.grow().unwrap();
+    put(&store, "after", b"3").unwrap();
+    assert_eq!(get(&store, "after").as_deref(), Some(&b"3"[..]));
+    store.close().unwrap();
+}
+
+#[test]
+fn recycle_reset_pages_routes_through_group_commit_and_adopts_grown_map() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        dir.path(),
+        StoreOptions {
+            syncs: true,
+            sync_idle: Duration::from_secs(600),
+            sync_interval: Duration::from_secs(600),
+            map_size_bytes: Some(256 << 10),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    put(&store, "a", b"1").unwrap();
+    let before_syncs = store.syncs();
+    store.recycle_reset_pages().unwrap();
+    assert!(store.syncs() > before_syncs, "recycle_reset_pages must account its commit and sync through GroupCommit");
+
+    // Another process grows the map; recycle_reset_pages must adopt the grown map on MapResized and succeed
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::tests::child_grower", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_GROW_DB", dir.path())
+        .env("ELMDB_GROW_GROUPED", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "child grower failed");
+    let before = store.map_size();
+    store.recycle_reset_pages().unwrap();
+    assert!(store.map_size() > before, "recycle_reset_pages adopted the grown map");
+
+    // A growth between ensure_pin and write_txn ends the pin; recycle_reset_pages must retry and re-pin before committing
+    use crate::failpoints::{self, points};
+    let store = std::sync::Arc::new(store);
+    let grower = std::sync::Arc::clone(&store);
+    let checker = std::sync::Arc::clone(&store);
+    let re_pinned = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&re_pinned);
+    failpoints::run_once_here(points::WRITE_PINNED, move || {
+        grower.grow().unwrap();
+        failpoints::run_once_here(points::RESET_CLAIMING, move || {
+            let checker2 = std::sync::Arc::clone(&checker);
+            let flag2 = std::sync::Arc::clone(&flag);
+            failpoints::run_once_here(points::RESET_CLAIMING, move || {
+                flag2.store(checker2.kept.as_ref().unwrap().pinned(), std::sync::atomic::Ordering::SeqCst);
+            });
+        });
+    });
+    store.recycle_reset_pages().unwrap();
+    assert!(!failpoints::is_armed_here(points::WRITE_PINNED));
+    assert!(
+        re_pinned.load(std::sync::atomic::Ordering::SeqCst),
+        "recycle_reset_pages must retry and re-pin after an intervening growth"
+    );
+    std::sync::Arc::try_unwrap(store).ok().expect("sole store owner").close().unwrap();
+}
+
+#[test]
+fn store_drop_keeps_path_registered_until_env_closes_and_reopens_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    assert_eq!(Store::open(dir.path(), quiet()).err().map(|e| e.code), Some(ErrorCode::AlreadyOpen));
+    drop(store);
+    let reopened = Store::open(dir.path(), quiet()).unwrap();
+    assert_eq!(get(&reopened, "a").as_deref(), Some(&b"1"[..]));
+    reopened.close().unwrap();
+}
+
+#[test]
+fn sync_each_commit_writes_and_grows_cleanly_under_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(
+        dir.path(),
+        StoreOptions { sync_each_commit: true, map_size_bytes: Some(256 << 10), ..Default::default() },
+    )
+    .unwrap();
+    put(&store, "a", &vec![7u8; 400_000]).unwrap();
+    assert_eq!(get(&store, "a").map(|v| v.len()), Some(400_000));
+    store.close().unwrap();
 }

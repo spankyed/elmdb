@@ -135,6 +135,14 @@ impl Wake {
     /// Starts telling `listener` of commits other processes make. There is one listener: a second is refused. It runs on a
     /// thread of its own, and is told once for a burst
     pub(crate) fn listen(&self, listener: WakeListener) -> Result<()> {
+        self.listen_with(listener, |run| std::thread::Builder::new().name("elmdb-wake".into()).spawn(run))
+    }
+
+    fn listen_with(
+        &self,
+        listener: WakeListener,
+        spawn: impl FnOnce(Box<dyn FnOnce() + Send>) -> std::io::Result<JoinHandle<()>>,
+    ) -> Result<()> {
         let mut listening = self.listening.lock();
         if listening.is_some() {
             return Err(Error::new(
@@ -143,11 +151,17 @@ impl Wake {
             ));
         }
         std::fs::create_dir_all(&self.directory)?;
-        let mailbox = Arc::new(mailbox::Mailbox::file(&self.directory)?);
-        self.peers.lock().own = Some(mailbox.path().to_path_buf());
+        // File the mailbox and record it as `own` under `peers`, so a concurrent `notify` on this handle cannot read
+        // the directory in between and cache our own mailbox as a peer
+        let mailbox = {
+            let mut peers = self.peers.lock();
+            let mailbox = Arc::new(mailbox::Mailbox::file(&self.directory)?);
+            peers.own = Some(mailbox.path().to_path_buf());
+            mailbox
+        };
         let stopping = Arc::new(AtomicBool::new(false));
         let (stop, waiting) = (Arc::clone(&stopping), Arc::clone(&mailbox));
-        let thread = std::thread::Builder::new().name("elmdb-wake".into()).spawn(move || {
+        let thread = match spawn(Box::new(move || {
             loop {
                 // Nothing wakes this again after a failure, and whoever asks next learns what was missed
                 if waiting.wait().is_err() || stop.load(Ordering::Acquire) {
@@ -155,7 +169,13 @@ impl Wake {
                 }
                 listener();
             }
-        })?;
+        })) {
+            Ok(thread) => thread,
+            Err(error) => {
+                self.peers.lock().own = None;
+                return Err(error.into());
+            }
+        };
         *listening = Some(Listening { stopping, mailbox, thread });
         Ok(())
     }
@@ -230,7 +250,17 @@ mod mailbox {
             if !already && matches!(&result, Err(error) if error.raw_os_error() == Some(libc::EPIPE)) {
                 // The signal the write raised, taken while blocked so it never reaches the thread
                 let now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
-                libc::sigtimedwait(&raw const pipe, std::ptr::null_mut(), &raw const now);
+                loop {
+                    let waited = libc::sigtimedwait(&raw const pipe, std::ptr::null_mut(), &raw const now);
+                    // mutant-skip: replace == with != in mailbox::write_wake
+                    // mutant-skip: delete - in mailbox::write_wake
+                    // mutant-skip: replace && with \|\| in mailbox::write_wake
+                    // On Linux sigtimedwait takes the pending SIGPIPE on the first call; EINTR only happens under a concurrent signal
+                    if waited == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                        continue;
+                    }
+                    break;
+                }
             }
             libc::pthread_sigmask(libc::SIG_SETMASK, &raw const kept, std::ptr::null_mut());
             written(result)
@@ -672,5 +702,16 @@ mod tests {
         heard.recv_timeout(SETTLES).expect("woken by itself");
         assert!(wake.peers.lock().mailboxes.is_empty(), "its own mailbox isn't another's");
         wake.stop();
+    }
+
+    #[test]
+    fn a_failed_listener_thread_spawn_cleans_up_own_mailbox_and_peers_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = Wake::new(dir.path());
+        let error = wake.listen_with(Arc::new(|| {}), |_| Err(std::io::Error::other("spawn refused"))).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Io);
+        assert!(wake.peers.lock().own.is_none(), "peers.own must be cleared when spawn fails");
+        assert!(wake.listening.lock().is_none(), "listening slot must remain empty");
+        assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "mailbox removed on failure");
     }
 }

@@ -14,9 +14,9 @@
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::error::{Error, ErrorCode, Result};
+use crate::sync::atomic::{AtomicBool, Ordering};
 use crate::sync::{PlainCondvar, PlainMutex};
 
 /// The most transactions the reads asked at one commit share: as many as libuv's pool runs at once unless told more,

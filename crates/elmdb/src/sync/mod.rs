@@ -3,13 +3,13 @@
 //! Code that uses these is what a model explores; everything else keeps its own, so a model build runs only the models.
 
 #[cfg(not(any(loom, shuttle)))]
-pub(crate) use std::sync::{Condvar, Mutex, MutexGuard};
+pub(crate) use std::sync::{Condvar, Mutex, MutexGuard, atomic};
 
 #[cfg(loom)]
-pub(crate) use loom::sync::{Condvar, Mutex, MutexGuard};
+pub(crate) use loom::sync::{Condvar, Mutex, MutexGuard, atomic};
 
 #[cfg(shuttle)]
-pub(crate) use shuttle::sync::{Condvar, Mutex, MutexGuard};
+pub(crate) use shuttle::sync::{Condvar, Mutex, MutexGuard, atomic};
 
 /// A mutex whose lock is never poisoned: parking_lot's, which Loom doesn't model
 #[cfg(not(shuttle))]

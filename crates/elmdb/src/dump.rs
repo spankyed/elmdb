@@ -165,14 +165,20 @@ pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
     if u64::from_le_bytes(count) != seen {
         return Err(invalid(format!("it records {} loads and holds {seen}", u64::from_le_bytes(count))));
     }
-    let mut rest = Vec::new();
-    file.read_to_end(&mut rest)?;
+    let mut rest = Vec::with_capacity(9);
+    file.take(9).read_to_end(&mut rest)?;
     let sequence = match rest.len() {
         0 => 0,
         8 => u64::from_le_bytes(rest.try_into().expect("8 bytes")),
         1..8 => return Err(invalid("it ends inside its last commit's sequence")),
         _ => return Err(invalid("it holds bytes after its load count and sequence")),
     };
+    if sequence == u64::MAX {
+        return Err(Error::new(
+            ErrorCode::Corrupted,
+            "The dump records last commit sequence u64::MAX, which no commit can be numbered past",
+        ));
+    }
     if !loads.is_empty() {
         db.bulk_load(&loads)?;
     }
@@ -250,13 +256,7 @@ impl Written {
 impl Drop for Written {
     fn drop(&mut self) {
         if let Some(target) = self.0.take() {
-            if target.is_dir() {
-                for file in ["data.mdb", "lock.mdb"] {
-                    let _ = std::fs::remove_file(target.join(file));
-                }
-            } else {
-                let _ = std::fs::remove_file(target);
-            }
+            let _ = std::fs::remove_file(target);
         }
     }
 }
@@ -382,5 +382,32 @@ mod tests {
         std::fs::write(&short, bytes).unwrap();
         let target = root.path().join("destination");
         assert_eq!(load(&short, &target).unwrap().entities, 1100);
+    }
+
+    #[test]
+    fn load_rejects_sequence_u64_max_as_corrupted_and_bounds_trailing_garbage() {
+        let root = tempfile::tempdir().unwrap();
+        let path = fixture(root.path());
+        let bytes = std::fs::read(&path).unwrap();
+        let target = root.path().join("destination");
+
+        // sequence == u64::MAX must return Corrupted rather than overflowing on commit numbering
+        let mut max_seq = bytes.clone();
+        let at = max_seq.len() - 8;
+        max_seq[at..].copy_from_slice(&u64::MAX.to_le_bytes());
+        let bad_seq = root.path().join("max-seq.dump");
+        std::fs::write(&bad_seq, &max_seq).unwrap();
+        let err = load(&bad_seq, &target).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Corrupted, "{err}");
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "staging cleaned up");
+
+        // Large trailing payload is bounded to 9 bytes and rejected as WrongFormat
+        let mut trailing = bytes;
+        trailing.extend(std::iter::repeat_n(0xABu8, 64 * 1024));
+        let bad_trailing = root.path().join("trailing.dump");
+        std::fs::write(&bad_trailing, &trailing).unwrap();
+        let err = load(&bad_trailing, &target).unwrap_err();
+        assert_eq!(err.code, ErrorCode::WrongFormat, "{err}");
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "staging cleaned up");
     }
 }

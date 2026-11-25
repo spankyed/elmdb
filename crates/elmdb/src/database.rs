@@ -2,7 +2,7 @@
 //! (`docs/architecture/engine.md`, Opening).
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 
 use parking_lot::{RwLock, RwLockReadGuard};
 use std::time::Duration;
@@ -73,11 +73,105 @@ pub struct Restore {
     pub sequence: Option<u64>,
 }
 
+/// The store slot inside `Database`: open, closing in flight, or permanently closed.
+enum Slot {
+    Open(Arc<Store>),
+    Closing(Arc<ClosingClose>),
+    Closed,
+}
+
+#[derive(Clone)]
+enum CloseOutcome {
+    /// The close closed the database, with this sync result.
+    Closed(Result<()>),
+    /// The close gave up (or unwound before closing); concurrent callers should recheck the slot.
+    GaveUp,
+}
+
+/// Coordinates concurrent `close` / `close_within` / `close_at_exit` callers so a second caller waits for an
+/// in-flight close instead of returning `Ok(())` while the first is still flushing or about to give up.
+struct ClosingClose {
+    state: Mutex<Option<CloseOutcome>>,
+    done: Condvar,
+}
+
+impl ClosingClose {
+    fn new() -> Self {
+        Self { state: Mutex::new(None), done: Condvar::new() }
+    }
+
+    fn finish(&self, outcome: CloseOutcome) {
+        *self.state.lock().expect("the close state's lock is never poisoned") = Some(outcome);
+        self.done.notify_all();
+    }
+
+    fn wait(&self, deadline: Option<std::time::Instant>) -> Option<CloseOutcome> {
+        let mut state = self.state.lock().expect("the close state's lock is never poisoned");
+        loop {
+            if let Some(outcome) = state.clone() {
+                return Some(outcome);
+            }
+            state = match deadline {
+                None => self.done.wait(state).expect("the close state's lock is never poisoned"),
+                Some(deadline) => {
+                    let left = deadline.checked_duration_since(std::time::Instant::now())?;
+                    if left.is_zero() {
+                        return None;
+                    }
+                    self.done.wait_timeout(state, left).expect("the close state's lock is never poisoned").0
+                }
+            };
+        }
+    }
+}
+
+/// Ensures an in-flight close always settles `slot` and wakes concurrent callers, even if the closer panics.
+struct CloseGuard<'a> {
+    slot: &'a Mutex<Slot>,
+    in_flight: Arc<ClosingClose>,
+    finished: bool,
+}
+
+impl<'a> CloseGuard<'a> {
+    fn new(slot: &'a Mutex<Slot>, in_flight: Arc<ClosingClose>) -> Self {
+        Self { slot, in_flight, finished: false }
+    }
+
+    fn finish_closed(mut self, result: Result<()>) {
+        *self.slot.lock().expect("the store slot's lock is never poisoned") = Slot::Closed;
+        self.in_flight.finish(CloseOutcome::Closed(result));
+        self.finished = true;
+    }
+
+    fn restore(&self, shared: Arc<Store>) {
+        *self.slot.lock().expect("the store slot's lock is never poisoned") = Slot::Open(shared);
+    }
+
+    fn finish_gave_up(mut self) {
+        self.in_flight.finish(CloseOutcome::GaveUp);
+        self.finished = true;
+    }
+}
+
+impl Drop for CloseGuard<'_> {
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let mut slot = self.slot.lock().expect("the store slot's lock is never poisoned");
+        if matches!(&*slot, Slot::Closing(current) if Arc::ptr_eq(current, &self.in_flight)) {
+            *slot = Slot::Closed;
+        }
+        drop(slot);
+        self.in_flight.finish(CloseOutcome::GaveUp);
+    }
+}
+
 /// An open database. Closing it, or dropping it, syncs what is owed and releases the environment
 pub struct Database {
     path: PathBuf,
     read_only: bool,
-    store: Mutex<Option<Arc<Store>>>,
+    store: Mutex<Slot>,
     schema: RwLock<Option<Schema>>,
     /// The schema the engine holds writes to: the database's, or one declaring nothing. A write holds it read-locked
     /// from before its transaction until it commits, and `set_schema` write-locked, so no write commits under a
@@ -183,7 +277,7 @@ impl Database {
         Ok(Self {
             path: store.path().to_path_buf(),
             read_only: options.read_only,
-            store: Mutex::new(Some(store)),
+            store: Mutex::new(Slot::Open(store)),
             engine_schema: observing,
             schema: RwLock::new(schema),
             report,
@@ -203,7 +297,7 @@ impl Database {
     }
 
     pub fn is_open(&self) -> bool {
-        self.store.lock().expect("the store slot's lock is never poisoned").is_some()
+        matches!(&*self.store.lock().expect("the store slot's lock is never poisoned"), Slot::Open(_))
     }
 
     /// The schema the database holds, if one was ever given
@@ -303,11 +397,12 @@ impl Database {
     }
 
     pub(crate) fn store(&self) -> Result<Arc<Store>> {
-        self.store
-            .lock()
-            .expect("the store slot's lock is never poisoned")
-            .clone()
-            .ok_or_else(|| Error::new(ErrorCode::Closed, format!("The database at {} is closed", self.path.display())))
+        match &*self.store.lock().expect("the store slot's lock is never poisoned") {
+            Slot::Open(store) => Ok(Arc::clone(store)),
+            Slot::Closing(_) | Slot::Closed => {
+                Err(Error::new(ErrorCode::Closed, format!("The database at {} is closed", self.path.display())))
+            }
+        }
     }
 
     /// Waits for every unit committed before the call to be on disk; resolved at once when nothing is owed, when
@@ -402,7 +497,7 @@ impl Database {
 
     fn close_as(&self, wait: Option<Duration>, at_exit: bool) -> Result<bool> {
         // The whole close's: an operation that keeps the store, and at exit the schema's lock, share it
-        let deadline = wait.map(|wait| std::time::Instant::now() + wait);
+        let deadline = wait.map(|wait| crate::store::sync::deadline_from(std::time::Instant::now(), wait));
         // A watch's listener, or the listener of the builder's commits, which runs on the builder's thread: a close
         // waits for the operation the listener is called from, and for the store that thread holds
         if crate::engine::watch::in_callback(&self.tracks) {
@@ -411,18 +506,26 @@ impl Database {
                 "A listener of this database is running on this thread: close the database after it returns",
             ));
         }
-        // Refused before the schema's lock is waited for, which a check on another thread holds for its whole run: a
-        // close beside an open unit answers at once. Asked again under the lock, for a unit begun meanwhile
-        if self
-            .store
-            .lock()
-            .expect("the store slot's lock is never poisoned")
-            .as_ref()
-            .is_some_and(|s| s.unit_is_open())
-        {
-            return Ok(false);
-        }
-        let (taken, mut closing) = {
+        let (taken, closing, in_flight) = loop {
+            // Refused before the schema's lock is waited for, which a check on another thread holds for its whole run:
+            // a close beside an open unit answers at once. Asked again under the lock, for a unit begun meanwhile. If
+            // another thread is already closing, wait for its outcome without holding the schema lock.
+            let waiting = {
+                let slot = self.store.lock().expect("the store slot's lock is never poisoned");
+                match &*slot {
+                    Slot::Closed => return Ok(true),
+                    Slot::Open(store) if store.unit_is_open() => return Ok(false),
+                    Slot::Closing(in_flight) => Some(Arc::clone(in_flight)),
+                    Slot::Open(_) => None,
+                }
+            };
+            if let Some(in_flight) = waiting {
+                match in_flight.wait(deadline) {
+                    Some(CloseOutcome::Closed(result)) => return result.map(|()| true),
+                    Some(CloseOutcome::GaveUp) => continue,
+                    None => return Ok(false),
+                }
+            }
             // Held while the builder is told to stop and the store is taken, so a schema change can't start a builder
             // after; released before either is waited for. At exit it is waited for until the deadline: on Windows the
             // exit handlers run after every other thread was ended, and one ended holding the schema for reading (a
@@ -431,7 +534,11 @@ impl Database {
                 (true, Some(deadline)) => match self.engine_schema.try_write_until(deadline) {
                     Some(schema) => schema,
                     None => {
-                        let store = self.store.lock().expect("the store slot's lock is never poisoned").clone();
+                        let store = match &*self.store.lock().expect("the store slot's lock is never poisoned") {
+                            Slot::Open(store) => Some(Arc::clone(store)),
+                            Slot::Closed => return Ok(true),
+                            Slot::Closing(_) => None,
+                        };
                         // The caller's wait is spent: the record's locks are tried, and not waited for
                         if let Some(store) = store {
                             store.sync_owed(deadline)?;
@@ -442,17 +549,36 @@ impl Database {
                 _ => self.engine_schema.write(),
             };
             let mut slot = self.store.lock().expect("the store slot's lock is never poisoned");
-            match slot.as_ref() {
-                None => return Ok(true),
-                Some(store) if store.unit_is_open() => return Ok(false),
-                Some(_) => {}
+            match &*slot {
+                Slot::Closed => return Ok(true),
+                Slot::Open(store) if store.unit_is_open() => return Ok(false),
+                Slot::Closing(in_flight) => {
+                    let in_flight = Arc::clone(in_flight);
+                    drop(slot);
+                    drop(_schema);
+                    match in_flight.wait(deadline) {
+                        Some(CloseOutcome::Closed(result)) => return result.map(|()| true),
+                        Some(CloseOutcome::GaveUp) => continue,
+                        None => return Ok(false),
+                    }
+                }
+                Slot::Open(_) => {
+                    // The building is told, which tells its thread to stop. Until this close says whether the database
+                    // closed, a wait for the builds waits for it to, and work a commit queues starts no thread, which
+                    // would hold the store this waits for
+                    let closing = self.building.begin_close();
+                    let in_flight = Arc::new(ClosingClose::new());
+                    let prev = std::mem::replace(&mut *slot, Slot::Closing(Arc::clone(&in_flight)));
+                    let Slot::Open(store) = prev else { unreachable!("matched Slot::Open above") };
+                    break (store, closing, in_flight);
+                }
             }
-            // The building is told, which tells its thread to stop. Until this close says whether the database
-            // closed, a wait for the builds waits for it to, and work a commit queues starts no thread, which would
-            // hold the store this waits for
-            let closing = self.building.begin_close();
-            (slot.take(), closing)
         };
+        // Declared before `closing` and `store` so on unwind `store` and `closing` drop before `close_guard`
+        // transitions the slot and wakes any concurrent closer.
+        let close_guard = CloseGuard::new(&self.store, in_flight);
+        let mut closing = closing;
+        let mut store = taken;
         // A build in progress stops between chunks, for the thread after it or the next open to finish. Its thread is
         // waited for with nothing held that it may wait for: it may be delivering a commit of its own to a watch,
         // whose read and whose listener's calls of the database take the schema's lock and the store's slot. At
@@ -463,10 +589,10 @@ impl Database {
             // or a panic among it, no thread is started beside that one, and the building is said to be over now
             closing.closed();
         }
-        let Some(mut store) = taken else { return Ok(true) };
         run_point!(CLOSE_TAKEN);
-        // An operation that took the store before the close finishes first, and none keeps it long. The slot is free
-        // meanwhile, so an operation that asks for the store again is told the database is closed rather than waiting
+        // An operation that took the store before the close finishes first, and none keeps it long. The slot is in
+        // `Closing` meanwhile, so an operation that asks for the store again is told the database is closed rather
+        // than waiting, while another closer waits for this close's outcome.
         loop {
             match Arc::try_unwrap(store) {
                 Ok(store) => {
@@ -482,17 +608,22 @@ impl Database {
                     // may be among those waiting
                     closing.closed();
                     let closed = if at_exit { store.close_at_exit(left) } else { store.close() };
+                    close_guard.finish_closed(closed.clone());
                     return closed.map(|()| true);
                 }
                 Err(shared) => {
                     if let Some(deadline) = deadline.filter(|deadline| std::time::Instant::now() >= *deadline) {
                         // The caller's wait is spent: the record's locks are tried, and not waited for
                         let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
-                        *self.store.lock().expect("the store slot's lock is never poisoned") = Some(shared);
-                        synced?;
+                        close_guard.restore(shared);
+                        if let Err(error) = synced {
+                            close_guard.finish_gave_up();
+                            return Err(error);
+                        }
                         if at_exit {
                             // The process is exiting: nothing more is built here, which the building was told as
                             // its thread was let go of
+                            close_guard.finish_gave_up();
                             return Ok(false);
                         }
                         run_point!(CLOSE_GAVE_UP);
@@ -516,6 +647,7 @@ impl Database {
                         if let Ok(Some(builders)) = self.builders() {
                             builders.queue(Vec::new());
                         }
+                        close_guard.finish_gave_up();
                         return Ok(false);
                     }
                     store = shared;
@@ -971,5 +1103,213 @@ mod tests {
 
         let read_only = OpenOptions { read_only: true, schema: Some(note_schema(Some("body"))), ..quiet() };
         assert_eq!(Database::open(dir.path(), read_only).err().unwrap().code, ErrorCode::SchemaChangeRefused);
+    }
+
+    #[test]
+    fn concurrent_close_waits_for_in_flight_close_and_observes_its_outcome() {
+        use crate::failpoints::{self, points};
+        use std::sync::mpsc;
+
+        // 1. Thread A is in flight closing (paused at CLOSE_TAKEN); Thread B must wait until A finishes,
+        //    and reopening immediately after B returns must succeed.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::open(dir.path(), quiet()).unwrap());
+            let (paused_tx, paused_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let db_a = Arc::clone(&db);
+            let t_a = std::thread::spawn(move || {
+                failpoints::run_once_here(points::CLOSE_TAKEN, move || {
+                    paused_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                });
+                db_a.close()
+            });
+            paused_rx.recv_timeout(Duration::from_secs(10)).expect("A entered close");
+            let (b_done_tx, b_done_rx) = mpsc::channel();
+            let db_b = Arc::clone(&db);
+            let t_b = std::thread::spawn(move || {
+                let res = db_b.close();
+                b_done_tx.send(res).unwrap();
+            });
+            assert!(
+                b_done_rx.recv_timeout(Duration::from_millis(80)).is_err(),
+                "concurrent close must not return Ok(()) while A is still closing"
+            );
+            release_tx.send(()).unwrap();
+            t_a.join().unwrap().unwrap();
+            b_done_rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+            t_b.join().unwrap();
+            assert!(!db.is_open());
+            Database::open(dir.path(), quiet()).unwrap().close().unwrap();
+        }
+
+        // 2. Thread A calls close_within(short) and times out while an operation holds Arc<Store>, restoring
+        //    the store; concurrent Thread B calling close() must NOT return Ok(()) early — it retries and closes.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::open(dir.path(), quiet()).unwrap());
+            let held = db.store().unwrap();
+            let (paused_tx, paused_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let db_a = Arc::clone(&db);
+            let t_a = std::thread::spawn(move || {
+                failpoints::run_once_here(points::CLOSE_TAKEN, move || {
+                    paused_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                });
+                db_a.close_within(Some(Duration::from_millis(60)))
+            });
+            paused_rx.recv_timeout(Duration::from_secs(10)).expect("A entered close_within");
+            let (b_done_tx, b_done_rx) = mpsc::channel();
+            let db_b = Arc::clone(&db);
+            let t_b = std::thread::spawn(move || {
+                let res = db_b.close();
+                b_done_tx.send(res).unwrap();
+            });
+            // Let B enter ClosingClose::wait, then let A time out and restore Slot::Open while `held` is still live.
+            std::thread::sleep(Duration::from_millis(30));
+            release_tx.send(()).unwrap();
+            assert!(!t_a.join().unwrap().unwrap(), "A gave up while store was held");
+            assert!(
+                b_done_rx.recv_timeout(Duration::from_millis(60)).is_err(),
+                "B must not return Ok(()) while store is still held open"
+            );
+            drop(held);
+            b_done_rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+            t_b.join().unwrap();
+            assert!(!db.is_open());
+        }
+
+        // 3. Thread A fails during sync on close; concurrent Thread B observes the same Err outcome,
+        //    and a later close after Slot::Closed returns Ok(()).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(
+                Database::open(
+                    dir.path(),
+                    OpenOptions { syncs: true, sync_idle_ms: 600_000, sync_interval_ms: 600_000, ..Default::default() },
+                )
+                .unwrap(),
+            );
+            db.store()
+                .unwrap()
+                .write(|txn, d| d.put(txn, &crate::format::key::encode(&["k".into()]), b"v").map_err(Into::into), false)
+                .unwrap();
+            let failing = failpoints::fail_while_at(points::SYNC, db.path());
+            let (paused_tx, paused_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let db_a = Arc::clone(&db);
+            let t_a = std::thread::spawn(move || {
+                failpoints::run_once_here(points::CLOSE_TAKEN, move || {
+                    paused_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                });
+                db_a.close()
+            });
+            paused_rx.recv_timeout(Duration::from_secs(10)).expect("A entered close");
+            let (b_done_tx, b_done_rx) = mpsc::channel();
+            let db_b = Arc::clone(&db);
+            let t_b = std::thread::spawn(move || {
+                b_done_tx.send(db_b.close()).unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(30));
+            release_tx.send(()).unwrap();
+            let err_a = t_a.join().unwrap().unwrap_err();
+            let err_b = b_done_rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap_err();
+            t_b.join().unwrap();
+            drop(failing);
+            assert_eq!(err_a.code, ErrorCode::Io);
+            assert_eq!(err_b.code, ErrorCode::Io);
+            // Once permanently closed, a subsequent close does nothing and returns Ok(())
+            db.close().unwrap();
+        }
+
+        // 4. Huge wait duration on close_within / close_at_exit must never panic on Instant overflow.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Database::open(dir.path(), quiet()).unwrap();
+            assert!(db.close_within(Some(Duration::MAX)).unwrap());
+            let dir2 = tempfile::tempdir().unwrap();
+            let db2 = Database::open(dir2.path(), quiet()).unwrap();
+            assert!(db2.close_at_exit(Duration::MAX).unwrap());
+        }
+
+        // 5. Concurrent close_within times out cleanly while another close is in flight.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::open(dir.path(), quiet()).unwrap());
+            let (paused_tx, paused_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let db_a = Arc::clone(&db);
+            let t_a = std::thread::spawn(move || {
+                failpoints::run_once_here(points::CLOSE_TAKEN, move || {
+                    paused_tx.send(()).unwrap();
+                    let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                });
+                db_a.close()
+            });
+            paused_rx.recv_timeout(Duration::from_secs(10)).expect("A entered close");
+            assert!(!db.close_within(Some(Duration::from_millis(25))).unwrap(), "bounded concurrent close timed out");
+            release_tx.send(()).unwrap();
+            t_a.join().unwrap().unwrap();
+        }
+
+        // 6. If the closing thread panics while in flight, CloseGuard settles the slot and wakes concurrent callers.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::open(dir.path(), quiet()).unwrap());
+            let (paused_tx, paused_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let db_a = Arc::clone(&db);
+            let t_a = std::thread::spawn(move || {
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    failpoints::run_once_here(points::CLOSE_TAKEN, move || {
+                        paused_tx.send(()).unwrap();
+                        let _ = release_rx.recv_timeout(Duration::from_secs(10));
+                        panic!("simulated panic during close");
+                    });
+                    let _ = db_a.close();
+                }))
+            });
+            paused_rx.recv_timeout(Duration::from_secs(10)).expect("A entered close");
+            let (b_done_tx, b_done_rx) = mpsc::channel();
+            let db_b = Arc::clone(&db);
+            let t_b = std::thread::spawn(move || {
+                b_done_tx.send(db_b.close()).unwrap();
+            });
+            std::thread::sleep(Duration::from_millis(30));
+            release_tx.send(()).unwrap();
+            assert!(t_a.join().unwrap().is_err(), "A panicked");
+            b_done_rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap();
+            t_b.join().unwrap();
+            assert!(!db.is_open());
+        }
+
+        // 7. A unit opened while a closer waits for the schema lock causes the re-check under the lock to return false.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::open(dir.path(), quiet()).unwrap());
+            let store = db.store().unwrap();
+            let schema_read = db.engine_schema.read();
+            let (done_tx, done_rx) = mpsc::channel();
+            let db_a = Arc::clone(&db);
+            let t_a = std::thread::spawn(move || {
+                done_tx.send(db_a.close_within(None)).unwrap();
+            });
+            // Wait until A has passed the pre-lock unit check and is blocked on engine_schema.write().
+            std::thread::sleep(Duration::from_millis(40));
+            let held = store.begin().unwrap();
+            drop(schema_read);
+            assert!(
+                !done_rx.recv_timeout(Duration::from_secs(10)).unwrap().unwrap(),
+                "close refused under schema lock"
+            );
+            t_a.join().unwrap();
+            held.abort();
+            store.end_unit();
+            drop(store);
+            db.close().unwrap();
+        }
     }
 }

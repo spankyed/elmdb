@@ -449,18 +449,33 @@ impl Txn<'_, '_> {
         self.state.events.push(event);
     }
 
+    /// Validates that `depth` names an open savepoint (`1..=self.state.levels.len()`).
+    fn check_savepoint(&self, depth: usize) -> Result<()> {
+        if depth == 0 || depth > self.state.levels.len() {
+            return Err(crate::error::Error::new(
+                crate::error::ErrorCode::BatchInvalid,
+                format!("Savepoint depth {depth} is not open (current savepoint depth is {})", self.state.levels.len()),
+            ));
+        }
+        Ok(())
+    }
+
     /// Undoes everything since the savepoint at `depth` and closes it and every one inside it
     pub fn rollback_to(&mut self, depth: usize) -> Result<()> {
-        while self.state.levels.len() >= depth && depth > 0 {
-            let level = self.state.levels.pop().expect("a level at or past depth");
-            for (key, before) in level.undo.into_iter().rev() {
-                match before {
-                    Some(value) => self.db.put(self.txn, &key, &value)?,
-                    None => {
-                        self.db.delete(self.txn, &key)?;
-                    }
+        self.check_savepoint(depth)?;
+        while self.state.levels.len() >= depth {
+            let level = self.state.levels.last_mut().expect("a level at or past depth");
+            while let Some((key, before)) = level.undo.pop() {
+                let undone = match &before {
+                    Some(value) => self.db.put(self.txn, &key, value),
+                    None => self.db.delete(self.txn, &key).map(|_| ()),
+                };
+                if let Err(error) = undone {
+                    level.undo.push((key, before));
+                    return Err(error.into());
                 }
             }
+            let level = self.state.levels.pop().expect("checked above");
             self.state.events.truncate(level.events);
             self.state.edges.truncate(level.edges);
         }
@@ -468,8 +483,9 @@ impl Txn<'_, '_> {
     }
 
     /// Closes the savepoint at `depth` and every one inside it, keeping their writes in the unit around them
-    pub fn release(&mut self, depth: usize) {
-        while self.state.levels.len() >= depth && depth > 0 {
+    pub fn release(&mut self, depth: usize) -> Result<()> {
+        self.check_savepoint(depth)?;
+        while self.state.levels.len() >= depth {
             let level = self.state.levels.pop().expect("a level at or past depth");
             if let Some(parent) = self.state.levels.last_mut() {
                 for (key, before) in level.undo {
@@ -479,5 +495,6 @@ impl Txn<'_, '_> {
                 }
             }
         }
+        Ok(())
     }
 }

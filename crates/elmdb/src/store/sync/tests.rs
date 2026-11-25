@@ -90,7 +90,8 @@ impl Harness {
             Policy::new(IDLE, CAP),
             Box::new(ManualSyncer { started: started_tx, outcomes: Mutex::new(outcomes), transient }),
             Box::new(ManualClock { base: Instant::now(), elapsed: Arc::clone(&elapsed) }),
-        );
+        )
+        .unwrap();
         Self { commit, started, finish, elapsed }
     }
 
@@ -192,6 +193,34 @@ fn the_policy_is_due_after_the_idle_time_or_the_cap() {
     assert_eq!(p.due_at(), Some(t0 + CAP));
     p.on_sync_started();
     assert_eq!(p.due_at(), None);
+}
+
+#[test]
+fn huge_durations_never_panic_in_policy_or_deadline_from() {
+    let t0 = Instant::now();
+    // Huge idle with finite cap uses cap
+    let mut p = Policy::new(Duration::MAX, CAP);
+    p.on_commit(t0);
+    assert_eq!(p.due_at(), Some(t0 + CAP));
+
+    // Finite idle with huge cap uses idle, and on_retry does not panic
+    let mut p = Policy::new(IDLE, Duration::MAX);
+    p.on_commit(t0);
+    assert_eq!(p.due_at(), Some(t0 + IDLE));
+    p.on_sync_started();
+    p.on_retry(t0);
+    assert_eq!(p.due_at(), None);
+
+    // Both huge: no finite timer, but forced bound still fires immediately
+    let mut p = Policy::new(Duration::MAX, Duration::MAX);
+    p.on_commit(t0);
+    assert_eq!(p.due_at(), None);
+    p.on_bound(t0);
+    assert_eq!(p.due_at(), Some(t0));
+
+    // deadline_from preserves representable waits and clamps overflowing waits without panicking
+    assert_eq!(deadline_from(t0, Duration::from_secs(5)), t0 + Duration::from_secs(5));
+    assert!(deadline_from(t0, Duration::MAX) > t0 + Duration::from_secs(3600));
 }
 
 #[test]

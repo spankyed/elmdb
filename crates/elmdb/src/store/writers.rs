@@ -123,11 +123,28 @@ mod macos {
         name
     }
 
+    /// Named POSIX semaphore handle owned by `Held`, closed on drop so errors after `sem_open` cannot leak it
+    struct Semaphore(*mut libc::sem_t);
+
+    // SAFETY: a named semaphore's handle is the system's, and its calls are safe from any thread
+    unsafe impl Send for Semaphore {}
+    // SAFETY: as for Send: sem_trywait and sem_post may run on the same handle from several threads at once
+    unsafe impl Sync for Semaphore {}
+
+    impl Drop for Semaphore {
+        fn drop(&mut self) {
+            // mutant-skip: replace macos::<impl Drop for Semaphore>::drop with \(\)
+            // Closing the handle frees a descriptor this process would otherwise keep until it exits, which no test reads
+            // SAFETY: opened in `Held::open`, closed once, here
+            unsafe { libc::sem_close(self.0) };
+        }
+    }
+
     pub(super) struct Held {
         /// `writer.lock`, opened once. A lock is the open file's, so this process's threads take their turn first
         /// (`Writers::turn`): the file's lock keeps processes apart, not threads
         file: Arc<std::fs::File>,
-        semaphore: *mut libc::sem_t,
+        semaphore: Semaphore,
     }
 
     /// The file locked for one writer, unlocked when dropped
@@ -141,11 +158,6 @@ mod macos {
         }
     }
 
-    // SAFETY: a named semaphore's handle is the system's, and its calls are safe from any thread
-    unsafe impl Send for Held {}
-    // SAFETY: as for Send: sem_trywait and sem_post may run on the same handle from several threads at once
-    unsafe impl Sync for Held {}
-
     impl Held {
         pub(super) fn open(dir: &Path) -> Result<Self> {
             use std::os::unix::fs::MetadataExt;
@@ -154,13 +166,14 @@ mod macos {
             let id = mutex_id(lock.dev() as i32, lock.ino());
             let name = CString::new(semaphore_name(id)).expect("a semaphore's name holds no NUL");
             // SAFETY: the name is a valid C string, and opening an existing semaphore creates nothing
-            let semaphore = unsafe { libc::sem_open(name.as_ptr(), 0) };
-            if semaphore == libc::SEM_FAILED {
+            let raw = unsafe { libc::sem_open(name.as_ptr(), 0) };
+            if raw == libc::SEM_FAILED {
                 return Err(Error::new(
                     ErrorCode::Io,
                     format!("LMDB's write lock {name:?} wouldn't open: {}", std::io::Error::last_os_error()),
                 ));
             }
+            let semaphore = Semaphore(raw);
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -176,10 +189,10 @@ mod macos {
             let hold = Hold { file: Arc::clone(&self.file) };
             loop {
                 // SAFETY: the handle was opened in `open` and stays open until drop
-                if unsafe { libc::sem_trywait(self.semaphore) } == 0 {
+                if unsafe { libc::sem_trywait(self.semaphore.0) } == 0 {
                     // Free, as it should be with no live writer inside a transaction: given back for LMDB to take
                     // SAFETY: as above
-                    unsafe { libc::sem_post(self.semaphore) };
+                    unsafe { libc::sem_post(self.semaphore.0) };
                     return Ok(hold);
                 }
                 match std::io::Error::last_os_error().raw_os_error() {
@@ -190,21 +203,12 @@ mod macos {
                     Some(libc::EAGAIN) => {
                         // Taken, though no live elmdb writer can be inside a transaction: one died there
                         // SAFETY: as above
-                        unsafe { libc::sem_post(self.semaphore) };
+                        unsafe { libc::sem_post(self.semaphore.0) };
                         return Ok(hold);
                     }
                     _ => return Err(std::io::Error::last_os_error().into()),
                 }
             }
-        }
-    }
-
-    impl Drop for Held {
-        fn drop(&mut self) {
-            // mutant-skip: replace macos::<impl Drop for Held>::drop with \(\)
-            // Closing the handle frees a descriptor this process would otherwise keep until it exits, which no test reads
-            // SAFETY: opened in `open`, closed once, here
-            unsafe { libc::sem_close(self.semaphore) };
         }
     }
 }

@@ -489,6 +489,25 @@ fn child_of_the_kept_tests() {
                 Err(error) => println!("refused {}", error.code.as_str()),
             }
         }
+        // Opens read-only, prints "holding" and stays open until stdin closes
+        "hold-read-only" => {
+            let store = Store::open(&path, StoreOptions { read_only: true, ..grouped() }).unwrap();
+            println!("holding not_borne_out={}", store.not_borne_out());
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+            store.close().unwrap();
+        }
+        // Opens writable in grouped mode with NO_BOOT set, says how that went
+        "open-grouped-no-boot" => {
+            boot::NO_BOOT.store(true, std::sync::atomic::Ordering::Relaxed);
+            match Store::open(&path, grouped()) {
+                Ok(store) => {
+                    println!("opened");
+                    store.close().unwrap();
+                }
+                Err(error) => println!("refused {}", error.code.as_str()),
+            }
+        }
         // Writes, syncs, writes again, and is ended at the step of the next sync the point names
         point if point.starts_with("die-at-") => {
             let store = Store::open(&path, grouped()).unwrap();
@@ -1121,11 +1140,10 @@ fn a_write_and_a_unit_whose_pin_a_growth_ended_before_their_transaction_make_sur
     assert!(!failpoints::is_armed_here(points::WRITE_PINNED), "the write reached the point");
     let grower = std::sync::Arc::clone(&store);
     failpoints::run_once_here(points::UNIT_PINNED, move || grower.grow().unwrap());
-    let (mut txn, gate, writer) = store.begin().unwrap();
+    let mut held = store.begin().unwrap();
     assert!(!failpoints::is_armed_here(points::UNIT_PINNED), "the unit reached the point");
-    store.db.main.put(&mut txn, b"c", b"3").unwrap();
-    let committed = store.commit_txn(txn);
-    drop((gate, writer));
+    store.db.main.put(&mut held.txn, b"c", b"3").unwrap();
+    let committed = held.commit(&store);
     store.end_unit();
     committed.unwrap();
     assert_eq!(get(&store, "b").as_deref(), Some(&b"2"[..]));
@@ -1138,13 +1156,12 @@ fn a_unit_open_across_a_failed_sync_is_refused_at_its_commit() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(dir.path(), grouped()).unwrap();
     put(&store, "a", b"1").unwrap();
-    let (mut txn, gate, writer) = store.begin().unwrap();
-    store.db.main.put(&mut txn, b"b", b"2").unwrap();
+    let mut held = store.begin().unwrap();
+    store.db.main.put(&mut held.txn, b"b", b"2").unwrap();
     let failing = failpoints::fail_while_at(points::SYNC, &store.path);
     assert!(store.durable().unwrap().wait().is_err());
     drop(failing);
-    let refused = store.commit_txn(txn).unwrap_err();
-    drop((gate, writer));
+    let refused = held.commit(&store).unwrap_err();
     store.end_unit();
     assert!(refused.message.contains("An earlier sync failed"), "{refused}");
     let _ = store.close();
@@ -1312,7 +1329,7 @@ fn a_sync_that_met_a_grown_map_as_a_unit_began_gives_way_to_the_unit_and_its_own
     // Asked before the unit, so the sync it waits on is the one held at the point
     let waiting = store.durable().expect("the grouped mode syncs");
     sync_paused.recv_timeout(Duration::from_secs(10)).expect("the sync met the grown map");
-    let (txn, gate, writer) = store.begin().unwrap();
+    let held = store.begin().unwrap();
     opened.send(()).unwrap();
     // Waited on a thread of its own, so a wait that never ends fails here rather than hanging the test; the unit is
     // ended either way, which lets a sync waiting behind it go on
@@ -1321,9 +1338,7 @@ fn a_sync_that_met_a_grown_map_as_a_unit_began_gives_way_to_the_unit_and_its_own
         let _ = answered.send(waiting.wait());
     });
     let answer = answer.recv_timeout(Duration::from_secs(10));
-    txn.abort();
-    drop(gate);
-    writer.release();
+    held.abort();
     store.end_unit();
     answer.expect("the sync waited behind the unit, which its owner held as it waited").unwrap();
     store.close().unwrap();
@@ -1346,7 +1361,7 @@ fn a_unit_s_owner_waits_on_a_sync_though_another_process_grew_the_map_before_the
         .status()
         .unwrap();
     assert!(status.success(), "the child's write failed");
-    let (txn, gate, writer) = store.begin().unwrap();
+    let held = store.begin().unwrap();
     // Waited on a thread of its own, so a wait that never ends fails here rather than hanging the test
     let waiting = store.durable().expect("the grouped mode syncs");
     let (answered, answer) = std::sync::mpsc::channel();
@@ -1354,9 +1369,7 @@ fn a_unit_s_owner_waits_on_a_sync_though_another_process_grew_the_map_before_the
         let _ = answered.send(waiting.wait());
     });
     answer.recv_timeout(Duration::from_secs(10)).expect("the unit's owner waited on its sync for good").unwrap();
-    txn.abort();
-    drop(gate);
-    writer.release();
+    held.abort();
     store.end_unit();
     store.close().unwrap();
 }
@@ -1517,4 +1530,173 @@ fn a_write_that_spills_its_pages_before_its_commit_leaves_a_loss_the_record_s_co
     assert_eq!(held, loaded, "the record's commit lost values to pages written before a later commit");
     assert_eq!(get(&opened, "big-00000000"), None);
     opened.close().unwrap();
+}
+
+/// Spawns `child_of_the_kept_tests` holding a read-only open until the returned stdin pipe is dropped
+fn spawn_read_only_holder(dir: &Path) -> (std::process::Child, String) {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::kept_tests::child_of_the_kept_tests", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_KEPT_DB", dir)
+        .env("ELMDB_KEPT_DO", "hold-read-only")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut output = String::new();
+    let mut line = String::new();
+    let found = loop {
+        line.clear();
+        if stdout.read_line(&mut line).unwrap() == 0 {
+            break None;
+        }
+        if line.contains("holding") {
+            break Some(line);
+        }
+        output.push_str(&line);
+    };
+    if let Some(line) = found {
+        child.stdout = Some(stdout.into_inner());
+        (child, line)
+    } else {
+        let _ = child.wait();
+        panic!("child exited before holding read-only: {output:?}");
+    }
+}
+
+#[test]
+fn sequence_a_reboot_read_only_open_then_grouped_writer_preserves_unsynced_writes_after_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open(dir.path(), grouped()).unwrap();
+        put(&store, "a", b"1").unwrap();
+        synced(&store);
+        store.close().unwrap();
+    }
+    // Simulate a reboot: record carries another boot while commit == newest
+    let held = std::fs::read(dir.path().join(record::RECORD)).unwrap();
+    std::fs::write(dir.path().join(record::RECORD), record::of_another_boot(&held)).unwrap();
+
+    // 1. Read-only process opens alone: Outcome::Unchanged leaves stale boot on disk while holding open.lock
+    let (mut reader, _) = spawn_read_only_holder(dir.path());
+    assert!(
+        !record_in(dir.path()).unwrap().boot.same(&boot::this_boot()),
+        "read-only open alone leaves the stale boot on disk"
+    );
+
+    // 2. Concurrent writable grouped opener is the first writer and must update synced.boot to this boot
+    let writer = Store::open(dir.path(), grouped()).unwrap();
+    assert!(
+        record_in(dir.path()).unwrap().boot.same(&boot::this_boot()),
+        "first writable opener beside read-only reader must refresh stale boot"
+    );
+
+    // 3. Writer commits unsynced write and crashes (same boot — copied with boot intact)
+    put(&writer, "b", b"2").unwrap();
+    let crashed = copied(dir.path(), false);
+    writer.close().unwrap();
+    drop(reader.stdin.take());
+    assert!(reader.wait().unwrap().success());
+
+    // 4. Next opener in the same boot must preserve the committed write "b" instead of restoring to "a"
+    let reopened = Store::open(crashed.path(), grouped()).unwrap();
+    assert_eq!(reopened.restored(), None, "same-boot crash must not trigger a restore");
+    assert_eq!(get(&reopened, "b").as_deref(), Some(&b"2"[..]), "committed write must survive same-boot crash");
+    reopened.close().unwrap();
+}
+
+#[test]
+fn sequence_b_foreign_record_read_only_then_grouped_writer_does_not_trust_or_brick_db() {
+    let (high, low) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    // `high` has more commits than `low` so its foreign `synced` record names a commit > low's newest
+    {
+        let store = Store::open(high.path(), grouped()).unwrap();
+        for n in 0..10 {
+            put(&store, &format!("hi-{n}"), b"x").unwrap();
+        }
+        synced(&store);
+        store.close().unwrap();
+    }
+    {
+        let store = Store::open(low.path(), grouped()).unwrap();
+        put(&store, "lo-0", b"y").unwrap();
+        synced(&store);
+        store.close().unwrap();
+    }
+    // Place `high`'s `synced` record beside `low`'s `data.mdb` (NotBorneOut)
+    std::fs::copy(high.path().join(record::RECORD), low.path().join(record::RECORD)).unwrap();
+
+    // 1. Read-only process opens alone on NotBorneOut and stays open (cannot void the foreign record)
+    let (mut reader, line) = spawn_read_only_holder(low.path());
+    assert!(line.contains("not_borne_out=true"), "expected read-only to see not_borne_out: {line}");
+
+    // 2. Concurrent grouped writer must detect NotBorneOut, void the foreign record, and record THIS file's commit
+    let writer = Store::open(low.path(), grouped()).unwrap();
+    assert!(writer.not_borne_out(), "first writer beside read-only must detect NotBorneOut");
+    assert_eq!(
+        record_in(low.path()).unwrap().commit,
+        newest(&writer),
+        "writer must record this file's commit rather than trusting the foreign record's higher commit"
+    );
+
+    // 3. Even if a subsequent sync fails, State::Failed is stamped on THIS file's valid record (not the foreign one)
+    put(&writer, "lo-1", b"z").unwrap();
+    let failing = failpoints::fail_while_at(points::SYNC, &writer.path);
+    assert!(writer.durable().unwrap().wait().is_err());
+    drop(failing);
+    let _ = writer.close();
+    drop(reader.stdin.take());
+    assert!(reader.wait().unwrap().success());
+
+    // 4. Reopening alone must restore cleanly rather than refusing the DB as Corrupted
+    let reopened = Store::open(low.path(), grouped()).unwrap();
+    assert!(reopened.restored().is_some(), "failed sync restored to this file's last synced commit");
+    assert_eq!(get(&reopened, "lo-0").as_deref(), Some(&b"y"[..]));
+    assert_eq!(get(&reopened, "lo-1"), None);
+    reopened.close().unwrap();
+}
+
+#[test]
+fn failed_record_with_live_read_only_reader_refuses_first_writer_with_restore_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = Store::open(dir.path(), grouped()).unwrap();
+    put(&writer, "a", b"1").unwrap();
+    synced(&writer);
+    // Start a read-only holder while the DB is healthy
+    let (mut reader, _) = spawn_read_only_holder(dir.path());
+    // Now fail a sync on the writer and close it, leaving State::Failed while the reader is still open
+    put(&writer, "b", b"2").unwrap();
+    let failing = failpoints::fail_while_at(points::SYNC, &writer.path);
+    assert!(writer.durable().unwrap().wait().is_err());
+    drop(failing);
+    let _ = writer.close();
+
+    // First writable opener beside the live reader cannot restore under the reader and must return RestorePending
+    let refused = Store::open(dir.path(), grouped()).err().expect("must refuse with RestorePending");
+    assert_eq!(refused.code, ErrorCode::RestorePending, "{refused}");
+    drop(reader.stdin.take());
+    assert!(reader.wait().unwrap().success());
+    // Once the reader is gone, restore succeeds
+    let reopened = Store::open(dir.path(), grouped()).unwrap();
+    assert!(reopened.restored().is_some());
+    reopened.close().unwrap();
+}
+
+#[test]
+fn second_grouped_writer_beside_live_writer_with_no_boot_opens_as_is() {
+    let dir = tempfile::tempdir().unwrap();
+    let writer = Store::open(dir.path(), grouped()).unwrap();
+    put(&writer, "a", b"1").unwrap();
+    synced(&writer);
+    put(&writer, "b", b"2").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "store::kept_tests::child_of_the_kept_tests", "--nocapture", "--test-threads=1"])
+        .env("ELMDB_KEPT_DB", dir.path())
+        .env("ELMDB_KEPT_DO", "open-grouped-no-boot")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success() && stdout.contains("opened"), "{stdout}");
+    writer.close().unwrap();
 }

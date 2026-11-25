@@ -271,8 +271,8 @@ fn unit_keeps_its_uncommitted_view_across_idle_expiry() {
     let directory = tempfile::tempdir().unwrap();
     let store = Store::open(directory.path(), quiet()).unwrap();
     overwrite(&store, 0);
-    let (mut unit, gate, writer) = store.begin().unwrap();
-    store.db.put(&mut unit, b"block0000", b"uncommitted").unwrap();
+    let mut unit = store.begin().unwrap();
+    store.db.put(&mut unit.txn, b"block0000", b"uncommitted").unwrap();
     store
         .read(|txn, db| {
             assert_eq!(db.get(txn, b"block0000")?, Some(vec![0; VALUE_BYTES].as_slice()));
@@ -280,10 +280,8 @@ fn unit_keeps_its_uncommitted_view_across_idle_expiry() {
         })
         .unwrap();
     wait_until_empty(&store);
-    assert_eq!(store.db.get(&unit, b"block0000").unwrap(), Some(b"uncommitted".as_slice()));
+    assert_eq!(store.db.get(&unit.txn, b"block0000").unwrap(), Some(b"uncommitted".as_slice()));
     unit.abort();
-    drop(gate);
-    writer.release();
     store.end_unit();
     store
         .read(|txn, db| {
