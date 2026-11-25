@@ -55,10 +55,17 @@ on:
       - .github/workflows/release.yml
       - scripts/release-smoke.mjs
       - scripts/release-pack.mjs
+      - crates/elmdb-node/about.toml
+      - crates/elmdb-node/about.hbs
+      - crates/elmdb-node/client.js
+      - crates/elmdb-node/client.d.ts
       - crates/elmdb-node/package.json
       - crates/elmdb-node/index.js
+      - crates/elmdb-node/index.d.ts
+      - crates/elmdb-node/protocol/**
       - packages/ears/package.json
       - packages/ears/scripts/build.mjs
+      - packages/ears/scripts/dist-current.mjs
       - packages/ears/tsconfig.package.json
       - crates/*/Cargo.toml
       - crates/*/build.rs
@@ -100,11 +107,11 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       commit: ${{ steps.version.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.COMMIT }}
       # The workflows this run is made of, which a dispatch for an older commit takes from the branch dispatched on
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           path: running
           sparse-checkout: .github/workflows
@@ -159,7 +166,7 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.COMMIT }}
       # No Rust cache: four of the seven builds run in containers, which a cache on the runner doesn't reach, and each
@@ -189,7 +196,7 @@ jobs:
             echo "::error::elmdb.win32-x64-msvc.node loads the Visual C++ redistributable, which many Windows machines lack"
             exit 1
           fi
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: runner.os == 'macOS'
         with:
           node-version: 22.17.0
@@ -206,8 +213,13 @@ jobs:
       # doesn't have, which a binary built against newer headers than its library leaves (`__isoc23_strtol`)
       - if: matrix.glibc
         run: |
+          case "$(uname -m)" in
+            x86_64) image='quay.io/pypa/manylinux_2_28_x86_64:latest@sha256:55a36963bc0504cdf004011001c1072306402f0b8b83be5a5eba7068f93eec53' ;;
+            aarch64) image='quay.io/pypa/manylinux_2_28_aarch64:latest@sha256:126d9eea9d6b1717f3e17b2b3ac51da04ef159a5f935dac36fe92d621dc8f246' ;;
+            *) echo "::error::unsupported glibc build architecture: $(uname -m)"; exit 1 ;;
+          esac
           docker run --rm -v "$PWD:/w" -w /w -e CARGO_TERM_COLOR -e CARGO_INCREMENTAL=0 \
-            "quay.io/pypa/manylinux_2_28_$(uname -m)" bash -euc '
+            "$image" bash -euc '
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             export PATH="$HOME/.cargo/bin:$PATH"
             git config --global --add safe.directory /w
@@ -232,7 +244,7 @@ jobs:
       # As full.yml's musl job: in Alpine, on the runner's own architecture, where the native gcc links musl binaries
       - if: matrix.musl
         run: |
-          docker run --rm -v "$PWD:/w" -w /w -e CARGO_TERM_COLOR -e CARGO_INCREMENTAL=0 node:22.17.0-alpine sh -euc '
+          docker run --rm -v "$PWD:/w" -w /w -e CARGO_TERM_COLOR -e CARGO_INCREMENTAL=0 node:22.17.0-alpine@sha256:fc3e945f920b7e3000cd1af86c4ae406ec70c72f328b667baf0f3a8910d69eed sh -euc '
             apk add --no-cache bash curl git build-base
             curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
             export PATH="$HOME/.cargo/bin:$PATH"
@@ -248,7 +260,7 @@ jobs:
         run: |
           ls -l crates/elmdb-node/*.node
           test -f crates/elmdb-node/elmdb.${{ matrix.platform }}.node
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: binding-${{ matrix.platform }}
           path: crates/elmdb-node/elmdb.${{ matrix.platform }}.node
@@ -260,19 +272,19 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.COMMIT }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.17.0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: binding-*
           merge-multiple: true
           path: binaries
       # The notices the package carries are the lockfile's and the toolchain's, as ci.yml's repo job holds them on main
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: cargo-about@0.9.3,cargo-cyclonedx@0.5.10
       - run: cargo fetch --locked
@@ -287,6 +299,7 @@ jobs:
         env:
           REPO: ${{ github.repository }}
           RELEASE_COMMIT: ${{ needs.version.outputs.commit }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           ls -l binaries
           node scripts/release-pack.mjs pack --binaries binaries --out out
@@ -295,16 +308,18 @@ jobs:
           for tarball in out/*.tgz commit/*.tgz; do
             echo "$tarball:"; tar -tzvf "$tarball" | awk '{ print "  " $3 "  " $NF }'
           done
-          tar -xOzf "commit/elmdb-${{ needs.version.outputs.version }}.tgz" package/package.json | grep -A8 optionalDependencies
+          tar -xOzf "commit/elmdb-$VERSION.tgz" package/package.json | grep -A8 optionalDependencies
       # EARS, its `dist` built here from this checkout by its own build, which refuses a tree missing an export's target
       # or importing a package its manifest doesn't declare; the root's tooling holds the TypeScript it builds with
       - name: Pack EARS
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           npm ci --no-audit --no-fund
           npm run build:ears
           (cd packages/ears && npm pack --pack-destination ../../out)
-          test -f "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz"
-          tar -tzf "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz" | sort
+          test -f "out/elmdb-ears-$VERSION.tgz"
+          tar -tzf "out/elmdb-ears-$VERSION.tgz" | sort
       - name: SBOMs
         run: |
           for pair in aarch64-apple-darwin:darwin-arm64 x86_64-apple-darwin:darwin-x64 \
@@ -315,12 +330,12 @@ jobs:
             mv crates/elmdb-node/elmdb_node_cdylib.cdx.json "out/elmdb.${pair##*:}.cdx.json"
           done
           ls -l out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release
           path: out/*
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: commit-binding
           path: commit/*
@@ -343,38 +358,44 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.COMMIT }}
           sparse-checkout: scripts/release-smoke.mjs
           sparse-checkout-cone-mode: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release
           path: out
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         if: ${{ !matrix.musl && !matrix.glibc }}
         with:
           node-version: 22.17.0
       - if: ${{ !matrix.musl && !matrix.glibc }}
         shell: bash
-        run: node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz" out/elmdb-binding-*-${{ needs.version.outputs.version }}.tgz
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: node scripts/release-smoke.mjs "out/elmdb-$VERSION.tgz" "out/elmdb-ears-$VERSION.tgz" out/elmdb-binding-*-"$VERSION".tgz
       # At the glibc floor the binary is built for: AlmaLinux 8's 2.28, with Node 22.17.0's own Linux build, which
       # needs the same
       - if: matrix.glibc
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          docker run --rm -v "$PWD:/w" -w /w almalinux:8 bash -euc '
+          docker run --rm -v "$PWD:/w" -w /w -e VERSION almalinux:8@sha256:768bedc30fe0a536adb0a65d2eddb7caad364e514fbddd0ae9e026975f590342 bash -euc '
             arch=$(uname -m | sed "s/x86_64/x64/; s/aarch64/arm64/")
             dnf install -y -q tar gzip > /dev/null
             curl -fsSL "https://nodejs.org/dist/v22.17.0/node-v22.17.0-linux-$arch.tar.gz" | tar -xz -C /opt
             export PATH="/opt/node-v22.17.0-linux-$arch/bin:$PATH"
             ldd --version | head -1
-            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz" out/elmdb-binding-*-${{ needs.version.outputs.version }}.tgz
+            node scripts/release-smoke.mjs "out/elmdb-$VERSION.tgz" "out/elmdb-ears-$VERSION.tgz" out/elmdb-binding-*-"$VERSION".tgz
           '
       - if: matrix.musl
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
-          docker run --rm -v "$PWD:/w" -w /w node:22.17.0-alpine \
-            node scripts/release-smoke.mjs "out/elmdb-${{ needs.version.outputs.version }}.tgz" "out/elmdb-ears-${{ needs.version.outputs.version }}.tgz" out/elmdb-binding-*-${{ needs.version.outputs.version }}.tgz
+          docker run --rm -v "$PWD:/w" -w /w node:22.17.0-alpine@sha256:fc3e945f920b7e3000cd1af86c4ae406ec70c72f328b667baf0f3a8910d69eed \
+            node scripts/release-smoke.mjs "out/elmdb-$VERSION.tgz" "out/elmdb-ears-$VERSION.tgz" out/elmdb-binding-*-"$VERSION".tgz
 
   release:
     name: draft the release
@@ -385,7 +406,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release
           path: out
@@ -439,11 +460,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: release
           path: built
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: commit-binding
           path: commit
@@ -503,12 +524,12 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ env.COMMIT }}
           sparse-checkout: scripts/release-smoke.mjs
           sparse-checkout-cone-mode: false
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.17.0
       - env:

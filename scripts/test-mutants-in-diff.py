@@ -1,4 +1,4 @@
-"""Tests for scripts/mutants-in-diff.py's orphan copy sweep and narrow filter passthrough."""
+"""Tests for scripts/mutants-in-diff.py's cfg attribute parsing, orphan copy sweep, and narrow filter passthrough."""
 import contextlib
 import importlib.util
 import io
@@ -351,6 +351,105 @@ class OrphanSweepTests(unittest.TestCase):
             for kept in (at_boundary, active_inc, locked, unrelated):
                 self.assertTrue(kept.exists(), f"expected {kept} to be kept")
             self.assertTrue(symlink.is_symlink())
+
+
+class CfgParsingTests(unittest.TestCase):
+    def test_multiple_attributes_on_one_line(self):
+        source = "\n".join([
+            "fn always_kept() {}",
+            "#[cfg(windows)] #[allow(dead_code)] fn win_first() { let x = 1; }",
+            "fn between() {}",
+            "#[allow(dead_code)] #[cfg(windows)] fn win_second() { let y = 2; }",
+            "fn after_all() {}",
+        ]) + "\n"
+        self.assertEqual(mid.compiled_out_text(source, "linux"), {2, 4})
+        self.assertEqual(mid.compiled_out_text(source, "windows"), set())
+
+    def test_multiline_cfg_and_followup_attributes(self):
+        source = "\n".join([
+            "fn kept() {}",
+            "#[cfg(all(",
+            "    windows,",
+            "    not(unix),",
+            "))]",
+            "#[allow(",
+            "    dead_code,",
+            ")]",
+            "fn only_win() {",
+            "    let a = 1;",
+            "}",
+            "fn kept_after() {}",
+        ]) + "\n"
+        self.assertEqual(mid.compiled_out_text(source, "linux"), set(range(2, 12)))
+        self.assertEqual(mid.compiled_out_text(source, "windows"), set())
+
+    def test_multiline_inner_cfg_excludes_whole_file(self):
+        source = "\n".join([
+            "#![cfg(",
+            '    target_os = "windows"',
+            ")]",
+            "fn win_file() {}",
+        ]) + "\n"
+        self.assertEqual(mid.compiled_out_text(source, "linux"), {1, 2, 3, 4})
+        self.assertEqual(mid.compiled_out_text(source, "windows"), set())
+
+    def test_not_unix_and_any_windows_test(self):
+        source = "\n".join([
+            "#[cfg(not(unix))]",
+            "fn fallback_non_unix() {}",
+            "#[cfg(any(windows, test))]",
+            "fn win_or_test() {}",
+            "#[cfg(unix)]",
+            "fn unix_only() {}",
+        ]) + "\n"
+        # `not(unix)` is compiled out on linux and kept on windows; `any(windows, test)` is unknown on linux (because
+        # `test` is unknown) and True on windows, so neither excludes it.
+        self.assertEqual(mid.compiled_out_text(source, "linux"), {1, 2})
+        self.assertEqual(mid.compiled_out_text(source, "windows"), {5, 6})
+
+    def test_string_literals_and_comments_containing_cfg_are_ignored(self):
+        source = "\n".join([
+            "fn kept() {",
+            '    let outer = "#[cfg(windows)]";',
+            '    let inner = "#![cfg(windows)]";',
+            '    let raw = r#"#[cfg(windows)]"#;',
+            '    let multi = r#"',
+            "        #[cfg(windows)]",
+            '    "#;',
+            "    // #[cfg(windows)]",
+            "    /* #[cfg(windows)] */",
+            "    let quote = '\"';",
+            "}",
+            "#[cfg(windows)] fn real_win() { let q = '\"'; }",
+        ]) + "\n"
+        self.assertEqual(mid.compiled_out_text(source, "linux"), {12})
+        self.assertEqual(mid.compiled_out_text(source, "windows"), set())
+
+    def test_balanced_parens_in_holds_and_compiled_out(self):
+        self.assertIs(mid.holds('all(target_os = "windows", feature = "a)b")', "linux"), False)
+        self.assertIs(mid.holds('all(target_os = "windows", feature = "a)b")', "windows"), None)
+        self.assertIs(mid.holds("all(windows, not(unix),)", "linux"), False)
+        self.assertIs(mid.holds("all(windows, not(unix),)", "windows"), True)
+        # Malformed or empty predicates fail safely without raising IndexError
+        for malformed in ("", "not()", "target_os =", "target_os"):
+            with self.subTest(predicate=malformed):
+                self.assertIsNone(mid.holds(malformed, "linux"))
+        self.assertIs(mid.holds("all(windows", "linux"), False)
+
+        source = "\n".join([
+            '#[cfg(all(target_os = "windows", feature = "paren)inside"))]',
+            "fn win_with_paren() {",
+            '    let url = "https://example.com"; // comment with }',
+            "}",
+            "fn kept() {}",
+        ]) + "\n"
+        with tempfile.TemporaryDirectory() as scratch:
+            root = Path(scratch)
+            rel = "src/lib.rs"
+            (root / "src").mkdir()
+            (root / rel).write_text(source, encoding="utf-8")
+            self.assertEqual(mid.compiled_out(root, rel, "linux"), {1, 2, 3, 4})
+            self.assertEqual(mid.compiled_out(root, rel, "windows"), set())
 
 
 if __name__ == "__main__":

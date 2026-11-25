@@ -76,57 +76,271 @@ PLATFORMS = {
 
 def holds(predicate, platform):
     """Whether a cfg predicate holds on `platform`: True, False, or None when it names something else"""
-    tokens = re.findall(r'"[^"]*"|[A-Za-z_][A-Za-z0-9_]*|[(),=]', predicate)
+    tokens = re.findall(r'"(?:\\.|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*|[(),=]', predicate)
+    if not tokens:
+        return None
     at = 0
 
     def parse():
         nonlocal at
+        if at >= len(tokens):
+            return None
         name = tokens[at]
         at += 1
         if at < len(tokens) and tokens[at] == "(":
             at += 1
             values = []
-            while tokens[at] != ")":
+            while at < len(tokens) and tokens[at] != ")":
                 values.append(parse())
-                if tokens[at] == ",":
+                if at < len(tokens) and tokens[at] == ",":
                     at += 1
-            at += 1
+            if at < len(tokens) and tokens[at] == ")":
+                at += 1
             if name == "all":
                 return False if False in values else (True if all(v is True for v in values) else None)
             if name == "any":
                 return True if True in values else (False if all(v is False for v in values) else None)
             if name == "not":
-                return None if values[0] is None else not values[0]
+                return None if not values or values[0] is None else not values[0]
             return None
         if at < len(tokens) and tokens[at] == "=":
+            if at + 1 >= len(tokens):
+                return None
             value = tokens[at + 1].strip('"')
             at += 2
             known = PLATFORMS[platform].get(name)
             return None if known is None else known == value
-        return PLATFORMS[platform].get(name)
+        known = PLATFORMS[platform].get(name)
+        return known if isinstance(known, bool) else None
 
     return parse()
 
 
-def compiled_out(root, path, platform):
-    """The lines of a source file behind a `#[cfg(...)]` that doesn't hold on `platform`"""
-    lines = (root / path).read_text(encoding="utf-8").splitlines()
+def _raw_string_start(line, pos):
+    """If a Rust raw string (`r#"`, `br#"`, `cr#"`) starts at `pos`, return `(hash_count, after_quote)`."""
+    if line[pos] != "r":
+        return None
+    if pos > 0:
+        prev = line[pos - 1]
+        if prev in "bc" and (pos == 1 or not (line[pos - 2].isalnum() or line[pos - 2] == "_")):
+            pass
+        elif prev.isalnum() or prev == "_":
+            return None
+    idx = pos + 1
+    while idx < len(line) and line[idx] == "#":
+        idx += 1
+    if idx < len(line) and line[idx] == '"':
+        return idx - (pos + 1), idx + 1
+    return None
+
+
+def _strip_line_comment(line):
+    """Strip a `//` comment from `line` without cutting through string or char literals."""
+    in_string = False
+    escaped = False
+    raw_hashes = None
+    i = 0
+    n = len(line)
+    while i < n:
+        ch = line[i]
+        if raw_hashes is not None:
+            if ch == '"' and line.startswith("#" * raw_hashes, i + 1):
+                i += 1 + raw_hashes
+                raw_hashes = None
+                continue
+        elif in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        else:
+            raw = _raw_string_start(line, i)
+            if raw is not None:
+                raw_hashes, i = raw
+                continue
+            if ch == "'" and i + 2 < n and line[i + 1] == '"' and line[i + 2] == "'":
+                i += 3
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "/" and i + 1 < n and line[i + 1] == "/":
+                return line[:i]
+        i += 1
+    return line
+
+
+def _find_cfg_attrs(lines):
+    """Yield `(is_inner, predicate, start_line, end_line, after_text)` for each `#![cfg(...)]` and `#[cfg(...)]`.
+
+    Parses balanced parentheses across lines and ignores comments and string literals so multiple attributes on one
+    line (`#[cfg(windows)] #[allow(dead_code)] fn f() {}`), multiline `#[cfg(...)]` blocks, and string literals
+    containing `#[cfg(...)]` are each handled accurately.
+    """
+    n = len(lines)
+    start_re = re.compile(r"#(!?)\[\s*cfg\s*\(")
+    in_string = False
+    raw_hashes = None
+    block_comment = 0
+    line_idx = 0
+    while line_idx < n:
+        line = lines[line_idx]
+        pos = 0
+        line_len = len(line)
+        escaped = False
+        while pos < line_len:
+            ch = line[pos]
+            if block_comment > 0:
+                if ch == "/" and pos + 1 < line_len and line[pos + 1] == "*":
+                    block_comment += 1
+                    pos += 2
+                elif ch == "*" and pos + 1 < line_len and line[pos + 1] == "/":
+                    block_comment -= 1
+                    pos += 2
+                else:
+                    pos += 1
+                continue
+            if raw_hashes is not None:
+                if ch == '"' and line.startswith("#" * raw_hashes, pos + 1):
+                    pos += 1 + raw_hashes
+                    raw_hashes = None
+                else:
+                    pos += 1
+                continue
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                pos += 1
+                continue
+            if ch == "/" and pos + 1 < line_len and line[pos + 1] == "/":
+                break
+            if ch == "/" and pos + 1 < line_len and line[pos + 1] == "*":
+                block_comment = 1
+                pos += 2
+                continue
+            raw = _raw_string_start(line, pos)
+            if raw is not None:
+                raw_hashes, pos = raw
+                continue
+            if ch == "'" and pos + 2 < line_len and line[pos + 1] == '"' and line[pos + 2] == "'":
+                pos += 3
+                continue
+            if ch == '"':
+                in_string = True
+                pos += 1
+                continue
+            if ch == "#":
+                match = start_re.match(line, pos)
+                if match:
+                    is_inner = match.group(1) == "!"
+                    depth = 1
+                    pred_in_string = False
+                    pred_escaped = False
+                    pred_parts = []
+                    cur_line = line_idx
+                    cur_code = _strip_line_comment(lines[cur_line])
+                    idx = match.end()
+                    found_end = None
+                    while cur_line < n:
+                        chunk_start = idx
+                        while idx < len(cur_code):
+                            c = cur_code[idx]
+                            if pred_in_string:
+                                if pred_escaped:
+                                    pred_escaped = False
+                                elif c == "\\":
+                                    pred_escaped = True
+                                elif c == '"':
+                                    pred_in_string = False
+                            else:
+                                if c == '"':
+                                    pred_in_string = True
+                                elif c == "(":
+                                    depth += 1
+                                elif c == ")":
+                                    depth -= 1
+                                    if depth == 0:
+                                        pred_parts.append(cur_code[chunk_start:idx])
+                                        tail = cur_code[idx + 1:]
+                                        close_match = re.match(r"\s*\]", tail)
+                                        if close_match:
+                                            after_idx = idx + 1 + close_match.end()
+                                            found_end = (cur_line, after_idx, cur_code[after_idx:])
+                                        else:
+                                            found_end = (cur_line, idx + 1, "")
+                                        break
+                            idx += 1
+                        if found_end is not None:
+                            break
+                        pred_parts.append(cur_code[chunk_start:])
+                        cur_line += 1
+                        if cur_line < n:
+                            cur_code = _strip_line_comment(lines[cur_line])
+                            idx = 0
+                    if found_end is None:
+                        return
+                    end_line, after_idx, after_text = found_end
+                    predicate = " ".join(pred_parts)
+                    yield is_inner, predicate, line_idx, end_line, after_text
+                    if end_line > line_idx:
+                        line_idx = end_line
+                        line = lines[line_idx]
+                        line_len = len(line)
+                    pos = after_idx
+                    continue
+            pos += 1
+        line_idx += 1
+
+
+def _strip_leading_attrs(code, attr_depth):
+    """Strip any leading `#[...]` attributes (including multiline ones) from `code`, returning `(rest, attr_depth)`."""
+    i = 0
+    n = len(code)
+    while True:
+        if attr_depth > 0:
+            while i < n and attr_depth > 0:
+                if code[i] == "[":
+                    attr_depth += 1
+                elif code[i] == "]":
+                    attr_depth -= 1
+                i += 1
+            if attr_depth > 0:
+                return "", attr_depth
+        while i < n and code[i].isspace():
+            i += 1
+        if i + 1 < n and code[i] == "#" and code[i + 1] == "[":
+            attr_depth = 1
+            i += 2
+            continue
+        return code[i:], attr_depth
+
+
+def compiled_out_text(text, platform):
+    """The 1-based line numbers of Rust source `text` behind a `#[cfg(...)]` that doesn't hold on `platform`."""
+    lines = text.splitlines()
     out = set()
-    if any(re.match(r"\s*#!\[cfg\((.*)\)\]\s*$", line) and holds(re.match(r"\s*#!\[cfg\((.*)\)\]", line).group(1), platform) is False
-           for line in lines):
+    attrs = list(_find_cfg_attrs(lines))
+    if any(is_inner and holds(predicate, platform) is False for is_inner, predicate, _, _, _ in attrs):
         return set(range(1, len(lines) + 1))
-    for at, line in enumerate(lines):
-        found = re.match(r"\s*#\[cfg\((.*)\)\](.*)$", line)
-        if not found or holds(found.group(1), platform) is not False:
+    for is_inner, predicate, start_line, end_line, after_text in attrs:
+        if is_inner or holds(predicate, platform) is not False:
             continue
         # The item the attribute is on: to its closing brace, to the `;` or `,` that ends a statement or a field first,
         # or to the brace closing what holds it
         depth, parens, opened, end = 0, 0, False, None
-        rest = [found.group(2)] + lines[at + 1:]
-        for offset, text in enumerate(rest):
-            code = re.sub(r'"(\\.|[^"\\])*"', '""', text.split("//")[0])
-            if code.lstrip().startswith("#["):
-                continue
+        attr_depth = 0
+        rest = [after_text] + lines[end_line + 1:]
+        for offset, raw in enumerate(rest):
+            code = re.sub(r'"(\\.|[^"\\])*"', '""', _strip_line_comment(raw))
+            if not opened and depth == 0 and parens == 0:
+                code, attr_depth = _strip_leading_attrs(code, attr_depth)
+                if not code:
+                    continue
             for char in code:
                 if char in "([":
                     parens += 1
@@ -144,8 +358,14 @@ def compiled_out(root, path, platform):
                     break
             if end is not None:
                 break
-        out.update(range(at + 1, at + 1 + (end if end is not None else len(rest) - 1) + 1))
+        last_line = end_line + (end if end is not None else len(rest) - 1)
+        out.update(range(start_line + 1, last_line + 2))
     return out
+
+
+def compiled_out(root, path, platform):
+    """The lines of a source file behind a `#[cfg(...)]` that doesn't hold on `platform`"""
+    return compiled_out_text((root / path).read_text(encoding="utf-8"), platform)
 
 
 def lines_pattern(path, numbers):
