@@ -7,7 +7,8 @@
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read as _, Write as _};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use elmdb::engine::answer::{self, Answer};
 use elmdb::engine::batch::Batch;
@@ -114,23 +115,51 @@ fn child_builds_indexes_and_signals_mid_build() {
         return;
     };
     let db = Database::open(&path, OpenOptions { syncs: false, ..Default::default() }).unwrap();
-    let seq_before = db.sequence().unwrap();
+
+    // Keep `tracks` non-empty before `set_schema` so every builder chunk starts with key-write logging enabled
+    // (otherwise a chunk that began while `tracks` was empty commits with `written = None` and notifies every token
+    // conservatively). A `count` read only tracks `d/c`, which index builds never write.
+    let keep_logging = Reads {
+        reads: vec![
+            serde_json::from_value::<ReadOp>(json!({
+                "read": "query",
+                "plan": { "start": { "from": "types", "types": ["Doc"] }, "terminal": { "answer": "count" } }
+            }))
+            .unwrap(),
+        ],
+        track: Some(99),
+    };
+    db.read(&keep_logging).unwrap();
+
+    // `hear_builder_commits` runs synchronously on the background builder thread right after a chunk commits a key
+    // watched by a tracked read. Parking inside it freezes the builder mid-build (after chunk 1 of `meaning` commits
+    // `d/qp` + `d/xbr` progress, before chunks 2..3 and `grams` run), so SIGKILL always catches an interrupted build
+    // with zero scheduling race.
+    db.hear_builder_commits(Some(Arc::new(move |_, _| {
+        let mut out = std::io::stdout().lock();
+        // Leading newline separates the marker from libtest's `test <name> ... ` prefix under `--nocapture`.
+        writeln!(out, "\nchunk-committed").unwrap();
+        out.flush().unwrap();
+        loop {
+            std::thread::park();
+        }
+    })))
+    .unwrap();
+
     db.set_schema(indexed_schema()).unwrap();
 
-    // `set_schema` itself consumes one sequence; wait until at least one background build chunk commits (`d/xbr`
-    // progress), advancing `sequence` by at least 2 past `seq_before`, then immediately signal the parent to SIGKILL.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    while db.sequence().unwrap() < seq_before + 2 {
-        assert!(Instant::now() < deadline, "background builder did not commit a chunk within 15s");
-        std::thread::sleep(Duration::from_millis(1));
-    }
+    // Track `pendingEmbeddings` on `meaning` (built third, after `byCat` and `text`): chunk 1 of `meaning` writes
+    // `d/qp` keys plus `d/xbr` progress and immediately fires `hear_builder_commits` on the builder thread.
+    let track_pending = Reads {
+        reads: vec![
+            serde_json::from_value::<ReadOp>(json!({ "read": "pendingEmbeddings", "type": "Doc", "limit": 1 }))
+                .unwrap(),
+        ],
+        track: Some(1),
+    };
+    db.read(&track_pending).unwrap();
 
-    let mut out = std::io::stdout().lock();
-    // Leading newline separates the marker from libtest's `test <name> ... ` prefix under `--nocapture`.
-    writeln!(out, "\nchunk-committed").unwrap();
-    out.flush().unwrap();
-
-    // Park until SIGKILLed by parent (or parent exits and closes stdin).
+    // Park main thread until SIGKILLed by parent (or parent exits and closes stdin).
     let _ = std::io::stdin().read_to_end(&mut Vec::new());
 }
 
@@ -234,7 +263,8 @@ fn sigkill_mid_background_index_build_recovers_cleanly() {
     assert!(!status.success(), "killed child must not report normal exit");
 
     // Reopen read-only first to verify the database opens cleanly right after SIGKILL without modifying anything
-    // and that the kill actually interrupted background building before all indexes completed.
+    // and that the kill genuinely interrupted `meaning` mid-build (chunk 1 committed with `d/xbr`, remaining chunks
+    // and `grams` still unbuilt).
     {
         let ro = Database::open(&db_path, OpenOptions { read_only: true, ..Default::default() }).unwrap();
         let count = read_json(
@@ -245,28 +275,18 @@ fn sigkill_mid_background_index_build_recovers_cleanly() {
             }),
         );
         assert_eq!(count["n"], json!(ENTITY_COUNT));
-        let any_value_unbuilt = ro.index_status().unwrap().iter().any(|s| !s.built || s.ordered == Some(false));
-        let text_still_building = {
-            let reads = Reads {
-                reads: vec![
-                    serde_json::from_value::<ReadOp>(json!({
-                        "read": "query",
-                        "plan": {
-                            "start": { "from": "types", "types": ["Doc"] },
-                            "steps": [{ "step": "search", "query": "lighthouse" }],
-                            "terminal": { "answer": "ids" }
-                        }
-                    }))
-                    .unwrap(),
-                ],
-                track: None,
-            };
-            matches!(ro.read(&reads), Err(e) if e.code == elmdb::ErrorCode::IndexBuilding)
+        let Answer::Pending { count: pending_mid, .. } =
+            read_answer(&ro, json!({ "read": "pendingEmbeddings", "type": "Doc", "limit": 1 }))
+        else {
+            panic!("pendingEmbeddings did not answer Pending");
         };
+        let total_pending = (ENTITY_COUNT - embedded_count) as u64;
         assert!(
-            any_value_unbuilt || text_still_building,
-            "SIGKILL should interrupt the background builder while at least one index is still unbuilt"
+            pending_mid > 0 && pending_mid < total_pending,
+            "SIGKILL must leave `meaning` partially built with a `d/xbr` checkpoint on disk (got {pending_mid}/{total_pending} pending)"
         );
+        let any_index_unbuilt = ro.index_status().unwrap().iter().any(|s| !s.built || s.ordered == Some(false));
+        assert!(any_index_unbuilt, "SIGKILL must leave remaining index/order builds unfinished");
         ro.close().unwrap();
     }
 

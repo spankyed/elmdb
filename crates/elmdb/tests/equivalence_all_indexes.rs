@@ -107,6 +107,7 @@ struct ReferenceAnswers {
     all_relations: Json,
     weighted_from_1: Json,
     edges_both: Json,
+    with_role_starred: Json,
     value_status_open: Json,
     value_status_explained: Json,
     unique_short: Json,
@@ -173,6 +174,17 @@ fn capture_answers(db: &Database) -> ReferenceAnswers {
             "plan": {
                 "start": { "from": "types", "types": ["Note"] },
                 "terminal": { "answer": "edges", "kinds": ["weighs", "parent_of"], "direction": "both" }
+            }
+        }),
+    );
+    let with_role_starred = read_json(
+        db,
+        json!({
+            "read": "query",
+            "plan": {
+                "start": { "from": "types", "types": ["Note"] },
+                "steps": [{ "step": "withRole", "role": "starred" }],
+                "terminal": { "answer": "ids" }
             }
         }),
     );
@@ -358,6 +370,7 @@ fn capture_answers(db: &Database) -> ReferenceAnswers {
         all_relations,
         weighted_from_1,
         edges_both,
+        with_role_starred,
         value_status_open,
         value_status_explained,
         unique_short,
@@ -389,6 +402,19 @@ fn explain_indexes(explained: &Json) -> Vec<String> {
         .collect()
 }
 
+/// Verifies `orderBy` over `title` reads the built collation order (`d/xo`) rather than falling back to in-memory
+/// sorting (`sorted: "building"` or `"noRoom"`).
+fn assert_collation_uses_order_index(label: &str, explained: &Json) {
+    let stages = explained["stages"].as_array().unwrap();
+    let order_stage = &stages[1];
+    assert_eq!(order_stage["stage"], json!("orderBy"), "{label}: expected orderBy at stages[1]: {stages:?}");
+    assert_eq!(order_stage.get("index"), Some(&json!("byTitle")), "{label}: expected byTitle index: {order_stage:?}");
+    assert!(
+        order_stage.get("sorted").is_none(),
+        "{label}: collation orderBy fell back to sorting instead of reading d/xo: {order_stage:?}"
+    );
+}
+
 fn assert_hits_close(label: &str, actual: &[Hit], expected: &[Hit], eps: f64) {
     let actual_ids: Vec<&str> = actual.iter().map(|h| h.id.as_str()).collect();
     let expected_ids: Vec<&str> = expected.iter().map(|h| h.id.as_str()).collect();
@@ -413,6 +439,7 @@ fn assert_answers_equivalent(label: &str, actual: &ReferenceAnswers, expected: &
     assert_eq!(actual.all_relations, expected.all_relations, "{label}: all_relations");
     assert_eq!(actual.weighted_from_1, expected.weighted_from_1, "{label}: weighted_from_1");
     assert_eq!(actual.edges_both, expected.edges_both, "{label}: edges_both");
+    assert_eq!(actual.with_role_starred, expected.with_role_starred, "{label}: with_role_starred");
     assert_eq!(actual.value_status_open, expected.value_status_open, "{label}: value_status_open");
     assert_eq!(
         explain_indexes(&actual.value_status_explained),
@@ -434,6 +461,7 @@ fn assert_answers_equivalent(label: &str, actual: &ReferenceAnswers, expected: &
         explain_indexes(&expected.collation_explained),
         "{label}: collation index plan"
     );
+    assert_collation_uses_order_index(label, &actual.collation_explained);
     assert_eq!(actual.text_search_hits, expected.text_search_hits, "{label}: text_search_hits");
     assert_eq!(actual.text_suggest, expected.text_suggest, "{label}: text_suggest");
     assert_eq!(actual.trigram_containing_exact, expected.trigram_containing_exact, "{label}: trigram_containing_exact");
@@ -734,7 +762,8 @@ fn backup_dump_load_and_replace_with_preserve_all_nine_index_kinds_and_features(
     assert!(explain_indexes(&ref_answers.compound_explained).iter().any(|i| i == "byGroupPriority"));
     // English collation: apple < banana < Banana < café < Éclair < Zeta-long-... (Note-7 "cherry" is trashed)
     assert_eq!(ref_answers.collation_asc["ids"], json!(["Note-1", "Note-3", "Note-2", "Note-4", "Note-5", "Note-6"]));
-    assert!(explain_indexes(&ref_answers.collation_explained).iter().any(|i| i == "byTitle"));
+    assert_collation_uses_order_index("reference", &ref_answers.collation_explained);
+    assert_eq!(ref_answers.with_role_starred["ids"], json!(["Note-1"]));
     assert!(!ref_answers.text_search_hits["hits"].as_array().unwrap().is_empty());
     assert_eq!(ref_answers.trigram_containing_exact["ids"], json!(["Note-1"]));
     assert_eq!(ref_answers.trigram_containing_ci["ids"], json!(["Note-1", "Note-2"]));
