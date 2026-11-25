@@ -114,7 +114,8 @@ pub(super) fn freed_from(file: &mut File, psize: usize, root: u64, from: u64) ->
         budget -= 1;
         let Some(page) = pgno.checked_mul(psize as u64).and_then(|at| read_at(file, at, psize)) else { continue };
         let flags = u16_at(&page, 10);
-        for node in nodes(&page).filter(|node| node + 8 <= page.len()) {
+        let Some(page_nodes) = nodes(&page) else { continue };
+        for node in page_nodes.filter(|node| node + 8 <= page.len()) {
             let (lo, hi, node_flags) = (u16_at(&page, node), u16_at(&page, node + 2), u16_at(&page, node + 4));
             if flags & P_BRANCH != 0 {
                 // The child's page number: its low, middle and high 16-bit words, the last in the node's flags
@@ -180,10 +181,16 @@ pub(super) fn named_roots(page: &[u8]) -> Vec<u64> {
     if u16_at(page, 10) & P_LEAF == 0 {
         return Vec::new();
     }
-    nodes(page)
+    let Some(page_nodes) = nodes(page) else {
+        return Vec::new();
+    };
+    page_nodes
         .filter(|node| node + 8 <= page.len())
         .filter(|node| u16_at(page, node + 4) & F_SUBDATA != 0)
-        .map(|node| u64_at(page, node + 8 + u16_at(page, node + 6) as usize + DB_ROOT))
+        .filter_map(|node| {
+            let at = node.checked_add(8)?.checked_add(u16_at(page, node + 6) as usize)?.checked_add(DB_ROOT)?;
+            page.get(at..at + 8).map(|b| u64::from_ne_bytes(b.try_into().expect("eight bytes")))
+        })
         .collect()
 }
 
@@ -261,7 +268,10 @@ impl Walk<'_> {
                     &format!("reaches page {pgno} as a tree page, which is an overflow page"),
                 ));
             }
-            for node in nodes(&page) {
+            let Some(page_nodes) = nodes(&page) else {
+                return Err(corrupt(self.path, &format!("page {pgno} has a node pointer table past its page")));
+            };
+            for node in page_nodes {
                 let (lo, hi, node_flags, key) = node_head(&page, node, self.path)?;
                 let data = node + 8 + key;
                 if flags & P_BRANCH != 0 {
@@ -349,11 +359,15 @@ impl Walk<'_> {
     }
 }
 
-/// The offsets of a page's nodes, from its pointer array, which ends at its `lower` bound
-fn nodes(page: &[u8]) -> impl Iterator<Item = usize> + '_ {
+/// The offsets of a page's nodes, from its pointer array, which ends at its `lower` bound.
+/// Returns `None` if `lower` exceeds `page.len()`.
+fn nodes(page: &[u8]) -> Option<impl Iterator<Item = usize> + '_> {
     let lower = u16_at(page, 12) as usize;
+    if lower > page.len() {
+        return None;
+    }
     let count = lower.saturating_sub(PAGE_HEADER) / 2;
-    (0..count).map(move |i| u16_at(page, PAGE_HEADER + 2 * i) as usize)
+    Some((0..count).map(move |i| u16_at(page, PAGE_HEADER + 2 * i) as usize))
 }
 
 /// A node's low and high data-size words, its flags and its key size, read from the node's header
@@ -651,5 +665,53 @@ mod tests {
         assert_eq!(newer.map(|meta| meta.txnid), Some(5), "a file torn short refused");
         let mut unreadable = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         assert!(newer_meta_page(&mut unreadable, PSIZE).is_err(), "a failed read taken as no meta page");
+    }
+
+    #[test]
+    fn a_corrupt_lower_past_page_len_is_refused_by_reach_and_skipped_by_helpers() {
+        let psize = 512;
+        // A valid leaf page at page 1, except `lower` claims pointers past the end of the 512-byte page
+        let mut corrupt_leaf = leaf_of_seven(psize);
+        corrupt_leaf[..8].copy_from_slice(&1u64.to_ne_bytes());
+        corrupt_leaf[12..14].copy_from_slice(&((psize + 2) as u16).to_ne_bytes());
+        let (_dir, mut file) = file_of(&[vec![0u8; psize], corrupt_leaf.clone()]);
+        let meta = Meta { free: NONE, main: 1, last_page: 1, _held: PhantomData };
+        let error = reach(&mut file, psize, 2, &meta, Path::new("data.mdb")).err().expect("corrupt lower refused");
+        assert_eq!(error.code, ErrorCode::Corrupted, "{error}");
+        assert_eq!(named_roots(&corrupt_leaf), Vec::<u64>::new(), "named_roots skips corrupt lower");
+        assert_eq!(freed_from(&mut file, psize, 1, 0), 0, "freed_from skips corrupt lower");
+
+        // `lower == page.len()` is within bounds and yields all pointer slots in the page
+        let mut exact_lower = vec![0u8; psize];
+        exact_lower[12..14].copy_from_slice(&(psize as u16).to_ne_bytes());
+        assert_eq!(nodes(&exact_lower).expect("lower == page.len() is in bounds").count(), (psize - PAGE_HEADER) / 2);
+
+        // `freed_from` skips a leaf node whose header runs past the end of the page
+        let mut oob_free = vec![0u8; psize];
+        oob_free[10..12].copy_from_slice(&P_LEAF.to_ne_bytes());
+        oob_free[12..14].copy_from_slice(&((PAGE_HEADER + 2) as u16).to_ne_bytes());
+        oob_free[PAGE_HEADER..PAGE_HEADER + 2].copy_from_slice(&((psize - 4) as u16).to_ne_bytes());
+        let (_dir2, mut file2) = file_of(&[vec![0u8; psize], oob_free]);
+        assert_eq!(freed_from(&mut file2, psize, 1, 0), 0);
+
+        // A leaf with F_SUBDATA whose DB_ROOT field runs past page.len() must be skipped rather than hashing page 0,
+        // while a valid F_SUBDATA node on the same leaf returns its root page number
+        let mut subdata_page = vec![0u8; psize];
+        subdata_page[10..12].copy_from_slice(&P_LEAF.to_ne_bytes());
+        subdata_page[12..14].copy_from_slice(&((PAGE_HEADER + 6) as u16).to_ne_bytes());
+        let oob_header = psize - 4;
+        let oob_root = psize - 16;
+        let valid_node = 64usize;
+        let key_len = 4u16;
+        subdata_page[PAGE_HEADER..PAGE_HEADER + 2].copy_from_slice(&(oob_header as u16).to_ne_bytes());
+        subdata_page[PAGE_HEADER + 2..PAGE_HEADER + 4].copy_from_slice(&(oob_root as u16).to_ne_bytes());
+        subdata_page[PAGE_HEADER + 4..PAGE_HEADER + 6].copy_from_slice(&(valid_node as u16).to_ne_bytes());
+        subdata_page[oob_root + 4..oob_root + 6].copy_from_slice(&F_SUBDATA.to_ne_bytes());
+        subdata_page[oob_root + 6..oob_root + 8].copy_from_slice(&0u16.to_ne_bytes());
+        subdata_page[valid_node + 4..valid_node + 6].copy_from_slice(&F_SUBDATA.to_ne_bytes());
+        subdata_page[valid_node + 6..valid_node + 8].copy_from_slice(&key_len.to_ne_bytes());
+        let root_at = valid_node + 8 + key_len as usize + DB_ROOT;
+        subdata_page[root_at..root_at + 8].copy_from_slice(&42u64.to_ne_bytes());
+        assert_eq!(named_roots(&subdata_page), vec![42]);
     }
 }

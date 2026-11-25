@@ -718,7 +718,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(dir.path(), grouped()).unwrap();
         put(&store, "a");
-        let (txn, gate, writer) = store.begin().unwrap();
+        let held_unit = store.begin().unwrap();
         // Past the bound, as last read: a write would wait for a sync, and one asked for would be held here
         let kept = store.kept.as_ref().unwrap();
         past_the_bound(&store);
@@ -731,9 +731,7 @@ mod tests {
         assert_eq!(store.begin().err().map(|error| error.code), Some(ErrorCode::UnitOpen));
         assert!(held.try_recv().is_err(), "the owner waited on a sync before it was refused");
         drop(release);
-        txn.abort();
-        drop(gate);
-        writer.release();
+        held_unit.abort();
         store.end_unit();
         kept.past.store(false, Relaxed);
         store.close().unwrap();

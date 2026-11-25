@@ -40,8 +40,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 use heed::{RoTxn, RwTxn, WithoutTls};
-use parking_lot::lock_api::ArcRwLockReadGuard;
-use parking_lot::{RawRwLockRecursive, RwLock};
+use parking_lot::RwLock;
 
 use crate::database::{Database, EngineSchema};
 use crate::diagnostics::Op;
@@ -1100,44 +1099,28 @@ impl Database {
         // The unit's place is let go if no unit comes of it, refused or panicking, once the transaction and its
         // holds, declared after it, have gone
         let mut place = Place { store: &store, taken: false };
-        let (txn, gate, writer) = store.begin()?;
-        // Declared so that an unwind drops the transaction first, then the gate, as the unit's own end does
-        let (writer, gate, txn) = (writer, gate, txn);
+        let held_txn = store.begin()?;
         place.taken = true;
         run_point!(UNIT_HELD);
-        if let Err(error) = held.validate(&txn, store.db()) {
-            drop(txn);
-            drop(gate);
-            writer.release();
-            return Err(error);
-        }
+        held.validate(&held_txn.txn, store.db())?;
         let schema = Arc::clone(&held);
         drop(held);
-        let builders = match self.builders() {
-            Ok(builders) => builders,
-            Err(error) => {
-                drop(txn);
-                drop(gate);
-                writer.release();
-                return Err(error);
-            }
-        };
-        // SAFETY: the transaction borrows the store's environment. `Unit` holds the store, in a field declared after
-        // the transaction's, so the transaction is dropped first and the environment outlives it
-        let txn: RwTxn<'static> = unsafe { std::mem::transmute::<RwTxn<'_>, RwTxn<'static>>(txn) };
+        let builders = self.builders()?;
+        // SAFETY: `held_txn` borrows `store`'s environment. `Unit` holds `store` in a field declared after `txn`,
+        // so `WriteTxn` (dropping its `RwTxn` before `_writer` and `_gate`) drops before `store` and its environment.
+        let held_txn: crate::store::WriteTxn<'static> = unsafe { held_txn.into_static() };
         let logging = !self.tracks.lock().is_empty();
         let (tracks, schemas) = (Arc::clone(&self.tracks), self.observing_schema());
         // From here the unit holds the place, and ends it
         place.taken = false;
         drop(place);
         Ok(Unit {
-            txn: Some(txn),
+            txn: Some(held_txn),
             state: UnitState::new(logging),
             tracks,
+            pending_tracks: Vec::new(),
             schemas,
             poisoned: None,
-            gate: Some(gate),
-            writer: Some(writer),
             schema,
             store,
             builders,
@@ -1164,20 +1147,19 @@ impl Drop for Place<'_> {
 /// A unit open across calls. Its write transaction belongs to the thread that began it, so it can't be sent to
 /// another. Dropped without a commit, it is aborted
 pub struct Unit {
-    // Field order is drop order: the transaction before the gate and the store it borrows
-    txn: Option<RwTxn<'static>>,
+    // Field order is drop order: `WriteTxn` drops its `RwTxn` before `_writer` and `_gate`, and all of them before
+    // `store` (which owns the LMDB `Env` that `WriteTxn` borrows).
+    txn: Option<crate::store::WriteTxn<'static>>,
     state: UnitState,
-    /// Why the unit can't commit: LMDB can't go on with a transaction a write filled the map in
+    /// Why the unit can't commit: LMDB can't go on with a transaction a write or undo left broken
     poisoned: Option<Error>,
-    /// The store's gate, held while the transaction is: a map growth waits for the unit to end
-    gate: Option<ArcRwLockReadGuard<RawRwLockRecursive, ()>>,
-    /// The writer's hold on the write transaction, let go once the transaction has ended and the store has accounted
-    /// for its commit (`store/writers.rs`)
-    writer: Option<crate::store::WriterLock>,
     schema: Arc<EngineSchema>,
     schemas: Arc<RwLock<Arc<EngineSchema>>>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,
+    /// Read sets recorded by `Unit::read`, filed on `tracks` only when this unit commits so failed reads and aborted
+    /// units never leave uncommitted-write read sets on tokens
+    pending_tracks: Vec<(u32, tracking::ReadSet)>,
     /// The builder the rank indexes' pushes its commit leaves go to
     builders: Option<crate::database::Builders>,
     /// Whether the store has been told the unit ended: once, however it ends
@@ -1200,7 +1182,15 @@ impl Unit {
     /// `reset` and `replace_with` drop it with them, so a reader starts again from nothing
     pub fn set_checkpoint(&mut self, name: &str, value: &[u8]) -> Result<()> {
         checkpoint_name(name)?;
-        self.view(0.0)?.put(&keys::checkpoint(name), value)
+        let key = keys::checkpoint(name);
+        let mut t = self.view(0.0)?;
+        if let Err(error) = t.put(&key, value) {
+            if error.code != ErrorCode::ValueInvalid {
+                self.poisoned = Some(error.clone());
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// The checkpoint named `name`, as this unit sees it
@@ -1244,8 +1234,8 @@ impl Unit {
     pub fn next_sequence(&mut self) -> Result<u64> {
         // What a poisoned or ended unit refuses, as its other calls do
         self.view(0.0)?;
-        let txn = self.txn.as_ref().ok_or_else(|| Error::new(ErrorCode::Closed, "The unit has ended"))?;
-        self.store.next_sequence(txn)
+        let held = self.txn.as_ref().ok_or_else(|| Error::new(ErrorCode::Closed, "The unit has ended"))?;
+        self.store.next_sequence(&held.txn)
     }
 
     fn view(&mut self, now: f64) -> Result<Txn<'_, 'static>> {
@@ -1255,8 +1245,8 @@ impl Unit {
                 format!("The unit can't go on, and must be aborted: {}", error.message),
             ));
         }
-        let txn = self.txn.as_mut().ok_or_else(|| Error::new(ErrorCode::Closed, "The unit has ended"))?;
-        Ok(Txn { txn, db: self.store.db(), state: &mut self.state, schema: &self.schema, now })
+        let held = self.txn.as_mut().ok_or_else(|| Error::new(ErrorCode::Closed, "The unit has ended"))?;
+        Ok(Txn { txn: &mut held.txn, db: self.store.db(), state: &mut self.state, schema: &self.schema, now })
     }
 
     /// Applies a batch in the unit, keeping none of it when any operation is refused
@@ -1266,7 +1256,7 @@ impl Unit {
         let depth = t.state.savepoint();
         match apply_all(&mut t, batch) {
             Ok(results) => {
-                t.release(depth);
+                t.release(depth)?;
                 Ok(results)
             }
             Err(error) => {
@@ -1296,13 +1286,13 @@ impl Unit {
 
     /// Answers reads from the unit's transaction, which sees the unit's own writes
     pub fn read(&mut self, reads: &plan::Reads) -> Result<Vec<u8>> {
-        let tracks = Arc::clone(&self.tracks);
         let t = self.view(0.0)?;
         let Some(token) = reads.track else { return reads::run(&t, &reads.reads) };
         let recording = tracking::Recording::new(&t);
-        let answer = reads::run(&recording, &reads.reads);
-        tracks.lock().file(token, recording.into_reads());
-        answer
+        let answer = reads::run(&recording, &reads.reads)?;
+        let read_set = recording.into_reads();
+        self.pending_tracks.push((token, read_set));
+        Ok(answer)
     }
 
     /// `read` with the reads as msgpack bytes
@@ -1318,13 +1308,19 @@ impl Unit {
 
     /// Undoes everything since the savepoint at `depth`, closing it
     pub fn rollback_to(&mut self, depth: usize) -> Result<()> {
-        self.view(0.0)?.rollback_to(depth)
+        let mut view = self.view(0.0)?;
+        let result = view.rollback_to(depth);
+        if let Err(error) = &result
+            && error.code != ErrorCode::BatchInvalid
+        {
+            self.poisoned = Some(error.clone());
+        }
+        result
     }
 
     /// Closes the savepoint at `depth`, keeping its writes in the unit around it
     pub fn release(&mut self, depth: usize) -> Result<()> {
-        self.view(0.0)?.release(depth);
-        Ok(())
+        self.view(0.0)?.release(depth)
     }
 
     /// Commits the unit. `durable` waits for the commit's sync
@@ -1341,16 +1337,20 @@ impl Unit {
             }
         };
         let changes = ChangeSet::of(&self.state.events);
-        let txn = self.txn.take().expect("an open unit has its transaction");
+        let held = self.txn.take().expect("an open unit has its transaction");
         run_point!(UNIT_COMMITTING);
         self.store.deposit(std::mem::take(&mut self.state.edges));
         self.store.deposit_touched(changed::Touched::of(&self.state.events, &self.schema));
-        let committed = self.store.commit_txn(txn);
-        self.gate = None;
-        self.writer = None;
+        let committed = held.commit(&self.store);
         self.ended = true;
         self.store.end_unit();
         let sequence = committed?;
+        if !self.pending_tracks.is_empty() {
+            let mut tracks = self.tracks.lock();
+            for (token, reads) in self.pending_tracks.drain(..) {
+                tracks.file(token, reads);
+            }
+        }
         let synced = self.store.committed(durable);
         // As in `write`: the commit has landed whatever its sync answers, so its rank work is queued before a failed sync
         let landed = finish_commit(
@@ -1369,12 +1369,11 @@ impl Unit {
 
     /// Ends the unit, keeping nothing of it
     pub fn abort(&mut self) {
-        // The transaction first, and then its holds. A commit that panicked once it had taken the transaction has
-        // not told the store, which is told here as the unit is dropped
+        // `WriteTxn` drops `txn` first, then `_writer`, then `_gate`. A commit that panicked once it had taken
+        // `txn` has not told the store, which is told here as the unit is dropped.
         self.txn = None;
+        self.pending_tracks.clear();
         if !self.ended {
-            self.gate = None;
-            self.writer = None;
             self.ended = true;
             self.store.end_unit();
         }

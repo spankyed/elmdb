@@ -57,7 +57,10 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
     let decide = record::lock_file(dir, record::RECORD_LOCK)?;
     let _deciding = record::exclusive(&decide)?;
     // An open in another mode than a live writer's is refused before it reads or writes anything
-    let mode_held = mode.map(|mode| mode_lock(dir, mode)).transpose()?;
+    let (mode_held, first_writer) = match mode.map(|mode| mode_lock(dir, mode)).transpose()? {
+        Some((lock, first)) => (Some(lock), first),
+        None => (None, false),
+    };
     let presence = record::lock_file(dir, record::PRESENCE)?;
     let alone = match presence.try_lock() {
         Ok(()) => true,
@@ -76,9 +79,12 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
         file.sync()?;
     }
     let data = dir.join("data.mdb");
+    // Run `decided` whenever this open is alone OR is the first writable opener (any other open handle is read-only,
+    // so `data.mdb` is quiescent). A prior read-only open alone could neither update a stale boot on `Unchanged` nor
+    // void a foreign record on `NotBorneOut`, so the first writer must normalize the record before relying on it.
     let outcome = match &record {
         None => Outcome::AsIs,
-        Some(record) if !alone => {
+        Some(record) if !alone && !first_writer => {
             if record.mode == Mode::Grouped && record.state == State::Failed {
                 return Err(pending(dir, "another process has it open"));
             }
@@ -106,6 +112,9 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
             }
         }
         Outcome::Restore => {
+            if !alone {
+                return Err(pending(dir, "another process has it open"));
+            }
             let earlier = record.take().expect("a restore is of a record");
             let mut data = std::fs::OpenOptions::new().read(true).write(true).open(&data).map_err(|error| {
                 pending(dir, &format!("its data file can't be written ({error}) and no writable open has made it"))
@@ -166,8 +175,9 @@ pub(super) fn decide(dir: &Path, mode: Option<Mode>, boot: Boot) -> Result<Decid
 }
 
 /// The lock of `mode`, taken shared for a writable open of it once no writable open of another mode holds its own:
-/// each is tried while the lock every open decides under is held, so two opens of two modes can't both pass
-fn mode_lock(dir: &Path, mode: Mode) -> Result<File> {
+/// each is tried while the lock every open decides under is held, so two opens of two modes can't both pass.
+/// Also returns whether this open is the first writable opener (no other writer currently holds `mode`'s lock).
+fn mode_lock(dir: &Path, mode: Mode) -> Result<(File, bool)> {
     for other in Mode::ALL.into_iter().filter(|other| *other != mode) {
         let held = record::lock_file(dir, record::mode_lock(other))?;
         match held.try_lock() {
@@ -190,8 +200,16 @@ fn mode_lock(dir: &Path, mode: Mode) -> Result<File> {
         }
     }
     let own = record::lock_file(dir, record::mode_lock(mode))?;
+    let first = match own.try_lock() {
+        Ok(()) => {
+            own.unlock()?;
+            true
+        }
+        Err(std::fs::TryLockError::WouldBlock) => false,
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    };
     own.lock_shared()?;
-    Ok(own)
+    Ok((own, first))
 }
 
 /// How an open that holds the database alone goes on, by a record of `data`

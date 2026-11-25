@@ -231,11 +231,12 @@ impl RecordFile {
                 Err(error) => Err(error.into()),
             };
         }
-        // mutant-skip: delete ! in RecordFile::open
-        // What it changes is whether the directory is synced as the file is made, which only a loss tells apart
-        let made = !path.exists();
         let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)?;
-        if made {
+        // Sync the directory whenever the file is empty — both when just created and when a prior crash left a
+        // 0-byte record file before its directory entry was synced
+        // mutant-skip: replace == with != in RecordFile::open
+        // What it changes is whether the directory is synced when the file is empty, which only a loss tells apart
+        if file.metadata()?.len() == 0 {
             sync_directory(dir)?;
         }
         Ok(Some(Self { file, path }))

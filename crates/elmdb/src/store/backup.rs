@@ -29,7 +29,9 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
         partial.as_file_mut().set_len(0)?;
         partial.as_file_mut().rewind()?;
         let guard = store.gate();
-        match store.env.copy_to_file(partial.as_file_mut(), heed::CompactionOption::Enabled) {
+        match super::with_reader_recovery(&store.env, || {
+            store.env.copy_to_file(partial.as_file_mut(), heed::CompactionOption::Enabled)
+        }) {
             Ok(()) => {
                 partial.as_file().sync_all()?;
                 break;

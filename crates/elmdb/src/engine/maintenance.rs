@@ -4,15 +4,13 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use heed::types::Bytes;
-use heed::{CommitOrAbort, EnvFlags, EnvOpenOptions};
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
 
 use crate::database::Database;
 use crate::error::{Error, ErrorCode, Result};
 use crate::format::key::{Part, decode as decode_key};
-use crate::format::{self, Prefix, PrefixKind, meta};
+use crate::format::{Prefix, PrefixKind};
 
 use super::unit::{Read, Txn};
 use super::{derive, entities, ids, keys, relations, values};
@@ -403,33 +401,9 @@ impl Database {
         // Opened as an open opens it: at the last synced commit where the record asks for a restore, and held open
         // while it is read, so that no open that finds it alone restores it meanwhile
         let _opened = crate::store::decide_for_reading(source)?;
-        let mut options = EnvOpenOptions::new().read_txn_without_tls();
-        options.max_dbs(8);
-        #[cfg(windows)]
-        options.map_size(crate::store::read_only_map_size(std::fs::metadata(source.join("data.mdb"))?.len(), None));
-        // SAFETY: LMDB's locks are per process, so an environment must be this process's only one of its files: the
-        // source's path is reserved above, which every open in this process asks first, and heed refuses a second
-        // environment of a path besides. It is opened read-only, for this call alone
-        unsafe { options.flags(EnvFlags::READ_ONLY) };
-        let env = unsafe { options.open(source) }?;
+        let env = crate::store::open_source_env(source)?;
         crate::store::require_registered_reader(&env, source)?;
-        let rtxn = crate::store::read_txn(&env)?;
-        let from = env
-            .open_databases_and_commit(rtxn, |opener, rtxn| -> heed::Result<_> {
-                Ok(CommitOrAbort::<_, ()>::Commit(opener.open_database::<Bytes, Bytes>(rtxn, Some(format::DB_NAME))?))
-            })?
-            .unwrap_commit()
-            .ok_or_else(|| {
-                Error::new(ErrorCode::NotADatabase, format!("{} holds no elmdb database", source.display()))
-            })?;
-        let rtxn = crate::store::read_txn(&env)?;
-        let stamped = from.get(&rtxn, &crate::store::meta_key(meta::FORMAT))?.map(<[u8]>::to_vec);
-        if stamped.as_deref() != Some(&format::FORMAT_VERSION.to_be_bytes()[..]) {
-            return Err(Error::new(
-                ErrorCode::WrongFormat,
-                format!("{} isn't a database in format {}", source.display(), format::FORMAT_VERSION),
-            ));
-        }
+        let crate::store::SourceSnapshot { db: from, txn: rtxn } = crate::store::open_source_snapshot(&env, source)?;
         // Retain one immutable source snapshot through retries, copying primary ranges directly into the write.
         // No source values are retained after each put, and derived source rows are never traversed.
         let store = self.store()?;
