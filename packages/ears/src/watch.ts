@@ -207,8 +207,9 @@ const processLater = (fn: () => void): (() => void) => {
 
 /** Adapts a structural `EarsClock` to the watch scheduler's clock, routing both gaps and `later` yields through `clock.after` */
 export function watchClockOf(clock: EarsClock): WatchClock {
+  const monotonicNow = clock.monotonic ? () => clock.monotonic!() : () => clock.now();
   return {
-    now: () => clock.now(),
+    now: monotonicNow,
     setTimeout: (fn, ms) => clock.after(ms, fn),
     clearTimeout: (handle) => (handle as () => void)(),
     later: (fn) => clock.after(0, fn),

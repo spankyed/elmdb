@@ -513,4 +513,71 @@ describe('injectable EarsClock', () => {
     expect(await isResolved(engine.admin.watchesSettled())).toBe(true);
     a.stop();
   });
+
+  it('keeps watch gaps and call durations on monotonic() when wall time now() jumps', async () => {
+    let wallMs = 1_750_000_000_000;
+    let monoMs = 500;
+    const scheduled: Array<{ due: number; fn: () => void; cancelled: boolean }> = [];
+    const clock: EarsClock = {
+      now: () => wallMs,
+      monotonic: () => monoMs,
+      after(ms, run) {
+        const entry = { due: monoMs + Math.max(0, ms), fn: run, cancelled: false };
+        scheduled.push(entry);
+        return () => { entry.cancelled = true; };
+      },
+    };
+    const advanceMono = (ms: number) => {
+      monoMs += ms;
+      for (;;) {
+        const due = scheduled
+          .filter((entry) => !entry.cancelled && entry.due <= monoMs)
+          .sort((a, b) => a.due - b.due)[0];
+        if (!due) break;
+        due.cancelled = true;
+        due.fn();
+      }
+    };
+
+    const { database } = databases.open({
+      types: { Task: { required: [] } },
+      relations: {},
+      roles: [],
+    });
+    const engine = createEarsEngine({
+      database,
+      clock,
+      schedule: { delayFactor: 4, minimumGapMs: 20, flushSliceMs: 8 },
+    });
+
+    const delivered: number[] = [];
+    const watching = engine.watch(() => {
+      monoMs += 2;
+      return engine.query('Task').count();
+    }, (count) => delivered.push(count), { label: 'mono' });
+    await flushMicrotasks();
+    expect(delivered).toEqual([0]);
+
+    // Jump wall clock forward by 10 seconds while monotonic time does not move:
+    // entity timestamps follow wall time, while the watch still respects its 20 ms monotonic gap
+    wallMs += 10_000;
+    engine.admin.calls.start();
+    const id = engine.create('Task', { title: 'after-wall-jump' }).id();
+    const report = engine.admin.calls.stop();
+    expect(engine.getRow(id)?.createdAt).toBe(1_750_000_010_000);
+    expect(report.elapsedMs).toBe(0);
+
+    await flushMicrotasks();
+    expect(delivered, 'wall-clock jump must not bypass monotonic watch gap').toEqual([0]);
+    expect(engine.admin.watchDiagnostics().scheduler.timerAt).toBe(522);
+
+    advanceMono(19);
+    await flushMicrotasks();
+    expect(delivered).toEqual([0]);
+
+    advanceMono(1);
+    await flushMicrotasks();
+    expect(delivered).toEqual([0, 1]);
+    watching.stop();
+  });
 });

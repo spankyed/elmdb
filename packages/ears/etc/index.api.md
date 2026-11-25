@@ -260,6 +260,7 @@ export interface EarsAdmin {
 // @public
 export interface EarsClock {
     after(ms: number, run: () => void): () => void;
+    monotonic?(): number;
     now(): number;
 }
 
