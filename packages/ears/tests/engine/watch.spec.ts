@@ -513,7 +513,7 @@ it('reports a committed load to connection listeners exactly once', () => {
   expect(() => connection.load([{ load: 'entity', id: 'Task-committed', fields: { title: 'kept' } }]))
     .toThrow('the sync failed after commit');
   expect(heard).toHaveLength(1);
-  expect(heard[0]).toEqual({ sequence: connection.lastCommit(), touched: 'all' });
+  expect(heard[0]).toEqual({ sequence: connection.lastCommit(), touched: 'all', source: 'local' });
   expect(e.query('Task').count()).toBe(1);
 });
 
@@ -668,6 +668,152 @@ describe('sameValue', () => {
     await settled();
     expect(w.seen).toHaveLength(2);
     expect((w.last() as { title: string }).title).toBe('two');
+    w.stop();
+  });
+});
+
+describe('watch diagnostics, cause sources, builder sync and rolled-back writes', () => {
+  it('exposes strictly payload-free watchDiagnostics with no entity values, IDs or query results', async () => {
+    const secretId = e.create('Task', { title: 'SECRET_PAYLOAD_VALUE_99123', body: 'PRIVATE_NOTE_BODY' }).id();
+    const w = e.watch(() => e.getRow(secretId), () => {}, { label: 'task-detail' });
+    await settled();
+
+    e.write(secretId).set('title', 'UPDATED_SECRET_PAYLOAD_88412');
+    const waiting = w.caughtUp({ soon: true });
+    const diag = e.admin.watchDiagnostics();
+    const serialized = JSON.stringify(diag);
+    expect(serialized).not.toContain(secretId);
+    expect(serialized).not.toContain('SECRET_PAYLOAD');
+    expect(serialized).not.toContain('PRIVATE_NOTE_BODY');
+    expect(serialized).not.toContain('UPDATED_SECRET_PAYLOAD');
+    expect(diag.scheduler.lastSeenCommit).toBe(e.lastCommit());
+    expect(diag.scheduler.databaseCommit).toBe(e.lastCommit());
+    expect(diag.watches).toHaveLength(1);
+    expect(diag.watches[0]).toMatchObject({
+      label: 'task-detail',
+      owed: true,
+      soon: true,
+      waiters: 1,
+    });
+    await waiting;
+    expect(e.admin.watchDiagnostics().watches[0]).toMatchObject({
+      label: 'task-detail',
+      owed: false,
+      soon: false,
+      waiters: 0,
+      lastDeliveredCommit: e.lastCommit(),
+    });
+    w.stop();
+  });
+
+  it('reports payload-free cause sources for local, wildcard, elsewhere and builder commits', async () => {
+    let database: EarsDatabase | undefined;
+    const local = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    const contexts: Array<import('../../src/index.ts').WatchReadContext | undefined> = [];
+    const watching = local.watch(
+      (ctx) => {
+        contexts.push(ctx);
+        return local.query('Task').ids().map(String);
+      },
+      () => {},
+      { recordCauses: () => true, label: 'cause-sources' },
+    );
+    await local.admin.watchesSettled();
+    expect(contexts[0]).toBeUndefined();
+
+    // Targeted local write
+    local.create('Task', { title: 'secret-local' });
+    await local.admin.watchesSettled();
+    expect(contexts[1]).toMatchObject({ sources: ['local'], wildcard: false, dropped: 0 });
+    expect(JSON.stringify(contexts[1])).not.toContain('secret-local');
+
+    // Wildcard local admin op (`clear`)
+    local.admin.clear();
+    await local.admin.watchesSettled();
+    expect(contexts[2]).toMatchObject({ sources: ['local'], wildcard: true, dropped: 0 });
+
+    // Elsewhere commit
+    await commitElsewhere(database!, "create('Task', 'Task-remote')");
+    expect(local.admin.changedElsewhere()).toBe(true);
+    await local.admin.watchesSettled();
+    expect(contexts[3]).toMatchObject({ sources: ['elsewhere'], wildcard: true, dropped: 0 });
+    expect(JSON.stringify(contexts[3])).not.toContain('Task-remote');
+    watching.stop();
+  });
+
+  it('syncs watches synchronously across waitForIndexBuilds so caughtUp reflects the built rank index', async () => {
+    let database: EarsDatabase | undefined;
+    const local = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    const tasks: Id[] = Array.from({ length: 400 }, (_, at) => local.create('Task', { title: `t${at}` }).id());
+    for (const task of tasks.slice(1)) local.write(task).link('refs', tasks[0]!);
+
+    const contexts: Array<import('../../src/index.ts').WatchReadContext | undefined> = [];
+    const seen: unknown[] = [];
+    local.admin.declare({
+      types: Object.fromEntries([...NAMES.types].map((type) => [type, { required: [] }])),
+      relations: Object.fromEntries([...NAMES.relationKinds].map((kind) => [kind, {}])),
+      roles: [...NAMES.roles],
+      ranks: { taskRank: { types: ['Task'], relations: ['refs'] } },
+    });
+    const holding = database!.begin();
+    const watching = local.watch(
+      (ctx) => {
+        contexts.push(ctx);
+        return local.query('Task').ranked('taskRank', { whileBuilding: 'refuse' }).limit(1).ids();
+      },
+      {
+        next: (answer) => seen.push(answer),
+        error: (err) => seen.push((err as { code?: string }).code),
+      },
+      { recordCauses: () => true, label: 'ranked-watch' },
+    );
+    await watching.caughtUp({ soon: true });
+    expect(seen).toEqual(['INDEX_BUILDING']);
+
+    // Release the write lock, block synchronously until the builder finishes, then await caughtUp() immediately
+    holding.abort();
+    local.admin.waitForIndexBuilds();
+    await watching.caughtUp({ soon: true });
+    expect(seen.at(-1), 'caughtUp never resolves before the built rank index is delivered').toEqual([tasks[0]]);
+    expect(contexts.at(-1)?.sources).toContain('builder');
+    watching.stop();
+  });
+
+  it('produces zero watch runs, zero deliveries and zero sequence advance on rolled-back beforeCommit hooks and aborted transacts', async () => {
+    let rejectCommit = false;
+    e.admin.beforeCommit({
+      wants: (type) => type === 'Task',
+      run() {
+        if (rejectCommit) throw new Error('hook rejected commit');
+      },
+    });
+    const taskId = e.create('Task', { title: 'initial' }).id();
+    const w = watched(() => e.query('Task').pick(['title']));
+    await settled();
+    const seqBefore = e.lastCommit();
+    const runsBefore = w.runs();
+    const seenBefore = w.seen.length;
+
+    // 1. Aborted transact (throws after writes)
+    expect(() => e.transact(() => {
+      e.create('Task', { title: 'aborted-create' });
+      e.write(taskId).set('title', 'aborted-update');
+      throw new Error('abort unit');
+    })).toThrow('abort unit');
+
+    // 2. Rolled-back beforeCommit hook on standalone write and inside transact
+    rejectCommit = true;
+    expect(() => e.create('Task', { title: 'hook-rejected-create' })).toThrow('hook rejected commit');
+    expect(() => e.write(taskId).set('title', 'hook-rejected-update')).toThrow('hook rejected commit');
+    expect(() => e.transact(() => {
+      e.write(taskId).set('title', 'hook-rejected-transact');
+    })).toThrow('hook rejected commit');
+
+    await settled();
+    expect(e.lastCommit(), 'sequence must not advance on aborted or hook-rejected commits').toBe(seqBefore);
+    expect(w.runs(), 'watch must not re-run on aborted or hook-rejected commits').toBe(runsBefore);
+    expect(w.seen.length, 'watch must not deliver on aborted or hook-rejected commits').toBe(seenBefore);
+    expect(w.last()).toEqual([{ id: taskId, title: 'initial' }]);
     w.stop();
   });
 });

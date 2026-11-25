@@ -8,26 +8,31 @@ import type { Ears, EarsAdmin } from '../../src/index.ts';
 /** What the harness reads and writes an engine through */
 export type HarnessEngine = Ears & { admin: Pick<EarsAdmin, 'getAllEntities'> };
 
-export type Value = string | number | number[];
+export type Value = string | number | number[] | Record<string, number>;
 
 /** One write the workload makes, as data: the model and the engine each apply it */
 export type Op =
   | { op: 'create'; id: string; fields: Record<string, Value> }
+  | { op: 'upsert'; id: string; fields: Record<string, Value> }
   | { op: 'set'; id: string; key: string; value: Value }
+  | { op: 'merge'; id: string; key: string; value: Record<string, number> }
   | { op: 'append'; id: string; key: string; value: number }
   | { op: 'delete'; id: string; key: string }
   | { op: 'link'; id: string; kind: string; target: string }
   | { op: 'unlink'; id: string; kind: string; target: string }
+  | { op: 'updateRelation'; id: string; kind: string; target: string; to: string }
+  | { op: 'removeRelation'; id: string; kind: string; target: string }
   | { op: 'destroy'; id: string }
   | { op: 'trash'; id: string }
   | { op: 'restore'; id: string }
   | { op: 'grant'; id: string; role: string }
+  | { op: 'grantExclusive'; id: string; role: string }
   | { op: 'revoke'; id: string; role: string }
   /**
    * Writes made as one unit, which then returns or throws; a durable one commits flushed, which changes no data. A
    * unit inside another is caught there, so its refusal rolls back its own writes and the outer one goes on
    */
-  | { op: 'unit'; ops: Op[]; throws: boolean; durable: boolean }
+  | { op: 'unit'; ops: Op[]; throws: boolean; durable: boolean };
 
 
 /** One entity as the model holds it */
@@ -49,6 +54,7 @@ export interface State {
 /** What the derived reads answer: every one in the order the engine gives it */
 export type Derived = Record<string, readonly string[] | number>;
 
+export const IDS = ['Task-1', 'Task-2', 'Task-3', 'Task-4', 'Note-1', 'Note-2'] as const;
 export const TYPES = ['Task', 'Note'] as const;
 export const KINDS = ['refs', 'blocks'] as const;
 export const ROLES = ['r1', 'r2'] as const;
@@ -60,7 +66,7 @@ export const PROBES: readonly unknown[] = [...Array.from({ length: 10 }, (_, n) 
 
 const typeOf = (id: string) => id.slice(0, id.indexOf('-'));
 const edge = (source: string, kind: string, target: string) => `${source}|${kind}|${target}`;
-const copy = (v: Value): Value => (Array.isArray(v) ? [...v] : v);
+const copy = (v: Value): Value => (Array.isArray(v) ? [...v] : typeof v === 'object' && v !== null ? { ...v } : v);
 const holds = (value: unknown, v: unknown) => value === v || (Array.isArray(value) && value.includes(v as number));
 
 /** Why the model refuses a write, as the engine would; undefined when it is taken */
@@ -70,15 +76,17 @@ type Refusal = string | undefined;
 export class Model {
   /** In insertion order, which is the order a type's entities are read in */
   entities = new Map<string, Entity>();
-  /** In the order they were linked, which is the order an edge's far ends are read in */
-  edges = new Set<string>();
+  /** Edge key → creation place, preserving the order edges are read in across updates */
+  edges = new Map<string, number>();
+  nextEdgeSeq = 0;
 
   clone(): Model {
     const next = new Model();
     for (const [id, e] of this.entities) {
       next.entities.set(id, { type: e.type, fields: new Map([...e.fields].map(([k, v]) => [k, copy(v)])), trashed: e.trashed, roles: [...e.roles] });
     }
-    next.edges = new Set(this.edges);
+    next.edges = new Map(this.edges);
+    next.nextEdgeSeq = this.nextEdgeSeq;
     return next;
   }
 
@@ -86,6 +94,7 @@ export class Model {
   private adopt(other: Model): void {
     this.entities = other.entities;
     this.edges = other.edges;
+    this.nextEdgeSeq = other.nextEdgeSeq;
   }
 
   /** Applies one op outside any unit; returns whether the engine must refuse it, leaving the model as it was */
@@ -120,11 +129,47 @@ export class Model {
       this.entities.set(op.id, { type: typeOf(op.id), fields: new Map(Object.entries(op.fields).map(([k, v]) => [k, copy(v)])), trashed: false, roles: [] });
       return undefined;
     }
+    if (op.op === 'upsert') {
+      const existing = this.entities.get(op.id);
+      if (existing) {
+        for (const [k, v] of Object.entries(op.fields)) existing.fields.set(k, copy(v));
+      } else {
+        this.entities.set(op.id, { type: typeOf(op.id), fields: new Map(Object.entries(op.fields).map(([k, v]) => [k, copy(v)])), trashed: false, roles: [] });
+      }
+      return undefined;
+    }
+    if (op.op === 'updateRelation') {
+      const existing = edge(op.id, op.kind, op.target);
+      if (!this.edges.has(existing)) return `no relation ${existing}`;
+      if (op.id === op.to) return 'a self link';
+      const moved = edge(op.id, op.kind, op.to);
+      if (moved !== existing && this.edges.has(moved)) return 'duplicate edge';
+      if (moved !== existing && !this.entities.has(op.to)) return `no entity has ${op.to}`;
+      // Moving to new ends files the relation last among its new ends' edges; a no-op move keeps its place
+      if (moved !== existing) {
+        this.edges.delete(existing);
+        this.edges.set(moved, ++this.nextEdgeSeq);
+      }
+      return undefined;
+    }
+    if (op.op === 'removeRelation') {
+      const existing = edge(op.id, op.kind, op.target);
+      if (!this.edges.delete(existing)) return `no relation ${existing}`;
+      return undefined;
+    }
     const entity = this.entities.get(op.id);
     if (!entity) return `no entity has ${op.id}`;
     switch (op.op) {
-      case 'set': case 'append': case 'delete': {
+      case 'set': case 'merge': case 'append': case 'delete': {
         if (op.op === 'set') entity.fields.set(op.key, copy(op.value));
+        else if (op.op === 'merge') {
+          const current = entity.fields.get(op.key);
+          if (current !== undefined && typeof current === 'object' && !Array.isArray(current)) {
+            entity.fields.set(op.key, { ...current, ...op.value });
+          } else {
+            entity.fields.set(op.key, { ...op.value });
+          }
+        }
         else if (op.op === 'delete') entity.fields.delete(op.key);
         else {
           const current = entity.fields.get(op.key);
@@ -138,7 +183,7 @@ export class Model {
         // The target exists when the link is written, in a unit as outside one
         if (!this.entities.has(op.target)) return `no entity has ${op.target}`;
         const added = edge(op.id, op.kind, op.target);
-        this.edges.add(added);
+        if (!this.edges.has(added)) this.edges.set(added, ++this.nextEdgeSeq);
         return undefined;
       }
       case 'unlink': {
@@ -147,7 +192,7 @@ export class Model {
       }
       case 'destroy': {
         this.entities.delete(op.id);
-        for (const e of this.edges) {
+        for (const e of [...this.edges.keys()]) {
           const [source, , target] = e.split('|');
           if (source === op.id || target === op.id) this.edges.delete(e);
         }
@@ -158,6 +203,13 @@ export class Model {
         return undefined;
       }
       case 'grant': {
+        if (!entity.roles.includes(op.role)) entity.roles.push(op.role);
+        return undefined;
+      }
+      case 'grantExclusive': {
+        for (const [otherId, other] of this.entities) {
+          if (otherId !== op.id) other.roles = other.roles.filter((r) => r !== op.role);
+        }
         if (!entity.roles.includes(op.role)) entity.roles.push(op.role);
         return undefined;
       }
@@ -174,7 +226,7 @@ export class Model {
       const { type, fields, trashed, roles } = this.entities.get(id)!;
       entities[id] = { type, fields: Object.fromEntries([...fields].sort(([a], [b]) => a.localeCompare(b))), trashed, roles: [...roles] };
     }
-    return { entities, edges: [...this.edges].sort() };
+    return { entities, edges: [...this.edges.keys()].sort() };
   }
 
   /** The derived reads, as the engine should answer them (`derivedOf`) */
@@ -194,11 +246,11 @@ export class Model {
       }
     }
     const isLive = (id: string) => this.entities.has(id) && !this.entities.get(id)!.trashed;
+    const orderedEnds = [...this.edges].sort((a, b) => a[1] - b[1]).map(([e]) => e.split('|'));
     for (const id of [...this.entities.keys()].filter(isLive)) {
       for (const kind of KINDS) {
-        const ends = [...this.edges].map((e) => e.split('|'));
-        out[`${id} out ${kind}`] = ends.filter(([s, k, t]) => s === id && k === kind && isLive(t)).map(([, , t]) => t);
-        out[`${id} in ${kind}`] = ends.filter(([s, k, t]) => t === id && k === kind && isLive(s)).map(([s]) => s);
+        out[`${id} out ${kind}`] = orderedEnds.filter(([s, k, t]) => s === id && k === kind && isLive(t)).map(([, , t]) => t);
+        out[`${id} in ${kind}`] = orderedEnds.filter(([s, k, t]) => t === id && k === kind && isLive(s)).map(([s]) => s);
       }
     }
     return out;
@@ -248,11 +300,15 @@ export function derivedOf(engine: HarnessEngine, model: Model): Derived {
  * afresh: the whole state, and every derived read for every id the workload creates — a trashed or destroyed one's
  * walks included, which answer empty
  */
-export function watchedReads(engine: HarnessEngine, ops: readonly Op[]): Record<string, () => unknown> {
+export function watchedReads(
+  engine: HarnessEngine,
+  ops: readonly Op[],
+  options: { search?: boolean; substrings?: boolean; compound?: boolean; ranked?: string } = {},
+): Record<string, () => unknown> {
   const ids = new Set<string>();
   const collect = (list: readonly Op[]) => {
     for (const op of list) {
-      if (op.op === 'create') ids.add(op.id);
+      if (op.op === 'create' || op.op === 'upsert') ids.add(op.id);
       else if (op.op === 'unit') collect(op.ops);
     }
   };
@@ -262,10 +318,42 @@ export function watchedReads(engine: HarnessEngine, ops: readonly Op[]): Record<
     reads[`${type} ids`] = () => engine.query(type).ids();
     reads[`${type} count`] = () => engine.query(type).count();
     reads[`${type} first`] = () => engine.query(type).first();
+    reads[`${type} limit 2`] = () => engine.query(type).limit(2).ids();
+    reads[`${type} reverse`] = () => engine.query(type).reverse().ids();
+    reads[`${type} reverse limit 2`] = () => engine.query(type).reverse().limit(2).ids();
     reads[`${type} trashed`] = () => engine.query.trashed(type).ids();
     for (const role of ROLES) reads[`${type} withRole ${role}`] = () => engine.query(type).withRole(role as never).ids();
     for (const field of [INDEXED, UNINDEXED]) {
+      reads[`${type} order ${field} asc`] = () => engine.query(type).orderBy(field, 'asc').ids();
+      reads[`${type} order ${field} desc`] = () => engine.query(type).orderBy(field, 'desc').ids();
+      reads[`${type} order ${field} asc limit 2`] = () => engine.query(type).orderBy(field, 'asc').limit(2).ids();
+      reads[`${type} order ${field} desc limit 2`] = () => engine.query(type).orderBy(field, 'desc').limit(2).ids();
       for (const probe of PROBES) reads[`${type} where ${field} ${String(probe).slice(0, 8)}`] = () => engine.query(type).where(field, probe as never).ids();
+    }
+    const cursor = `${type}-1`;
+    reads[`${type} after ${cursor} limit 2`] = () => engine.query(type).after(cursor as never).limit(2).ids();
+    reads[`${type} order ${INDEXED} asc after ${cursor} limit 2`] = () =>
+      engine.query(type).orderBy(INDEXED, 'asc').after(cursor as never).limit(2).ids();
+    reads[`${type} order ${INDEXED} desc after ${cursor} limit 2`] = () =>
+      engine.query(type).orderBy(INDEXED, 'desc').after(cursor as never).limit(2).ids();
+    if (options.compound && type === 'Task') {
+      reads['Task compound b=3 order a asc limit 2'] = () => engine.query('Task').where(UNINDEXED, 3).orderBy(INDEXED, 'asc').limit(2).ids();
+      reads['Task compound b=3 order a desc limit 2'] = () => engine.query('Task').where(UNINDEXED, 3).orderBy(INDEXED, 'desc').limit(2).ids();
+      reads['Task compound b=3 order a asc after Task-1 limit 2'] = () =>
+        engine.query('Task').where(UNINDEXED, 3).orderBy(INDEXED, 'asc').after('Task-1' as never).limit(2).ids();
+    }
+    if (options.search) {
+      reads[`${type} search abc`] = () => engine.query(type).search('abc', { fuzzy: false }).ids();
+      reads[`${type} search ab hits`] = () => engine.query(type).search('ab', { fuzzy: false }).hits();
+    }
+    if (options.substrings) {
+      reads[`${type} containing abc`] = () => engine.query(type).containing('abc').ids();
+      reads[`${type} containing BCA ci`] = () => engine.query(type).containing('BCA', { caseInsensitive: true }).ids();
+      reads[`${type} matching a.c`] = () => engine.query(type).matching('a.c').ids();
+    }
+    if (options.ranked) {
+      const index = options.ranked;
+      reads[`${type} ranked ${index} limit 2`] = () => engine.query(type).ranked(index).limit(2).ids();
     }
   }
   for (const id of ids) {
@@ -283,15 +371,28 @@ export function applyTo(engine: HarnessEngine, op: Op): boolean {
   const write = (inner: Op, nested: boolean): void => {
     switch (inner.op) {
       case 'create': engine.create(typeOf(inner.id), { id: inner.id as never, ...inner.fields }); return;
+      case 'upsert': engine.upsert(typeOf(inner.id), { id: inner.id as never, ...inner.fields }); return;
       case 'set': engine.write(inner.id as never).set(inner.key, inner.value); return;
+      case 'merge': engine.write(inner.id as never).merge(inner.key, inner.value); return;
       case 'append': engine.write(inner.id as never).append(inner.key, inner.value); return;
       case 'delete': engine.write(inner.id as never).delete(inner.key); return;
       case 'link': engine.write(inner.id as never).link(inner.kind, inner.target as never); return;
       case 'unlink': engine.write(inner.id as never).unlink(inner.kind, inner.target as never); return;
+      case 'updateRelation': {
+        const existing = engine.findRelations({ source: inner.id as never, kind: inner.kind as never, target: inner.target as never })[0];
+        engine.updateRelation((existing?.id ?? 'Relation-none') as never, { target: inner.to as never });
+        return;
+      }
+      case 'removeRelation': {
+        const existing = engine.findRelations({ source: inner.id as never, kind: inner.kind as never, target: inner.target as never })[0];
+        engine.removeRelation((existing?.id ?? 'Relation-none') as never);
+        return;
+      }
       case 'destroy': engine.write(inner.id as never).destroy(); return;
       case 'trash': engine.write(inner.id as never).trash(); return;
       case 'restore': engine.write(inner.id as never).restore(); return;
       case 'grant': engine.write(inner.id as never).grant(inner.role as never); return;
+      case 'grantExclusive': engine.write(inner.id as never).grantExclusive(inner.role as never, [...IDS] as never); return;
       case 'revoke': engine.write(inner.id as never).revoke(inner.role as never); return;
       case 'unit': {
         const run = () => engine.transact(() => {

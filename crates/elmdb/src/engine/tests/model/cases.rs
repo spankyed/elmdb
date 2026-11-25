@@ -309,3 +309,51 @@ fn a_rekey_in_a_nested_unit_is_the_same_relation_as_an_earlier_rekey_of_it_in_th
         Aimed { step, aimed: true },
     );
 }
+
+#[test]
+fn tracked_watches_follow_ranges_order_pagination_compound_trigram_search_and_ignore_aborted_writes() {
+    let prelude = vec![
+        Step::Create { id: "Task-1", fields: BTreeMap::from([("a", json!(2)), ("b", json!(3))]) },
+        Step::Create { id: "Task-2", fields: BTreeMap::from([("a", json!(5)), ("b", json!(3))]) },
+        Step::Create { id: "Task-3", fields: BTreeMap::from([("a", json!(6)), ("b", json!(3))]) },
+        Step::Create { id: "Note-1", fields: BTreeMap::from([("a", json!("abc")), ("b", json!("bca"))]) },
+    ];
+    let mut model = Model::default();
+    for step in &prelude {
+        model.step(step).expect("the prelude creates each entity once");
+    }
+    let mut reference = Reference { model: model.clone(), prelude, outcome: Ok(()) };
+    let mut engine = <EngineMachine as proptest_state_machine::StateMachineTest>::init_test(&reference);
+    <EngineMachine as proptest_state_machine::StateMachineTest>::check_invariants(&engine, &reference);
+
+    let steps = vec![
+        // Range boundary + compound index (b=3, a) + pagination cursor change
+        Step::Set { id: "Task-3", key: "a", value: json!(4) },
+        Step::Create { id: "Task-4", fields: BTreeMap::from([("a", json!(1)), ("b", json!(3))]) },
+        // Trigram containing/matching and text search updates
+        Step::Set { id: "Note-1", key: "a", value: json!("5555") },
+        Step::Create { id: "Note-2", fields: BTreeMap::from([("a", json!("abc")), ("b", json!("ab"))]) },
+        // Aborted unit: throws after modifying Task and Note; must touch zero watches
+        Step::Unit {
+            steps: vec![Step::Set { id: "Task-1", key: "a", value: json!(9) }, Step::Destroy { id: "Note-2" }],
+            throws: true,
+            durable: false,
+        },
+        // Armed commit refusal: must touch zero watches and leave state unchanged
+        Step::RefuseNext,
+        Step::Set { id: "Task-2", key: "a", value: json!(0) },
+        // Trash and restore affecting ordered/limited/trigram/search watches
+        Step::Trash { id: "Task-4" },
+        Step::Restore { id: "Task-4" },
+    ];
+    for step in steps {
+        reference.outcome = model.step(&step);
+        reference.model = model.clone();
+        engine = <EngineMachine as proptest_state_machine::StateMachineTest>::apply(
+            engine,
+            &reference,
+            Aimed { step, aimed: true },
+        );
+        <EngineMachine as proptest_state_machine::StateMachineTest>::check_invariants(&engine, &reference);
+    }
+}

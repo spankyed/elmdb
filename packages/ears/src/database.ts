@@ -296,13 +296,17 @@ export function runCommitted<T>(operation: () => T, notify: () => void): T {
   return result;
 }
 
+/** Where a commit came from, without carrying any entity data */
+export type CommitSource = 'local' | 'builder' | 'elsewhere';
+
 /**
- * A commit, as a commit listener hears it: its sequence, and the tokens whose tracked reads it wrote into, or `all` for
- * one whose writes aren't known key by key (an emptied or replaced database, a schema change, a load)
+ * A commit, as a commit listener hears it: its sequence, the tokens whose tracked reads it wrote into (or `all` for
+ * one whose writes aren't known key by key), and where it originated
  */
 export interface Commit {
   readonly sequence: number;
   readonly touched: ReadonlySet<number> | 'all';
+  readonly source?: CommitSource;
 }
 
 /** What an open unit has changed so far (elmdb's `ChangeSet`): the entities it wrote, by id */
@@ -365,7 +369,7 @@ export interface Connection {
    */
   onCommit(listener: (commit: Commit) => void): () => void;
   /** Tells the commit listeners of a commit no write of this connection made */
-  heard(changes: { sequence: number; touched: number[] }): void;
+  heard(changes: { sequence: number; touched: number[] }, source?: CommitSource): void;
   /** Tells the commit listeners of a commit made past the connection, whose writes aren't known key by key */
   committedEverything(): void;
   /**
@@ -430,11 +434,11 @@ export function createConnection(
       }
     }
   };
-  const everyWatch = () => tellListeners({ sequence: database.sequence, touched: 'all' });
+  const everyWatch = (source: CommitSource = 'local') => tellListeners({ sequence: database.sequence, touched: 'all', source });
   /** A commit this connection made whose writes aren't known key by key */
-  const committedEverything = everyWatch;
-  const heard = (changes: { sequence: number; touched: number[] }) => {
-    if (listeners.size > 0) tellListeners({ sequence: changes.sequence, touched: new Set(changes.touched) });
+  const committedEverything = () => everyWatch('local');
+  const heard = (changes: { sequence: number; touched: number[] }, source: CommitSource = 'local') => {
+    if (listeners.size > 0) tellListeners({ sequence: changes.sequence, touched: new Set(changes.touched), source });
   };
   const foundElsewhere = new Set<() => void>();
   let hearing = false;
@@ -728,7 +732,7 @@ export function createConnection(
     changedElsewhere() {
       const changed = database.committedElsewhere() || foundUnasked;
       foundUnasked = false;
-      if (changed) everyWatch();
+      if (changed) everyWatch('elsewhere');
       return changed;
     },
     pendingChanges: () => (unit ? (unpackValue(crossing(() => unit!.pendingChanges())) as PendingChanges) : undefined),
@@ -750,7 +754,7 @@ export function createConnection(
       if (!database.adoptReplacement(epoch)) return false;
       // The replacement is news already acted on
       database.committedElsewhere();
-      everyWatch();
+      everyWatch('elsewhere');
       return true;
     },
     beforeCommit(given) { hook = given; },

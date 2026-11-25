@@ -232,6 +232,11 @@ pub(super) fn derived_reads() -> Vec<(String, Json)> {
             format!("{t} count"),
             json!({ "read": "query", "plan": { "start": start, "terminal": { "answer": "count" } } }),
         ));
+        out.push((format!("{t} reverse"), ids(start.clone(), json!([{ "step": "reverse" }]), "live")));
+        out.push((
+            format!("{t} reverse 2"),
+            ids(start.clone(), json!([{ "step": "reverse" }, { "step": "limit", "n": 2 }]), "live"),
+        ));
         for probe in probes() {
             for field in ["a", "b"] {
                 let label = format!(
@@ -360,6 +365,16 @@ pub(super) fn derived_reads() -> Vec<(String, Json)> {
     out
 }
 
+fn normalize_plan_answer(label: &str, answer: &Json) -> Json {
+    let mut value = if answer["kind"] == "count" { answer["n"].clone() } else { answer["ids"].clone() };
+    if (label.contains(" out ") || label.contains(" in ") || label.contains(" search "))
+        && let Json::Array(items) = &mut value
+    {
+        items.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+    }
+    value
+}
+
 /// The engine's answers to every derived read, in one call; far ends sorted, since the model doesn't keep link order
 pub(super) fn plans_of(db: &Database) -> BTreeMap<String, Json> {
     let reads = derived_reads();
@@ -373,15 +388,78 @@ pub(super) fn plans_of(db: &Database) -> BTreeMap<String, Json> {
         .into_iter()
         .zip(answers.as_array().unwrap())
         .map(|((label, _), answer)| {
-            let mut value = if answer["kind"] == "count" { answer["n"].clone() } else { answer["ids"].clone() };
-            if (label.contains(" out ") || label.contains(" in ") || label.contains(" search "))
-                && let Json::Array(items) = &mut value
-            {
-                items.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-            }
+            let value = normalize_plan_answer(&label, answer);
             (label, value)
         })
         .collect()
+}
+
+/// Active tracked watches over every derived read in `derived_reads()`, each filed under its own token `1..=N`.
+/// A committed write refreshes only the tokens named by `ChangeSet::touched` (and builder commits only those named by
+/// `hear_builder_commits`); admin operations with no change set refresh every watch, while refused or aborted steps
+/// refresh none. Comparing these cached answers against `plans_from` proves tracked invalidation never misses a change
+/// that alters any query's answer.
+pub(super) struct TrackedWatches {
+    reads: Vec<(String, crate::engine::plan::ReadOp)>,
+    values: std::sync::Mutex<Vec<Json>>,
+    builder_touched: std::sync::Arc<std::sync::Mutex<Vec<u32>>>,
+}
+
+impl TrackedWatches {
+    pub(super) fn start(db: &Database) -> Self {
+        let reads: Vec<(String, crate::engine::plan::ReadOp)> =
+            derived_reads().into_iter().map(|(label, read)| (label, serde_json::from_value(read).unwrap())).collect();
+        let builder_touched = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = std::sync::Arc::clone(&builder_touched);
+        db.hear_builder_commits(Some(std::sync::Arc::new(move |_, touched| {
+            sink.lock().unwrap().extend(touched);
+        })))
+        .expect("builder commit listener registers once");
+        let values =
+            reads.iter().enumerate().map(|(i, (label, read))| Self::run_one(db, (i + 1) as u32, label, read)).collect();
+        TrackedWatches { reads, values: std::sync::Mutex::new(values), builder_touched }
+    }
+
+    fn run_one(db: &Database, token: u32, label: &str, read: &crate::engine::plan::ReadOp) -> Json {
+        db.untrack(token);
+        let request = crate::engine::plan::Reads { reads: vec![read.clone()], track: Some(token) };
+        let answers: Json =
+            serde_json::to_value(rmpv::decode::read_value(&mut &db.read(&request).unwrap()[..]).unwrap()).unwrap();
+        normalize_plan_answer(label, &answers.as_array().unwrap()[0])
+    }
+
+    pub(super) fn refresh_tokens(&self, db: &Database, tokens: &[u32]) {
+        if tokens.is_empty() {
+            return;
+        }
+        let mut values = self.values.lock().unwrap();
+        let mut seen = BTreeSet::new();
+        for &token in tokens {
+            if seen.insert(token)
+                && let Some(index) = (token as usize).checked_sub(1)
+                && let Some((label, read)) = self.reads.get(index)
+            {
+                values[index] = Self::run_one(db, token, label, read);
+            }
+        }
+    }
+
+    pub(super) fn refresh_all(&self, db: &Database) {
+        let mut values = self.values.lock().unwrap();
+        for (i, (label, read)) in self.reads.iter().enumerate() {
+            values[i] = Self::run_one(db, (i + 1) as u32, label, read);
+        }
+    }
+
+    pub(super) fn drain_builder(&self, db: &Database) {
+        let touched = std::mem::take(&mut *self.builder_touched.lock().unwrap());
+        self.refresh_tokens(db, &touched);
+    }
+
+    pub(super) fn answers(&self) -> BTreeMap<String, Json> {
+        let values = self.values.lock().unwrap();
+        self.reads.iter().zip(values.iter()).map(|((label, _), value)| (label.clone(), value.clone())).collect()
+    }
 }
 
 /// How `orderBy` orders two values: booleans, numbers, strings by the root collation and then their bytes, a list or
@@ -461,6 +539,15 @@ pub(super) fn plans_from(m: &Model) -> BTreeMap<String, Json> {
                 ["trashed"] => json!(of_type().filter(|(_, e)| e.trashed).map(|(id, _)| id).collect::<Vec<_>>()),
                 ["with", "trashed"] => json!(of_type().map(|(id, _)| id).collect::<Vec<_>>()),
                 ["count"] => json!(of_type().filter(|(_, e)| !e.trashed).count()),
+                ["reverse"] => json!(of_type().filter(|(_, e)| !e.trashed).map(|(id, _)| id).rev().collect::<Vec<_>>()),
+                ["reverse", n] => json!(
+                    of_type()
+                        .filter(|(_, e)| !e.trashed)
+                        .map(|(id, _)| id)
+                        .rev()
+                        .take(n.parse().unwrap())
+                        .collect::<Vec<_>>()
+                ),
                 // A field's text is a string or a list's strings; the workload's strings are one word each, held as
                 // the word they fold to. Ranking is the corpora specs' (`text/tests.rs`): a match set is ordered here
                 // as the engine's ties are

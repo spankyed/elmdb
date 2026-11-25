@@ -247,6 +247,7 @@ export interface EarsAdmin {
     transactWithoutHook<T>(fn: () => T): T;
     updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
     waitForIndexBuilds(): void;
+    watchDiagnostics(): WatchDiagnostics;
     watchesSettled(): Promise<void>;
     watchStats(): {
         watches: number;
@@ -1098,12 +1099,33 @@ export interface Upsert {
 export const WATCH_SCHEDULE: WatchSchedule;
 
 // @public
+export type WatchCauseSource = 'local' | 'builder' | 'elsewhere';
+
+// @public
 export interface WatchCount {
     label: string;
     // (undocumented)
     ms: number;
     runs: number;
     skipped: number;
+}
+
+// @public
+export interface WatchDiagnostics {
+    readonly scheduler: WatchSchedulerDiagnostics;
+    readonly watches: readonly WatchEntryDiagnostics[];
+}
+
+// @public
+export interface WatchEntryDiagnostics {
+    readonly costMs: number;
+    readonly dueAt: number | null;
+    readonly label: string;
+    readonly lastDeliveredCommit: number | null;
+    readonly owed: boolean;
+    readonly running: boolean;
+    readonly soon: boolean;
+    readonly waiters: number;
 }
 
 // @public
@@ -1131,6 +1153,8 @@ export interface WatchReadContext {
     readonly dropped: number;
     // (undocumented)
     readonly sequences: readonly number[];
+    readonly sources: readonly WatchCauseSource[];
+    readonly wildcard: boolean;
 }
 
 // @public
@@ -1141,6 +1165,19 @@ export interface WatchSchedule {
     readonly flushSliceMs: number;
     // (undocumented)
     readonly minimumGapMs: number;
+}
+
+// @public
+export interface WatchSchedulerDiagnostics {
+    readonly caughtUpWaiting: number;
+    readonly databaseCommit: number;
+    readonly dirtyCount: number;
+    readonly flushing: boolean;
+    readonly lastSeenCommit: number;
+    readonly queued: 'none' | 'microtask' | 'later';
+    readonly settledWaiting: number;
+    readonly timerAt: number | null;
+    readonly timerHeld: boolean;
 }
 
 // @public

@@ -1,17 +1,19 @@
 // The correctness harness's workload: random writes over a small pool of ids, so they collide, refer to each other
 // and are refused often enough to exercise every rule
 import fc from 'fast-check';
-import { KINDS, ROLES, type Op, type Value } from './model.ts';
+import { IDS, KINDS, ROLES, type Op, type Value } from './model.ts';
 
-export const IDS = ['Task-1', 'Task-2', 'Task-3', 'Task-4', 'Note-1', 'Note-2'] as const;
+export { IDS };
 const KEYS = ['a', 'b', 'c'] as const;
 
 const id = fc.constantFrom(...IDS);
 const key = fc.constantFrom(...KEYS);
 const kind = fc.constantFrom(...KINDS);
 const role = fc.constantFrom(...ROLES);
+const mergeObj = fc.dictionary(fc.constantFrom('x', 'y'), fc.integer({ min: 0, max: 5 }), { minKeys: 1, maxKeys: 2 });
 const value: fc.Arbitrary<Value> = fc.oneof(
-  { weight: 4, arbitrary: fc.string({ maxLength: 8 }) },
+  { weight: 3, arbitrary: fc.constantFrom('abc', 'ab', 'bca', 'axc', '5555', 'hello', '') },
+  { weight: 2, arbitrary: fc.string({ maxLength: 8 }) },
   // Numbers from as small a pool as a list's elements, so an index lookup finds one often (`PROBES`)
   { weight: 4, arbitrary: fc.integer({ min: 0, max: 9 }) },
   { weight: 4, arbitrary: fc.array(fc.integer({ min: 0, max: 9 }), { maxLength: 3 }) },
@@ -23,15 +25,20 @@ const value: fc.Arbitrary<Value> = fc.oneof(
 /** One write that is not a unit */
 const write: fc.Arbitrary<Op> = fc.oneof(
   { weight: 3, arbitrary: fc.record({ op: fc.constant('create' as const), id, fields: fc.dictionary(key, value, { maxKeys: 2 }) }) },
+  { weight: 2, arbitrary: fc.record({ op: fc.constant('upsert' as const), id, fields: fc.dictionary(key, value, { maxKeys: 2 }) }) },
   { weight: 3, arbitrary: fc.record({ op: fc.constant('set' as const), id, key, value }) },
+  { weight: 1, arbitrary: fc.record({ op: fc.constant('merge' as const), id, key: fc.constant('c'), value: mergeObj }) },
   { weight: 2, arbitrary: fc.record({ op: fc.constant('append' as const), id, key, value: fc.integer({ min: 0, max: 9 }) }) },
   { weight: 1, arbitrary: fc.record({ op: fc.constant('delete' as const), id, key }) },
   { weight: 3, arbitrary: fc.record({ op: fc.constant('link' as const), id, kind, target: id }) },
   { weight: 1, arbitrary: fc.record({ op: fc.constant('unlink' as const), id, kind, target: id }) },
+  { weight: 1, arbitrary: fc.record({ op: fc.constant('updateRelation' as const), id, kind, target: id, to: id }) },
+  { weight: 1, arbitrary: fc.record({ op: fc.constant('removeRelation' as const), id, kind, target: id }) },
   { weight: 1, arbitrary: fc.record({ op: fc.constant('destroy' as const), id }) },
   { weight: 1, arbitrary: fc.record({ op: fc.constant('trash' as const), id }) },
   { weight: 1, arbitrary: fc.record({ op: fc.constant('restore' as const), id }) },
   { weight: 1, arbitrary: fc.record({ op: fc.constant('grant' as const), id, role }) },
+  { weight: 1, arbitrary: fc.record({ op: fc.constant('grantExclusive' as const), id, role }) },
   { weight: 1, arbitrary: fc.record({ op: fc.constant('revoke' as const), id, role }) },
 );
 
