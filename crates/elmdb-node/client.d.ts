@@ -16,9 +16,9 @@ import type { Batch } from './protocol/Batch.js'
  * a `BigInt` and keeps every digit
  */
 export interface Codec {
-  pack(value: unknown): Buffer
-  unpack(bytes: Buffer): unknown
-  unpackMaps(bytes: Buffer): unknown
+  pack(value: unknown): Uint8Array
+  unpack(bytes: Uint8Array): unknown
+  unpackMaps(bytes: Uint8Array): unknown
 }
 
 /**

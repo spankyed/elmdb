@@ -75,12 +75,12 @@ export declare class Database {
    * commit has landed, so the batch isn't to be written again. Refused while a unit is open (`UNIT_OPEN`): writes
    * go through the unit then
    */
-  write(batch: Buffer, durable?: boolean | undefined | null): Buffer
+  write(batch: Uint8Array, durable?: boolean | undefined | null): Uint8Array
   /**
    * Answers reads (msgpack bytes of a `Reads`) from one snapshot, on this thread, as msgpack bytes of its `Answers`:
    * an `Answer` per read, in the order asked
    */
-  read(reads: Buffer): Buffer
+  read(reads: Uint8Array): Uint8Array
   /**
    * `read` on a thread of the pool, so a large read doesn't hold up the event loop: msgpack bytes of a `Reads`, and
    * a promise of msgpack bytes of its `Answers`, what `read` would have answered at the call. Its snapshot is the
@@ -90,7 +90,7 @@ export declare class Database {
    * no such listener, and `CLOSED` when the database closes before it runs. Once sixteen snapshots are held for
    * reads still waiting, a read asked at a commit that holds none runs at the call, on this thread
    */
-  readAsync(reads: Buffer): Promise<Buffer>
+  readAsync(reads: Uint8Array): Promise<Uint8Array>
   /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
   untrack(token: number): void
   /**
@@ -149,12 +149,12 @@ export declare class Database {
   /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
   committedElsewhere(): boolean
   /** The checkpoint named `name`, as the latest commit left it */
-  checkpoint(name: string): Buffer | null
+  checkpoint(name: string): Uint8Array | null
   /**
    * The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
    * its `Changed`
    */
-  changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
+  changedSince(types: Array<string>, from: Uint8Array, limit: number): Uint8Array
   /**
    * Blocks until every index waiting to be built is built, as the database says once the builder is idle, throwing
    * `INDEX_BUILD_FAILED` when a build failed, `BUILDS_STOPPED` where a close at exit gave up and left builds,
@@ -205,7 +205,7 @@ export declare class Database {
    * Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a
    * value outside the value spec is refused all the same
    */
-  bulkLoad(loads: Buffer): void
+  bulkLoad(loads: Uint8Array): void
   /**
    * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
    * the database is closed. It resolves at once where nothing is owed: with `syncs: false`, under `syncEachCommit`,
@@ -225,22 +225,22 @@ export declare class Unit {
    * Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
    * bytes of a `BatchResult`
    */
-  write(batch: Buffer): Buffer
+  write(batch: Uint8Array): Uint8Array
   /** Records `value` as the checkpoint `name`, committing with this unit or not at all */
-  setCheckpoint(name: string, value: Buffer): void
+  setCheckpoint(name: string, value: Uint8Array): void
   /** The checkpoint named `name`, as this unit sees it */
-  checkpoint(name: string): Buffer | null
+  checkpoint(name: string): Uint8Array | null
   /** What the unit has changed so far: msgpack bytes of its `ChangeSet` */
-  pendingChanges(): Buffer
+  pendingChanges(): Uint8Array
   /** `Database.changedSince` read in the unit, before its own writes are stamped */
-  changedSince(types: Array<string>, from: Buffer, limit: number): Buffer
+  changedSince(types: Array<string>, from: Uint8Array, limit: number): Uint8Array
   /** The sequence this unit commits as, which what it writes is stamped with */
   nextSequence(): number
   /**
    * Answers reads (msgpack bytes of a `Reads`) from the unit's transaction, which sees the unit's own writes, as
    * msgpack bytes of its `Answers`
    */
-  read(reads: Buffer): Buffer
+  read(reads: Uint8Array): Uint8Array
   /** Opens a savepoint, answering its depth */
   savepoint(): number
   /** Undoes everything since the savepoint at `depth`, closing it */
@@ -248,7 +248,7 @@ export declare class Unit {
   /** Closes the savepoint at `depth`, keeping its writes */
   release(depth: number): void
   /** Commits the unit, answering msgpack bytes of its `ChangeSet` */
-  commit(durable?: boolean | undefined | null): Buffer
+  commit(durable?: boolean | undefined | null): Uint8Array
   /** Ends the unit, keeping nothing of it */
   abort(): void
   /** Whether the unit is still open: false once it has committed, aborted, or been ended by a panic */

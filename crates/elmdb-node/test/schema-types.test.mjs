@@ -101,7 +101,7 @@ test('a write answers what its generated type declares, field for field', (t) =>
     db?.close();
     rmSync(dir, { recursive: true, force: true });
   });
-  /** @type {{ Packr: new (options: object) => { pack(value: unknown): Buffer, unpack(bytes: Buffer): unknown } }} */
+  /** @type {{ Packr: new (options: object) => { pack(value: unknown): Uint8Array, unpack(bytes: Uint8Array): unknown } }} */
   const { Packr } = require('msgpackr');
   const packr = new Packr({ useRecords: false, mapsAsObjects: true });
   db = Database.open(dir, {
@@ -149,7 +149,7 @@ test('a write answers what its generated type declares, field for field', (t) =>
 
 test('a read answers what its generated types declare, kind by kind', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  /** @type {{ Packr: new (options: object) => { pack(value: unknown): Buffer, unpack(bytes: Buffer): unknown } }} */
+  /** @type {{ Packr: new (options: object) => { pack(value: unknown): Uint8Array, unpack(bytes: Uint8Array): unknown } }} */
   const { Packr } = require('msgpackr');
   const packr = new Packr({ useRecords: false, mapsAsObjects: true });
   const db = Database.open(dir, {
@@ -242,7 +242,7 @@ test('a read answers what its generated types declare, kind by kind', (t) => {
 
 test('an answer that may hold `__proto__` decodes exactly as Maps of the keys its types declare', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  /** @type {{ Packr: new (options: object) => { pack(value: unknown): Buffer, unpack(bytes: Buffer): unknown } }} */
+  /** @type {{ Packr: new (options: object) => { pack(value: unknown): Uint8Array, unpack(bytes: Uint8Array): unknown } }} */
   const { Packr } = require('msgpackr');
   const objects = new Packr({ useRecords: false, mapsAsObjects: true });
   const exact = new Packr({ useRecords: false, mapsAsObjects: false });

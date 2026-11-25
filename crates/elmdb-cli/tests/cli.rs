@@ -192,3 +192,73 @@ fn rebuilds_derived_data_that_differs_from_what_primary_data_derives() {
     assert!(out.contains("NO_DATABASE"), "{out}");
     assert!(!nothing.exists(), "a database was made where there was none");
 }
+
+#[test]
+fn backup_allows_new_or_empty_directories_and_refuses_existing_files_symlinks_and_non_empty_directories() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    let schema = elmdb::schema::Schema::from_json(&json!({
+        "$schema": elmdb::schema::SCHEMA_LANGUAGE,
+        "types": { "Note": { "fields": { "title": { "type": "string" } } } }
+    }))
+    .unwrap();
+    let write_note = |path: &std::path::Path, id: &str, title: &str| {
+        let db = Database::open(path, OpenOptions { schema: Some(schema.clone()), ..Default::default() }).unwrap();
+        let batch: Batch = serde_json::from_value(
+            json!({ "ops": [{ "op": "create", "type": "Note", "id": id, "fields": { "title": title } }] }),
+        )
+        .unwrap();
+        db.write(&batch, true).unwrap();
+        db.close().unwrap();
+    };
+    write_note(&source, "Note-src", "source");
+    let src = source.to_str().unwrap();
+
+    // A non-existent path succeeds
+    let fresh = dir.path().join("fresh");
+    let (code, out) = elmdb(&["backup", src, fresh.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(fresh.join("data.mdb").is_file());
+
+    // An existing empty directory succeeds
+    let empty = dir.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let (code, out) = elmdb(&["backup", src, empty.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(empty.join("data.mdb").is_file());
+
+    // An existing regular file is refused without modifying it
+    let file = dir.path().join("existing-file");
+    std::fs::write(&file, b"keep-me").unwrap();
+    let (code, out) = elmdb(&["backup", src, file.to_str().unwrap()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("ID_IN_USE"), "{out}");
+    assert!(out.contains("not a directory"), "{out}");
+    assert_eq!(std::fs::read(&file).unwrap(), b"keep-me");
+
+    // An existing non-empty directory holding a database is refused without touching `data.mdb` or `synced`
+    let existing_db = dir.path().join("existing-db");
+    write_note(&existing_db, "Note-dst", "destination");
+    let data_before = std::fs::read(existing_db.join("data.mdb")).unwrap();
+    let synced_before = std::fs::read(existing_db.join("synced")).unwrap();
+    let (code, out) = elmdb(&["backup", src, existing_db.to_str().unwrap()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("ID_IN_USE"), "{out}");
+    assert!(out.contains("not empty"), "{out}");
+    assert_eq!(std::fs::read(existing_db.join("data.mdb")).unwrap(), data_before);
+    assert_eq!(std::fs::read(existing_db.join("synced")).unwrap(), synced_before);
+
+    // A symlink (even to an empty directory) is refused without writing through it
+    #[cfg(unix)]
+    {
+        let link_target = dir.path().join("link-target");
+        std::fs::create_dir(&link_target).unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&link_target, &link).unwrap();
+        let (code, out) = elmdb(&["backup", src, link.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("ID_IN_USE"), "{out}");
+        assert!(out.contains("not a directory"), "{out}");
+        assert!(std::fs::read_dir(&link_target).unwrap().next().is_none(), "backup wrote through symlink");
+    }
+}

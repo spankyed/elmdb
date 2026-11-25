@@ -287,6 +287,10 @@ test('a reset from another process wakes a listener, refuses commits here until 
   assert.equal(typeof epoch, 'number');
   assert.throws(() => write('Task-b'), { code: 'DATA_REPLACED' });
 
+  for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
+    assert.throws(() => db.adoptReplacement(bad), { code: 'VALUE_INVALID' }, String(bad));
+  }
+  assert.equal(db.replacedElsewhere(), epoch, 'a refused epoch adopts nothing');
   assert.equal(db.adoptReplacement(epoch + 1), false, 'not the stored one');
   assert.equal(db.adoptReplacement(epoch), true);
   assert.equal(db.replacedElsewhere(), null);
