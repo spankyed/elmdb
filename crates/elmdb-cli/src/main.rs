@@ -1,7 +1,7 @@
 //! The `elmdb` command: inspect, check, rebuild, back up, dump and load databases. Each opens the database itself, so the app
 //! that holds one open must close it first, except for `inspect`, `check`, `backup` and `dump`, which open it read-only.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -24,7 +24,7 @@ enum Command {
     /// Deletes every index's derived data and writes what primary data derives, in one durable unit: what a database
     /// an older elmdb built needs once its format changed derived data in place. Opens the database to write
     Rebuild { dir: PathBuf },
-    /// A compacted copy of a database into a new directory
+    /// A compacted copy of a database into a new or empty directory
     Backup { dir: PathBuf, target: PathBuf },
     /// A database's schema and primary data into a new file, which `load` makes a database of again
     Dump { dir: PathBuf, target: PathBuf },
@@ -64,6 +64,30 @@ fn told(db: Database) -> elmdb::Result<Database> {
     Ok(db)
 }
 
+/// Refuses a backup target that already exists unless it is an empty directory: overwriting files in place is unsafe
+/// if another process has a database open at `target`
+fn check_backup_target(target: &Path) -> elmdb::Result<()> {
+    let Ok(meta) = std::fs::symlink_metadata(target) else {
+        return Ok(());
+    };
+    if !meta.is_dir() {
+        return Err(elmdb::Error::new(
+            elmdb::ErrorCode::IdInUse,
+            format!(
+                "{} exists and is not a directory; a backup writes into a new or empty directory",
+                target.display()
+            ),
+        ));
+    }
+    if std::fs::read_dir(target)?.next().transpose()?.is_some() {
+        return Err(elmdb::Error::new(
+            elmdb::ErrorCode::IdInUse,
+            format!("{} is not empty; a backup writes into a new or empty directory", target.display()),
+        ));
+    }
+    Ok(())
+}
+
 fn run(command: Command) -> elmdb::Result<bool> {
     match command {
         Command::Inspect { dir } => {
@@ -84,6 +108,7 @@ fn run(command: Command) -> elmdb::Result<bool> {
             Ok(true)
         }
         Command::Backup { dir, target } => {
+            check_backup_target(&target)?;
             let db = read_only(&dir)?;
             db.backup(&target)?;
             println!("{} copied to {}", dir.display(), target.display());

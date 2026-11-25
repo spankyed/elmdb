@@ -25,7 +25,7 @@ impl AsRef<str> for Code {
     }
 }
 
-/// An option that must be a whole number of at least `least`, refused otherwise (`VALUE_INVALID`) rather than cast
+/// A number that must be a whole number of at least `least`, refused otherwise (`VALUE_INVALID`) rather than cast
 fn whole(name: &str, value: Option<f64>, least: f64) -> Result<Option<u64>, Code> {
     match value {
         None => Ok(None),
@@ -308,8 +308,13 @@ impl Database {
     /// once it has committed. `durable` commits it with a sync, and where that sync fails throws `NOT_DURABLE`: the
     /// commit has landed, so the batch isn't to be written again. Refused while a unit is open (`UNIT_OPEN`): writes
     /// go through the unit then
-    #[napi]
-    pub fn write<'env>(&self, env: &'env Env, batch: Buffer, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
+    #[napi(ts_return_type = "Uint8Array")]
+    pub fn write<'env>(
+        &self,
+        env: &'env Env,
+        batch: Uint8Array,
+        durable: Option<bool>,
+    ) -> Result<BufferSlice<'env>, Code> {
         self.guarded("Database.write", || {
             answer(env, &self.inner.write_bytes(&batch, durable.unwrap_or(false)).map_err(to_js)?)
         })
@@ -317,8 +322,8 @@ impl Database {
 
     /// Answers reads (msgpack bytes of a `Reads`) from one snapshot, on this thread, as msgpack bytes of its `Answers`:
     /// an `Answer` per read, in the order asked
-    #[napi]
-    pub fn read<'env>(&self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
+    #[napi(ts_return_type = "Uint8Array")]
+    pub fn read<'env>(&self, env: &'env Env, reads: Uint8Array) -> Result<BufferSlice<'env>, Code> {
         self.guarded("Database.read", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
     }
 
@@ -329,8 +334,8 @@ impl Database {
     /// settled. elmdb's refusals of the read reject the promise: `NO_LISTENER` for a tracked read asked while there is
     /// no such listener, and `CLOSED` when the database closes before it runs. Once sixteen snapshots are held for
     /// reads still waiting, a read asked at a commit that holds none runs at the call, on this thread
-    #[napi(ts_return_type = "Promise<Buffer>")]
-    pub fn read_async<'env>(&self, env: &'env Env, reads: Buffer) -> Result<Unknown<'env>, Code> {
+    #[napi(ts_return_type = "Promise<Uint8Array>")]
+    pub fn read_async<'env>(&self, env: &'env Env, reads: Uint8Array) -> Result<Unknown<'env>, Code> {
         self.guarded("Database.readAsync", || {
             let read = self.inner.read_at_call_bytes(&reads);
             let task = ReadTask {
@@ -420,7 +425,10 @@ impl Database {
     /// nothing, when another has landed since
     #[napi]
     pub fn adopt_replacement(&self, epoch: f64) -> Result<bool, Code> {
-        self.guarded("Database.adoptReplacement", || self.inner.adopt_replacement(epoch as u64).map_err(to_js))
+        self.guarded("Database.adoptReplacement", || {
+            let epoch = whole("epoch", Some(epoch), 0.0)?.expect("Some returns Some");
+            self.inner.adopt_replacement(epoch).map_err(to_js)
+        })
     }
 
     /// How many tokens have tracked reads filed, and how many keys and ranges they hold
@@ -524,7 +532,7 @@ impl Database {
     }
 
     /// The checkpoint named `name`, as the latest commit left it
-    #[napi]
+    #[napi(ts_return_type = "Uint8Array | null")]
     pub fn checkpoint<'env>(&self, env: &'env Env, name: String) -> Result<Option<BufferSlice<'env>>, Code> {
         self.guarded("Database.checkpoint", || {
             self.inner.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
@@ -533,12 +541,12 @@ impl Database {
 
     /// The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
     /// its `Changed`
-    #[napi]
+    #[napi(ts_return_type = "Uint8Array")]
     pub fn changed_since<'env>(
         &self,
         env: &'env Env,
         types: Vec<String>,
-        from: Buffer,
+        from: Uint8Array,
         limit: u32,
     ) -> Result<BufferSlice<'env>, Code> {
         self.guarded("Database.changedSince", || {
@@ -643,7 +651,7 @@ impl Database {
     /// Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a
     /// value outside the value spec is refused all the same
     #[napi]
-    pub fn bulk_load(&self, loads: Buffer) -> Result<(), Code> {
+    pub fn bulk_load(&self, loads: Uint8Array) -> Result<(), Code> {
         self.guarded("Database.bulkLoad", || self.inner.bulk_load_bytes(&loads).map_err(to_js))
     }
 
@@ -804,19 +812,19 @@ impl Drop for Unit {
 impl Unit {
     /// Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
     /// bytes of a `BatchResult`
-    #[napi]
-    pub fn write<'env>(&mut self, env: &'env Env, batch: Buffer) -> Result<BufferSlice<'env>, Code> {
+    #[napi(ts_return_type = "Uint8Array")]
+    pub fn write<'env>(&mut self, env: &'env Env, batch: Uint8Array) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.write", |unit| answer(env, &unit.open()?.write_bytes(&batch).map_err(to_js)?))
     }
 
     /// Records `value` as the checkpoint `name`, committing with this unit or not at all
     #[napi]
-    pub fn set_checkpoint(&mut self, name: String, value: Buffer) -> Result<(), Code> {
+    pub fn set_checkpoint(&mut self, name: String, value: Uint8Array) -> Result<(), Code> {
         self.run("Unit.setCheckpoint", |unit| unit.open()?.set_checkpoint(&name, &value).map_err(to_js))
     }
 
     /// The checkpoint named `name`, as this unit sees it
-    #[napi]
+    #[napi(ts_return_type = "Uint8Array | null")]
     pub fn checkpoint<'env>(&mut self, env: &'env Env, name: String) -> Result<Option<BufferSlice<'env>>, Code> {
         self.run("Unit.checkpoint", |unit| {
             unit.open()?.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
@@ -824,18 +832,18 @@ impl Unit {
     }
 
     /// What the unit has changed so far: msgpack bytes of its `ChangeSet`
-    #[napi]
+    #[napi(ts_return_type = "Uint8Array")]
     pub fn pending_changes<'env>(&mut self, env: &'env Env) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.pendingChanges", |unit| answer(env, &unit.open()?.pending_changes_bytes().map_err(to_js)?))
     }
 
     /// `Database.changedSince` read in the unit, before its own writes are stamped
-    #[napi]
+    #[napi(ts_return_type = "Uint8Array")]
     pub fn changed_since<'env>(
         &mut self,
         env: &'env Env,
         types: Vec<String>,
-        from: Buffer,
+        from: Uint8Array,
         limit: u32,
     ) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.changedSince", |unit| {
@@ -851,8 +859,8 @@ impl Unit {
 
     /// Answers reads (msgpack bytes of a `Reads`) from the unit's transaction, which sees the unit's own writes, as
     /// msgpack bytes of its `Answers`
-    #[napi]
-    pub fn read<'env>(&mut self, env: &'env Env, reads: Buffer) -> Result<BufferSlice<'env>, Code> {
+    #[napi(ts_return_type = "Uint8Array")]
+    pub fn read<'env>(&mut self, env: &'env Env, reads: Uint8Array) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.read", |unit| answer(env, &unit.open()?.read_bytes(&reads).map_err(to_js)?))
     }
 
@@ -875,7 +883,7 @@ impl Unit {
     }
 
     /// Commits the unit, answering msgpack bytes of its `ChangeSet`
-    #[napi]
+    #[napi(ts_return_type = "Uint8Array")]
     pub fn commit<'env>(&mut self, env: &'env Env, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
         self.run("Unit.commit", |unit| {
             let unit = unit.take().ok_or_else(|| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))?;

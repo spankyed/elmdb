@@ -32,7 +32,7 @@ function objects(value) {
  * A call's answers: decoded with maps as objects where every answer says that is exact, and otherwise decoded with
  * maps as `Map`s and made objects that hold `__proto__` as a key
  * @param {import('./client').Codec} codec
- * @param {Buffer} bytes
+ * @param {Uint8Array} bytes
  */
 function answers(codec, bytes) {
   const decoded = /** @type {any[]} */ (codec.unpack(bytes));

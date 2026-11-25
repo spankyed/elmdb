@@ -13,7 +13,7 @@ const require = createRequire(import.meta.url);
 const { Database } = require('../index.js');
 /** @type {typeof import('../client.js')} */
 const { Client } = require('../client.js');
-/** @type {{ Packr: new (options: object) => { pack(value: unknown): Buffer, unpack(bytes: Buffer): unknown } }} */
+/** @type {{ Packr: new (options: object) => { pack(value: unknown): Uint8Array, unpack(bytes: Uint8Array): unknown } }} */
 const { Packr } = require('msgpackr');
 
 // As `Codec` asks: plain msgpack, and a 64-bit integer a number where one holds it exactly. msgpackr's declarations
