@@ -996,7 +996,7 @@ fn a_long_chain_orders_without_overflowing_the_stack() {
 fn similarity_scores_as_defined() {
     assert_eq!(jaccard(2, 3, 4), 2.0 / 5.0);
     assert_eq!(jaccard(3, 3, 3), 1.0);
-    assert_eq!(adamic_adar(2), 1.0 / 2f64.ln());
+    assert!((adamic_adar(2) - 1.0 / 2f64.ln()).abs() < 1e-12);
     assert!(adamic_adar(2) > adamic_adar(10), "a rarer shared neighbour counts for more");
 }
 
