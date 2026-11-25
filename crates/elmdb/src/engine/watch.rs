@@ -735,3 +735,42 @@ mod registration_tests {
         assert_eq!(touched, [7, 8]);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn callback_scope_tracks_nesting_and_cleans_up_on_unwind() {
+        let a = SharedTracks::default();
+        let b = SharedTracks::default();
+        assert!(!in_callback(&a));
+        assert!(!in_callback(&b));
+
+        as_callback(&a, || {
+            assert!(in_callback(&a));
+            assert!(!in_callback(&b));
+            as_callback(&b, || {
+                assert!(in_callback(&a));
+                assert!(in_callback(&b));
+                let unwound = catch_unwind(AssertUnwindSafe(|| {
+                    as_callback(&a, || {
+                        assert!(in_callback(&a));
+                        assert!(in_callback(&b));
+                        panic!("callback unwind");
+                    });
+                }));
+                assert!(unwound.is_err());
+                // Inner panic unwound cleanly back to outer b -> a scopes
+                assert!(in_callback(&a));
+                assert!(in_callback(&b));
+            });
+            assert!(in_callback(&a));
+            assert!(!in_callback(&b));
+        });
+
+        assert!(!in_callback(&a));
+        assert!(!in_callback(&b));
+        assert!(CALLBACKS.with(Cell::get).is_null());
+    }
+}

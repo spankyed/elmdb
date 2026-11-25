@@ -1,0 +1,112 @@
+# Targeted Miri and Linux AddressSanitizer / UndefinedBehaviorSanitizer runs: weekly, and on a dispatch.
+#
+# Miri checks the pure-Rust modules (key and value codecs, exact summation, interval tracking, label matching,
+# graph algorithms, and watch CallbackScope TLS pointer cleanup on unwind) without crossing the LMDB C FFI.
+#
+# ASan + UBSan instruments both Rust (`-Zsanitizer=address`) and the bundled C libraries (`lmdb-master-sys`,
+# `zstd-sys`) across real LMDB transactions, including `WriteTxn::into_static`, compression, and boundary fuzzing.
+name: sanitizers
+
+on:
+  schedule:
+    - cron: "41 5 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sanitizers
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri (pure-Rust unit tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: install nightly toolchain with miri
+        run: rustup toolchain install nightly --profile minimal --component miri,rust-src
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: miri
+      - name: prepare miri sysroot
+        run: cargo +nightly miri setup
+      - name: run pure-Rust unit tests under Miri
+        run: |
+          set -euo pipefail
+          run_miri() {
+            local log
+            log=$(mktemp)
+            cargo +nightly miri test -p elmdb --lib -- "$@" --color never 2>&1 | tee "$log"
+            # Guard against empty filters silently passing
+            grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"
+            rm -f "$log"
+          }
+          run_miri format::key::tests \
+            --skip byte_order_is_tuple_order \
+            --skip decodes_what_it_encodes \
+            --skip a_key_splits_into_its_parts_encodings_and_a_cut_part_into_none \
+            --skip a_prefix_range_holds_exactly_the_keys_that_extend_the_prefix
+          run_miri format::value::tests
+          run_miri engine::sum::tests
+          run_miri engine::tracking::tests \
+            --skip finds_exactly_the_owners_a_scan_of_every_read_set_finds
+          run_miri engine::text::labels::tests
+          run_miri engine::algorithms::tests \
+            --skip rank_agrees_with_the_dense_reference \
+            --skip weighted_rank_agrees_with_the_dense_reference \
+            --skip unit_weights_rank_as_no_weights_to_the_bit \
+            --skip components_agree_with_breadth_first_search \
+            --skip strong_components_agree_with_mutual_reachability \
+            --skip reversing_every_edge_leaves_the_strong_components \
+            --skip each_strong_component_lies_in_one_weak_one_and_together_they_form_no_cycle \
+            --skip relabelling_the_nodes_permutes_the_scores \
+            --skip communities_cover_every_node_once_each_connected_and_no_worse_than_alone \
+            --skip the_topological_order_agrees_with_its_definition \
+            --skip groups_from_labels_agree_with_grouping_by_hand \
+            --skip a_long_chain_or_cycle_walks_without_overflowing_the_stack \
+            --skip a_long_chain_orders_without_overflowing_the_stack
+          run_miri engine::watch::tests::callback_scope
+
+  asan-ubsan:
+    name: ASan + UBSan (Linux x64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      # Clang matches rustc's LLVM ASan runtime; `-fsanitize-trap=undefined` traps C UB immediately without
+      # requiring a separate libubsan runtime beside rustc's ASan runtime.
+      CC: clang
+      RUSTFLAGS: -Zsanitizer=address
+      CFLAGS: -fsanitize=address,undefined -fsanitize-trap=undefined -fno-omit-frame-pointer
+      # LeakSanitizer reports false positives on Rust's test harness TLS, parking_lot globals, and child-process
+      # crash/exit tests that intentionally terminate without running destructors.
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
+      CARGO_TARGET_DIR: target/asan
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: install nightly toolchain with rust-src
+        run: rustup toolchain install nightly --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: asan-ubsan
+      - name: run FFI, store, compression and boundary tests under ASan + UBSan
+        run: |
+          set -euo pipefail
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p elmdb \
+            --test store_soundness \
+            --test boundary_fuzz \
+            --test engine_correctness
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p elmdb --lib -- \
+            store:: \
+            engine::tests::compression \
+            engine::tests::commits \
+            engine::tests::tracked \
+            engine::tests::graph \
+            engine::tests::trigram \
+            engine::watch:: \
+            --skip measure_idle_reader_
