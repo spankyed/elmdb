@@ -24,7 +24,7 @@ enum Command {
     /// Deletes every index's derived data and writes what primary data derives, in one durable unit: what a database
     /// an older elmdb built needs once its format changed derived data in place. Opens the database to write
     Rebuild { dir: PathBuf },
-    /// A compacted copy of a database into a new or empty directory
+    /// A compacted copy of a database into a new directory, an empty one, or an earlier backup, which it replaces
     Backup { dir: PathBuf, target: PathBuf },
     /// A database's schema and primary data into a new file, which `load` makes a database of again
     Dump { dir: PathBuf, target: PathBuf },
@@ -64,25 +64,27 @@ fn told(db: Database) -> elmdb::Result<Database> {
     Ok(db)
 }
 
-/// Refuses a backup target that already exists unless it is an empty directory: overwriting files in place is unsafe
-/// if another process has a database open at `target`
+/// Refuses a backup target that is a file, or a directory holding a database an open has written in place: the command
+/// copies into a new directory, an empty one or an earlier backup, which it replaces, and never over a database that was
+/// opened there, as one named in the wrong place would be. The engine refuses one another process has open
 fn check_backup_target(target: &Path) -> elmdb::Result<()> {
-    let Ok(meta) = std::fs::symlink_metadata(target) else {
+    let Ok(meta) = std::fs::metadata(target) else {
         return Ok(());
     };
     if !meta.is_dir() {
         return Err(elmdb::Error::new(
-            elmdb::ErrorCode::IdInUse,
-            format!(
-                "{} exists and is not a directory; a backup writes into a new or empty directory",
-                target.display()
-            ),
+            elmdb::ErrorCode::Io,
+            format!("{} is a file; back up into a new directory, an empty one or an earlier backup", target.display()),
         ));
     }
-    if std::fs::read_dir(target)?.next().transpose()?.is_some() {
+    if elmdb::written_in(target) {
         return Err(elmdb::Error::new(
-            elmdb::ErrorCode::IdInUse,
-            format!("{} is not empty; a backup writes into a new or empty directory", target.display()),
+            elmdb::ErrorCode::TargetHoldsDatabase,
+            format!(
+                "{} holds a database that has been opened for writing, which a backup would replace; back up into a \
+                 new directory, an empty one or an earlier backup",
+                target.display()
+            ),
         ));
     }
     Ok(())

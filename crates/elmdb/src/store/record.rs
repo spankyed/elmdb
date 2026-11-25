@@ -37,6 +37,12 @@ pub(super) const fn mode_lock(mode: Mode) -> &'static str {
     }
 }
 
+/// Whether `dir` holds a database an open has written in place: the record, or a mode's lock, which every writable open
+/// leaves and a backup never makes. A backup a read-only open has read leaves neither
+pub fn written_in(dir: &Path) -> bool {
+    std::iter::once(RECORD).chain(Mode::ALL.map(mode_lock)).any(|name| dir.join(name).exists())
+}
+
 /// The bytes of LMDB's `MDB_meta`, which follow a meta page's header: the magic, the version, the fixed address, the
 /// map's size, the free and main trees, the last page and the transaction that committed it
 pub(super) const BODY: usize = 136;

@@ -24,6 +24,30 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
         ));
     }
     let _reservation = Registration(Some(target.clone()));
+    // Another process's open of a database in `target` holds its presence lock shared for as long as it is open, and
+    // takes the decision lock while it opens, making both files first: where they are, both are held here until the
+    // copy is published and its directory synced, so a database open elsewhere is refused and no open begins while the
+    // file it would open is replaced. Where they aren't, no database was ever opened there, and the backup leaves its
+    // data file alone
+    let deciding = existing_lock(&target, super::record::RECORD_LOCK)?;
+    let _deciding = deciding.as_ref().map(super::record::exclusive).transpose()?;
+    let presence = existing_lock(&target, super::record::PRESENCE)?;
+    if let Some(presence) = &presence {
+        match presence.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(Error::new(
+                    ErrorCode::TargetHoldsDatabase,
+                    format!(
+                        "The database at {} is open in another process, and a backup there would replace its file \
+                         beneath it; close it there, or back up into another directory",
+                        target.display()
+                    ),
+                ));
+            }
+            Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
     let mut partial = tempfile::Builder::new().prefix(".elmdb-backup-").tempfile_in(&target)?;
     loop {
         partial.as_file_mut().set_len(0)?;
@@ -76,6 +100,15 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
     synced.map_err(|error| Error::new(ErrorCode::Io, format!(
         "The backup at {} was published, but syncing its directory or removing the record a database there left failed: {error}. The complete backup is visible; retrying backup is safe",
         target.display())))
+}
+
+/// The lock file `name` in `dir`, when an open made it there: opened to be locked, never made
+fn existing_lock(dir: &Path, name: &str) -> Result<Option<std::fs::File>> {
+    match std::fs::File::open(dir.join(name)) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Sync the destination and each newly created ancestor's parent, deepest first. Existing ancestors above the first

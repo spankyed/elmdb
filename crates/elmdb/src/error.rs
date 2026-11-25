@@ -139,6 +139,10 @@ pub enum ErrorCode {
     /// elmdb panicked in a call from JavaScript, which is a bug in elmdb: the binding caught it, the call may not
     /// have finished, and the database handle refuses calls with this code until it is closed and opened again
     Panicked,
+    /// A backup into a directory holding a database it mustn't replace: one another process has open, whose file the
+    /// backup would replace beneath it, or, asked of the `elmdb` command, one an open has written in place there, which
+    /// no backup leaves
+    TargetHoldsDatabase,
 }
 
 impl ErrorCode {
@@ -203,6 +207,7 @@ impl ErrorCode {
             Self::WatchPanicked => "WATCH_PANICKED",
             Self::CallbackActive => "CALLBACK_ACTIVE",
             Self::Panicked => "PANICKED",
+            Self::TargetHoldsDatabase => "TARGET_HOLDS_DATABASE",
         }
     }
 }
@@ -300,6 +305,7 @@ mod tests {
             ErrorCode::WatchPanicked,
             ErrorCode::CallbackActive,
             ErrorCode::Panicked,
+            ErrorCode::TargetHoldsDatabase,
         ] {
             assert_eq!(serde_json::to_value(code).unwrap(), code.as_str());
         }
