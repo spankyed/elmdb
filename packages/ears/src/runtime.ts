@@ -19,6 +19,12 @@ import type { WatchSchedule } from './watch.ts';
 export interface EarsClock {
   /** Monotonically clamped wall time in milliseconds since 1970. */
   now(): number;
+  /**
+   * Optional monotonic time in milliseconds on the same timeline as `after()`, unaffected by wall-clock jumps.
+   * When provided, watch gaps, flush slices and call durations read `monotonic()` while entity timestamps, ids and
+   * `recency.now` read `now()`. Defaults to `now()` when omitted.
+   */
+  monotonic?(): number;
   /** Runs `run` after `ms` milliseconds on a monotonic timer. Returns what cancels it before it runs. */
   after(ms: number, run: () => void): () => void;
 }

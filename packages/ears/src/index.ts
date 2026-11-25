@@ -20,7 +20,7 @@ export type {
   EARSRuntimeDeps, EarsClock, EarsWarning, EarsSchema, UntypedSchema, QueryBuilder, WriteBuilder, SearchDeclaration, SearchOptions, SearchHit, RankedOptions, RankBound, SearchHighlights, QueryExplanation, QueryStage, EdgeDirection, SimilarityMeasure, FieldRule, FieldType, EmbedDeclaration, PendingEmbeddings, Embedding, RelationEdge, LinkOptions, WeightedLinkOptions, RelationPatch, RankSeed, RankOptions, RowIdentity, ShortCodeIdentity, WriteOptions, WriteTarget, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, CreateFields, WhereValue, RowRules, ShortCode, NoInferType,
 } from './runtime.ts';
 export { b64Encode, b64Decode, type Query, type QueryEntries } from './query.ts';
-export { entityTypeOf, getTimestamp } from './ids.ts';
+export { entityTypeOf } from './ids.ts';
 export { EARS } from './entities.ts';
 export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entities.ts';
 export {

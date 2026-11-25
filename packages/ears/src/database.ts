@@ -436,7 +436,9 @@ export function createConnection(
   { freeze = false, callSites, clock }: { freeze?: boolean; callSites?: CallSiteNaming; clock?: EarsClock } = {},
 ): Connection {
   const wallNow = clock ? () => clock.now() : () => Date.now();
-  const monotonicNow = clock ? () => clock.now() : () => performance.now();
+  const monotonicNow = clock
+    ? (clock.monotonic ? () => clock.monotonic!() : () => clock.now())
+    : () => performance.now();
   const callSite = createCallSites(callSites);
   /**
    * The units `transact` is inside, outermost first. elmdb's unit opens at the first write, so a unit that writes

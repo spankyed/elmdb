@@ -11,7 +11,7 @@ import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
 import { declaredNames, toElmdbSchema, withDeclarations, type EngineSchema } from './schema.ts';
-import { idSuffix } from './ids.ts';
+import { idSuffix, newId as makeNewId } from './ids.ts';
 import { createWatches, watchClockOf, type WatchDiagnostics, type WatchObserver, type WatchOptions, type WatchReadContext, type Watching } from './watch.ts';
 import { RESERVED_ENTITY_TYPES } from './errors.ts';
 
@@ -127,6 +127,10 @@ export interface Ears {
    * where its cost is reported
    */
   watch<T>(read: (context: WatchReadContext | undefined) => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
+  /** The engine's current wall-clock time in milliseconds (`clock.now()` when given, otherwise `Date.now()`) */
+  now(): number;
+  /** Creates an id for a new entity of `type`, stamped with the engine's clock (`now()`) */
+  newId(type: EARS.Entity): EARS.EntityId;
   /** The number of the last commit the engine's database made, or 0: what a watch's delivery is compared against */
   lastCommit(): number;
 }
@@ -364,6 +368,8 @@ export function createEarsEngine({ database, warn, freeze, callSites, clock, sch
       return { stored: results.length - stale, stale };
     },
     watch: watches.watch,
+    now: () => (wallNow ? wallNow() : Date.now()),
+    newId: (type) => makeNewId(type, wallNow),
     lastCommit: connection.lastCommit,
     getRow,
     getAttr,

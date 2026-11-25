@@ -1,7 +1,7 @@
 // Injectable clock contract: when `EARSRuntimeDeps.clock` is provided, every wall timestamp, generated id prefix,
 // call duration, recency query, watch gap, and slice-deferral yield advances strictly on virtual clock ticks.
 import { afterAll, describe, expect, it } from 'vitest';
-import { createEarsEngine, type EARS, type EarsClock, type EarsDatabase, type WatchSchedule } from '../../src/index.ts';
+import { createEarsEngine, defineEars, type EARS, type EarsClock, type EarsDatabase, type UntypedSchema, type WatchSchedule } from '../../src/index.ts';
 import { newId } from '../../src/ids.ts';
 import { createTemporaryDatabases } from '../../src/lmdb/index.ts';
 
@@ -102,8 +102,13 @@ describe('injectable EarsClock', () => {
     expect(createdId.startsWith(`Task-${start.toString(36)}`)).toBe(true);
     expect(engine.getRow(createdId)).toMatchObject({ createdAt: start, updatedAt: start });
 
-    // Standalone `newId` with optional `now` provider
+    // Standalone `newId` with optional `now` provider, plus `engine.now()` / `engine.newId()` and `defineEars`
+    const typed = defineEars<UntypedSchema & { names: 'Task' }>(() => engine);
     expect(newId('Task', virtual.clock.now).startsWith(`Task-${start.toString(36)}`)).toBe(true);
+    expect(engine.now()).toBe(start);
+    expect(typed.now()).toBe(start);
+    expect(engine.newId('Task').startsWith(`Task-${start.toString(36)}`)).toBe(true);
+    expect(typed.newId('Task').startsWith(`Task-${start.toString(36)}`)).toBe(true);
 
     // Explicit caller-provided timestamps remain respected
     const importedId = engine.create('Task', { title: 'imported', createdAt: 1234, updatedAt: 5678 }).id();
@@ -111,6 +116,9 @@ describe('injectable EarsClock', () => {
 
     // WriteBuilder stamps updatedAt from virtual clock and reuses the first write's timestamp across one chain
     virtual.advance(5_000);
+    expect(engine.now()).toBe(start + 5_000);
+    expect(typed.now()).toBe(start + 5_000);
+    expect(typed.newId('Task').startsWith(`Task-${(start + 5_000).toString(36)}`)).toBe(true);
     const builder = engine.write(createdId);
     builder.set('title', 'second');
     virtual.advance(2_000);
@@ -512,5 +520,72 @@ describe('injectable EarsClock', () => {
     expect(timers.size, 'stopping the last dirty watch cancelled its pending later flush timer').toBe(0);
     expect(await isResolved(engine.admin.watchesSettled())).toBe(true);
     a.stop();
+  });
+
+  it('keeps watch gaps and call durations on monotonic() when wall time now() jumps', async () => {
+    let wallMs = 1_750_000_000_000;
+    let monoMs = 500;
+    const scheduled: Array<{ due: number; fn: () => void; cancelled: boolean }> = [];
+    const clock: EarsClock = {
+      now: () => wallMs,
+      monotonic: () => monoMs,
+      after(ms, run) {
+        const entry = { due: monoMs + Math.max(0, ms), fn: run, cancelled: false };
+        scheduled.push(entry);
+        return () => { entry.cancelled = true; };
+      },
+    };
+    const advanceMono = (ms: number) => {
+      monoMs += ms;
+      for (;;) {
+        const due = scheduled
+          .filter((entry) => !entry.cancelled && entry.due <= monoMs)
+          .sort((a, b) => a.due - b.due)[0];
+        if (!due) break;
+        due.cancelled = true;
+        due.fn();
+      }
+    };
+
+    const { database } = databases.open({
+      types: { Task: { required: [] } },
+      relations: {},
+      roles: [],
+    });
+    const engine = createEarsEngine({
+      database,
+      clock,
+      schedule: { delayFactor: 4, minimumGapMs: 20, flushSliceMs: 8 },
+    });
+
+    const delivered: number[] = [];
+    const watching = engine.watch(() => {
+      monoMs += 2;
+      return engine.query('Task').count();
+    }, (count) => delivered.push(count), { label: 'mono' });
+    await flushMicrotasks();
+    expect(delivered).toEqual([0]);
+
+    // Jump wall clock forward by 10 seconds while monotonic time does not move:
+    // entity timestamps follow wall time, while the watch still respects its 20 ms monotonic gap
+    wallMs += 10_000;
+    engine.admin.calls.start();
+    const id = engine.create('Task', { title: 'after-wall-jump' }).id();
+    const report = engine.admin.calls.stop();
+    expect(engine.getRow(id)?.createdAt).toBe(1_750_000_010_000);
+    expect(report.elapsedMs).toBe(0);
+
+    await flushMicrotasks();
+    expect(delivered, 'wall-clock jump must not bypass monotonic watch gap').toEqual([0]);
+    expect(engine.admin.watchDiagnostics().scheduler.timerAt).toBe(522);
+
+    advanceMono(19);
+    await flushMicrotasks();
+    expect(delivered).toEqual([0]);
+
+    advanceMono(1);
+    await flushMicrotasks();
+    expect(delivered).toEqual([0, 1]);
+    watching.stop();
   });
 });

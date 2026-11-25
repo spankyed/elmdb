@@ -127,10 +127,11 @@ Held by the types and the specs, which say more than a rule over names could:
   answers its `visits`), once per call site, and a watch that keeps costing more than a flush's slice; the data lets
   a creator say where its own declarations make the fix. `callSites` (`CallSiteNaming`) is how a counted call and an
   unlabelled watch name the code that made them: which stack frames are EARS' own, and where a path is cut. `clock`
-  (`EarsClock`: `{ now(), after(ms, run) }`) injects wall time and monotonic timers across writes (`createdAt`,
-  `updatedAt`, `trash`), generated ids, call tallies, omitted `recency.now` on `search`/`hybrid` reads, and watch
-  scheduling (with `schedule` overriding `WATCH_SCHEDULE`), so deterministic specs run without wall-clock or real-timer
-  dependence. `freeze`
+  (`EarsClock`: `{ now(), monotonic?(), after(ms, run) }`) injects wall time (`now()` for `createdAt`, `updatedAt`,
+  `trash`, generated ids via `create`/`engine.newId`/`defineEars().newId`, `engine.now`/`defineEars().now`, and omitted
+  `recency.now`) and monotonic time/timers (`monotonic()` when given, else `now()`,
+  for watch gaps, flush slices and call tallies, with `schedule` overriding `WATCH_SCHEDULE`), so deterministic specs
+  and hosts with a shared clock run without wall-clock jumps or uncontrolled timers. `freeze`
   freezes what a read hands out, so code that mutates a read fails rather than appearing to work. The short code is
   EARS', like the id: `shortCode` is a reserved attribute, so no write sets or deletes it; a created row may bring one
   only as identity (`ShortCodeIdentity`, an import keeping its code), held to the type's `<prefix>-<n>`

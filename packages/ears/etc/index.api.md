@@ -203,7 +203,9 @@ export interface Ears {
     isRelationKind(name: string): boolean;
     isRole(name: string): boolean;
     lastCommit(): number;
+    newId(type: EARS.Entity): EARS.EntityId;
     nextLabel(type: EARS.Entity, base: string): string;
+    now(): number;
     pendingEmbeddings(type: EARS.Entity, options?: {
         limit?: number;
     }): PendingEmbeddings;
@@ -260,6 +262,7 @@ export interface EarsAdmin {
 // @public
 export interface EarsClock {
     after(ms: number, run: () => void): () => void;
+    monotonic?(): number;
     now(): number;
 }
 
@@ -566,9 +569,6 @@ E
 ] extends [keyof S] ? {
     [K in keyof ShapeOf<S, E> as K extends (typeof RESERVED_ATTRIBUTES)[number] ? never : K]?: ShapeOf<S, E>[K];
 } : Record<string, unknown>;
-
-// @public (undocumented)
-export function getTimestamp(): number;
 
 // @public
 export interface LinkOptions {
@@ -1016,6 +1016,7 @@ export interface TypedEars<D extends EarsSchema> {
     // (undocumented)
     getAttr: TypedGetAttr<D>;
     newId: TypedNewId<D>;
+    now: Ears['now'];
     // (undocumented)
     query: TypedQuery<D>;
     // (undocumented)

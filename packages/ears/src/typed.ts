@@ -11,7 +11,6 @@
  */
 import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
 import type { CreateFields, EarsSchema, QueryBuilder, RequiredField, RowIdentity, ShortCodeIdentity, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
-import { newId } from './ids.ts';
 import type { Ears } from './engine.ts';
 
 /**
@@ -75,8 +74,10 @@ export interface TypedEars<D extends EarsSchema> {
   upsert: TypedUpsert<D>;
   write: TypedWrite<D>;
   transact: Ears['transact'];
-  /** Generates a branded entity id using `Date.now()` so a facade can mint ids before its engine exists */
+  /** Generates a branded entity id stamped with the engine's clock (`engine.newId`) */
   newId: TypedNewId<D>;
+  /** The engine's current wall-clock time in milliseconds (`engine.now`) */
+  now: Ears['now'];
   getAttr: TypedGetAttr<D>;
 }
 
@@ -106,7 +107,8 @@ export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<
     upsert: on('upsert'),
     write: on('write'),
     transact: on('transact'),
-    newId,
+    newId: on('newId'),
+    now: on('now'),
     getAttr: on('getAttr'),
   } as unknown as TypedEars<D>;
 }
