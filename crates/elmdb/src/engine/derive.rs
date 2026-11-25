@@ -898,12 +898,9 @@ fn build_chunk_after(
             for tuple in entities::unique_keys(&fields) {
                 if tuple.iter().any(|v| values::index_part(v).is_none()) {
                     let key = canonical_unique_key(&tuple);
-                    match chunk_unindexable.get(&key) {
-                        Some(other) if other != id => return Err(unbuildable(entity_type, name, other, id)),
-                        Some(_) => {}
-                        None => {
-                            chunk_unindexable.insert(key, id.clone());
-                        }
+                    // `entities::unique_keys` deduplicates within an entity and each entity appears once in `chunk`
+                    if let Some(other) = chunk_unindexable.insert(key, id.clone()) {
+                        return Err(unbuildable(entity_type, name, &other, id));
                     }
                 }
             }
