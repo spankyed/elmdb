@@ -257,6 +257,16 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("IO") && out.contains("is a file"), "{out}");
     assert_eq!(std::fs::read(&file).unwrap(), b"keep-me");
+    // A target that can't be looked at is refused as that, never taken as absent: one under a file, which unix answers
+    // as not a directory (Windows answers it as not found)
+    #[cfg(unix)]
+    {
+        let under_file = file.join("backup");
+        let (code, out) = elmdb(&["backup", src, under_file.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("IO") && out.contains("Cannot look at"), "{out}");
+        assert_eq!(std::fs::read(&file).unwrap(), b"keep-me");
+    }
 
     // A database opened for writing is refused without touching `data.mdb` or `synced`: the backup an earlier run
     // made, once opened to write, is one too

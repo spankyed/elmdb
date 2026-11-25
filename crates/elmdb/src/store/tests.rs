@@ -743,6 +743,55 @@ fn a_backup_holds_its_target_s_decision_lock_and_presence_lock_until_it_has_publ
 }
 
 #[test]
+fn what_a_backup_and_a_read_only_open_of_it_leave_is_left_by_a_backup_and_what_a_writable_open_adds_is_not() {
+    let names = |dir: &Path| -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        names
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+
+    // The staged copy, before it is published, and what the published one leaves
+    let staged = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&staged);
+    let at = target.path().to_owned();
+    crate::failpoints::run_once_here(crate::failpoints::points::BACKUP_READY, move || {
+        *seen.lock().unwrap() = names(&at);
+    });
+    store.copy_to(target.path()).unwrap();
+    let staged = std::mem::take(&mut *staged.lock().unwrap());
+    assert!(staged.iter().any(|name| name.to_string_lossy().starts_with(".elmdb-backup-")), "{staged:?}");
+    let published = names(target.path());
+
+    // A read-only open of the copy, listening for other processes' commits
+    let copy = Store::open(target.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    copy.wake.listen(Arc::new(|| {})).unwrap();
+    let read = names(target.path());
+    assert!(read.iter().any(|name| name == "wake"), "{read:?}");
+    copy.wake.stop();
+    copy.close().unwrap();
+    for name in staged.iter().chain(&published).chain(&read) {
+        assert!(left_by_a_backup(name), "{name:?} is left by a backup or a read-only open of it");
+    }
+
+    // A writable open leaves the record and its mode's lock, which no backup does
+    Store::open(target.path(), quiet()).unwrap().close().unwrap();
+    let written: Vec<_> = names(target.path()).into_iter().filter(|name| !read.contains(name)).collect();
+    assert!(written.iter().any(|name| name == record::RECORD), "{written:?}");
+    for name in &written {
+        assert!(!left_by_a_backup(name), "{name:?} is left by a writable open");
+    }
+    for name in ["package.json", "data.mdb.partial", "elmdb-backup-x", "wake.lock"] {
+        assert!(!left_by_a_backup(name.as_ref()), "{name}");
+    }
+    #[cfg(unix)]
+    assert!(!left_by_a_backup(std::os::unix::ffi::OsStrExt::from_bytes(b"data.mdb\xff")));
+}
+
+#[test]
 fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
