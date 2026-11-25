@@ -35,7 +35,3 @@ export const setField = <V>(row: Record<string, V>, kind: string, value: V) => {
   if (kind === '__proto__') Object.defineProperty(row, kind, { value, writable: true, enumerable: true, configurable: true });
   else row[kind] = value;
 };
-
-export function getTimestamp(): number {
-  return Date.now();
-}

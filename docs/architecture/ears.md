@@ -128,7 +128,8 @@ Held by the types and the specs, which say more than a rule over names could:
   a creator say where its own declarations make the fix. `callSites` (`CallSiteNaming`) is how a counted call and an
   unlabelled watch name the code that made them: which stack frames are EARS' own, and where a path is cut. `clock`
   (`EarsClock`: `{ now(), monotonic?(), after(ms, run) }`) injects wall time (`now()` for `createdAt`, `updatedAt`,
-  `trash`, generated ids and omitted `recency.now`) and monotonic time/timers (`monotonic()` when given, else `now()`,
+  `trash`, generated ids via `create`/`engine.newId`/`defineEars().newId`, `engine.now`/`defineEars().now`, and omitted
+  `recency.now`) and monotonic time/timers (`monotonic()` when given, else `now()`,
   for watch gaps, flush slices and call tallies, with `schedule` overriding `WATCH_SCHEDULE`), so deterministic specs
   and hosts with a shared clock run without wall-clock jumps or uncontrolled timers. `freeze`
   freezes what a read hands out, so code that mutates a read fails rather than appearing to work. The short code is

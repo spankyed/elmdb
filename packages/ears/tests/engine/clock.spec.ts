@@ -1,7 +1,7 @@
 // Injectable clock contract: when `EARSRuntimeDeps.clock` is provided, every wall timestamp, generated id prefix,
 // call duration, recency query, watch gap, and slice-deferral yield advances strictly on virtual clock ticks.
 import { afterAll, describe, expect, it } from 'vitest';
-import { createEarsEngine, type EARS, type EarsClock, type EarsDatabase, type WatchSchedule } from '../../src/index.ts';
+import { createEarsEngine, defineEars, type EARS, type EarsClock, type EarsDatabase, type UntypedSchema, type WatchSchedule } from '../../src/index.ts';
 import { newId } from '../../src/ids.ts';
 import { createTemporaryDatabases } from '../../src/lmdb/index.ts';
 
@@ -102,8 +102,13 @@ describe('injectable EarsClock', () => {
     expect(createdId.startsWith(`Task-${start.toString(36)}`)).toBe(true);
     expect(engine.getRow(createdId)).toMatchObject({ createdAt: start, updatedAt: start });
 
-    // Standalone `newId` with optional `now` provider
+    // Standalone `newId` with optional `now` provider, plus `engine.now()` / `engine.newId()` and `defineEars`
+    const typed = defineEars<UntypedSchema & { names: 'Task' }>(() => engine);
     expect(newId('Task', virtual.clock.now).startsWith(`Task-${start.toString(36)}`)).toBe(true);
+    expect(engine.now()).toBe(start);
+    expect(typed.now()).toBe(start);
+    expect(engine.newId('Task').startsWith(`Task-${start.toString(36)}`)).toBe(true);
+    expect(typed.newId('Task').startsWith(`Task-${start.toString(36)}`)).toBe(true);
 
     // Explicit caller-provided timestamps remain respected
     const importedId = engine.create('Task', { title: 'imported', createdAt: 1234, updatedAt: 5678 }).id();
@@ -111,6 +116,9 @@ describe('injectable EarsClock', () => {
 
     // WriteBuilder stamps updatedAt from virtual clock and reuses the first write's timestamp across one chain
     virtual.advance(5_000);
+    expect(engine.now()).toBe(start + 5_000);
+    expect(typed.now()).toBe(start + 5_000);
+    expect(typed.newId('Task').startsWith(`Task-${(start + 5_000).toString(36)}`)).toBe(true);
     const builder = engine.write(createdId);
     builder.set('title', 'second');
     virtual.advance(2_000);

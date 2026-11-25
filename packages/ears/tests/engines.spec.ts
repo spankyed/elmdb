@@ -24,13 +24,16 @@ describe('defineEars', () => {
     expect(typed.query.all().ids()).toEqual([]);
     current = first;
     expect(typed.query('Note').pickAll().map((row) => row.title)).toEqual(['first']);
+    expect(typed.newId('Note')).toMatch(/^Note-/);
+    expect(typeof typed.now()).toBe('number');
     expect(typed.query.ids(id).count()).toBe(1);
   });
 
   it('builds without an engine, so a facade can be defined before one exists', () => {
     const typed = defineEars(() => { throw new Error('no engine yet'); });
-    expect(typed.newId('Note')).toMatch(/^Note-/);
     expect(() => typed.query('Note')).toThrow('no engine yet');
+    expect(() => typed.newId('Note')).toThrow('no engine yet');
+    expect(() => typed.now()).toThrow('no engine yet');
   });
 });
 
