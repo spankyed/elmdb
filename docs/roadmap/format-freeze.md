@@ -14,8 +14,9 @@ the freeze locks, and orders the work.
   `changedSince` position read at or before the dump is told to start over (`../architecture/format.md`, Dumps). It
   doesn't hold the other meta keys: the replacement count (`m/epoch`), the tombstones (`l/d`) or the checkpoints
   (`l/k`).
-- On 2026-11-20 the repository has no tag, and its packages, the binding and EARS, are at 0.1.0, publishable and
-  unpublished (`../architecture/testing.md`, Releases).
+- On 2026-11-25 the repository has no semver release tag (`v<version>`), though CI publishes per-commit prerelease tags
+  (`pkg-<commit>`) for `main`, and its packages, the binding and EARS, are at 0.1.0, publishable and unpublished
+  (`../architecture/testing.md`, Releases and Each commit's packages).
 - elmdb is on heed 0.23, whose LMDB is upstream `mdb.master` (0.9) with ITS#10395. A data file records LMDB's data
   version: 1 for 0.9, 3 for 1.0 (`../evidence/phase-1.md`), and each LMDB refuses the other's file
   (`MDB_VERSION_MISMATCH`, `mdb.c`).
