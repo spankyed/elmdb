@@ -632,7 +632,7 @@ the version CI installs, and says how to install it where it is missing or anoth
 where their database can't be fetched, `pre-push` says they weren't read and goes on, leaving them to CI. A crate
 yanked from crates.io warns and doesn't fail, cargo-deny's default.
 
-Seven workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
+Eight workflows gate no pull request. `lossy-filesystem.yml` runs each night, and on a pull request that changes it
 or its test, as no required check (Power loss). `release.yml` runs on a tag, on each push to `main`, where it publishes the
 commit's packages as a prerelease, each Monday, and on a pull request that changes the binding's package or the
 workspace's build configuration (Releases). `lmdb-upstream.yml` runs each Monday and fails when OpenLDAP's
@@ -643,6 +643,10 @@ tooling (`npm audit --audit-level=high`, the root `package-lock.json`; the bindi
 platform packages, while `@elmdb/ears` depends on `msgpackr`).
 `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
 and so is `models.yml` (Concurrency models). `model-mutants.yml` runs each week and on dispatch (Mutation testing).
+`sanitizers.yml` runs each week and on dispatch, running targeted pure-Rust unit tests (key and value codecs, exact
+summation, interval tracking, label matching, graph algorithms and watch `CallbackScope` unwind cleanup) under nightly
+Miri, and Linux nightly ASan + UBSan (`CC=clang`, `-fno-sanitize=alignment` for LMDB's 2-byte-aligned `EVEN(n)`
+pointers) across Rust and the bundled C libraries (`lmdb-master-sys`, `zstd-sys`).
 
 ## Releases
 
