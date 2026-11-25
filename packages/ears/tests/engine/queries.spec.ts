@@ -245,6 +245,54 @@ describe('terminals', () => {
     expect(e.query('Task').where('rank', 99).pickOne(['title'])).toBeUndefined();
     expect(e.query.ids(t.a).pickAll()).toEqual([{ id: t.a, entityType: 'Task', createdAt: expect.any(Number), updatedAt: expect.any(Number), title: 'banana', rank: 2, status: 'open', role: ['focus'] }]);
   });
+
+  it('respects limit(n) after a predicate where() for first, exists and pickOne', () => {
+    // t.a is open, t.b is done; limit(1) after the predicate keeps only t.a, so a subsequent filter for done finds none
+    const limitedOne = e.query('Task').where('title', (title) => typeof title === 'string').limit(1).where('status', 'done');
+    expect(limitedOne.ids()).toEqual([]);
+    expect(limitedOne.first()).toBeUndefined();
+    expect(limitedOne.exists()).toBe(false);
+    expect(limitedOne.pickOne()).toBeUndefined();
+    expect(limitedOne.pickOne(['title'])).toBeUndefined();
+
+    // limit(2) includes t.b, so the same terminals find t.b
+    const limitedTwo = e.query('Task').where('title', (title) => typeof title === 'string').limit(2).where('status', 'done');
+    expect(limitedTwo.first()).toBe(t.b);
+    expect(limitedTwo.exists()).toBe(true);
+    expect(limitedTwo.pickOne(['title'])).toEqual({ id: t.b, title: 'apple' });
+
+    // limit(1) after a walk following a predicate where() also applies across all walked targets
+    const afterWalk = e.query('Project').where('title', (title) => title === 'P').out('contains').limit(1).where('status', 'done');
+    expect(afterWalk.ids()).toEqual([]);
+    expect(afterWalk.first()).toBeUndefined();
+    expect(afterWalk.exists()).toBe(false);
+    expect(afterWalk.pickOne()).toBeUndefined();
+  });
+
+  it('freezes group keys and handles non-empty binary fields when freeze is enabled', () => {
+    const frozen = freshEngine({ ...NAMES, freeze: true });
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    const a = frozen.create('Task', { payload: bytes, meta: { tag: 'x', raw: new Uint8Array([5, 6]) } }).id();
+    const b = frozen.create('Task', { payload: new Uint8Array([9]), meta: { tag: 'x', raw: new Uint8Array([5, 6]) } }).id();
+    frozen.write(a).link('refs', b, { info: { sig: new Uint8Array([7, 8]), label: 'link' } });
+
+    const row = frozen.getRow(a)!;
+    expect(Array.from(row.payload as Uint8Array)).toEqual([1, 2, 3, 4]);
+    expect(Object.isFrozen(row.meta)).toBe(true);
+    expect(Array.from(frozen.getAttr(a, 'payload') as Uint8Array)).toEqual([1, 2, 3, 4]);
+    expect(Array.from(frozen.query('Task').pickAll()[0]!.payload as Uint8Array)).toEqual([1, 2, 3, 4]);
+    expect(Array.from(frozen.query.ids(a).pickOne()!.payload as Uint8Array)).toEqual([1, 2, 3, 4]);
+    const [rel] = frozen.findRelations({ source: a });
+    expect(Object.isFrozen(rel!.info)).toBe(true);
+    expect(Array.from((rel!.info as { sig: Uint8Array }).sig)).toEqual([7, 8]);
+
+    const groups = frozen.query('Task').groupBy('meta');
+    expect(groups.size).toBeGreaterThan(0);
+    for (const groupKey of groups.keys()) {
+      expect(Object.isFrozen(groupKey)).toBe(true);
+      expect(Array.from((groupKey as { tag: string; raw: Uint8Array }).raw)).toEqual([5, 6]);
+    }
+  });
 });
 
 describe('the value index', () => {

@@ -1,7 +1,7 @@
 // The query builder's types, read by the compiler: these assertions fail `tsc` (the package's typecheck), not vitest,
 // which only sees that each case was declared. Over `_support/typed-schema.ts`'s two types.
 import { describe, expectTypeOf, it } from 'vitest';
-import type { QueryBuilder, UntypedSchema } from '../../src/index.ts';
+import { WATCH_SCHEDULE, type QueryBuilder, type UntypedSchema } from '../../src/index.ts';
 import { query, typeOnly, type EARS, type Schema } from '../_support/typed-schema.ts';
 
 type SchemaQuery<E extends string> = QueryBuilder<E, Schema>;
@@ -113,3 +113,15 @@ it('QueryBuilder without type arguments is the untyped builder, whose members an
   expectTypeOf<QueryBuilder>().toEqualTypeOf<QueryBuilder<string, UntypedSchema>>();
   expectTypeOf<ReturnType<QueryBuilder['where']>>().toEqualTypeOf<QueryBuilder<string>>();
 });
+
+it('outEdges and inEdges accept readonly target type arrays, and WATCH_SCHEDULE is readonly', () => typeOnly(() => {
+  const targets = ['Note', 'Folder'] as const;
+  query('Folder').outEdges('contains', targets);
+  query('Note').inEdges('contains', targets);
+  // @ts-expect-error WATCH_SCHEDULE is frozen and readonly
+  WATCH_SCHEDULE.delayFactor = 1;
+  // @ts-expect-error WATCH_SCHEDULE is frozen and readonly
+  WATCH_SCHEDULE.minimumGapMs = 1;
+  // @ts-expect-error WATCH_SCHEDULE is frozen and readonly
+  WATCH_SCHEDULE.flushSliceMs = 1;
+}));

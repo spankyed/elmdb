@@ -215,6 +215,16 @@ describe('upsert', () => {
     const id = e.create('Task').id();
     expect(() => e.upsert('Project', { id })).toThrow(expect.objectContaining({ code: 'TYPE_MISMATCH' }));
   });
+
+  it('ignores createdAt and updatedAt when present with undefined value on missing and existing entities', () => {
+    const missing = 'Task-undef-times' as Id;
+    e.upsert('Task', { id: missing, title: 'created', createdAt: undefined, updatedAt: undefined });
+    expect(e.getRow(missing)).toMatchObject({ id: missing, title: 'created', createdAt: NOW, updatedAt: NOW });
+
+    vi.setSystemTime(NOW + 10);
+    e.upsert('Task', { id: missing, title: 'updated', createdAt: undefined, updatedAt: undefined });
+    expect(e.getRow(missing)).toMatchObject({ id: missing, title: 'updated', createdAt: NOW, updatedAt: NOW + 10 });
+  });
 });
 
 describe('attribute writes', () => {
@@ -598,5 +608,55 @@ describe("fields typed by a type's shape", () => {
     const id = e.create('Task', { title: 'one', elsewhere: 'anything-at-all', body: 'not in the enum', notes: ['found', null] }).id();
     expect(e.getRow(id)).toMatchObject({ elsewhere: 'anything-at-all', body: 'not in the enum' });
     expect(e.query('Task').search('found').ids()).toEqual([id]);
+  });
+
+  it('keeps REQUIRED_FIELD enforced when a required field is also indexed', () => {
+    const strictIndexed = freshEngine({
+      ...NAMES,
+      rowRules: { Task: { required: ['title'], indexes: ['title'] } },
+    });
+    expect(() => strictIndexed.create('Task', {})).toThrow(expect.objectContaining({ code: 'REQUIRED_FIELD' }));
+    const id = strictIndexed.create('Task', { title: 'keep' }).id();
+    expect(() => strictIndexed.write(id).delete('title')).toThrow(expect.objectContaining({ code: 'REQUIRED_FIELD' }));
+    const explained = strictIndexed.query('Task').where('title', 'keep').explain();
+    expect(explained.ids).toEqual([id]);
+    expect(explained.stages.some((stage) => stage.stage === 'where' && stage.index === 'title')).toBe(true);
+  });
+
+  it('preserves cross-module ref fields declared via admin.declare()', () => {
+    const declared = freshEngine({ types: [], relationKinds: [], roles: [] });
+    declared.admin.declare({ types: { Author: { required: [] } }, relations: {}, roles: [] });
+    declared.admin.declare({
+      types: {
+        Article: {
+          required: ['author'],
+          fields: {
+            author: { type: 'ref', to: ['Author'] },
+            reviewers: { type: 'list', of: { type: 'ref', to: ['Author'] }, optional: true },
+          },
+        },
+      },
+      relations: {},
+      roles: [],
+    });
+    const author = declared.create('Author').id();
+    const article = declared.create('Article', { author, reviewers: [author] }).id();
+    expect(declared.getRow(article)).toMatchObject({ author, reviewers: [author] });
+    expect(() => declared.create('Article', { author: 'not-an-author' })).toThrow(expect.objectContaining({ code: 'FIELD_TYPE' }));
+    expect(() => declared.write(article).set('reviewers', ['Other-1'])).toThrow(expect.objectContaining({ code: 'FIELD_TYPE' }));
+  });
+
+  it('decodes safe integers as numbers and wider 64-bit integers as BigInt without precision loss', () => {
+    const safe = 2 ** 40;
+    const bigPos = (1n << 60n) + 1n;
+    const bigNeg = -((1n << 60n) + 1n);
+    const id = e.create('Task', { safe, bigPos, bigNeg }).id();
+    const row = e.getRow(id)!;
+    expect(row.safe).toBe(safe);
+    expect(typeof row.safe).toBe('number');
+    expect(row.bigPos).toBe(bigPos);
+    expect(typeof row.bigPos).toBe('bigint');
+    expect(row.bigNeg).toBe(bigNeg);
+    expect(typeof row.bigNeg).toBe('bigint');
   });
 });

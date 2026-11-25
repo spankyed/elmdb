@@ -679,4 +679,55 @@ describe('waiting for one watch to catch up', () => {
       for (const { handle } of made) handle.stop();
     }), { numRuns: 80 });
   });
+
+  it('tracks the earliest dirty deadline across stops, soon lifts, and commit bursts', async () => {
+    const fast = watching(1, 'fast');
+    const medium = watching(5, 'medium');
+    const slow = watching(10, 'slow');
+    await drain();
+    time.advance(1000);
+
+    // One commit puts all three into overlapping gaps: fast + medium fit in the first 8 ms slice, slow runs next turn
+    // fast ranAt +1 (due +17), medium ranAt +6 (due +26), slow ranAt +16 (due +56)
+    commit();
+    await turn();
+    await turn();
+    expect([fast.last()?.length, medium.last()?.length, slow.last()?.length]).toEqual([1, 1, 1]);
+
+    // Commit burst marks all three dirty while all three are in their gaps
+    for (let i = 0; i < 20; i++) commit();
+    await turn();
+
+    // Stopping the earliest watch (fast) must invalidate and recompute so medium runs at +26 and not before
+    fast.stop();
+    time.advance(5);
+    await turn();
+    expect(medium.last(), 'medium is still inside its 20 ms gap').toHaveLength(1);
+    time.advance(5);
+    await turn();
+    expect(medium.last()).toHaveLength(21);
+    expect(slow.last(), 'slow is still inside its 40 ms gap').toHaveLength(1);
+    time.advance(30);
+    await turn();
+    expect(slow.last()).toHaveLength(21);
+
+    // Lifting `soon` on a watch with a shorter cost-based gap must pull the earliest deadline ahead of slower dirty watches
+    const cheap = watching(0.5, 'cheap');
+    await drain();
+    time.advance(1000);
+    commit();
+    await turn();
+    await turn();
+    commit();
+    await turn();
+    const waitSoon = cheap.caughtUp({ soon: true });
+    time.advance(2);
+    await turn();
+    expect(await resolved(waitSoon)).toBe(true);
+    expect(cheap.last()).toHaveLength(23);
+    await drain();
+    medium.stop();
+    slow.stop();
+    cheap.stop();
+  });
 });

@@ -7,3 +7,6 @@
  */
 
 export { openDatabase, createTemporaryDatabases, DATABASE_FORMAT, type DatabaseOptions, type TemporaryDatabases } from './database.ts';
+export type { EarsDatabase, EarsUnit } from '../database.ts';
+export type { EngineSchema, RankDeclaration, RelationRules } from '../schema.ts';
+export type { EdgeDirection, EmbedDeclaration, FieldRule, FieldType, RowRules, SearchDeclaration } from '../runtime.ts';

@@ -11,7 +11,7 @@ import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
 import { declaredNames, toElmdbSchema, withDeclarations, type EngineSchema } from './schema.ts';
-import { idSuffix } from './utils.ts';
+import { idSuffix } from './ids.ts';
 import { createWatches, type WatchObserver, type WatchOptions, type WatchReadContext, type Watching } from './watch.ts';
 import { RESERVED_ENTITY_TYPES } from './errors.ts';
 
@@ -453,7 +453,10 @@ export function createEarsEngine({ database, warn, freeze, callSites }: EARSRunt
     },
     declare(schema) {
       outsideUnit('declare()');
-      return runCommitted(() => database.setSchema(withDeclarations(database.schema, toElmdbSchema(schema))), () => {
+      return runCommitted(() => {
+        const held = database.schema;
+        return database.setSchema(withDeclarations(held, toElmdbSchema(schema, Object.keys(held?.types ?? {}))));
+      }, () => {
         declared = declaredNames(database.schema);
         connection.committedEverything();
       });

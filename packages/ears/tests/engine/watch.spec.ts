@@ -10,6 +10,7 @@ import { engine, NAMES, type Id } from './helpers.ts';
 import { freshEngine } from './engine-under-test.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
 import { createConnection, runCommitted, type Commit, type EarsDatabase } from '../../src/database.ts';
+import { sameValue } from '../../src/watch.ts';
 
 let e: EngineUnderTest;
 beforeEach(() => { e = engine(); });
@@ -527,4 +528,146 @@ it('preserves failed durability when refreshing committed state also throws', ()
   expect((failure as AggregateError & { code: string }).code).toBe('NOT_DURABLE');
   expect((failure as AggregateError).errors).toEqual([durability, refresh]);
   expect((failure as Error).cause).toBe(durability);
+});
+
+it('notifies watches when a write outside a unit commits and throws NOT_DURABLE', async () => {
+  e = engine({ wrap: committedFailure('write') });
+  const w = watched(titles);
+  await settled();
+  expect(w.last()).toEqual([]);
+  expect(() => e.create('Task', { title: 'kept-outside-unit' })).toThrow('the sync failed after commit');
+  await settled();
+  expect(w.last()).toEqual(['kept-outside-unit']);
+  expect(w.runs()).toBe(2);
+});
+
+describe('closing the database during a watch flush', () => {
+  const captureUncaught = async (run: () => Promise<void>) => {
+    const uncaught: unknown[] = [];
+    const onError = (error: unknown) => { uncaught.push(error); };
+    process.on('uncaughtException', onError);
+    try {
+      await run();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      process.off('uncaughtException', onError);
+    }
+    return uncaught;
+  };
+
+  it('handles database.close() inside watch 1 read without uncaught CLOSED errors or leaked watches', async () => {
+    let database: EarsDatabase | undefined;
+    const local = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    let secondRuns = 0;
+    const errors: unknown[] = [];
+    const uncaught = await captureUncaught(async () => {
+      const w1 = local.watch(() => {
+        database!.close();
+        return local.query('Task').count();
+      }, { next: () => {}, error: (err) => errors.push(err) });
+      const w2 = local.watch(() => {
+        secondRuns++;
+        return local.query('Task').count();
+      }, { next: () => {}, error: (err) => errors.push(err) });
+      await Promise.all([w1.caughtUp(), w2.caughtUp(), local.admin.watchesSettled()]);
+      expect(() => w1.stop()).not.toThrow();
+      expect(() => w2.stop()).not.toThrow();
+    });
+    expect(uncaught).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(secondRuns).toBe(0);
+    expect(local.admin.watchStats().watches).toBe(0);
+  });
+
+  it('handles database.close() inside watch 1 observer without uncaught CLOSED errors or running watch 2', async () => {
+    let database: EarsDatabase | undefined;
+    const local = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    let secondRuns = 0;
+    const uncaught = await captureUncaught(async () => {
+      const w1 = local.watch(() => local.query('Task').count(), () => { database!.close(); });
+      const w2 = local.watch(() => { secondRuns++; return local.query('Task').count(); }, () => {});
+      await Promise.all([w1.caughtUp(), w2.caughtUp(), local.admin.watchesSettled()]);
+    });
+    expect(uncaught).toEqual([]);
+    expect(secondRuns).toBe(0);
+    expect(local.admin.watchStats().watches).toBe(0);
+  });
+
+  it('allows stopping a watch after its database has already been closed', async () => {
+    let database: EarsDatabase | undefined;
+    const local = freshEngine({ ...NAMES, wrap: (held) => (database = held) });
+    const w = local.watch(() => local.query('Task').count(), () => {});
+    await local.admin.watchesSettled();
+    database!.close();
+    expect(() => w.stop()).not.toThrow();
+  });
+});
+
+describe('sameValue', () => {
+  it('distinguishes typed array views with identical bytes', () => {
+    expect(sameValue(new Uint8Array([0, 0, 0, 0]), new Float32Array([0]))).toBe(false);
+    expect(sameValue(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 3]))).toBe(true);
+    expect(sameValue(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 4]))).toBe(false);
+  });
+
+  it('treats two Invalid Dates as equal and distinct from valid Dates', () => {
+    expect(sameValue(new Date(Number.NaN), new Date(Number.NaN))).toBe(true);
+    expect(sameValue(new Date(Number.NaN), new Date(0))).toBe(false);
+    expect(sameValue(new Date(1000), new Date(1000))).toBe(true);
+  });
+
+  it('does not treat distinct non-plain built-ins or class instances as equal empty plain objects', () => {
+    expect(sameValue(/abc/g, /xyz/i)).toBe(false);
+    expect(sameValue(/abc/g, /abc/g)).toBe(true);
+    expect(sameValue(new URL('https://a.example'), new URL('https://b.example'))).toBe(false);
+    expect(sameValue(new URL('https://a.example'), new URL('https://a.example'))).toBe(true);
+    expect(sameValue(new Error('a'), new Error('b'))).toBe(false);
+    expect(sameValue(new Error('same'), new Error('same'))).toBe(false);
+    expect(sameValue(new ArrayBuffer(4), new ArrayBuffer(8))).toBe(false);
+    const ab1 = new Uint8Array([1, 2, 3, 4]).buffer;
+    const ab2 = new Uint8Array([1, 2, 3, 5]).buffer;
+    const ab3 = new Uint8Array([1, 2, 3, 4]).buffer;
+    expect(sameValue(ab1, ab2)).toBe(false);
+    expect(sameValue(ab1, ab3)).toBe(true);
+    expect(sameValue(new Set([1]), new Set([2]))).toBe(false);
+    expect(sameValue(new Map([['a', 1]]), new Map([['a', 2]]))).toBe(false);
+    class Box { #v: number; constructor(v: number) { this.#v = v; } value() { return this.#v; } }
+    expect(sameValue(new Box(1), new Box(2))).toBe(false);
+    expect(sameValue(new Box(1), new Box(1))).toBe(false);
+  });
+
+  it('compares cyclic object graphs safely without overflowing the stack', async () => {
+    const a1: Record<string, unknown> = { x: 1 };
+    a1.self = a1;
+    const a2: Record<string, unknown> = { x: 1 };
+    a2.self = a2;
+    const b: Record<string, unknown> = { x: 2 };
+    b.self = b;
+    expect(sameValue(a1, a2)).toBe(true);
+    expect(sameValue(a1, b)).toBe(false);
+
+    const m1 = new Map<string, unknown>();
+    m1.set('self', m1);
+    const m2 = new Map<string, unknown>();
+    m2.set('self', m2);
+    expect(sameValue(m1, m2)).toBe(true);
+
+    // End-to-end watch returning cyclic objects delivers once when structurally equal and again when changed
+    const task = e.create('Task', { title: 'one' }).id();
+    const w = watched(() => {
+      const node: Record<string, unknown> = { title: e.getAttr(task, 'title') };
+      node.self = node;
+      return node;
+    });
+    await settled();
+    expect(w.seen).toHaveLength(1);
+    e.write(task).set('title', 'one');
+    await settled();
+    expect(w.seen, 'structurally equal cyclic value is suppressed').toHaveLength(1);
+    e.write(task).set('title', 'two');
+    await settled();
+    expect(w.seen).toHaveLength(2);
+    expect((w.last() as { title: string }).title).toBe('two');
+    w.stop();
+  });
 });

@@ -52,23 +52,60 @@ export interface TemporaryDatabases {
  */
 export function createTemporaryDatabases(): TemporaryDatabases {
   const open = new Map<string, EarsDatabase>();
+  let listening = false;
+  const detach = () => {
+    if (!listening) return;
+    listening = false;
+    process.off('exit', atExit);
+  };
   const remove = (dir: string) => {
+    if (!open.has(dir)) return;
     const database = open.get(dir);
     open.delete(dir);
-    if (database?.isOpen) database.close();
-    fs.rmSync(dir, { recursive: true, force: true });
+    if (open.size === 0) detach();
+    let failure: unknown;
+    if (database?.isOpen) {
+      try { database.close(); } catch (error) { failure = error; }
+    }
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch (error) {
+      if (!failure) failure = error;
+    }
+    if (failure) throw failure;
+  };
+  const disposeAll = () => {
+    const errors: unknown[] = [];
+    for (const dir of [...open.keys()]) {
+      try { remove(dir); } catch (error) { errors.push(error); }
+    }
+    detach();
+    if (errors.length === 1) throw errors[0];
+    if (errors.length > 1) throw new AggregateError(errors, 'Failed to dispose multiple temporary databases');
   };
   const atExit = () => {
-    for (const dir of open.keys()) remove(dir);
+    listening = false;
+    for (const dir of [...open.keys()]) {
+      try { remove(dir); } catch { /* Best-effort cleanup at process exit */ }
+    }
   };
-  process.once('exit', atExit);
   return {
     open(schema) {
       const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-'));
-      const database = openDatabase({ path: dir, schema, syncs: false });
+      let database: EarsDatabase;
+      try {
+        database = openDatabase({ path: dir, schema, syncs: false });
+      } catch (error) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        throw error;
+      }
       open.set(dir, database);
+      if (!listening) {
+        listening = true;
+        process.once('exit', atExit);
+      }
       return { database, dispose: () => remove(dir) };
     },
-    disposeAll: atExit,
+    disposeAll,
   };
 }

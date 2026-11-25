@@ -299,3 +299,85 @@ describe('what transact refuses', () => {
     expect(e.findRelations({ source: task, target: other })).toEqual([]);
   });
 });
+
+describe('beforeCommit hook and transactWithoutHook', () => {
+  it('does not invoke beforeCommit on empty units or units whose writes all rolled back', () => {
+    let runs = 0;
+    e.admin.beforeCommit({ wants: () => true, run: () => { runs++; } });
+
+    e.transact(() => {});
+    e.transact(() => { e.admin.nextSequence(); });
+    e.transact(() => {
+      expect(() => e.transact(() => {
+        e.write(task).set('title', 'undone');
+        throw new Error('rollback');
+      })).toThrow('rollback');
+    });
+    expect(runs).toBe(0);
+
+    e.transact(() => { e.write(task).set('title', 'kept'); });
+    expect(runs).toBe(1);
+  });
+
+  it('keeps the hook paused across nested transactWithoutHook calls', () => {
+    let runs = 0;
+    e.admin.beforeCommit({ wants: () => true, run: () => { runs++; } });
+
+    e.admin.transactWithoutHook(() => {
+      e.admin.transactWithoutHook(() => {
+        e.write(task).set('title', 'inner');
+      });
+      e.write(other).set('title', 'outer');
+    });
+    expect(runs).toBe(0);
+
+    // Once the outermost transactWithoutHook ends, normal writes invoke the hook again
+    e.write(task).set('title', 'after');
+    expect(runs).toBe(1);
+  });
+
+  it('triggers beforeCommit for writes outside a unit touching wanted types via link target, relation ops, and grantExclusive', () => {
+    const seen: Array<{ entities: Record<string, unknown>; relations: Record<string, unknown> }> = [];
+    e.admin.beforeCommit({
+      wants: (type) => type === 'Task',
+      run: () => { seen.push(e.admin.pendingChanges() as { entities: Record<string, unknown>; relations: Record<string, unknown> }); },
+    });
+
+    const project2 = e.create('Project').set('name', 'p2').id();
+    e.write(project).set('name', 'renamed');
+    e.write(project).link('refs', project2);
+    expect(seen, 'writes touching only Project skip the unit hook').toHaveLength(0);
+
+    // Link where source is Project (unwanted) and target is Task (wanted)
+    e.write(project).link('contains', other);
+    expect(seen).toHaveLength(1);
+    expect(Object.keys(seen.at(-1)!.relations)).toHaveLength(1);
+
+    // updateRelation (even changing only info)
+    e.updateRelation(rel, { info: { pos: 2 } });
+    expect(seen).toHaveLength(2);
+    expect(seen.at(-1)!.relations).toHaveProperty(rel);
+
+    // removeRelation
+    e.removeRelation(rel);
+    expect(seen).toHaveLength(3);
+    expect(seen.at(-1)!.relations).toHaveProperty(rel);
+
+    // unlink with target
+    e.write(project).unlink('contains', other);
+    expect(seen).toHaveLength(4);
+    expect(Object.keys(seen.at(-1)!.relations)).toHaveLength(1);
+
+    // unlink without target (could unlink a Task)
+    e.write(project).link('contains', task);
+    seen.length = 0;
+    e.write(project).unlink('contains');
+    expect(seen).toHaveLength(1);
+    expect(Object.keys(seen.at(-1)!.relations)).toHaveLength(1);
+
+    // grantExclusive revoking role from Task in `among`
+    e.write(project).grantExclusive('owner', [task]);
+    expect(seen).toHaveLength(2);
+    expect(seen.at(-1)!.entities).toHaveProperty(task);
+  });
+});
