@@ -146,12 +146,15 @@ test('an open refuses a sync or map option that is not a whole number in range, 
 
 test('adoptReplacement refuses an epoch that is not a non-negative whole number in range, rather than casting it', (t) => {
   const db = Database.open(tempDir(t), { syncs: false });
-  t.after(() => db.close());
-  for (const epoch of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2 ** 53 + 2]) {
-    assert.throws(() => db.adoptReplacement(epoch), { code: 'VALUE_INVALID' }, String(epoch));
+  try {
+    for (const epoch of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2 ** 53 + 2]) {
+      assert.throws(() => db.adoptReplacement(epoch), { code: 'VALUE_INVALID' }, String(epoch));
+    }
+    assert.equal(db.adoptReplacement(0), true);
+    assert.equal(db.adoptReplacement(1), false);
+  } finally {
+    db.close();
   }
-  assert.equal(db.adoptReplacement(0), true);
-  assert.equal(db.adoptReplacement(1), false);
 });
 
 test("committedElsewhere is never a handle's own commit, a unit reads its pending changes, and a checkpoint commits with its unit", () => {
