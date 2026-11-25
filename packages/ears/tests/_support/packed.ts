@@ -137,7 +137,7 @@ export function codeExports(consumer: Consumer): string[] {
     .map(([key]) => `${name}${key.slice(1)}`);
 }
 
-export const MODULE_RESOLUTIONS = ['node16', 'bundler'] as const;
+export const MODULE_RESOLUTIONS = ['node16', 'nodenext', 'bundler'] as const;
 export type ModuleResolution = (typeof MODULE_RESOLUTIONS)[number];
 
 /**
@@ -146,7 +146,8 @@ export type ModuleResolution = (typeof MODULE_RESOLUTIONS)[number];
  */
 export function consumerOptions(moduleResolution: ModuleResolution): Record<string, unknown> {
   return {
-    target: 'ES2022', module: moduleResolution === 'node16' ? 'node16' : 'esnext', moduleResolution,
-    strict: true, noImplicitAny: true, skipLibCheck: false, noEmit: true, types: [], lib: ['ES2022'],
+    target: 'ES2022', module: moduleResolution === 'bundler' ? 'esnext' : moduleResolution, moduleResolution,
+    strict: true, noImplicitAny: true, exactOptionalPropertyTypes: true, noUncheckedIndexedAccess: true,
+    verbatimModuleSyntax: true, skipLibCheck: false, noEmit: true, types: [], lib: ['ES2022'],
   };
 }

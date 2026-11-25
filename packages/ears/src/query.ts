@@ -164,14 +164,23 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
   };
 
   /**
-   * How many of the ids a caller's function admits the rest of a plan can use, when that is fewer than all: the rest
-   * is limits alone, and its terminal answers from the first, so the function stops being called once that many pass
+   * How many of the ids a caller's function admits the rest of a plan can use, when that is fewer than all: any
+   * leading limits cap what the rest can ever read, and when the rest is limits alone and its terminal answers from
+   * the first, one is enough so the function stops being called once that many pass
    */
   const wanted = (rest: readonly Pending[], terminal: Terminal): number => {
-    if (!rest.every((p) => 'step' in p && p.step.step === 'limit')) return Infinity;
-    const limits = rest.map((p) => ('step' in p && p.step.step === 'limit' ? p.step.n : Infinity));
-    const first = FIRST.includes(terminal.answer) ? 1 : Infinity;
-    return Math.min(first, ...limits);
+    let bound = Infinity;
+    let allLimits = true;
+    for (const p of rest) {
+      if ('step' in p && p.step.step === 'limit') {
+        const n = Number.isNaN(p.step.n) ? 0 : Math.max(0, Math.floor(p.step.n));
+        bound = Math.min(bound, n);
+      } else {
+        allLimits = false;
+        break;
+      }
+    }
+    return allLimits && FIRST.includes(terminal.answer) ? Math.min(1, bound) : bound;
   };
 
   /** Runs the recipe to its terminal: the plans before each caller's function, then the one after the last */

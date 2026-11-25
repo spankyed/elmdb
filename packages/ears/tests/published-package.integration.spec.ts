@@ -77,6 +77,22 @@ describe('the packed package', () => {
     expect(loaded.filter(([url, exported]) => !url.startsWith(`${dist}/`) || exported === 0)).toEqual([]);
   });
 
+  it('loads each export via CommonJS require() in Node, with elmdb beside it', async () => {
+    const specifiers = codeExports(consumer());
+    const { code, output } = await run(process.execPath, ['-e', `
+      const loaded = [];
+      for (const specifier of ${JSON.stringify(specifiers)}) {
+        const mod = require(specifier);
+        loaded.push([specifier, Object.keys(mod).length]);
+      }
+      process.stdout.write(JSON.stringify(loaded));
+    `], consumer().dir);
+    expect(code, output).toBe(0);
+    const loaded = JSON.parse(output) as Array<[string, number]>;
+    expect(loaded).toHaveLength(specifiers.length);
+    expect(loaded.filter(([, exported]) => exported === 0)).toEqual([]);
+  });
+
   it('exposes no any in any export', () => {
     expect(exportsWithAny(consumer().installed)).toEqual([]);
   });
