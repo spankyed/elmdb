@@ -22,6 +22,9 @@ impl std::fmt::Display for Problem {
     }
 }
 
+/// The deepest a `list` field's element type may nest: deeper schemas are refused rather than overflowing the stack
+pub const MAX_LIST_DEPTH: usize = 32;
+
 /// Reads a schema, or every problem with it
 pub fn parse(json: &Value) -> Result<Schema, Vec<Problem>> {
     let mut reader = Reader::default();
@@ -369,7 +372,7 @@ impl Reader {
 
     fn field(&mut self, value: &Value, path: &str) -> Option<FieldDef> {
         let mut object = self.object(value, path)?;
-        let value_type = self.value_type(&mut object);
+        let value_type = self.value_type(&mut object, 0);
         let optional = self.bool_or(&mut object, "optional", false);
         let nullable = self.bool_or(&mut object, "nullable", false);
         self.finish(object);
@@ -377,7 +380,7 @@ impl Reader {
     }
 
     /// A `type` and its options, read from the object that holds them
-    fn value_type(&mut self, object: &mut Object<'_>) -> Option<ValueType> {
+    fn value_type(&mut self, object: &mut Object<'_>, depth: usize) -> Option<ValueType> {
         let name = self.string(object, "type")?;
         Some(match name.as_str() {
             "string" => ValueType::String,
@@ -414,8 +417,12 @@ impl Reader {
                         self.problem(at, "missing");
                         None
                     }
+                    Some(_) if depth == MAX_LIST_DEPTH => {
+                        self.problem(at, format!("lists nest at most {MAX_LIST_DEPTH} levels deep"));
+                        None
+                    }
                     Some(v) => self.object(v, &at).and_then(|mut element| {
-                        let element_type = self.value_type(&mut element);
+                        let element_type = self.value_type(&mut element, depth + 1);
                         self.finish(element);
                         element_type
                     }),

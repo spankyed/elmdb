@@ -7,7 +7,7 @@ mod validate;
 
 pub use diff::{Change, Effect, Held, SchemaChange, diff};
 pub use model::*;
-pub use parse::{Problem, parse};
+pub use parse::{MAX_LIST_DEPTH, Problem, parse};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};

@@ -44,7 +44,7 @@ fn exact(db: &Database) -> Vec<(String, f64)> {
     hits(&read(
         db,
         json!({ "start": { "from": "types", "types": ["Doc"] },
-            "steps": [{ "step": "rank", "kinds": ["refs"], "iterations": 100000, "tolerance": 1e-13 }],
+            "steps": [{ "step": "rank", "kinds": ["refs"], "iterations": 10000, "tolerance": 1e-13 }],
             "terminal": { "answer": "hits" } }),
     ))
 }

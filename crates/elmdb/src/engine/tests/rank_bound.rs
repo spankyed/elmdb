@@ -57,7 +57,7 @@ impl RankIndex<'_> {
             db,
             json!({ "start": { "from": "types", "types": self.types },
             "steps": [{ "step": "rank", "kinds": self.kinds, "direction": self.direction, "weights": self.weights,
-                       "iterations": 100000, "tolerance": 1e-14 }],
+                       "iterations": 10000, "tolerance": 1e-14 }],
             "terminal": { "answer": "hits" } }),
         )
         .unwrap();

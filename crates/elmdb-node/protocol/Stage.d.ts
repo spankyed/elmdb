@@ -11,7 +11,7 @@ export type Stage = {
  */
 stage: string, 
 /**
- * The index the stage read, each named where it read several as lists, or `none: walks the type`
+ * The index the stage read, each named where it read several, or `none: walks the type`
  */
 index?: string, 
 /**
@@ -19,7 +19,7 @@ index?: string,
  */
 nodes?: number, 
 /**
- * A stage that built a graph: its edges; a `similar`: the edges it read
+ * A stage that built a graph: its edges; a `similar`, `descendants`, `ancestors` or `pathTo`: the edges it read
  */
 edges?: number, 
 /**
@@ -72,11 +72,11 @@ places?: number,
  */
 within?: number, 
 /**
- * A `similar`: the neighbours of `to`
+ * A `similar`: the neighbours of `to`; a `near`, `like` or `hybrid`: the vector neighbours returned
  */
 neighbours?: number, 
 /**
- * A `similar`: the candidates it scored
+ * A `similar`, `containing`, `matching`, `near`, `like` or `hybrid`: the candidates narrowed or scored
  */
 candidates?: number, 
 /**
