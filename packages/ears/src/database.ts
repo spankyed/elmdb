@@ -336,9 +336,12 @@ export interface ChangedEntities {
 
 /** What runs in a unit before it commits */
 export interface BeforeCommit {
-  /** Whether a write to an entity of this type has to run in a unit, so that `run` sees it */
+  /**
+   * Whether a write to an entity of this type has to run in a unit, so that `run` sees it; called on the hook, as its
+   * method
+   */
   wants(type: string): boolean;
-  /** Runs inside the unit: what it writes commits with it, and what it throws undoes it */
+  /** Runs inside the unit, called on the hook: what it writes commits with it, and what it throws undoes it */
   run(): void;
 }
 
@@ -445,17 +448,18 @@ export function createConnection(
     const dash = id.indexOf('-');
     return dash > 0 ? id.slice(0, dash) : undefined;
   };
-  const opWantsHook = (op: Op, wants: (type: string) => boolean): boolean => {
+  // `wants` is called as the hook's method, so a hook may keep what it wants on itself
+  const opWantsHook = (op: Op, hook: BeforeCommit): boolean => {
     const wanted = (id: string | undefined) => {
       if (id === undefined) return false;
       const type = typeOfId(id);
-      return type !== undefined && wants(type);
+      return type !== undefined && hook.wants(type);
     };
     switch (op.op) {
       case 'create':
       case 'upsert':
       case 'takeLabel':
-        return wants(op.type);
+        return hook.wants(op.type);
       case 'link':
         return wanted(op.source) || wanted(op.target);
       case 'unlink':
@@ -660,7 +664,9 @@ export function createConnection(
     },
     write(ops, now = Date.now()) {
       // A write the hook has to see runs in a unit of its own. One it doesn't pays for this check and nothing else
-      if (hook && !hookPaused && levels.length === 0 && ops.some((op) => opWantsHook(op, hook!.wants))) {
+      // One hook for the whole check, even if a `wants` sets another
+      const current = hook;
+      if (current && !hookPaused && levels.length === 0 && ops.some((op) => opWantsHook(op, current))) {
         return transact(() => connection.write(ops, now));
       }
       const inUnit = levels.length > 0;

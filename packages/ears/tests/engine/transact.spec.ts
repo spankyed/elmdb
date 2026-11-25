@@ -319,6 +319,20 @@ describe('beforeCommit hook and transactWithoutHook', () => {
     expect(runs).toBe(1);
   });
 
+  it('calls the hook\'s wants and run as its methods, on the hook', () => {
+    const hook = {
+      types: new Set(['Task']),
+      runs: 0,
+      wants(type: string) { return this.types.has(type); },
+      run() { this.runs++; },
+    };
+    e.admin.beforeCommit(hook);
+    e.write(task).set('title', 'wanted');
+    expect(hook.runs).toBe(1);
+    e.write(project).set('name', 'not wanted');
+    expect(hook.runs).toBe(1);
+  });
+
   it('keeps the hook paused across nested transactWithoutHook calls', () => {
     let runs = 0;
     e.admin.beforeCommit({ wants: () => true, run: () => { runs++; } });
