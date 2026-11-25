@@ -200,8 +200,14 @@ pub fn order_precision(tolerance: f64) -> u32 {
 /// than twice the tolerance, so between PageRank's further apart than that and the bound it reports. A cell can be wider
 /// than twice the tolerance only for a score over about `2 / CELL_TOLERANCES` of the estimates' sum, which few nodes can
 /// have, and a read of the top reads through those
-fn order_key(index: &str, precision: u32, node: &Node) -> Vec<u8> {
-    keys::rank_order(index, f64::from_bits(order_bits(node.x, precision)), node.type_at, node.seq)
+fn order_key(index: &str, precision: u32, node: &Node) -> Result<Vec<u8>> {
+    if !node.x.is_finite() {
+        return Err(Error::new(
+            ErrorCode::Corrupted,
+            format!("Rank index {index} holds a non-finite estimate, which has no place in its score order"),
+        ));
+    }
+    Ok(keys::rank_order(index, f64::from_bits(order_bits(node.x, precision)), node.type_at, node.seq))
 }
 
 /// An estimate's bits as its order key keeps them: sign, exponent and `precision` bits of the fraction
@@ -293,6 +299,15 @@ impl<'a> Index<'a> {
         self.def.tolerance * (1.0 - self.def.damping) * estimates.max(0.0) / 2.0
     }
 
+    /// Whether the residuals' sum exceeds the index's tolerance budget over `estimates`. Shared by `push`, `plan`,
+    /// `push_at_commit`, `owes_work`, `Change::finish`, and `unfinished` so floating-point evaluation order can never
+    /// disagree by 1 ULP between the builder and `unfinished`
+    fn over_budget(&self, residuals: f64, estimates: f64) -> bool {
+        // mutant-skip: replace > with >= in Index<'a>::over_budget
+        // A residual sum landing on the exact bit of the budget: a double the writes never land on
+        residuals > self.budget(estimates)
+    }
+
     /// Whether the totals are due to be counted from the nodes: once as many changes as nodes have added their rounding
     /// to them, or sooner when a tolerance is so tight their worst-case rounding would reach a tenth of the budget
     fn count_due(&self, totals: &Totals) -> bool {
@@ -301,10 +316,26 @@ impl<'a> Index<'a> {
         totals.moved > 0 && (totals.moved >= totals.nodes || totals.moved as f64 >= tight)
     }
 
-    /// An edge's weight in this index's graph: its own for a kind declared weighted, read with weights; else 1
-    fn weight(&self, kind: &str, weight: Option<f64>) -> f64 {
+    /// An edge's weight in this index's graph: its own for a kind declared weighted, read with weights; else 1.
+    /// Refuses a stored weight outside `[0, MAX_WEIGHT]` (brought by an unchecked load) so negative weights or
+    /// overflowing sums cannot corrupt the index or panic key encoding
+    fn weight(&self, kind: &str, weight: Option<f64>) -> Result<f64> {
         let weighted = self.def.weights && self.schema.relations.get(kind).is_some_and(|k| k.weighted);
-        if weighted { weight.unwrap_or(1.0) } else { 1.0 }
+        if !weighted {
+            return Ok(1.0);
+        }
+        let w = weight.unwrap_or(1.0);
+        if !(0.0..=relations::MAX_WEIGHT).contains(&w) {
+            return Err(Error::new(
+                ErrorCode::ValueInvalid,
+                format!(
+                    "Rank index {} reads weight {w} on a {kind} edge, which isn't from 0 to 2^960: fix or reload the \
+                     edge",
+                    self.name
+                ),
+            ));
+        }
+        Ok(w)
     }
 
     /// The arcs an edge makes in this index's graph: forward, from its source to its target, backward, or both
@@ -359,11 +390,9 @@ impl<'i, 'a> Change<'i, 'a> {
         let held = node(t, self.index.name, id)?;
         self.nodes.insert(id.to_owned(), (held, held));
         if let Some(n) = held
-            // mutant-skip: in Change<'i, 'a>::get
-            // Which waiting node a commit pushes, or whether the commit or the drain pushes it: both follow one sweep
-            // kept in the totals, so the same nodes are pushed in the same order
-            // (`draining_in_chunks_makes_the_bits_one_drain_makes`), and the queue `finish` writes is counted from each
-            // node's residual, not from what was waiting
+            // mutant-skip: replace (&& with \|\||> with (==|<|>=)) in Change<'i, 'a>::get
+            // Every node `get` loads during `push` is immediately written through `set` (which refreshes `waiting`)
+            // before `next_waiting` reads `waiting` again, so this eager insert is equivalent under every branch
             && n.r.abs() > self.index.threshold
         {
             self.waiting.insert((n.type_at, n.seq), id.to_owned());
@@ -511,7 +540,7 @@ impl<'i, 'a> Change<'i, 'a> {
         for kind in &self.index.def.relations {
             for &outward in self.index.def.direction.sides() {
                 relations::visit_far_ends(t, u, outward, Some(kind), |far, weight| {
-                    found.push((far.to_owned(), self.index.weight(kind, weight)));
+                    found.push((far.to_owned(), self.index.weight(kind, weight)?));
                     Ok(true)
                 })?;
             }
@@ -535,7 +564,7 @@ impl<'i, 'a> Change<'i, 'a> {
         for kind in &self.index.def.relations {
             for outward in [true, false] {
                 relations::visit_far_ends(t, v, outward, Some(kind), |far, weight| {
-                    edges.push((outward, far.to_owned(), self.index.weight(kind, weight)));
+                    edges.push((outward, far.to_owned(), self.index.weight(kind, weight)?));
                     Ok(true)
                 })?;
             }
@@ -609,7 +638,7 @@ impl<'i, 'a> Change<'i, 'a> {
         }
         let name = self.index.name;
         // The first change of the unit began from the totals as it found them
-        let owed = self.held.residuals > self.index.budget(self.held.estimates);
+        let owed = self.index.over_budget(self.held.residuals, self.held.estimates);
         t.state.rank_owed_before.entry(name.to_owned()).or_insert(owed);
         let threshold = self.index.threshold;
         let precision = self.index.precision;
@@ -619,7 +648,7 @@ impl<'i, 'a> Change<'i, 'a> {
             }
             if let Some(b) = before {
                 if after.is_none_or(|a| !same_order(&a, b, precision)) {
-                    t.del(&order_key(name, precision, b))?;
+                    t.del(&order_key(name, precision, b)?)?;
                 }
                 // mutant-skip: replace > with >= in Change<'i, 'a>::finish
                 // A residual exactly at the threshold, or a bound exactly at the tolerance: a double the writes never
@@ -632,7 +661,7 @@ impl<'i, 'a> Change<'i, 'a> {
                 Some(a) => {
                     t.put(&keys::rank_node(name, id), &a.encode())?;
                     if before.is_none_or(|b| !same_order(a, &b, precision)) {
-                        t.put(&order_key(name, precision, a), id.as_bytes())?;
+                        t.put(&order_key(name, precision, a)?, id.as_bytes())?;
                     }
                     // mutant-skip: replace > with >= in Change<'i, 'a>::finish (as above)
                     if a.r.abs() > threshold && before.is_none_or(|b| b.r.abs() <= threshold) {
@@ -680,10 +709,10 @@ pub fn edge_changed(
             let (from, to) = if forward { (source, target) } else { (target, source) };
             match (before, after) {
                 (Some(old), Some(new)) => {
-                    change.reweigh_arc(t, from, to, index.weight(kind, old), index.weight(kind, new))?
+                    change.reweigh_arc(t, from, to, index.weight(kind, old)?, index.weight(kind, new)?)?
                 }
-                (Some(old), None) => change.remove_arc(t, from, to, index.weight(kind, old))?,
-                (None, Some(new)) => change.add_arc(t, from, to, index.weight(kind, new))?,
+                (Some(old), None) => change.remove_arc(t, from, to, index.weight(kind, old)?)?,
+                (None, Some(new)) => change.add_arc(t, from, to, index.weight(kind, new)?)?,
                 (None, None) => {}
             }
         }
@@ -720,7 +749,7 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
     let mut change = Change::begin(t, &index)?;
     let mut after = change.totals.swept;
     for _ in 0..limit {
-        if change.totals.residuals <= index.budget(change.totals.estimates) {
+        if !index.over_budget(change.totals.residuals, change.totals.estimates) {
             break;
         }
         let next = match change.next_waiting(t, after)? {
@@ -733,8 +762,7 @@ pub fn push(t: &mut Txn<'_, '_>, index: &str, limit: usize) -> Result<bool> {
         after = Some(place);
     }
     change.totals.swept = after;
-    // mutant-skip: replace > with >= in push (as above)
-    let waiting = change.totals.residuals > index.budget(change.totals.estimates);
+    let waiting = index.over_budget(change.totals.residuals, change.totals.estimates);
     change.finish(t)?;
     Ok(waiting)
 }
@@ -808,8 +836,8 @@ impl Drained {
             let id = &reached.ids[at];
             t.put(&keys::rank_node(index, id), &new.encode())?;
             if !same_order(old, new, precision) {
-                t.del(&order_key(index, precision, old))?;
-                t.put(&order_key(index, precision, new), id.as_bytes())?;
+                t.del(&order_key(index, precision, old)?)?;
+                t.put(&order_key(index, precision, new)?, id.as_bytes())?;
             }
             // mutant-skip: replace > with >= in Drained::write (as above)
             let (was, is) = (old.r.abs() > threshold, new.r.abs() > threshold);
@@ -846,18 +874,12 @@ pub fn plan(
     let mut reached = Reached::default();
     // A drain reaching a quarter of the nodes reads them all in one pass, cheaper than one read each. A drain stops once
     // the residuals' sum is within its budget, so the queue it leaves can be most of the nodes
-    // mutant-skip: in plan
-    // Whether a drain reads its nodes one at a time or all in one pass: which nodes it pushes, and how, is the same, so
-    // only its cost shows (the bench's spread and near graphs)
     let most = held.nodes / 4;
     let mut queued = 0u64;
     t.visit(&keys::rank_queue(index.name), |_, _| {
-        // mutant-skip: in plan (as above)
         queued += 1;
-        // mutant-skip: in plan (as above)
         queued <= most
     })?;
-    // mutant-skip: in plan (as above)
     if queued > most {
         reached.read_all(t, &index)?;
     } else {
@@ -878,12 +900,10 @@ pub fn plan(
         Sweep { residuals: held.residuals, estimates: held.estimates, after: held.swept, pushes: 0, moved: 0 };
     // One node at a time while few are read: the next waiting after the place pushed last, from the first again once past
     // the last
-    // mutant-skip: replace > with >= in plan (as above)
     // mutant-skip: replace < with <= in plan
     // The drain's limit, a push more or fewer in a unit: the next unit takes up the sweep where it stopped
     // (`draining_in_chunks_makes_the_bits_one_drain_makes`)
-    while !reached.all && sweep.pushes < limit && sweep.residuals > index.budget(sweep.estimates) {
-        // mutant-skip: in plan (as above)
+    while !reached.all && sweep.pushes < limit && index.over_budget(sweep.residuals, sweep.estimates) {
         if reached.at.len() as u64 > most {
             reached.read_all(t, &index)?;
             break;
@@ -920,9 +940,9 @@ pub fn plan(
         reached.sweep_all(t, &index, mirror, sequence, &mut sweep, limit)?;
     }
     // Owed pushes: past the budget with a node to push, so a drain never waits on a sum no push can lower
-    // mutant-skip: replace > with >= in plan (as above)
-    let waiting = sweep.residuals > index.budget(sweep.estimates)
-        // mutant-skip: replace > with >= in plan (as above)
+    let waiting = index.over_budget(sweep.residuals, sweep.estimates)
+        // mutant-skip: replace > with >= in plan
+        // A residual exactly at the threshold: a double the writes never land on
         && if reached.all { reached.nodes.iter().any(|n| n.r.abs() > threshold) } else { !reached.waiting.is_empty() };
     let totals = Totals {
         estimates: sweep.estimates,
@@ -1129,9 +1149,8 @@ impl Reached {
         let n = self.nodes.len();
         let mut at = sweep.after.map_or(0, |place| self.nodes.partition_point(|n| (n.type_at, n.seq) <= place));
         let mut seen = 0;
-        // mutant-skip: replace > with >= in Reached::sweep_all (as above)
         // mutant-skip: replace < with <= in Reached::sweep_all (as above)
-        while sweep.pushes < limit && seen < n && sweep.residuals > index.budget(sweep.estimates) {
+        while sweep.pushes < limit && seen < n && index.over_budget(sweep.residuals, sweep.estimates) {
             if at >= n {
                 at = 0;
             }
@@ -1167,20 +1186,35 @@ impl Reached {
         u: usize,
     ) -> Result<Vec<(usize, f64)>> {
         let mut arcs = Vec::new();
+        let mut failed = None;
         for kind in &index.def.relations {
             for &outward in index.def.direction.sides() {
                 let at = &self.at;
-                let mut arc = |far: &str, weight: Option<f64>| {
-                    if let Some(Some(v)) = at.get(far) {
-                        arcs.push((*v, index.weight(kind, weight)));
+                let mut arc = |far: &str, weight: Option<f64>| -> bool {
+                    if failed.is_some() {
+                        return false;
                     }
+                    if let Some(Some(v)) = at.get(far) {
+                        match index.weight(kind, weight) {
+                            Ok(w) => arcs.push((*v, w)),
+                            Err(e) => {
+                                failed = Some(e);
+                                return false;
+                            }
+                        }
+                    }
+                    true
                 };
                 match &mut graph {
-                    Some((graph, at)) => graph.visit_far_ends(t, *at, &self.ids[u], outward, kind, arc)?,
-                    None => relations::visit_far_ends(t, &self.ids[u], outward, Some(kind), |far, weight| {
+                    Some((graph, at)) => graph.visit_far_ends(t, *at, &self.ids[u], outward, kind, |far, weight| {
                         arc(far, weight);
-                        Ok(true)
                     })?,
+                    None => relations::visit_far_ends(t, &self.ids[u], outward, Some(kind), |far, weight| {
+                        Ok(arc(far, weight))
+                    })?,
+                }
+                if let Some(e) = failed {
+                    return Err(e);
                 }
             }
         }
@@ -1198,36 +1232,47 @@ impl Reached {
         most: u64,
     ) -> Result<Option<Vec<(usize, f64)>>> {
         // A far end already read is taken by its place here; one not read yet is named, read once the visit is done
-        // mutant-skip: replace Reached::arcs -> Result<Option<Vec<\(usize, f64\)>>> with Ok\(None\) (as above)
         enum Far {
             Read(usize, f64),
             Unread(String, f64),
         }
         let id = Rc::clone(&self.ids[u]);
         let mut found: Vec<Far> = Vec::new();
+        let mut failed = None;
         for kind in &index.def.relations {
             for &outward in index.def.direction.sides() {
                 let at = &self.at;
-                let mut arc = |far: &str, weight: Option<f64>| {
-                    let weight = index.weight(kind, weight);
+                let mut arc = |far: &str, weight: Option<f64>| -> bool {
+                    if failed.is_some() {
+                        return false;
+                    }
+                    let weight = match index.weight(kind, weight) {
+                        Ok(w) => w,
+                        Err(e) => {
+                            failed = Some(e);
+                            return false;
+                        }
+                    };
                     match at.get(far) {
                         Some(Some(v)) => found.push(Far::Read(*v, weight)),
                         Some(None) => {}
                         None => found.push(Far::Unread(far.to_owned(), weight)),
                     }
+                    true
                 };
                 let visited = match &mut graph {
-                    Some((graph, at)) => graph.visit_far_ends(t, *at, &id, outward, kind, arc),
-                    None => relations::visit_far_ends(t, &id, outward, Some(kind), |far, weight| {
+                    Some((graph, at)) => graph.visit_far_ends(t, *at, &id, outward, kind, |far, weight| {
                         arc(far, weight);
-                        Ok(true)
                     }),
+                    None => relations::visit_far_ends(t, &id, outward, Some(kind), |far, weight| Ok(arc(far, weight))),
                 };
                 visited?;
+                if let Some(e) = failed {
+                    return Err(e);
+                }
             }
         }
         let unread = found.iter().filter(|far| matches!(far, Far::Unread(..))).count();
-        // mutant-skip: in Reached::arcs (as above)
         if (self.at.len() + unread) as u64 > most {
             return Ok(None);
         }
@@ -1262,7 +1307,7 @@ pub fn push_at_commit(t: &mut Txn<'_, '_>) -> Result<Vec<String>> {
         let owed = if changed && !t.state.rank_owed_before.get(&name).copied().unwrap_or(false) {
             push(t, &name, COMMIT_PUSHES)?
         } else {
-            held.residuals > Index::new(&name, def, t.schema).budget(held.estimates)
+            Index::new(&name, def, t.schema).over_budget(held.residuals, held.estimates)
         };
         if owed || Index::new(&name, def, t.schema).count_due(&totals(&*t, &name)?) {
             waiting.push(name);
@@ -1276,8 +1321,9 @@ pub fn owes_work(r: &impl Read, index: &str) -> Result<bool> {
     let Some(def) = r.schema().ranks.get(index) else { return Ok(false) };
     let index = Index::new(index, def, r.schema());
     let totals = totals(r, index.name)?;
-    // mutant-skip: replace > with >= in owes_work (as above)
-    Ok(totals.stage != Stage::Built || totals.residuals > index.budget(totals.estimates) || index.count_due(&totals))
+    Ok(totals.stage != Stage::Built
+        || index.over_budget(totals.residuals, totals.estimates)
+        || index.count_due(&totals))
 }
 
 /// One chunk of a rank index's build: adds up to `limit` of its types' live entities after `after` (a type's place among
@@ -1389,12 +1435,13 @@ pub fn is_built(r: &impl Read, index: &str) -> Result<bool> {
     Ok(totals(r, index)?.stage == Stage::Built)
 }
 
-/// The rank indexes not built yet, or whose bound is past their tolerance, for the drain
+/// The rank indexes not built yet, or whose residual sum is past their tolerance budget, for the drain
 pub fn unfinished(r: &impl Read) -> Result<Vec<String>> {
     let mut out = Vec::new();
     for (name, def) in &r.schema().ranks {
+        let index = Index::new(name, def, r.schema());
         let totals = totals(r, name)?;
-        // Past the tolerance with a node queued to push: the drain's own test of whether it owes pushes
+        // Past the budget with a node queued to push: the drain's own test of whether it owes pushes
         let queued = || -> Result<bool> {
             let mut any = false;
             r.visit(&keys::rank_queue(name), |_, _| {
@@ -1403,11 +1450,10 @@ pub fn unfinished(r: &impl Read) -> Result<Vec<String>> {
             })?;
             Ok(any)
         };
-        // mutant-skip: replace > with >= in unfinished (as above)
         // mutant-skip: replace && with \|\| in unfinished
         // Whether a built index within its tolerance, nodes still queued, is handed to the builder: a drain then owes
         // no push and writes nothing, so only its cost shows; index_status reads the build stage, not this
-        if totals.stage != Stage::Built || (totals.error(def.damping) > def.tolerance && queued()?) {
+        if totals.stage != Stage::Built || (index.over_budget(totals.residuals, totals.estimates) && queued()?) {
             out.push(name.clone());
         }
     }
@@ -1457,17 +1503,37 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         }
         // Each node's arcs, as the edges make them
         let mut arcs: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nodes.len()];
+        let mut bad_weight: Option<String> = None;
         for (at, (id, _)) in nodes.iter().enumerate() {
             for kind in &def.relations {
                 for &outward in def.direction.sides() {
                     relations::visit_far_ends(r, id, outward, Some(kind), |far, weight| {
                         if let Some(&to) = place.get(far) {
-                            arcs[at].push((to, index.weight(kind, weight)));
+                            match index.weight(kind, weight) {
+                                Ok(w) => arcs[at].push((to, w)),
+                                Err(e) => {
+                                    bad_weight = Some(e.message);
+                                    return Ok(false);
+                                }
+                            }
                         }
                         Ok(true)
                     })?;
+                    if bad_weight.is_some() {
+                        break;
+                    }
+                }
+                if bad_weight.is_some() {
+                    break;
                 }
             }
+            if bad_weight.is_some() {
+                break;
+            }
+        }
+        if let Some(msg) = bad_weight {
+            out.push(violation(msg));
+            continue;
         }
         let alpha = def.damping;
         let keep = 1.0 - alpha;
@@ -1481,9 +1547,8 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
                 )));
             }
             let w: f64 = arcs[at].iter().map(|(_, w)| w).sum();
-            // mutant-skip: in violations
-            // check()'s tolerances for rounding: a clean index holds its sums within them by far, and the damage the
-            // tests make moves a value far past them, so a tolerance off by a factor answers the same
+            // mutant-skip: replace > with >= in violations
+            // Exact floating-point equality at the 1e-9 rounding tolerance boundary
             if (w - n.w).abs() > 1e-9 * w.max(1.0) {
                 out.push(violation(format!("{} holds out-weight {} where its arcs weigh {w}", nodes[at].0, n.w)));
             }
@@ -1496,7 +1561,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let scale = nodes.iter().map(|(_, n)| n.x.abs()).fold(1.0, f64::max);
         for (at, (id, n)) in nodes.iter().enumerate() {
             let residual = keep + inflow[at] - n.x;
-            // mutant-skip: in violations (as above)
+            // mutant-skip: replace > with >= in violations (as above)
             if (residual - n.r).abs() > 1e-9 * scale {
                 out.push(violation(format!("{id} holds residual {} where its estimates make it {residual}", n.r)));
             }
@@ -1515,7 +1580,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let mut expected_queued = 0usize;
         for (id, n) in &nodes {
             // An estimate that isn't finite has no place in the score order, and is reported above
-            if n.x.is_finite() && !r.contains(&order_key(name, order_precision(def.tolerance), n))? {
+            if n.x.is_finite() && !r.contains(&order_key(name, order_precision(def.tolerance), n)?)? {
                 out.push(violation(format!("{id} is missing from the score order")));
             }
             if n.r.abs() > index.threshold {
@@ -1535,9 +1600,9 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let estimates: f64 = nodes.iter().map(|(_, n)| n.x).sum();
         let residuals: f64 = nodes.iter().map(|(_, n)| n.r.abs()).sum();
         if totals.nodes != nodes.len() as u64
-            // mutant-skip: in violations (as above)
+            // mutant-skip: replace > with >= in violations (as above)
             || (totals.estimates - estimates).abs() > 1e-9 * estimates.abs().max(1.0)
-            // mutant-skip: in violations (as above)
+            // mutant-skip: replace > with >= in violations (as above)
             || (totals.residuals - residuals).abs() > 1e-9 * estimates.abs().max(1.0)
         {
             out.push(violation(format!(
@@ -1549,10 +1614,6 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
             )));
         }
         // The contract: within the reported bound of `rank` over the same graph
-        // mutant-skip: in violations
-        // check()'s comparison with `rank`: every state the invariant holds in is within the bound it reports (the
-        // bound's proof, `docs/evidence/rank-index.md`), so it fires only for a wrong system or a wrong bound, which
-        // the invariant checks above it catch first
         if nodes.is_empty() || estimates <= 0.0 {
             continue;
         }
@@ -1564,7 +1625,7 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
         let truth = algorithms::rank(&graph, &seeds, alpha, 1_000_000, 1e-13).expect("a seed in a graph of its nodes");
         let distance: f64 = nodes.iter().zip(&truth.scores).map(|((_, n), s)| (n.x / estimates - s).abs()).sum();
         let bound = error_bound(residuals, estimates, nodes.len() as u64, alpha);
-        // mutant-skip: in violations (as above)
+        // mutant-skip: replace > with >= in violations (as above)
         if distance > bound + 1e-9 {
             out.push(violation(format!("its scores are {distance} from PageRank, past the bound {bound} it reports")));
         }
@@ -1635,12 +1696,15 @@ mod tests {
     fn the_score_order_keeps_as_many_bits_as_it_is_given() {
         let node = |x: f64| Node { x, r: 0.0, w: 0.0, type_at: 0, seq: 7 };
         for precision in [4, 12, 16, 52] {
-            let key = |x: f64| order_key("i", precision, &node(x));
+            let key = |x: f64| order_key("i", precision, &node(x)).unwrap();
             // Apart past the bits kept: one key. Apart in the last bit kept: another, and the higher estimate first
             if precision < 52 {
                 assert_eq!(key(1.0), key(1.0 + 2f64.powi(-(precision as i32) - 1)), "{precision}");
             }
             assert!(key(1.0 + 2f64.powi(-(precision as i32))) < key(1.0), "{precision}");
+        }
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(order_key("i", 12, &node(bad)).unwrap_err().code, ErrorCode::Corrupted);
         }
     }
 
@@ -1655,12 +1719,401 @@ mod tests {
                         let (p, q) = (node(a, sa), node(b, sb));
                         assert_eq!(
                             same_order(&p, &q, precision),
-                            order_key("i", precision, &p) == order_key("i", precision, &q),
+                            order_key("i", precision, &p).unwrap() == order_key("i", precision, &q).unwrap(),
                             "{a} {sa}, {b} {sb}, {precision}"
                         );
                     }
                 }
             }
         }
+    }
+
+    fn rank_schema(weighted: bool) -> Schema {
+        Schema::from_json(&serde_json::json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": { "Task": { "fields": {} } },
+            "relations": { "weighs": { "cardinality": "many-to-many", "weighted": weighted } },
+            "ranks": {
+                "taskRank": {
+                    "types": ["Task"],
+                    "relations": ["weighs"],
+                    "direction": "out",
+                    "weights": weighted,
+                    "damping": 0.85,
+                    "tolerance": 1e-5
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn unfinished_and_owes_work_agree_at_the_1_ulp_tolerance_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = rank_schema(false);
+        let db = crate::Database::open(
+            dir.path(),
+            crate::OpenOptions { schema: Some(schema.clone()), syncs: false, ..Default::default() },
+        )
+        .unwrap();
+        let def = &schema.ranks["taskRank"];
+        let index = Index::new("taskRank", def, &schema);
+        // Find an `estimates` value where `budget(estimates)` yields a `residuals` whose `error_bound` exceeds
+        // `def.tolerance` by 1 ULP while `residuals <= budget(estimates)` holds.
+        let (estimates, residuals) = (1..10_000)
+            .map(|n| f64::from(n) * 0.1 + 0.03)
+            .find_map(|s| {
+                let b = index.budget(s);
+                (error_bound(b, s, 10, def.damping) > def.tolerance).then_some((s, b))
+            })
+            .expect("exists an estimate where multiplication and division disagree by 1 ULP");
+        assert!(!index.over_budget(residuals, estimates));
+        assert!(error_bound(residuals, estimates, 10, def.damping) > def.tolerance);
+        db.store()
+            .unwrap()
+            .write(
+                |txn, d| {
+                    let totals = Totals {
+                        nodes: 10,
+                        estimates,
+                        residuals,
+                        moved: 0,
+                        written_at: 1,
+                        stage: Stage::Built,
+                        swept: None,
+                    };
+                    d.main.put(txn, &keys::rank_totals("taskRank"), &totals.encode())?;
+                    d.main.put(txn, &keys::rank_queued("taskRank", 0, 1), b"Task-0")?;
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        db.snapshot(|s| {
+            assert!(!owes_work(s, "taskRank")?);
+            assert!(unfinished(s)?.is_empty());
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn plan_switches_between_single_node_and_full_scan_at_quarter_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = rank_schema(false);
+        let db = crate::Database::open(
+            dir.path(),
+            crate::OpenOptions { schema: Some(schema), syncs: false, ..Default::default() },
+        )
+        .unwrap();
+        // 16 nodes => `most = 16 / 4 = 4`
+        let ops: Vec<_> =
+            (0..16).map(|i| serde_json::json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+        crate::engine::tests::write(&db, ops).unwrap();
+        db.wait_for_index_builds().unwrap();
+        let set_queued = |count: usize| {
+            db.store()
+                .unwrap()
+                .write(
+                    |txn, d| {
+                        let prefix = keys::rank_queue("taskRank");
+                        let existing: Vec<Vec<u8>> = d
+                            .main
+                            .prefix_iter(txn, &prefix)?
+                            .map(|item| item.map(|(k, _)| k.to_vec()))
+                            .collect::<std::result::Result<_, _>>()?;
+                        for k in existing {
+                            d.main.delete(txn, &k)?;
+                        }
+                        let mut totals = Totals::decode(d.main.get(txn, &keys::rank_totals("taskRank"))?.unwrap())?;
+                        totals.residuals = 1.0;
+                        for i in 0..16usize {
+                            let id = format!("Task-{i}");
+                            let key = keys::rank_node("taskRank", &id);
+                            let mut n = Node::decode(d.main.get(txn, &key)?.unwrap())?;
+                            n.r = if i < count { 0.1 } else { 0.0 };
+                            d.main.put(txn, &key, &n.encode())?;
+                            if i < count {
+                                d.main.put(txn, &keys::rank_queued("taskRank", n.type_at, n.seq), id.as_bytes())?;
+                            }
+                        }
+                        d.main.put(txn, &keys::rank_totals("taskRank"), &totals.encode())?;
+                        Ok(())
+                    },
+                    false,
+                )
+                .unwrap();
+        };
+        // `queued == 4 == most` with `limit == 0`: stays on single-node path and makes zero pushes
+        set_queued(4);
+        let drained = db.snapshot(|s| plan(s, s.schema, "taskRank", 0, None)).unwrap().unwrap();
+        assert!(!drained.read_every_node(), "4 queued out of 16 must not read all");
+        assert_eq!(drained.totals.residuals, 1.0, "limit=0 must not push any node");
+        // `queued == 5 > most` with `limit == 0`: switches to reading all nodes upfront before the loop
+        set_queued(5);
+        let drained = db.snapshot(|s| plan(s, s.schema, "taskRank", 0, None)).unwrap().unwrap();
+        assert!(drained.read_every_node(), "5 queued out of 16 must read all");
+        assert_eq!(drained.totals.residuals, 1.0, "limit=0 must not push any node");
+        // `queued == 4 == most` with `limit == 1`: stays on single-node path and pushes once
+        set_queued(4);
+        let drained = db.snapshot(|s| plan(s, s.schema, "taskRank", 1, None)).unwrap().unwrap();
+        assert!(!drained.read_every_node(), "4 queued out of 16 must not read all");
+        assert!(drained.totals.residuals < 1.0, "limit=1 must push a queued node");
+        // `queued == 5 > most` with `limit == 1`: switches to reading all nodes upfront
+        set_queued(5);
+        let drained = db.snapshot(|s| plan(s, s.schema, "taskRank", 1, None)).unwrap().unwrap();
+        assert!(drained.read_every_node(), "5 queued out of 16 must read all");
+
+        // `Reached::arcs` threshold: 1 queued node with 3 unread far ends (`1 + 3 = 4 <= most`) stays incremental,
+        // while 4 unread far ends (`1 + 4 = 5 > most`) switches to read_all
+        let edges: Vec<_> = (1..=3)
+            .map(|i| serde_json::json!({ "op": "link", "source": "Task-0", "kind": "weighs", "target": format!("Task-{i}") }))
+            .collect();
+        crate::engine::tests::write(&db, edges).unwrap();
+        db.wait_for_index_builds().unwrap();
+        set_queued(1);
+        let drained = db.snapshot(|s| plan(s, s.schema, "taskRank", 1, None)).unwrap().unwrap();
+        assert!(!drained.read_every_node(), "1 + 3 = 4 <= most stays incremental");
+
+        // Chain past `most` across multiple pushes: `Task-1 -> Task-4` makes 2nd push reach 5th node (`at.len() == 5 > most`)
+        crate::engine::tests::write(
+            &db,
+            vec![serde_json::json!({ "op": "link", "source": "Task-1", "kind": "weighs", "target": "Task-4" })],
+        )
+        .unwrap();
+        db.wait_for_index_builds().unwrap();
+        set_queued(1);
+        let drained = db.snapshot(|s| plan(s, s.schema, "taskRank", 20, None)).unwrap().unwrap();
+        assert!(drained.read_every_node(), "chain reaching 5th node switches to read_all");
+
+        // Adding a 4th outgoing edge from Task-0 makes `1 + 4 = 5 > most` on the very first push
+        crate::engine::tests::write(
+            &db,
+            vec![serde_json::json!({ "op": "link", "source": "Task-0", "kind": "weighs", "target": "Task-5" })],
+        )
+        .unwrap();
+        db.wait_for_index_builds().unwrap();
+        set_queued(1);
+        let drained = db.snapshot(|s| plan(s, s.schema, "taskRank", 1, None)).unwrap().unwrap();
+        assert!(drained.read_every_node(), "1 + 4 = 5 > most switches to read_all in Reached::arcs");
+    }
+
+    #[test]
+    fn violations_checks_out_weight_residual_totals_estimates_and_pagerank_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = rank_schema(true);
+        let db = crate::Database::open(
+            dir.path(),
+            crate::OpenOptions { schema: Some(schema), syncs: false, ..Default::default() },
+        )
+        .unwrap();
+        // Empty graph: `nodes.is_empty()` skips PageRank comparison cleanly
+        db.wait_for_index_builds().unwrap();
+        assert!(db.snapshot(|s| violations(s)).unwrap().is_empty());
+
+        // Weighted graph with large out-weight (`w = 100`) and a hub (`Task-0`) receiving edges from all other nodes
+        // so `scale = max |x| > 2` and `estimates > 10`, separating `*` from `/` and `+` in `1e-9 * scale`
+        let mut ops: Vec<_> =
+            (0..12).map(|i| serde_json::json!({ "op": "create", "type": "Task", "id": format!("Task-{i}") })).collect();
+        ops.push(serde_json::json!({
+            "op": "link", "source": "Task-0", "kind": "weighs", "target": "Task-1", "weight": 100.0
+        }));
+        for i in 1..12 {
+            ops.push(serde_json::json!({
+                "op": "link", "source": format!("Task-{i}"), "kind": "weighs", "target": "Task-0", "weight": 100.0
+            }));
+        }
+        crate::engine::tests::write(&db, ops).unwrap();
+        db.wait_for_index_builds().unwrap();
+        assert!(db.snapshot(|s| violations(s)).unwrap().is_empty());
+
+        let edit_node = |id: &str, f: &dyn Fn(&mut Node)| {
+            db.store()
+                .unwrap()
+                .write(
+                    |txn, d| {
+                        let key = keys::rank_node("taskRank", id);
+                        let mut n = Node::decode(d.main.get(txn, &key)?.unwrap())?;
+                        f(&mut n);
+                        d.main.put(txn, &key, &n.encode())?;
+                        Ok(())
+                    },
+                    false,
+                )
+                .unwrap();
+        };
+        let edit_totals = |f: &dyn Fn(&mut Totals)| {
+            db.store()
+                .unwrap()
+                .write(
+                    |txn, d| {
+                        let key = keys::rank_totals("taskRank");
+                        let mut t = Totals::decode(d.main.get(txn, &key)?.unwrap())?;
+                        f(&mut t);
+                        d.main.put(txn, &key, &t.encode())?;
+                        Ok(())
+                    },
+                    false,
+                )
+                .unwrap();
+        };
+        let messages =
+            || -> Vec<String> { db.snapshot(|s| violations(s)).unwrap().into_iter().map(|v| v.message).collect() };
+
+        // 1. Out-weight tolerance: error `5e-9` is within `1e-9 * 100 = 1e-7`, error `1e-4` exceeds it
+        edit_node("Task-0", &|n| n.w += 5e-9);
+        assert!(messages().iter().all(|m| !m.contains("out-weight")), "{:?}", messages());
+        edit_node("Task-0", &|n| n.w += 1e-4);
+        assert!(messages().iter().any(|m| m.contains("out-weight")), "{:?}", messages());
+        db.rebuild(None).unwrap();
+
+        // 2. Residual tolerance: with scale > 1, error `2e-9` within `1e-9 * scale`, error `1e-4` exceeds it
+        edit_node("Task-0", &|n| n.x *= 10.0);
+        // Check `scale` effect via residual perturbation on a freshly built graph where `Task-0.x > 1`
+        db.rebuild(None).unwrap();
+        let scale: f64 = db
+            .snapshot(|s| {
+                let mut m = 1.0f64;
+                for i in 0..12 {
+                    m = m.max(node(s, "taskRank", &format!("Task-{i}"))?.unwrap().x.abs());
+                }
+                Ok(m)
+            })
+            .unwrap();
+        assert!(scale > 1.5, "scale={scale}");
+        edit_node("Task-0", &|n| n.r += 1.2e-9);
+        assert!(messages().iter().all(|m| !m.contains("holds residual")), "{:?}", messages());
+        edit_node("Task-0", &|n| n.r += 1e-4);
+        assert!(messages().iter().any(|m| m.contains("holds residual")), "{:?}", messages());
+        db.rebuild(None).unwrap();
+
+        // 3. Totals.estimates and Totals.residuals tolerances (estimates ≈ 12 > 1)
+        edit_totals(&|t| t.estimates += 5e-9);
+        assert!(messages().iter().all(|m| !m.contains("its totals")), "{:?}", messages());
+        edit_totals(&|t| t.estimates += 1e-4);
+        assert!(messages().iter().any(|m| m.contains("its totals")), "{:?}", messages());
+        db.rebuild(None).unwrap();
+
+        edit_totals(&|t| t.residuals += 5e-9);
+        assert!(messages().iter().all(|m| !m.contains("its totals")), "{:?}", messages());
+        edit_totals(&|t| t.residuals += 1e-4);
+        assert!(messages().iter().any(|m| m.contains("its totals")), "{:?}", messages());
+        db.rebuild(None).unwrap();
+
+        // 4. PageRank distance check: on an exact solution (`bound = 0`), a `1e-11` drift stays within `bound + 1e-9`
+        // (killing `+ -> -` and `+ -> *`), while a large drift exceeds it (killing `> -> ==` and `> -> <`)
+        {
+            let dir_pr = tempfile::tempdir().unwrap();
+            let db_pr = crate::Database::open(
+                dir_pr.path(),
+                crate::OpenOptions { schema: Some(rank_schema(false)), syncs: false, ..Default::default() },
+            )
+            .unwrap();
+            crate::engine::tests::write(
+                &db_pr,
+                vec![
+                    serde_json::json!({ "op": "create", "type": "Task", "id": "Task-0" }),
+                    serde_json::json!({ "op": "create", "type": "Task", "id": "Task-1" }),
+                ],
+            )
+            .unwrap();
+            db_pr.wait_for_index_builds().unwrap();
+            let tweak = |dx: f64| {
+                db_pr
+                    .store()
+                    .unwrap()
+                    .write(
+                        |txn, d| {
+                            let key = keys::rank_node("taskRank", "Task-0");
+                            let mut n = Node::decode(d.main.get(txn, &key)?.unwrap())?;
+                            n.x += dx;
+                            n.r = 0.0;
+                            d.main.put(txn, &key, &n.encode())?;
+                            Ok(())
+                        },
+                        false,
+                    )
+                    .unwrap();
+            };
+            tweak(1e-11);
+            let pr_msgs = || -> Vec<String> {
+                db_pr.snapshot(|s| violations(s)).unwrap().into_iter().map(|v| v.message).collect()
+            };
+            assert!(pr_msgs().iter().all(|m| !m.contains("from PageRank")), "{:?}", pr_msgs());
+            tweak(5.0);
+            assert!(pr_msgs().iter().any(|m| m.contains("from PageRank")), "{:?}", pr_msgs());
+        }
+
+        // 5. Non-empty graph with `estimates <= 0.0`: skips PageRank check rather than dividing by <= 0
+        for i in 0..12 {
+            edit_node(&format!("Task-{i}"), &|n| {
+                n.x = if i == 0 { 1.0 } else { -2.0 };
+                n.r = 0.0;
+            });
+        }
+        assert!(messages().iter().all(|m| !m.contains("from PageRank")), "{:?}", messages());
+        db.rebuild(None).unwrap();
+
+        // 6. Stored edge with an invalid weight on a built rank index is reported as a violation rather than panicking
+        let rel_seq = db
+            .snapshot(|s| {
+                let mut found = None;
+                s.visit(&keys::all_relations(), |_, bytes| {
+                    let stored: relations::Stored = rmp_serde::from_slice(bytes).unwrap();
+                    found = Some(stored.seq);
+                    false
+                })?;
+                Ok(found.unwrap())
+            })
+            .unwrap();
+        db.store()
+            .unwrap()
+            .write(
+                |txn, d| {
+                    d.main.put(
+                        txn,
+                        &keys::edge(true, "Task-0", "weighs", rel_seq),
+                        &relations::edge_value("Relation-1", "Task-1", Some(-5.0)),
+                    )?;
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        assert!(messages().iter().any(|m| m.contains("weight -5")), "{:?}", messages());
+    }
+
+    #[test]
+    fn weight_requires_both_index_weights_and_weighted_relation_and_checks_range() {
+        let weighted_schema = rank_schema(true);
+        let unweighted_index_schema = Schema::from_json(&serde_json::json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": { "Task": { "fields": {} } },
+            "relations": {
+                "weighs": { "cardinality": "many-to-many", "weighted": true },
+                "links": { "cardinality": "many-to-many", "weighted": false }
+            },
+            "ranks": {
+                "unweighted": { "types": ["Task"], "relations": ["weighs"], "weights": false },
+                "weighted": { "types": ["Task"], "relations": ["weighs", "links"], "weights": true }
+            }
+        }))
+        .unwrap();
+        let unweighted =
+            Index::new("unweighted", &unweighted_index_schema.ranks["unweighted"], &unweighted_index_schema);
+        assert_eq!(unweighted.weight("weighs", Some(10.0)).unwrap(), 1.0);
+        assert_eq!(unweighted.weight("weighs", Some(-5.0)).unwrap(), 1.0);
+
+        let weighted = Index::new("weighted", &unweighted_index_schema.ranks["weighted"], &unweighted_index_schema);
+        assert_eq!(weighted.weight("links", Some(10.0)).unwrap(), 1.0);
+        assert_eq!(weighted.weight("weighs", None).unwrap(), 1.0);
+        assert_eq!(weighted.weight("weighs", Some(0.0)).unwrap(), 0.0);
+        assert_eq!(weighted.weight("weighs", Some(relations::MAX_WEIGHT)).unwrap(), relations::MAX_WEIGHT);
+        assert_eq!(weighted.weight("weighs", Some(-0.001)).unwrap_err().code, ErrorCode::ValueInvalid);
+        assert_eq!(weighted.weight("weighs", Some(f64::NAN)).unwrap_err().code, ErrorCode::ValueInvalid);
+        assert_eq!(weighted.weight("weighs", Some(f64::INFINITY)).unwrap_err().code, ErrorCode::ValueInvalid);
+
+        let idx = Index::new("taskRank", &weighted_schema.ranks["taskRank"], &weighted_schema);
+        assert_eq!(idx.weight("weighs", Some(2.5)).unwrap(), 2.5);
     }
 }

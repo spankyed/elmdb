@@ -76,6 +76,10 @@ pub fn unstored_owned(bytes: Vec<u8>) -> Result<Vec<u8>> {
 // the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
 const ONE_CALL_UP_TO: u64 = 16 << 20;
 
+/// The largest stored value a streaming decompression will expand to: a damaged or crafted frame expanding past this is
+/// refused as `CORRUPTED` rather than exhausting memory
+pub const MAX_DECOMPRESSED_BYTES: usize = 64 << 20;
+
 thread_local! {
     /// One decompression context a thread, for every value it reads: a context costs about 100 KB to allocate, where
     /// the values it reads are a kilobyte or two (`docs/evidence/read-allocation-codec.md`). Each call decompresses one
@@ -84,10 +88,24 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+fn decompress_stream(frame: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::Read as _;
+    let decoder = zstd::stream::Decoder::new(frame)?;
+    let mut out = Vec::new();
+    decoder.take(limit as u64 + 1).read_to_end(&mut out)?;
+    if out.len() > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("decompressed value exceeds {limit} bytes"),
+        ));
+    }
+    Ok(out)
+}
+
 fn decompress(frame: &[u8]) -> std::io::Result<Vec<u8>> {
     let size = match zstd::zstd_safe::get_frame_content_size(frame) {
         Ok(Some(size)) if size <= ONE_CALL_UP_TO => size as usize,
-        _ => return zstd::stream::decode_all(frame),
+        _ => return decompress_stream(frame, MAX_DECOMPRESSED_BYTES),
     };
     DECOMPRESSOR.with(|context| {
         let mut context = context.borrow_mut();
@@ -112,9 +130,85 @@ pub fn decode(bytes: &[u8]) -> Result<Value> {
         .map_err(|e| Error::new(ErrorCode::Corrupted, format!("A stored value doesn't decode: {e}")))
 }
 
+/// The extension msgpackr writes its records as unless told `useRecords: false`, which a refusal names as the fix
+const MSGPACKR_RECORD_EXTENSION: i8 = 0x72;
+
 /// Checks a value a write brings is in the value spec (`format::value`), and nests no deeper than it allows
 pub fn check_spec(value: &Value) -> Result<()> {
-    crate::format::value::decode(&encode(value)).map(|_| ())
+    check_spec_at(value, MAX_DEPTH)
+        .map_err(|why| Error::new(ErrorCode::ValueInvalid, format!("A value isn't valid msgpack for elmdb: {why}")))
+}
+
+/// Validates `&Value` against the value spec (`format::value`) with zero allocations on the valid path, matching
+/// `rmpv::decode::read_value_with_max_depth(..., MAX_DEPTH)`'s depth accounting so every accepted value decodes cleanly
+fn check_spec_at(value: &Value, depth: usize) -> std::result::Result<(), String> {
+    let dec =
+        |d: usize| d.checked_sub(1).filter(|&next| next > 0).ok_or_else(|| format!("it nests deeper than {MAX_DEPTH}"));
+    let depth = dec(depth)?;
+    match value {
+        Value::Nil | Value::Boolean(_) | Value::Integer(_) | Value::Binary(_) => Ok(()),
+        Value::F32(n) if n.is_finite() => Ok(()),
+        Value::F64(n) if n.is_finite() => Ok(()),
+        Value::F32(_) | Value::F64(_) => Err("it holds a number that isn't finite".to_owned()),
+        Value::String(s) => {
+            dec(depth)?;
+            match s.as_str() {
+                Some(_) => Ok(()),
+                None => {
+                    let valid_up_to = std::str::from_utf8(s.as_bytes()).unwrap_err().valid_up_to();
+                    Err(format!(
+                        "it holds a string that isn't UTF-8 from its byte {valid_up_to}: write it as UTF-8, a lone \
+                         surrogate as U+FFFD, or bytes as binary"
+                    ))
+                }
+            }
+        }
+        Value::Ext(t, _) if *t == TIMESTAMP_EXTENSION => {
+            dec(depth)?;
+            Ok(())
+        }
+        Value::Ext(t, _) => {
+            let fix = if *t == MSGPACKR_RECORD_EXTENSION {
+                ": it is msgpackr's record, which `useRecords: false` leaves out"
+            } else {
+                ""
+            };
+            Err(format!("it holds extension type {t}, and the only one allowed is the timestamp (-1){fix}"))
+        }
+        Value::Array(items) => {
+            if items.is_empty() {
+                return Ok(());
+            }
+            let inner = dec(depth)?;
+            items.iter().try_for_each(|item| check_spec_at(item, inner))
+        }
+        Value::Map(entries) => {
+            if entries.is_empty() {
+                return Ok(());
+            }
+            let inner = dec(depth)?;
+            for (key, val) in entries {
+                if !matches!(key, Value::String(_)) {
+                    return Err(format!("a map key is {}, and keys are strings", kind_of_key(key)));
+                }
+                check_spec_at(key, inner)?;
+                check_spec_at(val, inner)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn kind_of_key(v: &Value) -> &'static str {
+    match v {
+        Value::Nil => "nil",
+        Value::Boolean(_) => "a boolean",
+        Value::Integer(_) | Value::F32(_) | Value::F64(_) => "a number",
+        Value::Binary(_) => "binary",
+        Value::Array(_) => "an array",
+        Value::Map(_) => "a map",
+        _ => "an extension",
+    }
 }
 
 pub fn as_number(value: &Value) -> Option<f64> {
@@ -460,6 +554,127 @@ mod tests {
     fn refuses_a_value_outside_the_value_spec() {
         assert!(check_spec(&Value::Map(vec![("k".into(), 1.into())])).is_ok());
         assert!(check_spec(&Value::Map(vec![(1.into(), 1.into())])).is_err(), "a map key is a string");
+    }
+
+    #[test]
+    fn check_spec_matches_format_value_decode_on_every_variant_and_depth_boundary() {
+        // Invalid-UTF-8 `Utf8String` is refused directly (whereas `rmpv::encode` would silently write it as binary)
+        let bad_utf8 = rmpv::decode::read_value(&mut &[0xa4, b'a', 0xed, 0xa0, 0x80][..]).unwrap();
+        let err = check_spec(&bad_utf8).unwrap_err();
+        assert_eq!(err.code, ErrorCode::ValueInvalid);
+        assert!(err.message.contains("isn't UTF-8 from its byte 1"), "{}", err.message);
+        let bad_key = rmpv::decode::read_value(&mut &[0xa1, 0xff][..]).unwrap();
+        assert_eq!(check_spec(&Value::Map(vec![(bad_key, 1.into())])).unwrap_err().code, ErrorCode::ValueInvalid);
+
+        let cases = vec![
+            Value::Nil,
+            Value::Boolean(true),
+            Value::Boolean(false),
+            Value::from(0),
+            Value::from(-42),
+            Value::from(u64::MAX),
+            Value::F32(1.5),
+            Value::F32(f32::NAN),
+            Value::F32(f32::INFINITY),
+            Value::F32(f32::NEG_INFINITY),
+            Value::F64(2.5),
+            Value::F64(f64::NAN),
+            Value::F64(f64::INFINITY),
+            Value::F64(f64::NEG_INFINITY),
+            Value::from("utf8"),
+            Value::Binary(vec![0xed, 0xa0, 0x80]),
+            Value::Ext(TIMESTAMP_EXTENSION, vec![0, 0, 0, 1]),
+            Value::Ext(1, vec![1]),
+            Value::Ext(0x72, vec![0x40, 0x91]),
+            Value::Array(vec![Value::Nil, Value::from(1), Value::from("x")]),
+            Value::Array(vec![Value::F64(f64::NAN)]),
+            Value::Map(vec![("a".into(), 1.into()), ("b".into(), Value::Ext(TIMESTAMP_EXTENSION, vec![0; 4]))]),
+            Value::Map(vec![(Value::Nil, 1.into())]),
+            Value::Map(vec![(true.into(), 1.into())]),
+            Value::Map(vec![(1.into(), 1.into())]),
+            Value::Map(vec![(Value::F32(1.0), 1.into())]),
+            Value::Map(vec![(Value::F64(1.0), 1.into())]),
+            Value::Map(vec![(Value::Binary(vec![1]), 1.into())]),
+            Value::Map(vec![(Value::Array(vec![]), 1.into())]),
+            Value::Map(vec![(Value::Map(vec![]), 1.into())]),
+            Value::Map(vec![(Value::Ext(TIMESTAMP_EXTENSION, vec![0; 4]), 1.into())]),
+            Value::Map(vec![("ok".into(), Value::Ext(2, vec![]))]),
+        ];
+        for v in &cases {
+            let direct = check_spec(v);
+            let via_decode = crate::format::value::decode(&encode(v)).map(|_| ());
+            assert_eq!(direct.is_ok(), via_decode.is_ok(), "mismatch on {v:?}: {direct:?} vs {via_decode:?}");
+            if let (Err(a), Err(b)) = (direct, via_decode) {
+                assert_eq!(a.code, b.code, "code mismatch on {v:?}");
+                assert_eq!(a.message, b.message, "message mismatch on {v:?}");
+            }
+        }
+        // Depth boundaries for arrays and maps around every leaf kind
+        let wrap_array = |mut v: Value, depth: usize| {
+            for _ in 0..depth {
+                v = Value::Array(vec![v]);
+            }
+            v
+        };
+        let wrap_map = |mut v: Value, depth: usize| {
+            for _ in 0..depth {
+                v = Value::Map(vec![("k".into(), v)]);
+            }
+            v
+        };
+        for leaf in [
+            Value::Nil,
+            Value::Boolean(true),
+            Value::from(7),
+            Value::F32(1.0),
+            Value::F64(1.0),
+            Value::from(""),
+            Value::from("s"),
+            Value::Binary(vec![]),
+            Value::Binary(vec![1]),
+            Value::Array(vec![]),
+            Value::Map(vec![]),
+            Value::Ext(TIMESTAMP_EXTENSION, vec![0; 4]),
+        ] {
+            for depth in [125, 126, 127, 128] {
+                for wrapped in [wrap_array(leaf.clone(), depth), wrap_map(leaf.clone(), depth)] {
+                    let direct = check_spec(&wrapped);
+                    let via_decode = crate::format::value::decode(&encode(&wrapped)).map(|_| ());
+                    assert_eq!(
+                        direct.is_ok(),
+                        via_decode.is_ok(),
+                        "depth {depth} leaf {leaf:?}: direct={direct:?} decode={via_decode:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_decompression_enforces_byte_limit_without_unbounded_growth() {
+        use std::io::Write as _;
+        let stream_compress = |bytes: &[u8]| {
+            let mut enc = zstd::stream::Encoder::new(Vec::new(), 3).unwrap();
+            enc.include_contentsize(false).unwrap();
+            enc.write_all(bytes).unwrap();
+            enc.finish().unwrap()
+        };
+        // Exact boundary: `limit` bytes succeed, `limit + 1` bytes fail
+        let exact = stream_compress(&vec![b'x'; 512]);
+        assert_eq!(decompress_stream(&exact, 512).unwrap().len(), 512);
+        let over = stream_compress(&vec![b'x'; 513]);
+        assert_eq!(decompress_stream(&over, 512).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+
+        // Full `unstored` rejects a streaming zstd bomb past `MAX_DECOMPRESSED_BYTES` as `CORRUPTED`
+        let mut enc = zstd::stream::Encoder::new(vec![COMPRESSED], 3).unwrap();
+        enc.include_contentsize(false).unwrap();
+        let chunk = vec![0u8; 1 << 20];
+        for _ in 0..=64 {
+            enc.write_all(&chunk).unwrap();
+        }
+        let bomb = enc.finish().unwrap();
+        assert!(bomb.len() < 32_768, "bomb frame is tiny on disk: {} bytes", bomb.len());
+        assert_eq!(unstored(&bomb).unwrap_err().code, ErrorCode::Corrupted);
     }
 
     #[test]

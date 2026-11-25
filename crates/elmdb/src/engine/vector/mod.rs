@@ -434,9 +434,14 @@ pub fn restore(
     vector: &[f32],
 ) -> Result<()> {
     let entity_type = ids::type_of(id).to_owned();
+    let filed = vector_indexes(t.schema, &entity_type).into_iter().find(|i| i.name == index);
+    if let Some(filed) = &filed {
+        check_vector("load", filed, vector)?;
+    } else if vector.iter().any(|f| !f.is_finite()) {
+        return Err(Error::new(ErrorCode::ValueInvalid, "load: a vector holds only finite numbers"));
+    }
     t.put(&keys::vector(&entity_type, index, id, chunk), &encode_vector(model, hash, vector))?;
     let current = t.get(&keys::vector_chunk_key(Prefix::VectorChunk, &entity_type, index, id, chunk))?;
-    let filed = vector_indexes(t.schema, &entity_type).into_iter().find(|i| i.name == index);
     let embeds = match (current, filed) {
         (Some(current), Some(filed)) => {
             decode_chunk(&current)?.0 == hash && filed.model == model && filed.dims == vector.len()
@@ -797,12 +802,15 @@ pub fn nearest(
         ));
     }
     check_vector("near", index, vector)?;
+    if k == 0 {
+        return Ok((Vec::new(), true));
+    }
     // The graph is read through hannoy, outside what a tracked read records: what it answers changes with the index's
     // items, which a commit adding or removing a vector writes, and with the embeddings, which re-embedding a chunk
     // writes in place
     r.note(&keys::vector_index_range(Prefix::VectorItem, entity_type, &index.name));
     r.note(&keys::vector_index_range(Prefix::Vector, entity_type, &index.name));
-    let Some((number, _)) = graph_of(r, entity_type, &index.name)? else { return Ok((Vec::new(), true)) };
+    let Some((number, next)) = graph_of(r, entity_type, &index.name)? else { return Ok((Vec::new(), true)) };
     let mut pending = Vec::new();
     for (key, value) in r.scan(&keys::vector_index_range(Prefix::VectorJournal, entity_type, &index.name))? {
         let item = journal_item(&key)?;
@@ -814,8 +822,11 @@ pub fn nearest(
     // A scoped search asks the graph only among the items this unit left unchanged
     let graph_among = among.map(|items| items - &changed);
     let (txn, db) = r.raw();
-    // Request enough unchanged graph items even when old versions of every pending item rank first.
-    let wanted = (k * 4).max(16);
+    // Request enough unchanged graph items even when old versions of every pending item rank first, capped to one past
+    // the total items numbered in this graph so huge `k` never overflows or asks hannoy for unbounded allocations while
+    // keeping `exhausted` accurate when the graph returns everything it holds.
+    let cap = (next as usize).saturating_add(1).max(16);
+    let wanted = k.saturating_mul(4).max(16).min(cap);
     let graph_wanted = if among.is_some() { wanted } else { wanted.saturating_add(pending.len()) };
     macro_rules! search {
         ($db:expr, $d:ty) => {{
@@ -885,11 +896,18 @@ pub fn items_of(r: &impl Read, entity_type: &str, index: &str, ids: &[String]) -
     Ok(out)
 }
 
-/// The entity's own embedding to search near: its first chunk's, when it has one
+/// The entity's own embedding to search near: its first chunk's whose stored embedding matches the chunk's current
+/// hash, model and dimensions
 pub fn own_vector(r: &impl Read, entity_type: &str, index: &VectorIndex, id: &str) -> Result<Option<Vec<f32>>> {
-    for (_, stored) in r.scan(&keys::vectors_of(entity_type, &index.name, id))? {
+    for (key, stored) in r.scan(&keys::vectors_of(entity_type, &index.name, id))? {
+        let chunk = chunk_number(&key)?;
+        let Some(current) = r.get(&keys::vector_chunk_key(Prefix::VectorChunk, entity_type, &index.name, id, chunk))?
+        else {
+            continue;
+        };
+        let (hash, _) = decode_chunk(&current)?;
         let stored = decode_vector(&stored)?;
-        if stored.model == index.model && stored.vector.len() == index.dims {
+        if stored.hash == hash && stored.model == index.model && stored.vector.len() == index.dims {
             return Ok(Some(stored.vector));
         }
     }
@@ -916,6 +934,21 @@ pub fn check_items(r: &impl Read, schema: &Schema) -> Result<Vec<String>> {
                     ));
                 }
                 items.insert((id, n), item);
+            }
+            for (key, value) in r.scan(&keys::vector_index_range(Prefix::VectorItemOf, entity_type, &index.name))? {
+                let mut parts = decode_key(&key)?;
+                let n = match parts.pop() {
+                    Some(Part::Number(n)) => n as u32,
+                    _ => return Err(corrupt("key")),
+                };
+                let Some(Part::String(id)) = parts.pop() else { return Err(corrupt("key")) };
+                let item = values::decode(&value)?.as_u64().ok_or_else(|| corrupt("item"))? as u32;
+                if items.get(&(id.clone(), n)) != Some(&item) {
+                    out.push(format!(
+                        "{entity_type}.{} {id} chunk {n} maps to item {item}, which isn't in the graph",
+                        index.name
+                    ));
+                }
             }
             for (key, _) in r.scan(&keys::vector_index_range(Prefix::VectorChunk, entity_type, &index.name))? {
                 let mut parts = decode_key(&key)?;
@@ -968,3 +1001,112 @@ pub fn clear(t: &mut Txn<'_, '_>, entity_type: &str, index: &str) -> Result<()> 
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod edge_case_tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::schema::{SCHEMA_LANGUAGE, Schema};
+    use crate::{Database, OpenOptions};
+
+    #[test]
+    fn check_items_reports_orphan_vector_item_of_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::from_json(&json!({
+            "$schema": SCHEMA_LANGUAGE,
+            "types": {
+                "Doc": {
+                    "fields": { "text": { "type": "string" } },
+                    "indexes": {
+                        "meaning": { "kind": "vector", "from": ["text"], "dims": 2, "metric": "cosine", "model": "m" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let db = Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() })
+            .unwrap();
+        crate::engine::tests::write(
+            &db,
+            vec![json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "text": "hello" } })],
+        )
+        .unwrap();
+        assert!(db.check().unwrap().is_clean());
+        db.store()
+            .unwrap()
+            .write(
+                |txn, d| {
+                    d.main.put(
+                        txn,
+                        &keys::vector_chunk_key(Prefix::VectorItemOf, "Doc", "meaning", "Doc-ghost", 0),
+                        &values::encode(&Value::from(999u64)),
+                    )?;
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+        let report = db.check().unwrap();
+        assert!(
+            report.violations.iter().any(|v| v.subject == "vector graph" && v.message.contains("Doc-ghost")),
+            "{report:?}"
+        );
+    }
+
+    #[test]
+    fn own_vector_requires_matching_hash_model_and_dims() {
+        let dir = tempfile::tempdir().unwrap();
+        let schema = Schema::from_json(&json!({
+            "$schema": SCHEMA_LANGUAGE,
+            "types": {
+                "Doc": {
+                    "fields": { "text": { "type": "string" } },
+                    "indexes": {
+                        "meaning": { "kind": "vector", "from": ["text"], "dims": 2, "metric": "cosine", "model": "m" }
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let db = Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() })
+            .unwrap();
+        crate::engine::tests::write(
+            &db,
+            vec![json!({ "op": "create", "type": "Doc", "id": "Doc-1", "fields": { "text": "hello" } })],
+        )
+        .unwrap();
+        let chunk_hash = hash_of("hello");
+        let put_vec = |model: &str, hash: &str, vec: &[f32]| {
+            db.store()
+                .unwrap()
+                .write(
+                    |txn, d| {
+                        d.main.put(
+                            txn,
+                            &keys::vector("Doc", "meaning", "Doc-1", 0),
+                            &encode_vector(model, hash, vec),
+                        )?;
+                        Ok(())
+                    },
+                    false,
+                )
+                .unwrap();
+        };
+        let get_own = || {
+            db.snapshot(|s| {
+                let def = resolve(s.schema(), "Doc", Some("meaning"), "like")?;
+                own_vector(s, "Doc", &def, "Doc-1")
+            })
+            .unwrap()
+        };
+        put_vec("m", &chunk_hash, &[1.0, 0.0]);
+        assert_eq!(get_own(), Some(vec![1.0, 0.0]));
+        put_vec("m", "stale-hash", &[1.0, 0.0]);
+        assert_eq!(get_own(), None, "stale hash");
+        put_vec("other-model", &chunk_hash, &[1.0, 0.0]);
+        assert_eq!(get_own(), None, "wrong model");
+        put_vec("m", &chunk_hash, &[1.0, 0.0, 0.0]);
+        assert_eq!(get_own(), None, "wrong dims");
+    }
+}

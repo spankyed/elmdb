@@ -119,9 +119,35 @@ fn order_places_into(
     Ok(())
 }
 
-/// Refuses what would keep a build of a value index from finishing: values whose key LMDB can't store
-/// (`VALUE_INVALID`), or, in a unique index, two entities filed under the same values (`UNIQUE`). `own` is the key
-/// the entity `id` is filed under as an entry
+/// Canonical representation of a value under `values::same` so equal values (including numbers of different
+/// encodings, `-0.0` vs `+0.0`, and maps with reordered or repeated keys) encode to identical bytes
+fn canonical_unique(value: &Value) -> Value {
+    if let Some(n) = values::as_number(value) {
+        return Value::F64(if n == 0.0 { 0.0 } else { n });
+    }
+    match value {
+        Value::Array(items) => Value::Array(items.iter().map(canonical_unique).collect()),
+        Value::Map(fields) => {
+            let mut entries: Vec<(Vec<u8>, Vec<u8>, Value, Value)> = fields
+                .iter()
+                .map(|(k, v)| {
+                    let cv = canonical_unique(v);
+                    (values::encode(k), values::encode(&cv), k.clone(), cv)
+                })
+                .collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            Value::Map(entries.into_iter().map(|(_, _, k, v)| (k, v)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+fn canonical_unique_key(tuple: &[Value]) -> Vec<u8> {
+    values::encode(&Value::Array(tuple.iter().map(canonical_unique).collect()))
+}
+
+/// Refuses a unique-index tuple that another entity already holds (`UNIQUE`), recording `own` (a canonical unique key)
+/// under `id`
 fn buildable_entry(
     entity_type: &str,
     index: &ValueIndex,
@@ -129,10 +155,6 @@ fn buildable_entry(
     id: &str,
     holders: &mut BTreeMap<Vec<u8>, String>,
 ) -> Result<()> {
-    entities::key_fits(own, id, entity_type, &index.name)?;
-    if !index.unique {
-        return Ok(());
-    }
     match holders.get(own) {
         Some(other) if other != id => return Err(unbuildable(entity_type, &index.name, other, id)),
         Some(_) => {}
@@ -141,6 +163,31 @@ fn buildable_entry(
         }
     }
     Ok(())
+}
+
+/// Finds another entity of `entity_type` holding any of `wanted` canonical unique keys, for values that a value
+/// index cannot file into `d/x` (long strings, maps, timestamps, binary)
+fn unindexable_holder(
+    t: &impl Read,
+    entity_type: &str,
+    index: &ValueIndex,
+    id: &str,
+    wanted: &[Vec<u8>],
+) -> Result<Option<String>> {
+    for trashed in [false, true] {
+        for (_, other) in t.scan(&keys::type_range(trashed, entity_type))? {
+            let other = values::decode(&other)?.as_str().unwrap_or_default().to_owned();
+            if other == id {
+                continue;
+            }
+            let fields: Vec<Option<Value>> =
+                index.fields.iter().map(|f| entities::get(t, &other, f)).collect::<Result<_>>()?;
+            if entities::unique_keys(&fields).iter().any(|k| wanted.contains(&canonical_unique_key(k))) {
+                return Ok(Some(other));
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn unbuildable(entity_type: &str, name: &str, one: &str, other: &str) -> Error {
@@ -508,37 +555,43 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                     if ids::type_of(&e.id) != entity_type {
                         return Ok(());
                     }
-                    index_others_into(t, entity_type, &found, &[&e], |key, e| {
-                        entities::key_fits(&key, &e.id, entity_type, name)?;
-                        filing.entry(key, e.seq)
-                    })?;
-                    index_entries_into(t, entity_type, &found, &[&e], |key, e| {
-                        entities::key_fits(&key, &e.id, entity_type, name)?;
-                        if let Some(holders) = holders.as_mut() {
-                            // Sorted by key and then holder, two entities under one key come one after the other,
-                            // with no map of every value held: by their ids, since a store whose rows don't read
-                            // may have two entities at one place
-                            let holder = [Part::Bytes(key.clone()), Part::String(e.id.clone())];
+                    let fields: Vec<Option<Value>> =
+                        found.fields.iter().map(|f| entities::get(t, &e.id, f)).collect::<Result<_>>()?;
+                    if let Some(holders) = holders.as_mut() {
+                        // Enforce uniqueness over every `entities::unique_keys` tuple, including values the index
+                        // cannot file (strings past `MAX_INDEXED_STRING`, maps, timestamps, binary). Include `e.id`
+                        // in the sort key because `Scratch` deduplicates identical keys.
+                        for tuple in entities::unique_keys(&fields) {
+                            let holder = [Part::Bytes(canonical_unique_key(&tuple)), Part::String(e.id.clone())];
                             holders.push(crate::format::key::encode(&holder), Vec::new())?;
                         }
-                        filing.entry(key, e.seq)
-                    })
+                    }
+                    let filed = found.files(&fields);
+                    for key in filed.other_keys(entity_type, name) {
+                        entities::key_fits(&key, &e.id, entity_type, name)?;
+                        filing.entry(key, e.seq)?;
+                    }
+                    for key in filed.entry_keys(entity_type, name) {
+                        entities::key_fits(&key, &e.id, entity_type, name)?;
+                        filing.entry(key, e.seq)?;
+                    }
+                    Ok(())
                 })?;
                 if let Some(holders) = holders {
                     let mut holders = holders.finish()?;
-                    let mut holder: Option<(Vec<u8>, String)> = None;
+                    let mut prev: Option<(Vec<u8>, String)> = None;
                     while let Some((order, _)) = holders.next()? {
                         let mut parts = decode_key(&order)?.into_iter();
                         let (Some(Part::Bytes(key)), Some(Part::String(id))) = (parts.next(), parts.next()) else {
                             return Err(Error::new(ErrorCode::Corrupted, "A sorted index holder doesn't read"));
                         };
-                        if let Some((held, other)) = &holder
+                        if let Some((held, other)) = &prev
                             && *held == key
                             && *other != id
                         {
                             return Err(unbuildable(entity_type, name, other, &id));
                         }
-                        holder = Some((key, id));
+                        prev = Some((key, id));
                     }
                 }
                 clear_value_index(t, entity_type, name)?;
@@ -647,15 +700,27 @@ pub fn rebuild(t: &mut Txn<'_, '_>, index: Option<(&str, &str)>) -> Result<()> {
                         mark(t, ty, &index, true)?;
                         continue;
                     };
-                    let mut holders = BTreeMap::new();
-                    // Where it files an entity besides its entries is a key too, and one too long keeps the build
-                    // from finishing as an entry's does
-                    let buildable = index_entries_into(t, ty, found, of, |key, e| {
-                        buildable_entry(ty, found, &key, &e.id, &mut holders)
-                    })
-                    .and_then(|()| {
-                        index_others_into(t, ty, found, of, |key, e| entities::key_fits(&key, &e.id, ty, &found.name))
-                    });
+                    let mut holders: BTreeMap<Vec<u8>, String> = BTreeMap::new();
+                    // Check every unique key (indexable and unindexable alike) and every key the index files
+                    let buildable = (|| -> Result<()> {
+                        for e in of {
+                            let fields: Vec<Option<Value>> =
+                                found.fields.iter().map(|f| entities::get(t, &e.id, f)).collect::<Result<_>>()?;
+                            if found.unique {
+                                for tuple in entities::unique_keys(&fields) {
+                                    buildable_entry(ty, found, &canonical_unique_key(&tuple), &e.id, &mut holders)?;
+                                }
+                            }
+                            let filed = found.files(&fields);
+                            for key in filed.entry_keys(ty, &found.name) {
+                                entities::key_fits(&key, &e.id, ty, &found.name)?;
+                            }
+                            for key in filed.other_keys(ty, &found.name) {
+                                entities::key_fits(&key, &e.id, ty, &found.name)?;
+                            }
+                        }
+                        Ok(())
+                    })();
                     match buildable {
                         Ok(()) => mark(t, ty, &index, true)?,
                         Err(e) if matches!(e.code, ErrorCode::Unique | ErrorCode::ValueInvalid) => {
@@ -820,6 +885,18 @@ fn build_chunk_after(
     for (seq, id) in chunk.iter().take(limit) {
         let fields: Vec<Option<Value>> = index.fields.iter().map(|f| entities::get(t, id, f)).collect::<Result<_>>()?;
         let filed = index.files(&fields);
+        if index.unique {
+            let unindexable: Vec<Vec<u8>> = entities::unique_keys(&fields)
+                .into_iter()
+                .filter(|tuple| tuple.iter().any(|v| values::index_part(v).is_none()))
+                .map(|tuple| canonical_unique_key(&tuple))
+                .collect();
+            if !unindexable.is_empty()
+                && let Some(other) = unindexable_holder(t, entity_type, &index, id, &unindexable)?
+            {
+                return Err(unbuildable(entity_type, name, &other, id));
+            }
+        }
         for key in filed.entry_keys(entity_type, name) {
             if index.unique {
                 // A write checks a unique value against the rows while the index is unbuilt, so another entity
@@ -947,6 +1024,80 @@ mod audit_tests {
                 )
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn unique_index_build_admits_distinct_and_refuses_duplicate_unindexable_values() {
+        use crate::engine::batch::{Batch, Op};
+        use crate::{Database, OpenOptions};
+        use serde_json::json;
+        use std::collections::BTreeMap;
+
+        // Canonicalization normalizes -0.0 and distinct numbers stay distinct
+        assert_eq!(canonical_unique_key(&[Value::F64(-0.0)]), canonical_unique_key(&[Value::from(0)]));
+        assert_ne!(canonical_unique_key(&[Value::from(1.0)]), canonical_unique_key(&[Value::from(2.0)]));
+
+        let plain = Schema::from_json(&json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": { "Item": { "fields": { "k": { "type": "any", "optional": true } } } }
+        }))
+        .unwrap();
+        let unique = Schema::from_json(&json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": {
+                "Item": {
+                    "fields": { "k": { "type": "any", "optional": true } },
+                    "indexes": { "k": { "kind": "value", "fields": ["k"], "unique": true } }
+                }
+            }
+        }))
+        .unwrap();
+        let create = |id: &str, v: Value| Op::Create {
+            entity_type: "Item".into(),
+            id: Some(id.into()),
+            short_code: None,
+            created_at: None,
+            updated_at: None,
+            fields: BTreeMap::from([("k".into(), v)]),
+        };
+
+        // Distinct unindexable values (long strings, maps, timestamps): build and rebuild succeed
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            Database::open(dir.path(), OpenOptions { schema: Some(plain.clone()), syncs: false, ..Default::default() })
+                .unwrap();
+        db.write(
+            &Batch {
+                ops: vec![
+                    create("Item-1", Value::from("a".repeat(300))),
+                    create("Item-2", Value::from("b".repeat(300))),
+                    create("Item-3", Value::Map(vec![("x".into(), 1.into())])),
+                    create("Item-4", Value::Map(vec![("x".into(), 2.into())])),
+                ],
+                now: Some(1_000.0),
+            },
+            false,
+        )
+        .unwrap();
+        db.set_schema(unique.clone()).unwrap();
+        db.wait_for_index_builds().unwrap();
+        db.rebuild(Some(("Item", "k"))).unwrap();
+        db.rebuild(None).unwrap();
+        assert!(db.check().unwrap().is_clean());
+
+        // Duplicate unindexable values: build fails, single-index rebuild returns UNIQUE
+        let dir2 = tempfile::tempdir().unwrap();
+        let db2 = Database::open(dir2.path(), OpenOptions { schema: Some(plain), syncs: false, ..Default::default() })
+            .unwrap();
+        let dup = Value::from("z".repeat(300));
+        db2.write(
+            &Batch { ops: vec![create("Item-1", dup.clone()), create("Item-2", dup)], now: Some(1_000.0) },
+            false,
+        )
+        .unwrap();
+        db2.set_schema(unique).unwrap();
+        assert_eq!(db2.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
+        assert_eq!(db2.rebuild(Some(("Item", "k"))).unwrap_err().code, ErrorCode::Unique);
     }
 
     #[test]
