@@ -789,6 +789,10 @@ fn what_a_backup_and_a_read_only_open_of_it_leave_is_left_by_a_backup_and_what_a
     }
     #[cfg(unix)]
     assert!(!left_by_a_backup(std::os::unix::ffi::OsStrExt::from_bytes(b"data.mdb\xff")));
+
+    assert!(is_backup_lock(record::RECORD_LOCK.as_ref()));
+    assert!(!is_backup_lock("data.mdb".as_ref()));
+    assert!(!is_backup_lock(record::PRESENCE.as_ref()));
 }
 
 #[test]

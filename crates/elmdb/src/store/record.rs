@@ -57,6 +57,11 @@ pub fn left_by_a_backup(name: &std::ffi::OsStr) -> bool {
     matches!(name, "data.mdb" | "lock.mdb" | PRESENCE | RECORD_LOCK | "wake") || name.starts_with(".elmdb-backup-")
 }
 
+/// Whether `name` is the decision lock every backup leaves beside its data file (`synced.lock`)
+pub fn is_backup_lock(name: &std::ffi::OsStr) -> bool {
+    name == RECORD_LOCK
+}
+
 /// The bytes of LMDB's `MDB_meta`, which follow a meta page's header: the magic, the version, the fixed address, the
 /// map's size, the free and main trees, the last page and the transaction that committed it
 pub(super) const BODY: usize = 136;
@@ -308,28 +313,32 @@ impl RecordFile {
     }
 }
 
+/// Opens `dir/name` for locking, creating it where it is missing, or read-only where it already exists and cannot be
+/// written
+pub(super) fn open_lock_file(dir: &Path, name: &str) -> std::io::Result<File> {
+    let path = dir.join(name);
+    match std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path) {
+        Ok(file) => Ok(file),
+        // A lock file this process may read and not write, another user's or on a filesystem mounted read-only:
+        // read, it is locked all the same, and the lock is all it is for
+        Err(error) => File::open(&path).or(Err(error)),
+    }
+}
+
 /// One of the database's lock files, made where it is missing. A read-only open makes it too: where it can't, on a
 /// filesystem it can't write, it is refused as it is where it can't make LMDB's
 pub(super) fn lock_file(dir: &Path, name: &str) -> Result<File> {
     let path = dir.join(name);
-    let opened = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path);
-    let file = match opened {
-        Ok(file) => file,
-        // A lock file this process may read and not write, another user's or on a filesystem mounted read-only:
-        // read, it is locked all the same, and the lock is all it is for
-        Err(_) if path.exists() => File::open(&path)?,
-        Err(error) => {
-            return Err(Error::new(
-                ErrorCode::Io,
-                format!(
-                    "Cannot make the lock file {}: {error}. Open the database on a filesystem this process can \
-                     write, or use a writable copy",
-                    path.display()
-                ),
-            ));
-        }
-    };
-    Ok(file)
+    open_lock_file(dir, name).map_err(|error| {
+        Error::new(
+            ErrorCode::Io,
+            format!(
+                "Cannot make the lock file {}: {error}. Open the database on a filesystem this process can \
+                 write, or use a writable copy",
+                path.display()
+            ),
+        )
+    })
 }
 
 /// The record's lock between processes, let go when dropped

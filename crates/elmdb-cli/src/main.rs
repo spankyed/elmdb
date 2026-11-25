@@ -95,8 +95,12 @@ fn check_backup_target(target: &Path) -> elmdb::Result<()> {
             ),
         ));
     }
+    let mut has_lmdb = false;
+    let mut has_record_lock = false;
     for entry in std::fs::read_dir(target)? {
-        let name = entry?.file_name();
+        let entry = entry?;
+        let name = entry.file_name();
+        let file_type = entry.file_type()?;
         // Finder's, beside anything a person has looked at on macOS
         if !elmdb::left_by_a_backup(&name) && name != ".DS_Store" {
             return Err(elmdb::Error::new(
@@ -109,6 +113,35 @@ fn check_backup_target(target: &Path) -> elmdb::Result<()> {
                 ),
             ));
         }
+        // `wake` is a directory holding listeners' mailboxes; everything else a backup or Finder leaves is a regular
+        // file, never a directory or a symbolic link
+        let expected_type = if name == "wake" { file_type.is_dir() } else { file_type.is_file() };
+        if !expected_type {
+            return Err(elmdb::Error::new(
+                elmdb::ErrorCode::TargetInUse,
+                format!(
+                    "{} holds {} with an unexpected file type, which no backup leaves; back up into a new directory, \
+                     an empty one or an earlier backup",
+                    target.display(),
+                    name.to_string_lossy()
+                ),
+            ));
+        }
+        if name == "data.mdb" || name == "lock.mdb" {
+            has_lmdb = true;
+        } else if elmdb::is_backup_lock(&name) {
+            has_record_lock = true;
+        }
+    }
+    if has_lmdb && !has_record_lock {
+        return Err(elmdb::Error::new(
+            elmdb::ErrorCode::TargetInUse,
+            format!(
+                "{} holds LMDB files without an elmdb backup lock (synced.lock), so it may belong to another program; \
+                 back up into a new directory, an empty one or an earlier backup",
+                target.display()
+            ),
+        ));
     }
     Ok(())
 }

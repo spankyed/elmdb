@@ -29,7 +29,8 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
     // published and its directory synced, the decision lock keeps any open from beginning meanwhile, so a presence
     // lock that isn't there now can't be taken before the backup ends; one that is, held by an open elsewhere, refuses
     // the backup, whose file that open would have replaced beneath it
-    let deciding = super::record::lock_file(&target, super::record::RECORD_LOCK)?;
+    let deciding = super::record::open_lock_file(&target, super::record::RECORD_LOCK)
+        .map_err(|error| lock_failed(&target, super::record::RECORD_LOCK, error.into()))?;
     let _deciding =
         super::record::exclusive(&deciding).map_err(|error| lock_failed(&target, super::record::RECORD_LOCK, error))?;
     let present = existing_lock(&target, super::record::PRESENCE)?;

@@ -691,3 +691,47 @@ fn a_backup_is_refused_where_a_lock_file_an_open_made_can_t_be_opened() {
     assert_eq!(db.backup(target.path()).unwrap_err().code, crate::ErrorCode::Io);
     assert!(!target.path().join("data.mdb").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_backup_names_an_unopenable_decision_lock_and_the_fix() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let lock = target.path().join("synced.lock");
+    std::fs::write(&lock, b"").unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root opens it all the same, and nothing here can make it fail to
+    if std::fs::File::open(&lock).is_ok() {
+        return;
+    }
+    let error = db.backup(target.path()).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::Io, "{}", error.message);
+    assert!(
+        error.message.contains("Cannot lock") && error.message.contains("synced.lock"),
+        "expected path in error: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("Back up into a directory this process may write"),
+        "expected fix in error: {}",
+        error.message
+    );
+    assert!(!target.path().join("data.mdb").exists());
+
+    // A read-only target directory without `synced.lock` reports backup's lock error rather than Store::open's
+    let readonly = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(readonly.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let error = db.backup(readonly.path()).unwrap_err();
+    std::fs::set_permissions(readonly.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(error.code, crate::ErrorCode::Io, "{}", error.message);
+    assert!(
+        error.message.contains("Cannot lock")
+            && error.message.contains("synced.lock")
+            && error.message.contains("Back up into a directory this process may write")
+            && !error.message.contains("Cannot make the lock file"),
+        "unexpected error: {}",
+        error.message
+    );
+}
