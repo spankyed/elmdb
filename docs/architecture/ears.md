@@ -210,29 +210,32 @@ Held by the types and the specs, which say more than a rule over names could:
   `containing(text, { caseInsensitive? })` and `matching(pattern)` filter without ranking (`search.md`, Substrings and
   patterns as built); a type with none refuses them (`UNKNOWN_INDEX`).
 - **Watches.** `watch(read, observer)` runs `read` and delivers its result, then runs it again after every commit that
-  wrote into what it read, delivering each result that differs from the last, with the commit's sequence
-  (`lastCommit()`). A result differs unless `sameValue` finds it equal: plain objects and arrays by their contents, a map
-  by the values under the keys it finds, a set by the members it finds, and dates, regular expressions, URLs and bytes
-  by their value. Any other object, a class's instance or a plain
-  object from another realm, is taken as differing every time, since what it holds may not be its own enumerable
-  keys, so a watch whose result holds one is delivered after every commit that wrote into what it read. Tracking is the database's (`engine.md`, Change sets and watch): each run drops what the watch's
-  token held and makes its reads tracked under it, and a commit's change set names the tokens it wrote into, so a
-  write's cost doesn't grow with the watches open. **However fast anything commits, a watch's cost is bounded by the
-  scheduler, not by its writers** (G14 of `../archive/goals/goal-elmdb-next.md`): a watch has at most one run pending
-  and the states between are skipped; after a run it waits four times that run's cost, and at least a frame; a watch
-  idle when a commit lands runs at once; and a flush starts no run past an 8 ms slice. A commit the connection can't
-  name the touched tokens of (`admin.clear`, `admin.replaceWith`, `admin.setSchema`, `admin.declare`, a load) is heard
-  as touching every watch. Deliveries never come inside a write: re-runs wait for a microtask, so a burst of commits is
-  one. A unit that throws notifies nothing. A read that throws delivers to `observer.error` and stays watched. **A
-  watched read is a pure read of the EARS engine**: what it reads elsewhere isn't tracked. A watch's own
-  `caughtUp()` resolves once that watch has been handed everything this engine committed before the call (another
-  process's commit is heard later), by the run it is owed,
-  or by its ending: it waits for the one watch, so it resolves under a stream of commits that keeps others behind.
-  `caughtUp({ soon: true })` says something is blocked on the answer: the run that watch is owed then waits four
+  wrote into what it read, delivering each result that differs from the last it delivered, with the commit's sequence
+  (`lastCommit()`). A result differs unless it is the same object or `sameValue` finds it equal: arrays and plain
+  objects by their contents, a plain object's being its own enumerable string keys, so a change only to a symbol-keyed
+  or non-enumerable property isn't delivered; a map by the values under its keys and a set by its members, keys and
+  members matched by identity, so a map or set keyed by objects each run makes afresh differs every time; and dates,
+  regular expressions, URLs and bytes by their value. An instance of a class extending any of these (a Node `Buffer`,
+  say) is compared as what it extends. Any other object, such as an instance of a class extending none of them or a
+  plain object from another realm, differs unless it is the same object, since what it holds may not be its own
+  enumerable keys: a watch whose result holds a new one is delivered after every commit that wrote into what it read.
+  Tracking is the database's (`engine.md`, Change sets and watch): each run drops what the watch's token held and makes
+  its reads tracked under it, and a commit's change set names the tokens it wrote into, so a write's cost doesn't grow
+  with the watches open. **However fast anything commits, a watch's cost is bounded by the scheduler, not by its
+  writers** (G14 of `../archive/goals/goal-elmdb-next.md`): a watch has at most one run pending and the states between
+  are skipped; after a run it waits four times that run's cost, and at least a frame; a watch idle when a commit lands
+  runs at once; and a flush starts no run past an 8 ms slice. A commit the connection can't name the touched tokens of
+  (`admin.clear`, `admin.replaceWith`, `admin.setSchema`, `admin.declare`, a load) is heard as touching every watch.
+  Deliveries never come inside a write: re-runs wait for a microtask, so a burst of commits is one. A unit that throws
+  notifies nothing. A read that throws delivers to `observer.error` and stays watched. **A watched read is a pure read
+  of the EARS engine**: what it reads elsewhere isn't tracked. A watch's own `caughtUp()` resolves once that watch has
+  been handed everything this engine committed before the call (another process's commit is heard later), by the run it
+  is owed, or by its ending: it waits for the one watch, so it resolves under a stream of commits that keeps others
+  behind. `caughtUp({ soon: true })` says something is blocked on the answer: the run that watch is owed then waits four
   times its last run's cost and not the frame (a millisecond at least, a timer's grain), ahead of the others in its
-  flush, and the run after it has its whole gap again. It lifts nothing for a watch that is owed no run, nor for any other watch.
-  `admin.watchesSettled()` resolves once no watch at all is waiting to run, a moment such a stream may not leave, so
-  it is for a spec or a tool that has stopped writing. `admin.watchStats()` counts the watches and what the
+  flush, and the run after it has its whole gap again. It lifts nothing for a watch that is owed no run, nor for any
+  other watch. `admin.watchesSettled()` resolves once no watch at all is waiting to run, a moment such a stream may not
+  leave, so it is for a spec or a tool that has stopped writing. `admin.watchStats()` counts the watches and what the
   database has filed. The model-based harness checks the contract: every watch, after every op, holds what its read
   answers afresh.
 - **One row shape.** A row is `{ id, entityType, ...attributes }` (`EntityRow`) wherever a read returns one.
