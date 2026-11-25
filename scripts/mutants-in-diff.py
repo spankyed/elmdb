@@ -34,10 +34,9 @@ platform, and a Windows run takes only code compiled on Windows alone. macOS-onl
 (`docs/architecture/testing.md`, Mutation testing).
 """
 import argparse
-import fnmatch
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
@@ -159,7 +158,8 @@ def _profile_dirs(target):
         return found
 
     def visit(directory, depth):
-        if (directory / ".cargo-lock").is_file():
+        lock = directory / ".cargo-lock"
+        if not lock.is_symlink() and lock.is_file():
             found.append(directory)
         if depth == 0:
             return
@@ -175,21 +175,72 @@ def _profile_dirs(target):
     return found
 
 
-def _copy_activity_mtime(copy_dir):
-    """Newest modification time across `copy_dir` and any nested Cargo profile build directories."""
-    newest = copy_dir.lstat().st_mtime
-    for profile in _profile_dirs(copy_dir / "target"):
-        for sub in ("deps", ".fingerprint", "build", "incremental"):
-            candidate = profile / sub
-            try:
-                newest = max(newest, candidate.stat().st_mtime)
-            except OSError:
-                pass
+def _newest_in_dir(directory, newest):
+    """Newest mtime of `directory` and its direct children (shallow, without following symlinks)."""
+    try:
+        newest = max(newest, directory.lstat().st_mtime)
+        children = list(directory.iterdir())
+    except OSError:
+        return newest
+    for child in children:
         try:
-            newest = max(newest, profile.stat().st_mtime)
+            newest = max(newest, child.lstat().st_mtime)
         except OSError:
             pass
     return newest
+
+
+def _copy_activity_mtime(copy_dir):
+    """Newest modification time across `copy_dir`, its `target/` layout, and per-crate incremental/fingerprint dirs."""
+    newest = copy_dir.lstat().st_mtime
+    target = copy_dir / "target"
+    if target.is_dir() and not target.is_symlink():
+        newest = _newest_in_dir(target, newest)
+        for profile in _profile_dirs(target):
+            try:
+                newest = max(newest, profile.lstat().st_mtime)
+            except OSError:
+                pass
+            for sub in ("deps", "build"):
+                try:
+                    newest = max(newest, (profile / sub).lstat().st_mtime)
+                except OSError:
+                    pass
+            # Rebuilding an existing crate mutates entries inside `<crate>-<hash>/` without updating its parent dir's mtime
+            for sub in (".fingerprint", "incremental"):
+                newest = _newest_in_dir(profile / sub, newest)
+    return newest
+
+
+def _rmtree_force(entry):
+    """Remove `entry`, relaxing read-only permissions inside it if a permission error blocks deletion."""
+    try:
+        shutil.rmtree(entry)
+        return
+    except PermissionError:
+        pass
+    stack = [entry]
+    while stack:
+        current = stack.pop()
+        try:
+            if not current.is_symlink():
+                os.chmod(current, current.lstat().st_mode | 0o700)
+        except OSError:
+            pass
+        try:
+            children = list(current.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if child.is_symlink():
+                continue
+            try:
+                os.chmod(child, child.lstat().st_mode | 0o700)
+            except OSError:
+                pass
+            if child.is_dir():
+                stack.append(child)
+    shutil.rmtree(entry)
 
 
 def sweep_orphaned_copies(tmp_root, now=None, min_age_secs=IN_USE_SECS):
@@ -202,6 +253,7 @@ def sweep_orphaned_copies(tmp_root, now=None, min_age_secs=IN_USE_SECS):
         return []
     now = time.time() if now is None else now
     removed = []
+    open_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
         entries = list(Path(tmp_root).iterdir())
     except OSError:
@@ -223,7 +275,8 @@ def sweep_orphaned_copies(tmp_root, now=None, min_age_secs=IN_USE_SECS):
         try:
             for lock in locks:
                 try:
-                    fd = os.open(lock, os.O_RDONLY)
+                    # BSD flock accepts O_RDONLY on both Linux and macOS without creating or modifying the lock file
+                    fd = os.open(lock, open_flags)
                 except FileNotFoundError:
                     continue
                 except OSError:
@@ -237,9 +290,10 @@ def sweep_orphaned_copies(tmp_root, now=None, min_age_secs=IN_USE_SECS):
                     break
             if busy:
                 continue
-            shutil.rmtree(entry)
+            _rmtree_force(entry)
             removed.append(entry)
-        except OSError:
+        except OSError as error:
+            print(f"Warning: could not sweep orphaned {entry}: {error}", file=sys.stderr)
             continue
         finally:
             for fd in fds:
@@ -250,31 +304,86 @@ def sweep_orphaned_copies(tmp_root, now=None, min_age_secs=IN_USE_SECS):
     return removed
 
 
-def select_crate_files(crates, scope, file_filters):
+def _glob_matches(path, pattern):
+    """Match a POSIX relative `path` against a globset-style `pattern` (`*` stays within one segment, `**/` crosses any)."""
+    parts = ["^"]
+    at = 0
+    length = len(pattern)
+    while at < length:
+        if pattern.startswith("**/", at):
+            parts.append("(?:[^/]+/)*")
+            at += 3
+        elif pattern.startswith("**", at):
+            parts.append(".*")
+            at += 2
+        elif pattern[at] == "*":
+            parts.append("[^/]*")
+            at += 1
+        elif pattern[at] == "?":
+            parts.append("[^/]")
+            at += 1
+        elif pattern[at] == "[":
+            end = at + 1
+            if end < length and pattern[end] in "!^":
+                end += 1
+            if end < length and pattern[end] == "]":
+                end += 1
+            end = pattern.find("]", end)
+            if end == -1:
+                parts.append(re.escape(pattern[at]))
+                at += 1
+            else:
+                body = pattern[at + 1:end]
+                if body.startswith("!"):
+                    body = "^" + body[1:]
+                parts.append(f"[{body}]")
+                at = end + 1
+        else:
+            parts.append(re.escape(pattern[at]))
+            at += 1
+    parts.append("$")
+    return re.match("".join(parts), path) is not None
+
+
+def select_crate_files(crates, scope, file_filters, root=None):
     """Map each workspace crate name to the `--file` arguments to hand to cargo-mutants.
 
     When `file_filters` is empty, preserves the default crate-wide (or `--windows-only`) selection.
-    When `file_filters` is given, validates that every filter targets a workspace crate and narrows selection to it.
+    When `file_filters` is given, validates that every filter targets a workspace crate, expands directory targets to
+    `<dir>/**` (since cargo-mutants matches `--file` against file paths), and narrows selection to it.
     """
-    normalized = [Path(item).as_posix() for item in (file_filters or [])]
-    if not normalized:
+    if not file_filters:
         return {
             name: ([f"{path}/**"] if scope is None else [file for file in scope if file.startswith(f"{path}/")])
             for name, path, _ in crates
         }
     by_crate = {name: [] for name, _, _ in crates}
-    for pattern in normalized:
+    # Match longest crate path first so nested crates would win over an enclosing one
+    crates_by_specificity = sorted(crates, key=lambda item: len(item[1]), reverse=True)
+    for raw in file_filters:
+        raw_posix = raw.replace("\\", "/")
+        had_trailing_slash = raw_posix.endswith("/")
+        pure = PurePosixPath(raw_posix)
+        pattern = pure.as_posix()
+        if not pattern or pattern == "." or pure.is_absolute() or ".." in pure.parts:
+            raise ValueError(f"--file {raw!r} must be a repo-relative path or glob inside a workspace crate")
         matched_crate = None
-        for name, path, _ in crates:
+        matched_path = None
+        for name, path, _ in crates_by_specificity:
             if pattern == path or pattern.startswith(f"{path}/"):
                 matched_crate = name
+                matched_path = path
                 break
         if matched_crate is None:
-            raise ValueError(f"--file {pattern!r} does not match any workspace crate")
-        by_crate[matched_crate].append(pattern)
+            raise ValueError(f"--file {raw!r} does not match any workspace crate")
+        is_glob = any(ch in pattern for ch in "*?[")
+        if pattern == matched_path or had_trailing_slash or (not is_glob and root is not None and (Path(root) / pattern).is_dir()):
+            pattern = f"{pattern}/**"
+        if pattern not in by_crate[matched_crate]:
+            by_crate[matched_crate].append(pattern)
     if scope is not None:
         return {
-            name: [file for file in scope if any(fnmatch.fnmatch(file, pat) for pat in patterns)]
+            name: [file for file in scope if any(_glob_matches(file, pat) for pat in patterns)]
             for name, patterns in by_crate.items()
         }
     return by_crate
@@ -288,6 +397,20 @@ def build_mutants_command(jobs, out_dir, selection, chosen, crate_name, with_fea
         *selection, *chosen,
         "--test-package", crate_name, *with_features, *suite_args,
     ]
+
+
+def format_scope_summary(args):
+    """Describe what a run mutated for console output and the GitHub Actions step summary."""
+    parts = ["Windows-only code" if args.windows_only else "the change"]
+    if args.shard:
+        parts.append(f"shard {args.shard}")
+    if args.files:
+        parts.append(f"files: {', '.join(args.files)}")
+    if args.patterns:
+        parts.append(f"re: {', '.join(args.patterns)}")
+    if args.test_filter is not None:
+        parts.append(f"test-filter: {args.test_filter}")
+    return ", ".join(parts)
 
 
 def lines_of(path):
@@ -309,6 +432,12 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.windows_only and args.patterns:
         parser.error("--re cannot be combined with --windows-only (cargo-mutants ORs multiple --re filters)")
+    if any(not item.strip() for item in args.files):
+        parser.error("--file must not be empty")
+    if any(not item.strip() for item in args.patterns):
+        parser.error("--re must not be empty")
+    if args.test_filter is not None and not args.test_filter.strip():
+        parser.error("--test-filter must not be empty")
     return args
 
 
@@ -350,7 +479,7 @@ def main(argv=None):
     assert crates, "the workspace names no crate"
 
     try:
-        crate_files = select_crate_files(crates, scope, args.files)
+        crate_files = select_crate_files(crates, scope, args.files, root=root)
     except ValueError as error:
         sys.exit(str(error))
     has_work = any(crate_files.values())
@@ -415,10 +544,10 @@ def main(argv=None):
                 if outcome["summary"] == "Unviable" and log.is_file() and DAMAGED.search(log.read_text(errors="replace")):
                     damaged.append(outcome["scenario"]["Mutant"]["name"])
 
-    what = "Windows-only code" if args.windows_only else "the change"
-    what += f", shard {args.shard}" if args.shard else ""
+    what = format_scope_summary(args)
     if not has_work and args.windows_only:
-        print("The change holds no Windows-only code to mutate")
+        print("No Windows-only code matched the --file filter" if args.files
+              else "The change holds no Windows-only code to mutate")
     print(f"{len(missed)} missed, {len(timeouts)} timeouts ({what})")
     for line in missed:
         print(f"MISSED  {line}")

@@ -154,6 +154,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
       - run: cargo xtask check-mutant-exclusions
+      - run: python3 -B scripts/test-mutants-in-diff.py
       - name: binding
         run: |
           cargo run -p elmdb --example read-allocations -- --json > "$RUNNER_TEMP/read-allocations.json"
@@ -163,7 +164,6 @@ jobs:
           npm run test:binding
           node crates/elmdb-node/bench/reads.mjs --json --runs 2 > "$RUNNER_TEMP/read-codecs.json"
           python3 -B scripts/test-read-profile.py
-          python3 -B scripts/test-mutants-in-diff.py
           python3 scripts/check-read-profile.py --allocations "$RUNNER_TEMP/read-allocations.json" --codecs "$RUNNER_TEMP/read-codecs.json"
           node crates/elmdb-node/bench/against-sqlite.mjs --json --notes 2000 > "$RUNNER_TEMP/against-sqlite.json"
       - name: preserve read measurement reports
