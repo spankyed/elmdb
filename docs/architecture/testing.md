@@ -2,9 +2,7 @@
 
 What proves elmdb correct, and where each proof lives. `cargo nextest run --workspace` runs the Rust suites, each test in
 its own process (`cargo test --workspace --doc` the doc tests); `npm test` runs the binding's, then EARS'
-([EARS](#ears)). A test that hangs is killed at its deadline in `.config/nextest.toml`: ten seconds for a watch test,
-where a regression deadlocks a delivery, and for the open of a file that lost its commit's meta page; twenty for a
-graph walk, rank index, reader-saturation or idle-reader test; forty for the rank index's random histories; sixty for the open that takes a
+([EARS](#ears)). A test that hangs is killed at its deadline in `.config/nextest.toml`: ten seconds for the open of a file that lost its commit's meta page; twenty for a watch test (where a regression deadlocks a delivery), graph walk, reader-saturation or idle-reader test; forty for a rank index test (including its random histories); sixty for the open that takes a
 map another process grows; fifteen minutes for the model harness; and four minutes for any other; the rest run on. A filter that selects no test fails the run. A test still runs the test binary again where it needs
 a second process: the crash harnesses' killed writers, another process's commit, schema change and map growth seen by
 this one, a read-only open beside another process's writer, and the process claim.
@@ -637,8 +635,8 @@ workspace's build configuration (Releases). `lmdb-upstream.yml` runs each Monday
 `mdb.master` has commits past `scripts/lmdb-upstream-reviewed.txt`, so someone reads what lands upstream of heed's
 LMDB (`scripts/lmdb-upstream.py`). `advisories.yml` runs each day and fails on a RustSec advisory against a crate in
 the lockfile (`cargo deny check advisories`), or an npm advisory of high severity or above against the binding's build
-tooling (`npm audit --audit-level=high`, the root `package-lock.json`; the npm package itself depends only on its own
-platform packages).
+tooling (`npm audit --audit-level=high`, the root `package-lock.json`; the binding package itself depends only on its own
+platform packages, while `@elmdb/ears` depends on `msgpackr`).
 `instruction-determinism.yml` is dispatched (Repeatable maintenance measurements),
 and so is `models.yml` (Concurrency models). `model-mutants.yml` runs each week and on dispatch (Mutation testing).
 
@@ -683,7 +681,7 @@ database through the binding, a text search, a rank and
 `check()`, and another through EARS, its README's example through both its entries; it reads the thin client and the
 binding's manifest through the binding's `exports`. The glibc targets install in AlmaLinux 8, at glibc 2.28, and the
 musl ones in Alpine; macOS on macOS 15 and Windows on Windows Server 2022. On a tag it drafts a GitHub release holding
-both packages, the SBOMs and `SHA256SUMS`. A tag whose release is published fails, and so does one whose draft holds
+all nine packages (the binding, its seven platform packages and EARS), the SBOMs and `SHA256SUMS`. A tag whose release is published fails, and so does one whose draft holds
 every file the run would upload; a draft missing one, which a run that failed while uploading leaves, is made again. A
 release that can't be read, other than one that isn't there, fails the draft rather than counting as none.
 
