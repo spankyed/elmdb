@@ -7,7 +7,7 @@ pub(super) mod sorted;
 #[cfg(test)]
 use audit::{PrimaryGraph, audit_cycles};
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rmpv::Value;
 use serde::{Deserialize, Serialize};
@@ -165,25 +165,33 @@ fn buildable_entry(
     Ok(())
 }
 
-/// Finds another entity of `entity_type` holding any of `wanted` canonical unique keys, for values that a value
-/// index cannot file into `d/x` (long strings, maps, timestamps, binary)
-fn unindexable_holder(
-    t: &impl Read,
+/// Checks whether any entity of `entity_type` with `seq <= up_to` holds one of the canonical unindexable unique keys
+/// collected in the current build chunk. Earlier chunks already checked their keys against each other, so a single
+/// bounded pass up to `up_to` catches cross-chunk duplicates without rescanning the type per entity.
+fn unindexable_conflict_up_to(
+    t: &Txn<'_, '_>,
     entity_type: &str,
     index: &ValueIndex,
-    id: &str,
-    wanted: &[Vec<u8>],
-) -> Result<Option<String>> {
+    up_to: u64,
+    chunk_keys: &HashMap<Vec<u8>, String>,
+) -> Result<Option<(String, String)>> {
+    let (txn, db) = t.raw();
     for trashed in [false, true] {
-        for (_, other) in t.scan(&keys::type_range(trashed, entity_type))? {
-            let other = values::decode(&other)?.as_str().unwrap_or_default().to_owned();
-            if other == id {
-                continue;
-            }
+        let low = keys::type_range(trashed, entity_type);
+        let high = keys::of_type(trashed, entity_type, up_to);
+        let range = (std::ops::Bound::Included(low.as_slice()), std::ops::Bound::Included(high.as_slice()));
+        for entry in db.range(txn, &range)? {
+            let (_, other) = entry?;
+            let other = values::decode(other)?.as_str().unwrap_or_default().to_owned();
             let fields: Vec<Option<Value>> =
                 index.fields.iter().map(|f| entities::get(t, &other, f)).collect::<Result<_>>()?;
-            if entities::unique_keys(&fields).iter().any(|k| wanted.contains(&canonical_unique_key(k))) {
-                return Ok(Some(other));
+            for tuple in entities::unique_keys(&fields) {
+                if !tuple.iter().any(|v| values::index_part(v).is_none()) {
+                    continue;
+                }
+                if let Some(holder) = chunk_keys.get(&canonical_unique_key(&tuple)) {
+                    return Ok(Some((other, holder.clone())));
+                }
             }
         }
     }
@@ -882,19 +890,22 @@ fn build_chunk_after(
         }
         return Ok(Some(last));
     };
+    let mut chunk_unindexable: HashMap<Vec<u8>, String> = HashMap::new();
     for (seq, id) in chunk.iter().take(limit) {
         let fields: Vec<Option<Value>> = index.fields.iter().map(|f| entities::get(t, id, f)).collect::<Result<_>>()?;
         let filed = index.files(&fields);
         if index.unique {
-            let unindexable: Vec<Vec<u8>> = entities::unique_keys(&fields)
-                .into_iter()
-                .filter(|tuple| tuple.iter().any(|v| values::index_part(v).is_none()))
-                .map(|tuple| canonical_unique_key(&tuple))
-                .collect();
-            if !unindexable.is_empty()
-                && let Some(other) = unindexable_holder(t, entity_type, &index, id, &unindexable)?
-            {
-                return Err(unbuildable(entity_type, name, &other, id));
+            for tuple in entities::unique_keys(&fields) {
+                if tuple.iter().any(|v| values::index_part(v).is_none()) {
+                    let key = canonical_unique_key(&tuple);
+                    match chunk_unindexable.get(&key) {
+                        Some(other) if other != id => return Err(unbuildable(entity_type, name, other, id)),
+                        Some(_) => {}
+                        None => {
+                            chunk_unindexable.insert(key, id.clone());
+                        }
+                    }
+                }
             }
         }
         for key in filed.entry_keys(entity_type, name) {
@@ -917,6 +928,11 @@ fn build_chunk_after(
             places::file(t, key, *seq)?;
         }
         last = *seq;
+    }
+    if !chunk_unindexable.is_empty()
+        && let Some((other, holder)) = unindexable_conflict_up_to(t, entity_type, &index, after, &chunk_unindexable)?
+    {
+        return Err(unbuildable(entity_type, name, &other, &holder));
     }
     if done {
         mark(t, entity_type, name, true)?;
@@ -1061,7 +1077,8 @@ mod audit_tests {
             fields: BTreeMap::from([("k".into(), v)]),
         };
 
-        // Distinct unindexable values (long strings, maps, timestamps): build and rebuild succeed
+        // Distinct unindexable values (long strings, maps, and a single entity repeating a long string in a list):
+        // multi-chunk build (`limit = 2`) and rebuild succeed
         let dir = tempfile::tempdir().unwrap();
         let db =
             Database::open(dir.path(), OpenOptions { schema: Some(plain.clone()), syncs: false, ..Default::default() })
@@ -1069,7 +1086,7 @@ mod audit_tests {
         db.write(
             &Batch {
                 ops: vec![
-                    create("Item-1", Value::from("a".repeat(300))),
+                    create("Item-1", Value::Array(vec![Value::from("a".repeat(300)), Value::from("a".repeat(300))])),
                     create("Item-2", Value::from("b".repeat(300))),
                     create("Item-3", Value::Map(vec![("x".into(), 1.into())])),
                     create("Item-4", Value::Map(vec![("x".into(), 2.into())])),
@@ -1079,25 +1096,129 @@ mod audit_tests {
             false,
         )
         .unwrap();
+        // Drive `build_chunk` directly with `limit = 2` so chunk 2 runs `unindexable_conflict_up_to` with `after > 0`
+        db.store()
+            .unwrap()
+            .write(
+                |txn, d| {
+                    let mut state = super::super::unit::UnitState::new(false);
+                    let mut t = Txn { txn, db: d, state: &mut state, schema: &unique, now: 1_000.0 };
+                    assert!(!build_chunk(&mut t, "Item", "k", 2)?, "first chunk of 4 is not done");
+                    assert!(build_chunk(&mut t, "Item", "k", 2)?, "second chunk completes build");
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
         db.set_schema(unique.clone()).unwrap();
         db.wait_for_index_builds().unwrap();
         db.rebuild(Some(("Item", "k"))).unwrap();
         db.rebuild(None).unwrap();
         assert!(db.check().unwrap().is_clean());
 
-        // Duplicate unindexable values: build fails, single-index rebuild returns UNIQUE
+        // Intra-chunk duplicate unindexable values (`after = 0`): build fails, single-index rebuild returns UNIQUE
         let dir2 = tempfile::tempdir().unwrap();
-        let db2 = Database::open(dir2.path(), OpenOptions { schema: Some(plain), syncs: false, ..Default::default() })
-            .unwrap();
+        let db2 = Database::open(
+            dir2.path(),
+            OpenOptions { schema: Some(plain.clone()), syncs: false, ..Default::default() },
+        )
+        .unwrap();
         let dup = Value::from("z".repeat(300));
         db2.write(
-            &Batch { ops: vec![create("Item-1", dup.clone()), create("Item-2", dup)], now: Some(1_000.0) },
+            &Batch { ops: vec![create("Item-1", dup.clone()), create("Item-2", dup.clone())], now: Some(1_000.0) },
             false,
         )
         .unwrap();
-        db2.set_schema(unique).unwrap();
+        db2.set_schema(unique.clone()).unwrap();
         assert_eq!(db2.wait_for_index_builds().unwrap_err().code, ErrorCode::IndexBuildFailed);
         assert_eq!(db2.rebuild(Some(("Item", "k"))).unwrap_err().code, ErrorCode::Unique);
+
+        // Cross-chunk duplicate unindexable values (`limit = 2`, conflict between chunk 1 seq 1 and chunk 2 seq 3)
+        let dir3 = tempfile::tempdir().unwrap();
+        let db3 = Database::open(dir3.path(), OpenOptions { schema: Some(plain), syncs: false, ..Default::default() })
+            .unwrap();
+        db3.write(
+            &Batch {
+                ops: vec![
+                    create("Item-1", dup.clone()),
+                    create("Item-2", Value::from("distinct".repeat(50))),
+                    create("Item-3", dup.clone()),
+                    create("Item-4", Value::from("other".repeat(80))),
+                ],
+                now: Some(1_000.0),
+            },
+            false,
+        )
+        .unwrap();
+        db3.store()
+            .unwrap()
+            .write(
+                |txn, d| {
+                    let mut state = super::super::unit::UnitState::new(false);
+                    let mut t = Txn { txn, db: d, state: &mut state, schema: &unique, now: 1_000.0 };
+                    assert!(!build_chunk(&mut t, "Item", "k", 2)?, "chunk 1 has no intra-chunk duplicate");
+                    let err = build_chunk(&mut t, "Item", "k", 2).unwrap_err();
+                    assert_eq!(err.code, ErrorCode::Unique);
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
+
+        // Cross-chunk compound unique index with an unindexable leading field (`limit = 2`)
+        let pair_plain = Schema::from_json(&json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": { "Pair": { "fields": { "a": { "type": "string" }, "b": { "type": "number" } } } }
+        }))
+        .unwrap();
+        let pair_unique = Schema::from_json(&json!({
+            "$schema": crate::schema::SCHEMA_LANGUAGE,
+            "types": {
+                "Pair": {
+                    "fields": { "a": { "type": "string" }, "b": { "type": "number" } },
+                    "indexes": { "ab": { "kind": "value", "fields": ["a", "b"], "unique": true } }
+                }
+            }
+        }))
+        .unwrap();
+        let dir4 = tempfile::tempdir().unwrap();
+        let db4 =
+            Database::open(dir4.path(), OpenOptions { schema: Some(pair_plain), syncs: false, ..Default::default() })
+                .unwrap();
+        let pair_op = |id: &str, a: Value, b: i64| Op::Create {
+            entity_type: "Pair".into(),
+            id: Some(id.into()),
+            short_code: None,
+            created_at: None,
+            updated_at: None,
+            fields: BTreeMap::from([("a".into(), a), ("b".into(), b.into())]),
+        };
+        db4.write(
+            &Batch {
+                ops: vec![
+                    pair_op("Pair-1", dup.clone(), 7),
+                    pair_op("Pair-2", dup.clone(), 8),
+                    pair_op("Pair-3", dup, 7),
+                ],
+                now: Some(1_000.0),
+            },
+            false,
+        )
+        .unwrap();
+        db4.store()
+            .unwrap()
+            .write(
+                |txn, d| {
+                    let mut state = super::super::unit::UnitState::new(false);
+                    let mut t = Txn { txn, db: d, state: &mut state, schema: &pair_unique, now: 1_000.0 };
+                    assert!(!build_chunk(&mut t, "Pair", "ab", 2)?, "chunk 1 pairs (dup,7) and (dup,8) are distinct");
+                    let err = build_chunk(&mut t, "Pair", "ab", 2).unwrap_err();
+                    assert_eq!(err.code, ErrorCode::Unique);
+                    Ok(())
+                },
+                false,
+            )
+            .unwrap();
     }
 
     #[test]
