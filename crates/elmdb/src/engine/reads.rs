@@ -1461,11 +1461,13 @@ impl<R: Read> Query<'_, R> {
                         }
                     }
                     Some(name) => {
-                        let mut seen: Vec<SameValue> = Vec::new();
+                        let mut seen: HashSet<SameValue, Fixed> = HashSet::default();
                         for id in ids {
-                            let key = SameValue::of(get_value(self.r, &id, name)?.as_ref());
-                            if key.is_unique() || !seen.contains(&key) {
-                                seen.push(key);
+                            let keep = match SameValue::of(get_value(self.r, &id, name)?.as_ref()) {
+                                Some(key) => seen.insert(key),
+                                None => true,
+                            };
+                            if keep {
                                 kept.push(id);
                             }
                         }
@@ -1914,8 +1916,20 @@ impl<R: Read> Query<'_, R> {
         except: Option<&str>,
     ) -> Result<Vec<(Hit, String)>> {
         let (types, among) = self.searched(before)?;
+        self.nearest_among(&types, among.as_deref(), vector, index, k, except)
+    }
+
+    fn nearest_among(
+        &self,
+        types: &[String],
+        among: Option<&[String]>,
+        vector: &[f32],
+        index: Option<&str>,
+        k: usize,
+        except: Option<&str>,
+    ) -> Result<Vec<(Hit, String)>> {
         let mut found: Vec<(f32, Hit, String)> = Vec::new();
-        for entity_type in &types {
+        for entity_type in types {
             let def = match super::vector::resolve(self.r.schema(), entity_type, index, "near") {
                 Ok(def) => def,
                 Err(_)
@@ -1927,7 +1941,7 @@ impl<R: Read> Query<'_, R> {
                 }
                 Err(e) => return Err(e),
             };
-            let within = match &among {
+            let within = match among {
                 None => None,
                 Some(ids) => {
                     let of_type: Vec<String> =
@@ -1941,10 +1955,7 @@ impl<R: Read> Query<'_, R> {
             // the asking rather than repeating it forever
             let numbered =
                 super::vector::graph_of(self.r, entity_type, &def.name)?.map_or(0, |(_, next)| next as usize);
-            // mutant-skip: replace \+ with \* in Query<'_, R>::nearest
-            // nearest's first ask: it asks again, four times as many, while what it admitted is short of k and the
-            // graph held more, so any first ask finds the same k
-            let mut ask = k + 8;
+            let mut ask = if k == 0 { 0 } else { k.saturating_add(8).min(numbered.max(1)) };
             loop {
                 let (nearest, exhausted) =
                     super::vector::nearest(self.r, entity_type, &def, vector, ask, within.as_ref())?;
@@ -1983,9 +1994,9 @@ impl<R: Read> Query<'_, R> {
         options: &SearchOptions,
     ) -> Result<Vec<(Hit, String)>> {
         const FUSION: f64 = 60.0;
-        let wide = (k * 4).max(40);
-        let near = self.nearest(before, vector, vector_index, wide, None)?;
         let (types, among) = self.searched(before)?;
+        let wide = if k == 0 { 0 } else { k.saturating_mul(4).max(40) };
+        let near = self.nearest_among(&types, among.as_deref(), vector, vector_index, wide, None)?;
         let raw = text::search::parse(query);
         let now = options.recency.as_ref().and_then(|r| r.now).unwrap_or_else(super::now_ms);
         let mut texts: Vec<(Hit, String)> = Vec::new();
@@ -3823,7 +3834,7 @@ impl<R: Read> Query<'_, R> {
         let precision = ranks::order_precision(def.tolerance);
         let promised = 2.0 * def.tolerance * totals.estimates;
         let scored = matches!(self.plan.terminal, Terminal::Hits { .. });
-        let mut read: Vec<(String, f64)> = Vec::with_capacity(take);
+        let mut read: Vec<(String, f64)> = Vec::with_capacity(take.min(1024));
         let mut narrow = false;
         let mut estimated = 0;
         let mut step_to = |id: &[u8]| -> Result<bool> {
@@ -4220,7 +4231,22 @@ impl<R: Read> Query<'_, R> {
                 for &outward in direction.sides() {
                     relations::visit_far_ends(self.r, id, outward, Some(kind), |far, weight| {
                         if let Some(&at) = place.get(far) {
-                            targets.push((at, if weighs { weight.unwrap_or(1.0) } else { 1.0 }));
+                            let w = if weighs {
+                                let w = weight.unwrap_or(1.0);
+                                if !(0.0..=relations::MAX_WEIGHT).contains(&w) {
+                                    return Err(Error::new(
+                                        ErrorCode::ValueInvalid,
+                                        format!(
+                                            "An edge of kind {kind} from {id} to {far} holds weight {w}, which isn't \
+                                             from 0 to 2^960: fix or reload the edge, or read with weights: false"
+                                        ),
+                                    ));
+                                }
+                                w
+                            } else {
+                                1.0
+                            };
+                            targets.push((at, w));
                         }
                         Ok(true)
                     })?;
@@ -5093,28 +5119,28 @@ fn json_text(v: &Value) -> String {
     }
 }
 
-/// A key as JavaScript's `Set` and `Map` compare them: scalars by value, and no list, map or timestamp equal to any
-/// other, since each read decodes a new object
-#[derive(Debug, Clone, PartialEq)]
+/// A comparable scalar key as JavaScript's `Set` and `Map` compare them: null/missing, booleans, finite numbers
+/// (`-0.0` normalized to `+0.0`), and strings. Lists, maps, timestamps and binary values are never equal to any other
+/// (`None` from `of`), since each read decodes a fresh object
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum SameValue {
-    Scalar(Value),
-    Unique,
+    Null,
+    Bool(bool),
+    Number(u64),
+    String(Vec<u8>),
 }
 
 impl SameValue {
-    fn of(value: Option<&Value>) -> Self {
+    fn of(value: Option<&Value>) -> Option<Self> {
         match value {
-            None | Some(Value::Nil) => SameValue::Scalar(Value::Nil),
-            Some(Value::Array(_) | Value::Map(_) | Value::Ext(..) | Value::Binary(_)) => SameValue::Unique,
-            Some(v) => match values::as_number(v) {
-                Some(n) => SameValue::Scalar(Value::from(n)),
-                None => SameValue::Scalar(v.clone()),
-            },
+            None | Some(Value::Nil) => Some(SameValue::Null),
+            Some(Value::Boolean(b)) => Some(SameValue::Bool(*b)),
+            Some(Value::String(s)) => Some(SameValue::String(s.as_bytes().to_vec())),
+            Some(Value::Array(_) | Value::Map(_) | Value::Ext(..) | Value::Binary(_)) => None,
+            Some(v) => values::as_number(v)
+                .filter(|n| !n.is_nan())
+                .map(|n| SameValue::Number((if n == 0.0 { 0.0 } else { n }).to_bits())),
         }
-    }
-
-    fn is_unique(&self) -> bool {
-        matches!(self, SameValue::Unique)
     }
 }
 
@@ -5444,15 +5470,24 @@ fn query_with(
         }
         Terminal::GroupBy { field: name, counts } => {
             let ids = q.collect(last)?;
-            let mut groups: Vec<(SameValue, Vec<u8>, Vec<String>)> = Vec::new();
+            let mut groups: Vec<(Vec<u8>, Vec<String>)> = Vec::new();
+            let mut index: HashMap<SameValue, usize, Fixed> = HashMap::default();
             for id in ids {
                 let bytes = get(r, &id, name)?;
                 let value = bytes.as_ref().map(|b| values::decode(b)).transpose()?;
                 let key = SameValue::of(value.as_ref());
                 let raw = bytes.unwrap_or_else(|| values::encode(&Value::Nil));
-                match groups.iter_mut().find(|(k, _, _)| !key.is_unique() && *k == key) {
-                    Some((_, _, members)) => members.push(id),
-                    None => groups.push((key, raw, vec![id])),
+                match key {
+                    Some(key) => match index.entry(key) {
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            groups[*entry.get()].1.push(id);
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(groups.len());
+                            groups.push((raw, vec![id]));
+                        }
+                    },
+                    None => groups.push((raw, vec![id])),
                 }
             }
             w.map(3);
@@ -5460,7 +5495,7 @@ fn query_with(
             w.str("groups");
             let start = w.0.len();
             w.array(groups.len() as u32);
-            for (_, raw, members) in &groups {
+            for (raw, members) in &groups {
                 w.array(2);
                 w.raw(raw);
                 if *counts {
@@ -5635,4 +5670,25 @@ fn find_labels(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod same_value_tests {
+    use super::SameValue;
+    use rmpv::Value;
+
+    #[test]
+    fn canonicalizes_zero_and_leaves_nan_and_composites_unique() {
+        assert_eq!(SameValue::of(None), SameValue::of(Some(&Value::Nil)));
+        assert_eq!(SameValue::of(Some(&Value::from(0))), SameValue::of(Some(&Value::from(-0.0))));
+        assert_eq!(SameValue::of(Some(&Value::from(0.0))), SameValue::of(Some(&Value::from(-0.0))));
+        assert_ne!(SameValue::of(Some(&Value::from(0.0))), SameValue::of(Some(&Value::from(1.0))));
+        assert_eq!(SameValue::of(Some(&Value::from(true))), Some(SameValue::Bool(true)));
+        assert_eq!(SameValue::of(Some(&Value::from("a"))), Some(SameValue::String(b"a".to_vec())));
+        assert_eq!(SameValue::of(Some(&Value::F64(f64::NAN))), None);
+        assert_eq!(SameValue::of(Some(&Value::Array(vec![]))), None);
+        assert_eq!(SameValue::of(Some(&Value::Map(vec![]))), None);
+        assert_eq!(SameValue::of(Some(&Value::Binary(vec![]))), None);
+        assert_eq!(SameValue::of(Some(&Value::Ext(-1, vec![0; 4]))), None);
+    }
 }

@@ -199,6 +199,25 @@ pub(crate) fn trim_tombstones(txn: &mut heed::RwTxn<'_>, db: Db, sequence: u64) 
     Ok(())
 }
 
+/// The types whose change order currently has a `m/changeOrder:<type>` meta key
+fn built_types(txn: &heed::RoTxn<'_, heed::AnyTls>, db: Db) -> Result<Vec<String>> {
+    let prefix = {
+        let mut key = crate::format::Prefix::Meta.key();
+        key.string_prefix("changeOrder:");
+        key.to_vec()
+    };
+    db.main
+        .prefix_iter(txn, &prefix)?
+        .map(|item| {
+            let (key, _) = item?;
+            match decode_key(key)?.pop() {
+                Some(Part::String(name)) => Ok(name.trim_start_matches("changeOrder:").to_owned()),
+                _ => Err(Error::new(ErrorCode::Corrupted, "A change order's meta key doesn't read")),
+            }
+        })
+        .collect()
+}
+
 /// Brings each type's change order into line with the schema: built, from the entities it holds, for a type that keeps
 /// one and has none, which names the sequence it has it from; dropped for a type that no longer keeps one
 pub(crate) fn settle(txn: &mut heed::RwTxn<'_>, db: Db, schema: &crate::schema::Schema) -> Result<()> {
@@ -230,22 +249,7 @@ pub(crate) fn settle(txn: &mut heed::RwTxn<'_>, db: Db, schema: &crate::schema::
         }
     }
     // A type no longer kept, or no longer declared: its order goes, so check() finds nothing it doesn't derive
-    let prefix = {
-        let mut key = crate::format::Prefix::Meta.key();
-        key.string_prefix("changeOrder:");
-        key.to_vec()
-    };
-    let held: Vec<String> = db
-        .main
-        .prefix_iter(txn, &prefix)?
-        .map(|item| {
-            let (key, _) = item?;
-            match decode_key(key)?.pop() {
-                Some(Part::String(name)) => Ok(name.trim_start_matches("changeOrder:").to_owned()),
-                _ => Err(Error::new(ErrorCode::Corrupted, "A change order's meta key doesn't read")),
-            }
-        })
-        .collect::<Result<_>>()?;
+    let held = built_types(txn, db)?;
     for entity_type in held.iter().filter(|name| !kept(schema, name)) {
         let order: Vec<Vec<u8>> = db
             .main
@@ -287,6 +291,11 @@ pub(crate) fn needs_settling(
 ) -> Result<bool> {
     for (entity_type, def) in &schema.types {
         if def.change_order != db.main.get(txn, &built_meta(entity_type))?.is_some() {
+            return Ok(true);
+        }
+    }
+    for entity_type in built_types(txn, db)? {
+        if !kept(schema, &entity_type) {
             return Ok(true);
         }
     }
@@ -454,4 +463,40 @@ pub(crate) fn since(
     }
     let sequences = found.iter().map(|(changed, ..)| *changed).collect();
     Ok(Changed { ids: found.into_iter().map(|(_, _, _, id)| id).collect(), sequences, destroyed, next, done, complete })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::schema::{SCHEMA_LANGUAGE, Schema};
+    use crate::store::{Store, StoreOptions};
+
+    #[test]
+    fn needs_settling_detects_change_order_meta_for_removed_type() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path(), StoreOptions { syncs: false, ..Default::default() }).unwrap();
+        let with_removed = Schema::from_json(&json!({
+            "$schema": SCHEMA_LANGUAGE,
+            "types": {
+                "Task": { "changeOrder": true, "fields": {} },
+                "Legacy": { "changeOrder": true, "fields": {} }
+            }
+        }))
+        .unwrap();
+        let without_removed = Schema::from_json(&json!({
+            "$schema": SCHEMA_LANGUAGE,
+            "types": {
+                "Task": { "changeOrder": true, "fields": {} }
+            }
+        }))
+        .unwrap();
+        store.write(|txn, db| settle(txn, db, &with_removed), false).unwrap();
+        assert!(!store.read(|txn, db| needs_settling(txn, db, &with_removed)).unwrap());
+        // `Legacy` was removed from the schema, leaving `m/changeOrder:Legacy` behind
+        assert!(store.read(|txn, db| needs_settling(txn, db, &without_removed)).unwrap());
+        store.write(|txn, db| settle(txn, db, &without_removed), false).unwrap();
+        assert!(!store.read(|txn, db| needs_settling(txn, db, &without_removed)).unwrap());
+    }
 }

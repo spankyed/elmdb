@@ -177,14 +177,20 @@ pub fn with_number(key: &[u8], n: f64) -> Vec<u8> {
     out
 }
 
+/// Decodes an eight-byte ordered float back to a number, rejecting NaN, which `number_part` never encodes
+fn decode_number(raw: [u8; 8]) -> Option<f64> {
+    let ordered = u64::from_be_bytes(raw);
+    let bits = if ordered & (1 << 63) != 0 { ordered ^ (1 << 63) } else { !ordered };
+    let n = f64::from_bits(bits);
+    (!n.is_nan()).then_some(n)
+}
+
 /// The number a key's last part is, for a key the caller knows to end with one: read from its last nine bytes, the
 /// parts before them left undecoded
 pub fn last_number(key: &[u8]) -> Option<f64> {
     let part = key.len().checked_sub(9).map(|at| &key[at..])?;
     let (&NUMBER, raw) = part.split_first()? else { return None };
-    let ordered = u64::from_be_bytes(raw.try_into().ok()?);
-    let bits = if ordered & (1 << 63) != 0 { ordered ^ (1 << 63) } else { !ordered };
-    Some(f64::from_bits(bits))
+    decode_number(raw.try_into().ok()?)
 }
 
 /// The first part of a key's bytes as it is encoded, its tag first, and the bytes after it, borrowed and not decoded:
@@ -257,9 +263,8 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Part>> {
             TRUE => parts.push(Part::Bool(true)),
             NUMBER => {
                 let raw: [u8; 8] = bytes.get(at..at + 8).ok_or_else(corrupt)?.try_into().map_err(|_| corrupt())?;
-                let ordered = u64::from_be_bytes(raw);
-                let bits = if ordered & (1 << 63) != 0 { ordered ^ (1 << 63) } else { !ordered };
-                parts.push(Part::Number(f64::from_bits(bits)));
+                let n = decode_number(raw).ok_or_else(corrupt)?;
+                parts.push(Part::Number(n));
                 at += 8;
             }
             STRING | BYTES => {
@@ -424,5 +429,18 @@ mod tests {
         assert_eq!(decode(&[0x09]).unwrap_err().code, ErrorCode::Corrupted);
         assert_eq!(decode(&[STRING, b'a']).unwrap_err().code, ErrorCode::Corrupted);
         assert_eq!(decode(&[NUMBER, 0, 0]).unwrap_err().code, ErrorCode::Corrupted);
+        // Crafted number bytes that decode to positive, negative or signaling NaN are refused rather than later
+        // panicking `number_part`
+        for ordered in [
+            0xfff8_0000_0000_0000u64, // +qNaN
+            0xfff0_0000_0000_0001u64, // +sNaN
+            0x0007_ffff_ffff_ffffu64, // -qNaN
+            0x000f_ffff_ffff_fffeu64, // -sNaN
+        ] {
+            let mut key = vec![NUMBER];
+            key.extend_from_slice(&ordered.to_be_bytes());
+            assert_eq!(decode(&key).unwrap_err().code, ErrorCode::Corrupted, "{ordered:#018x}");
+            assert_eq!(last_number(&key), None, "{ordered:#018x}");
+        }
     }
 }
