@@ -638,7 +638,7 @@ DEALINGS IN THE SOFTWARE.
 
 ================================================================================
 MIT License (MIT), covering:
-  form_urlencoded 1.2.2, by The rust-url developers
+  form_urlencoded 1.2.3, by The rust-url developers
 
 Copyright (c) 2013-2016 The rust-url developers
 
@@ -671,7 +671,7 @@ DEALINGS IN THE SOFTWARE.
 MIT License (MIT), covering:
   idna 1.1.0, by The rust-url developers
   percent-encoding 2.3.2, by The rust-url developers
-  url 2.5.8, by The rust-url developers
+  url 2.5.9, by The rust-url developers
 
 Copyright (c) 2013-2025 The rust-url developers
 
