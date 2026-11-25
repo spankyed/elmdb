@@ -11,6 +11,7 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
     fn init_test(reference: &Reference) -> Engine {
         let dir = tempfile::tempdir().unwrap();
         let db = open(&dir);
+        let watches = TrackedWatches::start(&db);
         let mut engine = Engine {
             db,
             _dir: dir,
@@ -18,6 +19,7 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             since: Since::default(),
             sequence: 0,
             readers: BTreeMap::from([("Task", Reader::default()), ("Note", Reader::default())]),
+            watches,
         };
         for step in &reference.prelude {
             // Read beside the builder, which a prelude runs with: no step of one is a rename, whose commit alone is
@@ -26,10 +28,15 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             let quiet = engine.db.sequence().expect("the sequence reads");
             let got = run(&engine.db, step);
             assert!(got.is_ok(), "the prelude's {step:?}: {got:?}");
+            if let Ok(Some(changes)) = &got {
+                engine.watches.refresh_tokens(&engine.db, &changes.touched);
+            }
             let mut after = engine.before.clone();
             after.step(step).expect("the prelude creates each id once");
             track(&mut engine, step, &got, after, quiet);
         }
+        engine.db.wait_for_index_builds().expect("the prelude builds end");
+        engine.watches.drain_builder(&engine.db);
         engine
     }
 
@@ -37,6 +44,7 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
         // Read with the builder idle, so that the step's commit is the next: the builder commits what a step before
         // gave it to do, and is waited for here whether or not the invariants after that step were
         engine.db.wait_for_index_builds().expect("the builder's drain ends");
+        engine.watches.drain_builder(&engine.db);
         let quiet = engine.db.sequence().expect("the sequence reads");
         let got = run(&engine.db, &transition.step);
         match (&got, &reference.outcome) {
@@ -49,6 +57,23 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             ),
             _ => panic!("{:?}: the engine said {got:?}, the model {:?}", transition.step, reference.outcome),
         }
+        match (&got, &transition.step) {
+            (Ok(Some(changes)), _) => engine.watches.refresh_tokens(&engine.db, &changes.touched),
+            (
+                Ok(None),
+                Step::Rebuild { .. }
+                | Step::Reset
+                | Step::RenameRelation { .. }
+                | Step::RenameField { .. }
+                | Step::ReplaceWith
+                | Step::Redeclare
+                | Step::PurgeField
+                | Step::PurgeKind
+                | Step::RenameTypeAndBack,
+            ) => engine.watches.refresh_all(&engine.db),
+            (Ok(None), Step::RefuseNext | Step::Backup | Step::CloseGivesUp) | (Err(_), _) => {}
+            (Ok(None), other) => unreachable!("write step {other:?} returned no change set"),
+        }
         track(&mut engine, &transition.step, &got, reference.model.clone(), quiet);
         engine
     }
@@ -56,7 +81,8 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
     fn check_invariants(engine: &Engine, reference: &Reference) {
         assert_eq!(state_of(&engine.db), model_state(&reference.model));
         assert_eq!(sorted_far_ends(derived_of(&engine.db)), derived_from(&reference.model));
-        assert_eq!(plans_of(&engine.db), plans_from(&reference.model));
+        let expected_plans = plans_from(&reference.model);
+        assert_eq!(plans_of(&engine.db), expected_plans);
         // A registered field outlives its values, so what the model holds is all it must include
         engine
             .db
@@ -72,6 +98,8 @@ impl proptest_state_machine::StateMachineTest for EngineMachine {
             .unwrap();
         // A wait's answer is the database's: every index it says is built, with none failed, is what reads find
         engine.db.wait_for_index_builds().expect("the builds end");
+        engine.watches.drain_builder(&engine.db);
+        assert_eq!(engine.watches.answers(), expected_plans, "tracked watches match reference plans");
         let unbuilt: Vec<String> = engine
             .db
             .index_status()
@@ -132,4 +160,6 @@ pub(super) struct Engine {
     pub(super) sequence: u64,
     /// A reader of `changed_since` for each type it is asked about, `Task` and `Note`, each type asked alone
     pub(super) readers: BTreeMap<&'static str, Reader>,
+    /// Active tracked watches over every derived read, updated only on `ChangeSet::touched` or admin invalidation
+    pub(super) watches: TrackedWatches,
 }
