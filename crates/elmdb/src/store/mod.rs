@@ -18,7 +18,7 @@ mod idle_reads;
 mod kept;
 mod reach;
 mod record;
-pub use record::written_in;
+pub use record::{left_by_a_backup, written_in};
 mod restore;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;

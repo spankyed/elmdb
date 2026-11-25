@@ -644,7 +644,7 @@ fn a_backup_refuses_a_target_another_process_has_open_and_goes_on_once_it_closes
         .unwrap();
     elsewhere.lock_shared().unwrap();
     let refused = db.backup(target.path()).unwrap_err();
-    assert_eq!(refused.code, crate::ErrorCode::TargetHoldsDatabase, "{}", refused.message);
+    assert_eq!(refused.code, crate::ErrorCode::TargetInUse, "{}", refused.message);
     assert!(!target.path().join("data.mdb").exists(), "nothing was published beneath the open");
     drop(elsewhere);
     db.backup(target.path()).unwrap();
@@ -656,20 +656,20 @@ fn a_backup_refuses_a_target_another_process_has_open_and_goes_on_once_it_closes
 fn a_directory_is_written_in_once_an_open_has_written_there_and_never_by_a_backup_or_a_read() {
     let dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
-    assert!(!crate::written_in(dir.path()), "an empty directory");
+    assert!(!crate::written_in(dir.path()).unwrap(), "an empty directory");
     let db = open(&dir);
-    assert!(crate::written_in(dir.path()), "a writable open's");
+    assert!(crate::written_in(dir.path()).unwrap(), "a writable open's");
     db.backup(target.path()).unwrap();
-    assert!(!crate::written_in(target.path()), "a backup");
+    assert!(!crate::written_in(target.path()).unwrap(), "a backup");
     Database::open(target.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap().close().unwrap();
-    assert!(!crate::written_in(target.path()), "a backup a read-only open read");
+    assert!(!crate::written_in(target.path()).unwrap(), "a backup a read-only open read");
     for mode in [
         OpenOptions { sync_each_commit: true, ..Default::default() },
         OpenOptions { syncs: false, ..Default::default() },
     ] {
         let other = tempfile::tempdir().unwrap();
         Database::open(other.path(), mode).unwrap().close().unwrap();
-        assert!(crate::written_in(other.path()), "a writable open's in each mode");
+        assert!(crate::written_in(other.path()).unwrap(), "a writable open's in each mode");
     }
 }
 

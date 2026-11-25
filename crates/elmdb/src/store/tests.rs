@@ -548,8 +548,9 @@ fn a_backup_replaces_an_earlier_one_and_refuses_a_database_open_here() {
     store.copy_to(backup.path()).unwrap();
     put(&store, "a", b"2").unwrap();
     store.copy_to(backup.path()).unwrap();
-    let files: Vec<_> = std::fs::read_dir(backup.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
-    assert_eq!(files, ["data.mdb"]);
+    let mut files: Vec<_> = std::fs::read_dir(backup.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    files.sort();
+    assert_eq!(files, ["data.mdb", "synced.lock"], "the copy, and the decision lock it held");
     let copy = Store::open(backup.path(), quiet()).unwrap();
     assert_eq!(get(&copy, "a").as_deref(), Some(&b"2"[..]));
 
@@ -717,6 +718,31 @@ fn backup_reports_a_record_it_could_not_remove_as_after_its_publication() {
 }
 
 #[test]
+fn a_backup_holds_its_target_s_decision_lock_and_presence_lock_until_it_has_published() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    // An open there earlier, closed, left its presence lock; none was ever made in `fresh`
+    std::fs::write(target.path().join(record::PRESENCE), b"").unwrap();
+    let fresh = tempfile::tempdir().unwrap();
+    for (into, presence) in [(target.path(), true), (fresh.path(), false)] {
+        let held = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen = std::sync::Arc::clone(&held);
+        let at = into.to_owned();
+        crate::failpoints::run_once_here(crate::failpoints::points::BACKUP_READY, move || {
+            let free = |name: &str| std::fs::File::open(at.join(name)).ok().map(|file| file.try_lock().is_ok());
+            *seen.lock().unwrap() = Some((free(record::RECORD_LOCK), free(record::PRESENCE)));
+        });
+        store.copy_to(into).unwrap();
+        let held = held.lock().unwrap().take().expect("the backup reached publication");
+        // An open that began meanwhile would wait on the decision lock, made where none was, before it took the
+        // presence lock: neither is free until the copy is published
+        assert_eq!(held, (Some(false), presence.then_some(false)), "{}", into.display());
+    }
+}
+
+#[test]
 fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
@@ -726,8 +752,9 @@ fn backup_creates_nested_destinations_and_leaves_only_the_complete_data_file() {
     let store = Store::open(dir.path(), quiet()).unwrap();
     put(&store, "value", b"complete").unwrap();
     store.copy_to(&target).unwrap();
-    let names: Vec<_> = std::fs::read_dir(&target).unwrap().map(|e| e.unwrap().file_name()).collect();
-    assert_eq!(names, ["data.mdb"]);
+    let mut names: Vec<_> = std::fs::read_dir(&target).unwrap().map(|e| e.unwrap().file_name()).collect();
+    names.sort();
+    assert_eq!(names, ["data.mdb", "synced.lock"], "the complete copy, and the decision lock it held");
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;

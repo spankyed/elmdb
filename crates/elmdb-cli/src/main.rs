@@ -64,12 +64,20 @@ fn told(db: Database) -> elmdb::Result<Database> {
     Ok(db)
 }
 
-/// Refuses a backup target that is a file, or a directory holding a database an open has written in place: the command
-/// copies into a new directory, an empty one or an earlier backup, which it replaces, and never over a database that was
-/// opened there, as one named in the wrong place would be. The engine refuses one another process has open
+/// Refuses a backup target that is a file, or a directory holding a database an open has written in place or anything
+/// else no backup leaves: the command copies into a new directory, an empty one or an earlier backup, which it
+/// replaces, and never over what a target named in the wrong place holds. The engine refuses one another process has
+/// open
 fn check_backup_target(target: &Path) -> elmdb::Result<()> {
-    let Ok(meta) = std::fs::metadata(target) else {
-        return Ok(());
+    let meta = match std::fs::metadata(target) {
+        Ok(meta) => meta,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(elmdb::Error::new(
+                elmdb::ErrorCode::Io,
+                format!("Cannot look at {}: {error}", target.display()),
+            ));
+        }
     };
     if !meta.is_dir() {
         return Err(elmdb::Error::new(
@@ -77,15 +85,30 @@ fn check_backup_target(target: &Path) -> elmdb::Result<()> {
             format!("{} is a file; back up into a new directory, an empty one or an earlier backup", target.display()),
         ));
     }
-    if elmdb::written_in(target) {
+    if elmdb::written_in(target)? {
         return Err(elmdb::Error::new(
-            elmdb::ErrorCode::TargetHoldsDatabase,
+            elmdb::ErrorCode::TargetInUse,
             format!(
                 "{} holds a database that has been opened for writing, which a backup would replace; back up into a \
                  new directory, an empty one or an earlier backup",
                 target.display()
             ),
         ));
+    }
+    for entry in std::fs::read_dir(target)? {
+        let name = entry?.file_name();
+        // Finder's, beside anything a person has looked at on macOS
+        if !elmdb::left_by_a_backup(&name) && name != ".DS_Store" {
+            return Err(elmdb::Error::new(
+                elmdb::ErrorCode::TargetInUse,
+                format!(
+                    "{} holds {}, which no backup leaves, so it may not be a backup; back up into a new directory, an \
+                     empty one or an earlier backup",
+                    target.display(),
+                    name.to_string_lossy()
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -110,8 +133,10 @@ fn run(command: Command) -> elmdb::Result<bool> {
             Ok(true)
         }
         Command::Backup { dir, target } => {
-            check_backup_target(&target)?;
             let db = read_only(&dir)?;
+            // Once the source is open, which can take a while, so that the target is looked at as close to the backup
+            // as can be
+            check_backup_target(&target)?;
             db.backup(&target)?;
             println!("{} copied to {}", dir.display(), target.display());
             Ok(true)

@@ -194,7 +194,7 @@ fn rebuilds_derived_data_that_differs_from_what_primary_data_derives() {
 }
 
 #[test]
-fn backup_replaces_an_earlier_backup_and_refuses_a_file_or_a_database_opened_for_writing() {
+fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_writing_or_what_no_backup_leaves() {
     let dir = tempfile::tempdir().unwrap();
     let source = dir.path().join("source");
     let schema = elmdb::schema::Schema::from_json(&json!({
@@ -268,8 +268,27 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_or_a_database_opened_for
         let synced_before = std::fs::read(target.join("synced")).unwrap();
         let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
-        assert!(out.contains("TARGET_HOLDS_DATABASE") && out.contains("opened for writing"), "{out}");
+        assert!(out.contains("TARGET_IN_USE") && out.contains("opened for writing"), "{out}");
         assert_eq!(std::fs::read(target.join("data.mdb")).unwrap(), data_before);
         assert_eq!(std::fs::read(target.join("synced")).unwrap(), synced_before);
+    }
+
+    // A directory holding anything a backup doesn't leave is refused untouched: a project's, named where its backup
+    // directory was meant, and another program's LMDB database, whose `data.mdb` a backup would replace
+    let project = dir.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("package.json"), b"{}").unwrap();
+    let other_lmdb = dir.path().join("other-lmdb");
+    std::fs::create_dir(&other_lmdb).unwrap();
+    std::fs::write(other_lmdb.join("data.mdb"), b"another program's").unwrap();
+    std::fs::write(other_lmdb.join("lock.mdb"), b"").unwrap();
+    std::fs::write(other_lmdb.join("notes.txt"), b"").unwrap();
+    for (target, held) in [(&project, "package.json"), (&other_lmdb, "notes.txt")] {
+        let before: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("TARGET_IN_USE") && out.contains(held) && out.contains("no backup leaves"), "{out}");
+        let after: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(after, before, "nothing made or replaced");
     }
 }

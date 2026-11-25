@@ -833,14 +833,14 @@ unit is open.
 - `backup(dir)`: LMDB's copy of one read transaction, compacted (`mdb_env_copyfd2` with `MDB_CP_COMPACT`, into a
   file elmdb opens), which opens as a database of its own. A private temporary file is synced and atomically published; the destination is reserved
   against this process's opens and other publishers, and a backup into a directory that is open here or being
-  published to is refused (`ALREADY_OPEN`). Across processes, where a database was ever opened in the destination,
-  the backup holds its open and decision locks (Durability) until it is published: a database another process has
-  open there is refused (`TARGET_HOLDS_DATABASE`), and an open there waits for the backup to end. A backup makes no
-  file but its data file, so an open that begins in a directory no database was opened in, as the backup does, isn't
-  excluded: the caller coordinates that. A backup into a directory replaces the
-  data file a backup or a closed database there left. The `elmdb` command refuses a directory holding a database an
-  open has written in place (`TARGET_HOLDS_DATABASE`), which no backup leaves, so that a backup named in the wrong
-  place doesn't replace one, and copies into a new directory, an empty one or an earlier backup. Failure before
+  published to is refused (`ALREADY_OPEN`). Across processes, the backup holds the destination's decision lock, making
+  it where it isn't, and its presence lock where an open made one (Durability), until the copy is published: every
+  open decides under the decision lock before it takes the presence lock, so a database another process has open there
+  is refused (`TARGET_IN_USE`), and an open that begins there waits for the backup to end. Beside its data file, a
+  backup leaves the decision lock it made. A backup into a directory replaces the data file a backup or a closed
+  database there left. The `elmdb` command refuses a directory holding a database an open has written in place, or
+  anything else no backup or read-only open of one leaves (`TARGET_IN_USE`), so that a backup named in the wrong place
+  replaces nothing, and copies into a new directory, an empty one or an earlier backup. Failure before
   publication preserves the old backup. Unix backup data files are private to the creating user (mode 0600); arrange ownership/permissions
   explicitly before restoring under another account. Unix syncs affected directories; Windows clears the temporary
   file attribute before requesting a write-through replacement. If directory sync
