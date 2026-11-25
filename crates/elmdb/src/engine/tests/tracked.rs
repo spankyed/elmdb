@@ -151,6 +151,71 @@ fn a_unit_names_its_tokens_when_it_commits_and_a_refused_batch_commits_nothing()
 }
 
 #[test]
+fn a_unit_s_tracked_read_is_named_by_a_write_that_commits_as_the_unit_lets_the_writer_go() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Arc::new(open(&dir));
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.read(&reads(vec![row("Task-1")], Some(7))).unwrap();
+    // Another thread writes what the unit read as soon as the unit's commit lets the writer go
+    let named = Arc::new(Mutex::new(None));
+    let (other, answer) = (Arc::clone(&db), Arc::clone(&named));
+    crate::failpoints::run_once_here(crate::failpoints::points::UNIT_COMMITTED, move || {
+        let written = std::thread::spawn(move || {
+            touched(&other, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })])
+        });
+        *answer.lock().unwrap() = Some(written.join().unwrap());
+    });
+    unit.commit(false).unwrap();
+    assert_eq!(named.lock().unwrap().take().expect("the other write ran as the unit committed"), [7]);
+}
+
+#[test]
+fn a_unit_s_tracked_read_that_failed_is_filed_with_what_it_read_before_failing() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let unknown = json!({ "read": "query", "plan": { "start": { "from": "types", "types": ["Nope"] }, "terminal": { "answer": "ids" } } });
+    let mut unit = db.begin().unwrap();
+    assert!(unit.read(&reads(vec![row("Task-1"), unknown], Some(5))).is_err());
+    unit.commit(false).unwrap();
+    assert_eq!(touched(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })]), [5]);
+}
+
+#[test]
+fn an_untrack_while_a_unit_holds_a_tracked_read_cancels_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.read(&reads(vec![row("Task-1")], Some(3))).unwrap();
+    db.untrack(3);
+    unit.commit(false).unwrap();
+    assert!(db.tracks.lock().is_empty(), "the canceled read is neither filed nor left registered");
+    assert_eq!(db.track_stats().0, 0);
+    assert!(touched(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })]).is_empty());
+}
+
+#[test]
+fn a_unit_that_fails_to_commit_or_is_dropped_files_none_of_its_tracked_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let mut unit = db.begin().unwrap();
+    unit.read(&reads(vec![row("Task-1")], Some(4))).unwrap();
+    unit.write(&batch(vec![json!({ "op": "create", "type": "Task", "id": "Task-2" })])).unwrap();
+    crate::failpoints::fail_once_here(crate::failpoints::points::COMMIT);
+    assert!(unit.commit(false).is_err());
+    assert!(db.tracks.lock().is_empty(), "a unit whose commit failed leaves no read registered");
+    let mut unit = db.begin().unwrap();
+    unit.read(&reads(vec![row("Task-1")], Some(4))).unwrap();
+    drop(unit);
+    assert!(db.tracks.lock().is_empty(), "a dropped unit leaves no read registered");
+    assert_eq!(db.track_stats().0, 0);
+    assert!(touched(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })]).is_empty());
+}
+
+#[test]
 fn the_sequence_rises_by_one_a_commit_and_outlasts_a_reset_and_a_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);

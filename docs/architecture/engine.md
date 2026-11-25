@@ -764,9 +764,12 @@ in either order. `db.sequence` is the last commit's.
   elmdb can't see into, records the index's items instead, which every vector added or removed writes. A commit's
   change set names the tokens whose keys and ranges it wrote into (`touched`), found through that index in
   O(log N + matches) a key, so a commit's cost doesn't grow with the reads being tracked; a unit logs the keys it
-  writes only while some token is tracked. `db.untrack(token)` drops what a token holds, and a caller re-running its
-  reads drops it first. `db.trackStats()` answers how many tokens have reads filed and how many keys and ranges they
-  hold (`{ owners, keys, ranges }`). It also cancels dependency registration by any read already in flight under that token.
+  writes only while some token is tracked. `db.untrack(token)` drops what a token holds, and cancels dependency
+  registration by any read already in flight under that token, a unit's among them; a caller re-running its reads
+  drops it first. `db.trackStats()` answers how many tokens have reads filed and how many keys and ranges they hold
+  (`{ owners, keys, ranges }`). A unit's tracked reads are filed when it commits, failed ones with what they read
+  before failing, once the commit has let the map's gate go and before the unit lets the writer go, so a commit after
+  it names their tokens; a unit aborted, or whose commit fails, files none of them.
   Tracked queries normally execute outside the tracking mutex. The commit sequence is checked under that mutex
   before dependencies are filed: an intervening commit retries the query once, then a second conflict uses the locked
   path. This bounds retries under continuous writes and preserves notification ordering. In-flight token reads keep

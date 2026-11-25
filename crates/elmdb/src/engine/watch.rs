@@ -476,14 +476,45 @@ fn read_watch_with(
 }
 
 /// An in-flight token read can be canceled by untrack. Drop also cleans up if read execution unwinds.
-struct PendingRead {
+pub(crate) struct PendingRead {
     tracks: SharedTracks,
     id: u64,
+    /// Whether `file_all` has taken the registration already, which leaves `Drop` nothing to do
+    filed: bool,
+}
+
+impl PendingRead {
+    /// Registers a read under `token` as in flight, before it runs: an `untrack` from now on cancels it, and a write
+    /// logs its keys while it is registered
+    pub(crate) fn new(tracks: &SharedTracks, token: u32) -> Self {
+        let mut held = tracks.lock();
+        let id = held.next_read;
+        held.next_read += 1;
+        held.pending_reads.insert(id, token);
+        PendingRead { tracks: Arc::clone(tracks), id, filed: false }
+    }
+
+    /// Files each read under its token, unless an `untrack` canceled it meanwhile, all under one hold of the lock;
+    /// nothing is locked when there are none
+    pub(crate) fn file_all(tracks: &SharedTracks, pending: Vec<(PendingRead, ReadSet)>) {
+        if pending.is_empty() {
+            return;
+        }
+        let mut held = tracks.lock();
+        for (mut read, reads) in pending {
+            if let Some(token) = held.pending_reads.remove(&read.id) {
+                held.file(token, reads);
+            }
+            read.filed = true;
+        }
+    }
 }
 
 impl Drop for PendingRead {
     fn drop(&mut self) {
-        self.tracks.lock().pending_reads.remove(&self.id);
+        if !self.filed {
+            self.tracks.lock().pending_reads.remove(&self.id);
+        }
     }
 }
 
@@ -507,13 +538,7 @@ fn read_registered(
     token: u32,
     mut run: impl FnMut() -> (Result<Vec<u8>>, ReadSet),
 ) -> Result<Vec<u8>> {
-    let pending = {
-        let mut held = tracks.lock();
-        let id = held.next_read;
-        held.next_read += 1;
-        held.pending_reads.insert(id, token);
-        PendingRead { tracks: Arc::clone(tracks), id }
-    };
+    let pending = PendingRead::new(tracks, token);
     for _ in 0..2 {
         let before = sequence();
         let (answer, read) = run();

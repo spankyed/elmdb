@@ -1157,9 +1157,9 @@ pub struct Unit {
     schemas: Arc<RwLock<Arc<EngineSchema>>>,
     store: Arc<Store>,
     tracks: watch::SharedTracks,
-    /// Read sets recorded by `Unit::read`, filed on `tracks` only when this unit commits so failed reads and aborted
-    /// units never leave uncommitted-write read sets on tokens
-    pending_tracks: Vec<(u32, tracking::ReadSet)>,
+    /// The read sets `Unit::read` recorded under a token, each registered as in flight so `untrack` cancels it, filed on
+    /// `tracks` only when this unit commits: an aborted unit leaves no read of its uncommitted writes on a token
+    pending_tracks: Vec<(watch::PendingRead, tracking::ReadSet)>,
     /// The builder the rank indexes' pushes its commit leaves go to
     builders: Option<crate::database::Builders>,
     /// Whether the store has been told the unit ended: once, however it ends
@@ -1286,13 +1286,17 @@ impl Unit {
 
     /// Answers reads from the unit's transaction, which sees the unit's own writes
     pub fn read(&mut self, reads: &plan::Reads) -> Result<Vec<u8>> {
+        // Registered before it runs, as a read outside a unit is, so an `untrack` meanwhile cancels it
+        let pending = reads.track.map(|token| watch::PendingRead::new(&self.tracks, token));
         let t = self.view(0.0)?;
-        let Some(token) = reads.track else { return reads::run(&t, &reads.reads) };
+        let Some(pending) = pending else { return reads::run(&t, &reads.reads) };
         let recording = tracking::Recording::new(&t);
-        let answer = reads::run(&recording, &reads.reads)?;
+        let answer = reads::run(&recording, &reads.reads);
+        // Kept whether or not the reads failed, as a read outside a unit is filed: what they read before failing, an
+        // index's marker for one refused while the index builds, decides when they'd answer otherwise
         let read_set = recording.into_reads();
-        self.pending_tracks.push((token, read_set));
-        Ok(answer)
+        self.pending_tracks.push((pending, read_set));
+        answer
     }
 
     /// `read` with the reads as msgpack bytes
@@ -1341,16 +1345,15 @@ impl Unit {
         run_point!(UNIT_COMMITTING);
         self.store.deposit(std::mem::take(&mut self.state.edges));
         self.store.deposit_touched(changed::Touched::of(&self.state.events, &self.schema));
-        let committed = held.commit(&self.store);
+        // The unit's tracked reads are filed once its commit has landed and before the writer is let go: a writer that
+        // commits after this unit then names their tokens. Not filed when the commit fails, nor by an aborted unit
+        let pending = std::mem::take(&mut self.pending_tracks);
+        let tracks = &self.tracks;
+        let committed = held.commit_then(&self.store, || watch::PendingRead::file_all(tracks, pending));
         self.ended = true;
         self.store.end_unit();
+        run_point!(UNIT_COMMITTED);
         let sequence = committed?;
-        if !self.pending_tracks.is_empty() {
-            let mut tracks = self.tracks.lock();
-            for (token, reads) in self.pending_tracks.drain(..) {
-                tracks.file(token, reads);
-            }
-        }
         let synced = self.store.committed(durable);
         // As in `write`: the commit has landed whatever its sync answers, so its rank work is queued before a failed sync
         let landed = finish_commit(
