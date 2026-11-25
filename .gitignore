@@ -6,3 +6,5 @@ target-scratch/
 __pycache__/
 # EARS' build (`packages/ears/scripts/build.mjs`)
 packages/ears/dist/
+.DS_Store
+.claude/

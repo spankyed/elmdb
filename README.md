@@ -211,8 +211,8 @@ Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
 
 A binary of elmdb also holds the code it is built from, each under its own license: LMDB, under
 [the OpenLDAP Public License](LICENSE-OPENLDAP), zstd, under BSD-3-Clause, the Rust standard library and the crates
-elmdb depends on. Redistributing one means complying with those licenses too. The npm package carries their texts and
-notices beside its `.node` files: the crates' in `THIRD-PARTY-NOTICES`, the Rust standard library's in
+elmdb depends on. Redistributing one means complying with those licenses too. Each platform npm package (`@elmdb/binding-<platform>`) carries their texts and
+notices beside its `.node` file: the crates' in `THIRD-PARTY-NOTICES`, the Rust standard library's in
 `COPYRIGHT-rust-library.html`, and LMDB's alone in `LICENSE-OPENLDAP`. The `elmdb` command owes the same notices for
 what it is built from.
 
