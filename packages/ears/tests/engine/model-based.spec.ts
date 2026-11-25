@@ -81,6 +81,34 @@ it('refuses, holds and answers what the model does', () => {
   }), { numRuns: 120 });
 });
 
+it('files a moved relation last among its ends while keeping a no-op move in place', () => {
+  const ops: Op[] = [
+    { op: 'create', id: 'Note-2', fields: {} },
+    { op: 'create', id: 'Task-1', fields: {} },
+    { op: 'create', id: 'Task-2', fields: {} },
+    { op: 'create', id: 'Task-4', fields: {} },
+    { op: 'link', id: 'Note-2', kind: 'refs', target: 'Task-4' },
+    { op: 'link', id: 'Note-2', kind: 'refs', target: 'Task-1' },
+    // No-op move onto the same target keeps the relation's existing place (Task-4 before Task-1)
+    { op: 'updateRelation', id: 'Note-2', kind: 'refs', target: 'Task-4', to: 'Task-4' },
+    // Moving to a new target files the relation last (Task-1 before Task-2)
+    { op: 'updateRelation', id: 'Note-2', kind: 'refs', target: 'Task-4', to: 'Task-2' },
+  ];
+  const { engine, dispose } = harnessEngine();
+  const model = new Model();
+  try {
+    for (const op of ops) {
+      const where = JSON.stringify(op);
+      expect(applyTo(engine, op), where).toBe(model.apply(op) !== undefined);
+      expect(stateOf(engine), where).toEqual(model.state());
+      expect(derivedOf(engine, model), where).toEqual(model.derived());
+    }
+    expect(derivedOf(engine, model)['Note-2 out refs']).toEqual(['Task-1', 'Task-2']);
+  } finally {
+    dispose();
+  }
+});
+
 it('keeps every watch at what its read answers afresh, after every write, whatever wrote', async () => {
   await fc.assert(fc.asyncProperty(fc.integer({ min: 10, max: 60 }).chain((length) => workload(length)), async (ops: Op[]) => {
     const { engine, dispose } = harnessEngine();

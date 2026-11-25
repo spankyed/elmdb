@@ -140,14 +140,16 @@ export class Model {
     }
     if (op.op === 'updateRelation') {
       const existing = edge(op.id, op.kind, op.target);
-      const place = this.edges.get(existing);
-      if (place === undefined) return `no relation ${existing}`;
+      if (!this.edges.has(existing)) return `no relation ${existing}`;
       if (op.id === op.to) return 'a self link';
       const moved = edge(op.id, op.kind, op.to);
       if (moved !== existing && this.edges.has(moved)) return 'duplicate edge';
       if (moved !== existing && !this.entities.has(op.to)) return `no entity has ${op.to}`;
-      this.edges.delete(existing);
-      this.edges.set(moved, place);
+      // Moving to new ends files the relation last among its new ends' edges; a no-op move keeps its place
+      if (moved !== existing) {
+        this.edges.delete(existing);
+        this.edges.set(moved, ++this.nextEdgeSeq);
+      }
       return undefined;
     }
     if (op.op === 'removeRelation') {
