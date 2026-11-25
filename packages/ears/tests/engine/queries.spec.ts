@@ -210,6 +210,10 @@ describe('terminals', () => {
     expect(reads(() => counted().exists())).toBe(1);
     expect(reads(() => counted().pickOne(['title']))).toBe(1);
     expect(reads(() => counted().limit(2).ids())).toBe(2);
+    // A leading limit caps how many rows the predicate runs on even when later steps filter further
+    expect(reads(() => counted().limit(2).where('status', 'done').first())).toBe(2);
+    expect(reads(() => counted().limit(0).where('status', 'open').first())).toBe(0);
+    expect(reads(() => counted().limit(Number.NaN).where('status', 'open').first())).toBe(0);
     e.write(t.a).link('contains', t.c);
     expect(reads(() => counted().out('contains').first())).toBe(1);
     expect(reads(() => counted().both('contains').first())).toBe(1);

@@ -172,6 +172,13 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     }
   };
 
+  const removeDirty = (watch: Watch): boolean => {
+    if (!dirty.delete(watch)) return false;
+    if (dirty.size === 0) earliestDue = Infinity;
+    else if (earliestDue !== undefined && dueAt(watch) <= earliestDue) earliestDue = undefined;
+    return true;
+  };
+
   const earliestDirty = (): number => {
     if (earliestDue !== undefined) return earliestDue;
     let min = Infinity;
@@ -363,7 +370,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         }
         ranOne = true;
         // A commit an earlier run in this flush made is one this run reads: it needn't run again for it
-        if (dirty.delete(watch)) connection.tally()?.watchSkipped(watch.label);
+        if (removeDirty(watch)) connection.tally()?.watchSkipped(watch.label);
         try {
           run(watch);
           if (closed()) break;
@@ -438,10 +445,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
           watch.stopped = true;
           answer(watch.waiters.splice(0));
           open.delete(watch.token);
-          if (dirty.delete(watch)) {
-            if (dirty.size === 0) earliestDue = Infinity;
-            else if (earliestDue !== undefined && dueAt(watch) <= earliestDue) earliestDue = undefined;
-          }
+          removeDirty(watch);
           connection.untrack(watch.token);
           if (open.size === 0) {
             unlisten?.();
