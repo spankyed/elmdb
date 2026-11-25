@@ -287,7 +287,7 @@ pub struct CatalogKind {
 pub struct Stage {
     /// The start's, the step's or the terminal's name: `types`, `where`, `orderBy`, `rows`, …
     pub stage: String,
-    /// The index the stage read, each named where it read several as lists, or `none: walks the type`
+    /// The index the stage read, each named where it read several, or `none: walks the type`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "codegen", ts(optional))]
     pub index: Option<String>,
@@ -295,7 +295,7 @@ pub struct Stage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "codegen", ts(optional))]
     pub nodes: Option<u64>,
-    /// A stage that built a graph: its edges; a `similar`: the edges it read
+    /// A stage that built a graph: its edges; a `similar`, `descendants`, `ancestors` or `pathTo`: the edges it read
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "codegen", ts(optional))]
     pub edges: Option<u64>,
@@ -348,11 +348,11 @@ pub struct Stage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "codegen", ts(optional))]
     pub within: Option<u64>,
-    /// A `similar`: the neighbours of `to`
+    /// A `similar`: the neighbours of `to`; a `near`, `like` or `hybrid`: the vector neighbours returned
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "codegen", ts(optional))]
     pub neighbours: Option<u64>,
-    /// A `similar`: the candidates it scored
+    /// A `similar`, `containing`, `matching`, `near`, `like` or `hybrid`: the candidates narrowed or scored
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "codegen", ts(optional))]
     pub candidates: Option<u64>,

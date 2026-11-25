@@ -537,6 +537,9 @@ pub(crate) use builder::{Building, Commits as BuilderCommits, Target, Waited, Wo
 
 /// A position as the binding hands it, msgpack of `changed::Position`
 fn position(bytes: &[u8]) -> Result<changed::Position> {
+    crate::format::value::validate(bytes).map_err(|error| {
+        Error::new(ErrorCode::BatchInvalid, format!("A position to read what changed from: {}", error.message))
+    })?;
     rmp_serde::from_slice(bytes)
         .map_err(|error| Error::new(ErrorCode::BatchInvalid, format!("A position to read what changed from: {error}")))
 }

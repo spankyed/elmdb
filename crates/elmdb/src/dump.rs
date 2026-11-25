@@ -148,6 +148,8 @@ pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
             break;
         }
         let bytes = read_bytes(&mut file, n)?;
+        crate::format::value::validate(&bytes)
+            .map_err(|e| invalid(format!("load {} isn't valid: {}", seen + 1, e.message)))?;
         let load: Load =
             rmp_serde::from_slice(&bytes).map_err(|e| invalid(format!("load {} doesn't decode: {e}", seen + 1)))?;
         report.count(&load);

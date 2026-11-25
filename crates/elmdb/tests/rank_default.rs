@@ -57,7 +57,7 @@ fn the_default_tolerance_keeps_the_top_of_a_graph_with_hubs_exact() {
             f.db.wait_for_index_builds().unwrap();
         }
         let exact = |n| {
-            let step = json!({ "step": "rank", "kinds": ["refs"], "iterations": 100000, "tolerance": 1e-13 });
+            let step = json!({ "step": "rank", "kinds": ["refs"], "iterations": 10000, "tolerance": 1e-13 });
             ids(&f.db, step, Some(n))
         };
         let top = |n| ids(&f.db, json!({ "step": "ranked", "index": "docRank" }), Some(n));

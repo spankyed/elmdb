@@ -442,8 +442,11 @@ enum RankScores {
     Computed(HashMap<String, f64, Fixed>),
 }
 
+/// The most rounds `rank` or `communities` runs, bounding pathological plans
+pub const MAX_ITERATIONS: u32 = 10_000;
+
 /// The most rounds `rank` runs for an index not built yet, which its tolerance stops long before
-const COMPUTED_RANK_ROUNDS: u32 = 1_000_000;
+const COMPUTED_RANK_ROUNDS: u32 = MAX_ITERATIONS;
 
 /// How many places the value keys between two hold, or how many rows there are, as far as a read has counted,
 /// and the key its count of the rest goes on from
@@ -1065,21 +1068,23 @@ impl<R: Read> Query<'_, R> {
                 })
             }
             Step::Descendants { kinds, types, depth } => {
-                self.reach(before, kinds, types.as_deref(), true, *depth, visit)
+                self.reach(before, upto, kinds, types.as_deref(), true, *depth, visit)
             }
             Step::Ancestors { kinds, types, depth } => {
-                self.reach(before, kinds, types.as_deref(), false, *depth, visit)
+                self.reach(before, upto, kinds, types.as_deref(), false, *depth, visit)
             }
-            Step::PathTo { to, kinds, direction, depth } => self.path_to(before, to, kinds, *direction, *depth, visit),
+            Step::PathTo { to, kinds, direction, depth } => {
+                self.path_to(before, upto, to, kinds, *direction, *depth, visit)
+            }
             Step::Rank { kinds, direction, seeds, weights, damping, iterations, tolerance } => {
                 // NaN is in none of these ranges
                 let valid = (0.0..1.0).contains(damping) && *damping > 0.0 && *tolerance > 0.0;
-                if !valid || *iterations == 0 {
+                if !valid || *iterations == 0 || *iterations > MAX_ITERATIONS {
                     return Err(Error::new(
                         ErrorCode::BatchInvalid,
                         format!(
-                            "rank takes a damping between 0 and 1, at least one iteration and a tolerance above 0, and \
-                             was given {damping}, {iterations} and {tolerance}"
+                            "rank takes a damping between 0 and 1, 1 to {MAX_ITERATIONS} iterations and a tolerance \
+                             above 0, and was given {damping}, {iterations} and {tolerance}"
                         ),
                     ));
                 }
@@ -1432,7 +1437,12 @@ impl<R: Read> Query<'_, R> {
             Step::Like { id, index, k } => {
                 let entity_type = ids::type_of(id);
                 let def = super::vector::resolve(self.r.schema(), entity_type, index.as_deref(), "like")?;
-                let Some(own) = super::vector::own_vector(self.r, entity_type, &def, id)? else { return Ok(true) };
+                let Some(own) = super::vector::own_vector(self.r, entity_type, &def, id)? else {
+                    if let Some(stages) = self.stages {
+                        stages.reads_index(&def.name);
+                    }
+                    return Ok(true);
+                };
                 let found = self.nearest(before, &own, Some(&def.name), *k as usize, Some(id))?;
                 self.record_and_visit(found, visit)
             }
@@ -1848,11 +1858,18 @@ impl<R: Read> Query<'_, R> {
                     if matcher.matches(self.r, &found, id)? { visit(id) } else { Ok(true) }
                 };
                 let Some(places) = narrowed else {
+                    if let Some(stages) = self.stages {
+                        stages.reads_index("none: walks the type");
+                    }
                     if !self.walk_type(entity_type, None, &mut keep)? {
                         return Ok(false);
                     }
                     continue;
                 };
+                if let Some(stages) = self.stages {
+                    stages.reads_index(&found.name);
+                    stages.add_candidates(places.len());
+                }
                 let ranges: &[bool] = match self.plan.scope {
                     Scope::Live => &[false],
                     Scope::Trashed => &[true],
@@ -1941,6 +1958,9 @@ impl<R: Read> Query<'_, R> {
                 }
                 Err(e) => return Err(e),
             };
+            if let Some(stages) = self.stages {
+                stages.reads_index(&def.name);
+            }
             let within = match among {
                 None => None,
                 Some(ids) => {
@@ -1959,6 +1979,9 @@ impl<R: Read> Query<'_, R> {
             loop {
                 let (nearest, exhausted) =
                     super::vector::nearest(self.r, entity_type, &def, vector, ask, within.as_ref())?;
+                if let Some(stages) = self.stages {
+                    stages.add_neighbours(nearest.len() as u64);
+                }
                 let mut admitted = Vec::new();
                 for (id, distance) in nearest {
                     self.count_visit();
@@ -1969,6 +1992,9 @@ impl<R: Read> Query<'_, R> {
                     admitted.push((distance, Hit { id, seq: 0, score, terms: Vec::new(), fields: Vec::new() }));
                 }
                 if admitted.len() >= k || exhausted || ask >= numbered {
+                    if let Some(stages) = self.stages {
+                        stages.add_candidates(admitted.len() as u64);
+                    }
                     found.extend(admitted.into_iter().map(|(distance, hit)| (distance, hit, def.name.clone())));
                     break;
                 }
@@ -2012,6 +2038,9 @@ impl<R: Read> Query<'_, R> {
                 }
                 Err(e) => return Err(e),
             };
+            if let Some(stages) = self.stages {
+                stages.reads_index(&def.name);
+            }
             let within = match &among {
                 None => None,
                 Some(ids) => {
@@ -2020,11 +2049,16 @@ impl<R: Read> Query<'_, R> {
                     Some(text::search::places(self.r, &of_type)?.into_keys().collect::<roaring::RoaringTreemap>())
                 }
             };
+            let mut text_hits = 0u64;
             for hit in text::search::search(self.r, entity_type, &def, &raw, options, within.as_ref(), now)? {
                 if among.is_none() && !self.admits(&hit.id)? {
                     continue;
                 }
+                text_hits += 1;
                 texts.push((hit, def.name.clone()));
+            }
+            if let Some(stages) = self.stages {
+                stages.add_candidates(text_hits);
             }
         }
         texts.sort_by(|a, b| b.0.score.partial_cmp(&a.0.score).unwrap_or(Ordering::Equal));
@@ -4123,9 +4157,11 @@ impl<R: Read> Query<'_, R> {
         Ok(go)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn reach(
         &self,
         before: usize,
+        upto: usize,
         kinds: &[String],
         types: Option<&[String]>,
         outward: bool,
@@ -4137,26 +4173,42 @@ impl<R: Read> Query<'_, R> {
         }
         let mut frontier = self.collect(before)?;
         let mut seen: HashSet<String> = frontier.iter().cloned().collect();
-        let mut reached = Vec::new();
+        let mut edges = 0u64;
         let mut levels = 0;
-        while !frontier.is_empty() && depth.is_none_or(|most| levels < most) {
+        let mut go = true;
+        while go && !frontier.is_empty() && depth.is_none_or(|most| levels < most) {
             levels += 1;
             let mut next = Vec::new();
-            for from in &frontier {
+            'level: for from in &frontier {
                 for kind in kinds {
-                    for (_, far) in relations::edges(self.r, from, outward, Some(kind))? {
-                        if seen.contains(&far) || !self.alive(&far)? {
-                            continue;
+                    relations::visit_edges(self.r, from, outward, Some(kind), false, |_, far| {
+                        edges += 1;
+                        if seen.contains(&far) {
+                            return Ok(true);
+                        }
+                        self.count_visit();
+                        if !self.alive(&far)? {
+                            return Ok(true);
                         }
                         seen.insert(far.clone());
+                        if of_types(&far, types) && !visit(&far)? {
+                            go = false;
+                            return Ok(false);
+                        }
                         next.push(far);
+                        Ok(true)
+                    })?;
+                    if !go {
+                        break 'level;
                     }
                 }
             }
-            reached.extend(next.iter().cloned());
             frontier = next;
         }
-        each(reached.into_iter().filter(|id| of_types(id, types)).collect(), visit)
+        if let Some(stages) = self.stages {
+            stages.walked_edges(upto, edges);
+        }
+        Ok(go)
     }
 
     /// Visits an entity's neighbours: the far ends of its edges of the kinds on the sides given, each once in the order
@@ -4266,9 +4318,11 @@ impl<R: Read> Query<'_, R> {
 
     /// A shortest path from an entity of the set to `to`, walked level by level as `reach` walks; nothing visited when
     /// there is none within `depth`
+    #[allow(clippy::too_many_arguments)]
     fn path_to(
         &self,
         before: usize,
+        upto: usize,
         to: &str,
         kinds: &[String],
         direction: Direction,
@@ -4280,14 +4334,21 @@ impl<R: Read> Query<'_, R> {
         }
         let mut frontier = self.collect(before)?;
         if frontier.iter().any(|id| id == to) {
+            if let Some(stages) = self.stages {
+                stages.walked_edges(upto, 0);
+            }
             return visit(to);
         }
         // No path ends at an entity the scope doesn't reach, so nothing is walked looking for one
         if !self.alive(to)? {
+            if let Some(stages) = self.stages {
+                stages.walked_edges(upto, 0);
+            }
             return Ok(true);
         }
         let mut seen: HashSet<String> = frontier.iter().cloned().collect();
         let mut parent: HashMap<String, String> = HashMap::new();
+        let mut edges = 0u64;
         let mut levels = 0;
         while !frontier.is_empty() && depth.is_none_or(|most| levels < most) {
             levels += 1;
@@ -4296,12 +4357,20 @@ impl<R: Read> Query<'_, R> {
                 for kind in kinds {
                     for &outward in direction.sides() {
                         for (_, far) in relations::edges(self.r, from, outward, Some(kind))? {
-                            if seen.contains(&far) || !self.alive(&far)? {
+                            edges += 1;
+                            if seen.contains(&far) {
+                                continue;
+                            }
+                            self.count_visit();
+                            if !self.alive(&far)? {
                                 continue;
                             }
                             seen.insert(far.clone());
                             parent.insert(far.clone(), from.clone());
                             if far == to {
+                                if let Some(stages) = self.stages {
+                                    stages.walked_edges(upto, edges);
+                                }
                                 let mut path = vec![far];
                                 while let Some(previous) = parent.get(path.last().expect("a path holds `to`")) {
                                     path.push(previous.clone());
@@ -4315,6 +4384,9 @@ impl<R: Read> Query<'_, R> {
                 }
             }
             frontier = next;
+        }
+        if let Some(stages) = self.stages {
+            stages.walked_edges(upto, edges);
         }
         Ok(true)
     }
@@ -4331,8 +4403,12 @@ struct Stages {
     nanos: Vec<Cell<u64>>,
     /// Per stage that built a graph: its nodes and edges, and for a rank its rounds and whether it settled
     graph: RefCell<Vec<Option<Graphed>>>,
-    /// Per `similar` stage: the neighbours of `to`, the entities it scored, and the edges it read
-    compared: RefCell<Vec<Option<(usize, usize, usize)>>>,
+    /// Per stage that walked edges without building a graph (`similar`, `descendants`, `ancestors`, `pathTo`)
+    edges: RefCell<Vec<Option<u64>>>,
+    /// Per `similar`, `near`, `like` or `hybrid` stage: neighbours inspected
+    neighbours: RefCell<Vec<Option<u64>>>,
+    /// Per `similar`, `containing`, `matching`, `near`, `like` or `hybrid` stage: candidates narrowed or scored
+    candidates: RefCell<Vec<Option<u64>>>,
     /// Per `ranked` stage: the bound on its scores' distance from PageRank
     errors: RefCell<Vec<Option<f64>>>,
     /// Per stage, whether a `ranked` answered from `rank` because its index isn't built yet
@@ -4385,7 +4461,9 @@ impl Stages {
             index: RefCell::new(vec![None; n]),
             nanos: (0..n).map(|_| Cell::new(0)).collect(),
             graph: RefCell::new(vec![None; n]),
-            compared: RefCell::new(vec![None; n]),
+            edges: RefCell::new(vec![None; n]),
+            neighbours: RefCell::new(vec![None; n]),
+            candidates: RefCell::new(vec![None; n]),
             errors: RefCell::new(vec![None; n]),
             building: RefCell::new(vec![false; n]),
             wants: RefCell::new(vec![None; n]),
@@ -4487,7 +4565,23 @@ impl Stages {
     }
 
     fn compared(&self, stage: usize, neighbours: usize, candidates: usize, edges: usize) {
-        self.compared.borrow_mut()[stage] = Some((neighbours, candidates, edges));
+        self.neighbours.borrow_mut()[stage] = Some(neighbours as u64);
+        self.candidates.borrow_mut()[stage] = Some(candidates as u64);
+        self.edges.borrow_mut()[stage] = Some(edges as u64);
+    }
+
+    fn walked_edges(&self, stage: usize, edges: u64) {
+        self.edges.borrow_mut()[stage] = Some(edges);
+    }
+
+    fn add_neighbours(&self, count: u64) {
+        let slot = &mut self.neighbours.borrow_mut()[self.running.get()];
+        *slot = Some(slot.unwrap_or(0) + count);
+    }
+
+    fn add_candidates(&self, count: u64) {
+        let slot = &mut self.candidates.borrow_mut()[self.running.get()];
+        *slot = Some(slot.unwrap_or(0) + count);
     }
 
     fn cycled(&self, stage: usize, cycles: u32) {
@@ -4509,7 +4603,9 @@ impl Stages {
         w.array(n as u32);
         let index = self.index.borrow();
         let graph = self.graph.borrow();
-        let compared = self.compared.borrow();
+        let walked_edges = self.edges.borrow();
+        let neighbours = self.neighbours.borrow();
+        let candidates = self.candidates.borrow();
         let errors = self.errors.borrow();
         let building = self.building.borrow();
         let wants = self.wants.borrow();
@@ -4526,9 +4622,9 @@ impl Stages {
             // A stage visits what the stage before handed it, and what it read from the store itself
             let received = if at == 0 { 0 } else { self.kept[at - 1].get() };
             let graphed = graph[at];
-            // A stage's `edges` are its graph's (a `rank`, a `topological`) or the ones a `similar` read: one key,
-            // written once. No stage does both; one that did would answer its graph's
-            let edges = graphed.map(|g| g.edges).or(compared[at].map(|(_, _, edges)| edges));
+            // A stage's `edges` are its graph's (`rank`, `topological`, components, `communities`) or the ones a
+            // graph walk read (`similar`, `descendants`, `ancestors`, `pathTo`): one key, written once
+            let edges = graphed.map(|g| g.edges as u64).or(walked_edges[at]);
             let extra = match graphed {
                 None => 0,
                 Some(Graphed { weight, rounds, cycles, .. }) => {
@@ -4537,7 +4633,6 @@ impl Stages {
             };
             let extra = extra
                 + u32::from(edges.is_some())
-                + if compared[at].is_some() { 2 } else { 0 }
                 + u32::from(errors[at].is_some())
                 + u32::from(building[at])
                 + u32::from(wants[at].is_some())
@@ -4545,7 +4640,9 @@ impl Stages {
                 + u32::from(held[at].is_some())
                 + u32::from(self.places[at].get() > 0)
                 + u32::from(common[at])
-                + u32::from(within[at].is_some());
+                + u32::from(within[at].is_some())
+                + u32::from(neighbours[at].is_some())
+                + u32::from(candidates[at].is_some());
             w.map(if index[at].is_some() { 5 } else { 4 } + extra);
             w.str("stage");
             w.str(name);
@@ -4559,7 +4656,7 @@ impl Stages {
             }
             if let Some(edges) = edges {
                 w.str("edges");
-                w.uint(edges as u64);
+                w.uint(edges);
             }
             if let Some(Graphed { weight, rounds, cycles, .. }) = graphed {
                 if let Some(weight) = weight {
@@ -4609,11 +4706,13 @@ impl Stages {
                 w.str("within");
                 w.uint(within);
             }
-            if let Some((neighbours, candidates, _)) = compared[at] {
+            if let Some(neighbours) = neighbours[at] {
                 w.str("neighbours");
-                w.uint(neighbours as u64);
+                w.uint(neighbours);
+            }
+            if let Some(candidates) = candidates[at] {
                 w.str("candidates");
-                w.uint(candidates as u64);
+                w.uint(candidates);
             }
             w.str("visited");
             w.uint(received + self.read[at].get());
@@ -5373,12 +5472,12 @@ fn query_with(
         }
         Terminal::Communities { kinds, resolution, seed, iterations, weights } => {
             // NaN is not finite
-            if !(resolution.is_finite() && *resolution >= 0.0) || *iterations == 0 {
+            if !(resolution.is_finite() && *resolution >= 0.0) || *iterations == 0 || *iterations > MAX_ITERATIONS {
                 return Err(Error::new(
                     ErrorCode::BatchInvalid,
                     format!(
-                        "communities takes a resolution of at least 0 and at least one iteration, and was given \
-                         {resolution} and {iterations}"
+                        "communities takes a resolution of at least 0 and 1 to {MAX_ITERATIONS} iterations, and was \
+                         given {resolution} and {iterations}"
                     ),
                 ));
             }
