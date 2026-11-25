@@ -21,9 +21,10 @@ on:
   issue_comment:
     types: [created]
   pull_request_target:
-    types: [opened, closed, synchronize]
+    types: [opened, reopened, closed, synchronize]
 
 permissions:
+  # Required by contributor-assistant/github-action to re-run the pull_request_target check after a signature or recheck comment
   actions: write
   contents: write
   pull-requests: write
@@ -38,12 +39,29 @@ jobs:
     if: >-
       github.event_name == 'pull_request_target' ||
       (github.event.issue.pull_request &&
-        (github.event.comment.body == 'recheck' ||
-         github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+        (contains(github.event.comment.body, 'recheck') ||
+         contains(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')))
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
+      - name: Comment is a CLA signature or recheck
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request_target ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          trimmed=$(python3 -c 'import os; print(os.environ.get("COMMENT_BODY", "").strip())')
+          if [ "$trimmed" = "recheck" ] || [ "$trimmed" = "I have read the CLA Document and I hereby sign the CLA" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: The signatures' branch is there
+        if: steps.check.outputs.run == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -58,6 +76,7 @@ jobs:
           echo "made cla-signatures from main at $main"
       # Read from main, not from the pull request, which could otherwise list its own author
       - name: The accounts a corporate agreement covers
+        if: steps.check.outputs.run == 'true'
         id: corporate
         env:
           GH_TOKEN: ${{ github.token }}
@@ -68,6 +87,7 @@ jobs:
           echo "accounts=$accounts" >> "$GITHUB_OUTPUT"
           echo "covered by a corporate agreement: ${accounts:-none}"
       - name: CLA Assistant
+        if: steps.check.outputs.run == 'true'
         uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

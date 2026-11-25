@@ -6,6 +6,7 @@ import subprocess
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
+scratch_target = subprocess.check_output(["cargo", "xtask", "scratch-target"], cwd=root, text=True).strip()
 relative = Path("crates/elmdb/src/store/mod.rs")
 original = (root / relative).read_text()
 cases = [
@@ -25,7 +26,7 @@ for label, before, after, test in cases:
         name = "store::tests::" + test
         result = subprocess.run(
             ["cargo", "test", "--offline", "-p", "elmdb", "--lib", name, "--", "--exact", "--nocapture"],
-            cwd=copy, env={**os.environ, "CARGO_TARGET_DIR": str(root / "target")},
+            cwd=copy, env={**os.environ, "CARGO_TARGET_DIR": scratch_target},
             text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=240,
         )
         assert result.returncode != 0 and "running 1 test" in result.stdout and f"{name} ... FAILED" in result.stdout, result.stdout

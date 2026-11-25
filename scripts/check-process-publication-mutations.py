@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 
 root = Path.cwd()
+scratch_target = subprocess.check_output(["cargo", "xtask", "scratch-target"], cwd=root, text=True).strip()
 with tempfile.TemporaryDirectory(prefix="elmdb-claim-publish-mutations-") as temporary:
     copy = Path(temporary)
     with tarfile.open(fileobj=io.BytesIO(subprocess.check_output(["git", "archive", "HEAD"]))) as archive:
@@ -31,7 +32,7 @@ with tempfile.TemporaryDirectory(prefix="elmdb-claim-publish-mutations-") as tem
         assert good.count(before) == 1, path
         source.write_text(good.replace(before, after))
         ran = subprocess.run(["cargo", "test", "--offline", "-p", package, "--lib", test, "--", "--exact", "--nocapture"],
-                             cwd=copy, env={**os.environ, "CARGO_TARGET_DIR": str(root / "target")}, text=True,
+                             cwd=copy, env={**os.environ, "CARGO_TARGET_DIR": scratch_target}, text=True,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if not (ran.returncode and "running 1 test" in ran.stdout and marker in ran.stdout and "FAILED" in ran.stdout):
             print(ran.stdout)

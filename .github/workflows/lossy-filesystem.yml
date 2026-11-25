@@ -29,9 +29,9 @@ jobs:
       LAZYFS_COMMIT: 3edad01aa936b81fed9bd64e47e725fc5ef6c977
       TEST: engine::tests::power_loss::a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: LazyFS, built at its pinned commit
         timeout-minutes: 15

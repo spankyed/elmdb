@@ -2,7 +2,7 @@
 """Demonstrate heap/timing regressions on archived source, never mutate a production worktree.
 
 Requires full git history (1723d5b) and a local Criterion remediation-20261027 baseline.
-Run serially with all other local builds stopped; the disposable copies reuse this worktree's target cache.
+Run serially with all other local builds stopped; the disposable copies build into `cargo xtask scratch-target`.
 
 Not cargo-mutants: its regressions are a heap's growth and a duration's, measured against a baseline, which no source
 mutation cargo-mutants makes produces.
@@ -41,7 +41,11 @@ with tempfile.TemporaryDirectory(prefix="elmdb-verification-mutant-") as directo
         if source.is_file():
             (copy / path).parent.mkdir(parents=True, exist_ok=True)
             (copy / path).write_bytes(source.read_bytes())
-    env = {**os.environ, "CARGO_TARGET_DIR": str(root / "target"), "CARGO_INCREMENTAL": "0"}
+    scratch_target = subprocess.check_output(["cargo", "xtask", "scratch-target"], cwd=root, text=True).strip()
+    env = {**os.environ, "CARGO_TARGET_DIR": scratch_target, "CARGO_INCREMENTAL": "0"}
+    criterion_dir = root / "target/criterion"
+    if criterion_dir.is_dir():
+        env.setdefault("CRITERION_HOME", str(criterion_dir))
 
     def run(name, command, expected_failure):
         print(f"{name}: running on disposable source", flush=True)

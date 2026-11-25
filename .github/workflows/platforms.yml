@@ -12,6 +12,9 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -25,13 +28,13 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout || 60 }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.17.0
       - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: cargo-nextest@0.9.148
       - run: cargo nextest run --workspace --profile ci
@@ -54,7 +57,7 @@ jobs:
         run: |
           node scripts/runtime-binding.cjs record node-floor
           node scripts/check-runtime-binding.cjs
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
       - name: Node 24 loads the existing binding and runs the binding suite
@@ -62,7 +65,7 @@ jobs:
         run: |
           node scripts/runtime-binding.cjs verify node24
           npm run test:binding
-          # Node 23's SQLite has no FTS5, so the smoke above compares no search: here both engines answer them
+          # Node 24's SQLite has FTS5, so both engines answer text search here
           node crates/elmdb-node/bench/against-sqlite.mjs --json --notes 2000 --require-text > /dev/null
       # The app currently pins Electron 37.2.4. This runs Node's test runner inside that Electron executable,
       # not Electron's npm launcher under the setup-node runtime. No app windows or developer profiles are used.

@@ -9,8 +9,9 @@
 //! - `check-notices`: fails when what `notices` would write differs from what is committed, or when package.json's
 //!   `files` leaves one of those files out of the package.
 //! - `check-versions`: fails unless the workspace's `Cargo.toml`, the binding's `package.json` and EARS' hold one
-//!   version, EARS' peer `elmdb` names exactly it, so the pair a release packs installs only together, and the
-//!   binding's `optionalDependencies` name each of its `napi.targets`' platform package at exactly it.
+//!   version, EARS' peer `elmdb` names exactly it, so the pair a release packs installs only together, the binding's
+//!   `optionalDependencies` name each of its `napi.targets`' platform package at exactly it, and `napi.targets` matches
+//!   the targets declared in `deny.toml` and `.github/workflows/release.yml`.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
 //! - `check-exact`: fails unless every ICU crate the lockfile holds, and each crate whose output an index stores
 //!   (`INDEXED`), is a dependency of `elmdb` required at exactly the locked version, so whoever builds elmdb builds the
@@ -138,15 +139,17 @@ const UNMODELLED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Fails on an engine file that locks outside `crate::sync` and isn't in `UNMODELLED`, and on a listed file that no
-/// longer does
+/// Fails on an engine file that locks outside `crate::sync` and isn't in `UNMODELLED`, on a listed file that no
+/// longer does, or on a Shuttle/Loom-modelled file whose production code reaches `std::sync::atomic` (other than
+/// `Ordering`), `std::sync::OnceLock`/`Once`, or `std::thread::spawn` directly
 fn check_sync(root: &Path) -> Result<(), String> {
     let source = root.join("crates/elmdb/src");
     let found = unmodelled_files(&source)?;
     let listed: std::collections::BTreeSet<String> = UNMODELLED.iter().map(|(file, _)| (*file).to_owned()).collect();
     let unlisted: Vec<_> = found.difference(&listed).collect();
     let stale: Vec<_> = listed.difference(&found).collect();
-    if unlisted.is_empty() && stale.is_empty() {
+    let modelled = unmodelled_in_modelled_files(&source)?;
+    if unlisted.is_empty() && stale.is_empty() && modelled.is_empty() {
         return Ok(());
     }
     let mut message = String::new();
@@ -158,6 +161,12 @@ fn check_sync(root: &Path) -> Result<(), String> {
     }
     if !stale.is_empty() {
         message += &format!("UNMODELLED lists files that no longer lock outside crate::sync: {stale:?}; remove them\n");
+    }
+    if !modelled.is_empty() {
+        message += &format!(
+            "these Shuttle/Loom-modelled files use unmodelled concurrency primitives directly: {modelled:?}; route \
+             them through crate::sync so the concurrency models explore every interleaving\n"
+        );
     }
     Err(message.trim_end().to_owned())
 }
@@ -395,6 +404,36 @@ fn exclude_res(text: &str) -> Result<Vec<String>, String> {
 /// parking_lot's: their tests, `sync/` itself and the models excepted
 fn unmodelled_files(source: &Path) -> Result<std::collections::BTreeSet<String>, String> {
     let mut found = std::collections::BTreeSet::new();
+    for (relative, text) in engine_sync_files(source)? {
+        if locks_outside_sync(&text) {
+            found.insert(relative);
+        }
+    }
+    Ok(found)
+}
+
+/// Shuttle/Loom-modelled engine files whose production code uses `std::sync::atomic` (other than `Ordering`),
+/// `std::sync::OnceLock`/`Once`, or `std::thread::spawn` directly rather than through `crate::sync`. Non-modelled
+/// files (such as `engine/text/search.rs`'s constant `OnceLock` caches or `store/wake.rs`'s OS mailbox flag) are
+/// outside this scope.
+fn unmodelled_in_modelled_files(source: &Path) -> Result<Vec<(String, Vec<&'static str>)>, String> {
+    let mut found = Vec::new();
+    for (relative, text) in engine_sync_files(source)? {
+        if !is_modelled_file(&text) {
+            continue;
+        }
+        let violations = modelled_sync_violations(&text);
+        if !violations.is_empty() {
+            found.push((relative, violations));
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(found)
+}
+
+/// Engine source files scanned by `check-sync`: `sync/`, `tests/` directories, `*tests.rs` and `*model.rs` excepted
+fn engine_sync_files(source: &Path) -> Result<Vec<(String, String)>, String> {
+    let mut files = Vec::new();
     let mut pending = vec![source.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
@@ -410,12 +449,303 @@ fn unmodelled_files(source: &Path) -> Result<std::collections::BTreeSet<String>,
                 continue;
             }
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            if text.lines().any(locks_outside_sync) {
-                found.insert(relative);
-            }
+            files.push((relative, text));
         }
     }
-    Ok(found)
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(files)
+}
+
+/// Replaces comments (`//`, nested `/* ... */`) and string/char literal bodies with spaces while preserving every
+/// newline so byte offsets map 1-to-1 to original line numbers
+fn strip_comments_and_strings(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+    let mut i = 0;
+    while i < len {
+        // Line comment: keep the terminating newline
+        if bytes[i] == b'/' && i + 1 < len && bytes[i + 1] == b'/' {
+            while i < len && bytes[i] != b'\n' {
+                out.push(' ');
+                i += 1;
+            }
+            continue;
+        }
+        // Nested block comment: keep every newline inside
+        if bytes[i] == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+            out.push_str("  ");
+            i += 2;
+            let mut depth = 1usize;
+            while i < len && depth > 0 {
+                if bytes[i] == b'/' && i + 1 < len && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else if bytes[i] == b'*' && i + 1 < len && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    out.push_str("  ");
+                    i += 2;
+                } else {
+                    out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // Raw string literal: r"...", r#"..."#, br#"..."#, cr#"..."#
+        let raw_start = if bytes[i] == b'r' {
+            Some(i)
+        } else if (bytes[i] == b'b' || bytes[i] == b'c') && i + 1 < len && bytes[i + 1] == b'r' {
+            Some(i + 1)
+        } else {
+            None
+        };
+        if let Some(r_pos) = raw_start {
+            let prev_is_ident = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            if !prev_is_ident {
+                let mut j = r_pos + 1;
+                while j < len && bytes[j] == b'#' {
+                    j += 1;
+                }
+                if j < len && bytes[j] == b'"' {
+                    let hashes = j - (r_pos + 1);
+                    for _ in i..=j {
+                        out.push(' ');
+                    }
+                    i = j + 1;
+                    while i < len {
+                        if bytes[i] == b'"' && i + hashes < len && bytes[i + 1..=i + hashes].iter().all(|&b| b == b'#')
+                        {
+                            for _ in 0..=hashes {
+                                out.push(' ');
+                            }
+                            i += hashes + 1;
+                            break;
+                        }
+                        out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                        i += 1;
+                    }
+                    continue;
+                }
+            }
+        }
+        // Standard string literal: "..."
+        if bytes[i] == b'"' {
+            out.push('"');
+            i += 1;
+            while i < len {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    out.push(' ');
+                    out.push(if bytes[i + 1] == b'\n' { '\n' } else { ' ' });
+                    i += 2;
+                } else if bytes[i] == b'"' {
+                    out.push('"');
+                    i += 1;
+                    break;
+                } else {
+                    out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        // Char literal (must not consume Rust lifetimes like `'a` or `'static`)
+        if bytes[i] == b'\''
+            && let Some(end) = char_literal_end(source, i)
+        {
+            for b in &bytes[i..end] {
+                out.push(if *b == b'\n' { '\n' } else { ' ' });
+            }
+            i = end;
+            continue;
+        }
+        let ch = source[i..].chars().next().expect("valid utf-8 boundary");
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
+/// If `source[start..]` begins a Rust char literal (`'x'`, `'\''`, `'\n'`, `'\x7f'`, `'\u{1234}'`), returns the byte
+/// index just past its closing quote; lifetimes (`'a`, `'static`) return `None`
+fn char_literal_end(source: &str, start: usize) -> Option<usize> {
+    let rest = &source[start + 1..];
+    if let Some(escaped) = rest.strip_prefix('\\') {
+        let mut chars = escaped.char_indices();
+        let (_, first) = chars.next()?;
+        let after_escape = match first {
+            'u' => {
+                let close = escaped.find('}')?;
+                close + 1
+            }
+            'x' => {
+                // \xHH
+                let (_, _) = chars.next()?;
+                let (idx, ch) = chars.next()?;
+                idx + ch.len_utf8()
+            }
+            _ => first.len_utf8(),
+        };
+        if escaped[after_escape..].starts_with('\'') {
+            return Some(start + 1 + 1 + after_escape + 1);
+        }
+        None
+    } else {
+        let mut chars = rest.chars();
+        let ch = chars.next()?;
+        if ch != '\'' && ch != '\n' && chars.next() == Some('\'') {
+            return Some(start + 1 + ch.len_utf8() + 1);
+        }
+        None
+    }
+}
+
+/// Removes inline `#[cfg(test)] mod ... { ... }` and `#[cfg(all(..., test, ...))] mod ... { ... }` blocks from
+/// comment- and string-stripped Rust code so real-thread unit tests inside a modelled file are not scanned as
+/// production code
+fn strip_cfg_test_modules(code: &str) -> String {
+    let attr_re = regex::Regex::new(
+        r"#\[cfg\(\s*(?:test|all\([^]]*\btest\b[^]]*)\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{",
+    )
+    .expect("valid regex");
+    let mut result = code.to_owned();
+    while let Some(found) = attr_re.find(&result) {
+        let open = found.end() - 1;
+        let bytes = result.as_bytes();
+        let mut depth = 0usize;
+        let mut end = bytes.len();
+        for (offset, &b) in bytes[open..].iter().enumerate() {
+            if b == b'{' {
+                depth += 1;
+            } else if b == b'}' {
+                depth -= 1;
+                if depth == 0 {
+                    end = open + offset + 1;
+                    break;
+                }
+            }
+        }
+        let replacement: String =
+            result[found.start()..end].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect();
+        result.replace_range(found.start()..end, &replacement);
+    }
+    result
+}
+
+/// Expands every `use ...;` statement in comment- and string-stripped Rust code into normalized full paths (such as
+/// `std::sync::Mutex`, `std::sync::atomic::AtomicBool`, `std::thread::spawn`), handling multiline braced groups
+fn expand_use_trees(code: &str) -> Vec<String> {
+    fn split_top_level(text: &str) -> Vec<&str> {
+        let mut parts = Vec::new();
+        let mut depth = 0usize;
+        let mut start = 0;
+        for (idx, ch) in text.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    parts.push(&text[start..idx]);
+                    start = idx + 1;
+                }
+                _ => {}
+            }
+        }
+        parts.push(&text[start..]);
+        parts
+    }
+
+    fn expand(prefix: &str, tree: &str, out: &mut Vec<String>) {
+        let tree = tree.trim();
+        if tree.is_empty() {
+            return;
+        }
+        if let Some(open) = tree.find('{')
+            && let Some(close) = tree.rfind('}')
+            && close > open
+        {
+            let head: String = tree[..open].chars().filter(|c| !c.is_whitespace()).collect();
+            let head = head.trim_start_matches("::").trim_end_matches("::");
+            let next_prefix = match (prefix.is_empty(), head.is_empty()) {
+                (true, _) => head.to_owned(),
+                (false, true) => prefix.to_owned(),
+                (false, false) => format!("{prefix}::{head}"),
+            };
+            for item in split_top_level(&tree[open + 1..close]) {
+                expand(&next_prefix, item, out);
+            }
+            return;
+        }
+        // Strip `as Alias` before collapsing whitespace around `::`
+        let path = tree.split(" as ").next().unwrap_or(tree);
+        let path: String = path.chars().filter(|c| !c.is_whitespace()).collect();
+        let path = path.trim_start_matches("::");
+        if path.is_empty() {
+            return;
+        }
+        let full = if path == "self" {
+            prefix.to_owned()
+        } else if prefix.is_empty() {
+            path.to_owned()
+        } else {
+            format!("{prefix}::{path}")
+        };
+        if !full.is_empty() {
+            out.push(full);
+        }
+    }
+
+    let use_re = regex::Regex::new(r"\buse\s+([^;]+);").expect("valid regex");
+    let mut paths = Vec::new();
+    for cap in use_re.captures_iter(code) {
+        expand("", &cap[1], &mut paths);
+    }
+    paths
+}
+
+/// Whether `source` declares a Shuttle or Loom concurrency model (`#[cfg(...shuttle/loom...)] mod model`)
+fn is_modelled_file(source: &str) -> bool {
+    let code = strip_comments_and_strings(source);
+    let re = regex::Regex::new(r"#\[cfg\([^]]*\b(?:shuttle|loom)\b[^]]*\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+model\b")
+        .expect("valid regex");
+    re.is_match(&code)
+}
+
+/// Concurrency primitives in a Shuttle/Loom-modelled file's production code that bypass `crate::sync`
+fn modelled_sync_violations(source: &str) -> Vec<&'static str> {
+    let code = strip_cfg_test_modules(&strip_comments_and_strings(source));
+    let uses = expand_use_trees(&code);
+    let mut found = Vec::new();
+
+    // std::sync::atomic (other than `Ordering`, which is a pure enum identical across std, Loom and Shuttle)
+    let atomic_use = uses.iter().any(|p| {
+        p == "std::sync::atomic" || (p.starts_with("std::sync::atomic::") && p != "std::sync::atomic::Ordering")
+    });
+    let atomic_direct = regex::Regex::new(r"\bstd\s*::\s*sync\s*::\s*atomic\s*::\s*([A-Za-z_*][A-Za-z0-9_]*)")
+        .expect("valid regex")
+        .captures_iter(&code)
+        .any(|c| &c[1] != "Ordering");
+    if atomic_use || atomic_direct {
+        found.push("std::sync::atomic");
+    }
+
+    // std::sync::OnceLock / Once persist state across Shuttle schedules and can deadlock or leak between runs
+    let once_use = uses.iter().any(|p| p == "std::sync::OnceLock" || p == "std::sync::Once");
+    let once_direct =
+        regex::Regex::new(r"\bstd\s*::\s*sync\s*::\s*(?:OnceLock|Once)\b").expect("valid regex").is_match(&code);
+    if once_use || once_direct {
+        found.push("std::sync::OnceLock/Once");
+    }
+
+    // Direct `std::thread::spawn` bypasses Shuttle/Loom's scheduler (named worker threads using `thread::Builder` in
+    // outer wrappers such as `engine/builder.rs::Builder::start` are outside the modelled `Core` state machine)
+    let spawn_use = uses.iter().any(|p| p == "std::thread::spawn");
+    let spawn_direct = regex::Regex::new(r"\bstd\s*::\s*thread\s*::\s*spawn\b").expect("valid regex").is_match(&code);
+    if spawn_use || spawn_direct {
+        found.push("std::thread::spawn");
+    }
+
+    found
 }
 
 /// The engine's one module that commits a write transaction, relative to its source
@@ -453,10 +783,8 @@ fn commits_outside(source: &Path) -> Result<Vec<String>, String> {
                 continue;
             }
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            for (at, line) in text.lines().enumerate() {
-                if commits_a_write(line) {
-                    found.push(format!("{relative}:{}", at + 1));
-                }
+            for line in commit_lines(&text) {
+                found.push(format!("{relative}:{line}"));
             }
         }
     }
@@ -464,23 +792,41 @@ fn commits_outside(source: &Path) -> Result<Vec<String>, String> {
     Ok(found)
 }
 
-/// Whether a line of code commits a write transaction: heed's own commit of one, which takes no argument where
-/// the engine's commits of a unit do, or its making of databases, which commits the transaction it is given
-fn commits_a_write(line: &str) -> bool {
-    let code = line.trim_start();
-    !code.starts_with("//") && (code.contains(".commit()") || code.contains("create_databases_and_commit("))
+/// 1-based line numbers in `source` that commit a write transaction: heed's own `.commit()` (taking no arguments,
+/// whether on one line or split across lines) or `create_databases_and_commit(...)`
+fn commit_lines(source: &str) -> Vec<usize> {
+    let code = strip_comments_and_strings(source);
+    let re = regex::Regex::new(r"\.\s*(commit)\s*\(\s*\)|\b(create_databases_and_commit)\s*\(").expect("valid regex");
+    re.captures_iter(&code)
+        .filter_map(|cap| cap.get(1).or_else(|| cap.get(2)))
+        .map(|m| 1 + code[..m.start()].bytes().filter(|&b| b == b'\n').count())
+        .collect()
 }
 
-/// Whether a line of code reaches a lock, a condition variable or a thread-local other than `crate::sync`'s
-fn locks_outside_sync(line: &str) -> bool {
-    let code = line.trim_start();
-    if code.starts_with("//") {
-        return false;
+/// Whether `source` reaches a lock, a condition variable or a thread-local other than `crate::sync`'s, across both
+/// single-line and multiline `use` statements and direct paths
+fn locks_outside_sync(source: &str) -> bool {
+    let code = strip_comments_and_strings(source);
+    let uses = expand_use_trees(&code);
+    let std_lock_use = uses.iter().any(|p| {
+        matches!(
+            p.as_str(),
+            "std::sync::Mutex" | "std::sync::Condvar" | "std::sync::RwLock" | "std::sync::Barrier" | "std::sync::*"
+        )
+    });
+    let parking_lot_use = uses.iter().any(|p| p == "parking_lot" || p.starts_with("parking_lot::"));
+    let thread_local_use = uses.iter().any(|p| p == "std::thread_local");
+    if std_lock_use || parking_lot_use || thread_local_use {
+        return true;
     }
-    let std_lock = code.contains("std::sync::")
-        && ["Mutex", "Condvar", "RwLock", "Barrier"].iter().any(|primitive| code.contains(primitive));
-    let thread_local = code.contains("thread_local!") && !code.contains("crate::sync::thread_local!");
-    std_lock || code.contains("parking_lot::") || thread_local
+    let std_lock_direct = regex::Regex::new(r"\bstd\s*::\s*sync\s*::\s*(?:Mutex|Condvar|RwLock|Barrier)\b")
+        .expect("valid regex")
+        .is_match(&code);
+    let parking_lot_direct = regex::Regex::new(r"\bparking_lot\s*::").expect("valid regex").is_match(&code);
+    let thread_local_re = regex::Regex::new(r"\bthread_local\s*!").expect("valid regex");
+    let sync_prefix_re = regex::Regex::new(r"\bcrate\s*::\s*sync\s*::\s*$").expect("valid regex");
+    let thread_local_direct = thread_local_re.find_iter(&code).any(|m| !sync_prefix_re.is_match(&code[..m.start()]));
+    std_lock_direct || parking_lot_direct || thread_local_direct
 }
 
 /// `cargo xtask scratch-target`: the scratch target, made, its path printed for a copy to build into with
@@ -703,21 +1049,22 @@ fn check_generated() -> Result<(), String> {
 /// exactly it. EARS is built against one binding's protocol and a process holds one binding, so the pair is released
 /// at one version, and the peer, an exact version and no range, lets npm install EARS beside that binding alone. The
 /// binding's binaries are its platform packages, one per target (`scripts/release-pack.mjs`), packed at its version,
-/// so its `optionalDependencies` name each at exactly that version, which napi's loader takes the binary from
+/// so its `optionalDependencies` name each at exactly that version, which napi's loader takes the binary from; and
+/// `napi.targets` matches `deny.toml`'s `[graph].targets` and `.github/workflows/release.yml`'s build, SBOM and smoke
+/// matrices so adding or removing a target never drifts silently.
 fn check_versions(root: &Path) -> Result<(), String> {
     let read = |path: &str| std::fs::read_to_string(root.join(path)).map_err(|e| format!("{path}: {e}"));
     let json = |path: &str| -> Result<serde_json::Value, String> {
         serde_json::from_str(&read(path)?).map_err(|e| format!("{path}: {e}"))
     };
-    let problems = version_mismatches(
-        &read("Cargo.toml")?,
-        &json("crates/elmdb-node/package.json")?,
-        &json("packages/ears/package.json")?,
-    );
+    let binding = json("crates/elmdb-node/package.json")?;
+    let mut problems = version_mismatches(&read("Cargo.toml")?, &binding, &json("packages/ears/package.json")?);
+    problems.extend(target_parity_mismatches(&binding, &read("deny.toml")?, &read(".github/workflows/release.yml")?));
     match problems.is_empty() {
         true => Ok(()),
         false => Err(format!(
-            "The binding and EARS are released as a pair, at the version Cargo.toml's [workspace.package] holds:\n  {}",
+            "The binding and EARS are released as a pair, at the version Cargo.toml's [workspace.package] holds, with \
+             one target list across package.json, deny.toml and release.yml:\n  {}",
             problems.join("\n  ")
         )),
     }
@@ -796,6 +1143,236 @@ fn platform_package_mismatches(version: &str, binding: &serde_json::Value) -> Ve
         }
     }
     problems
+}
+
+/// Checks that `crates/elmdb-node/package.json`'s `napi.targets` matches `deny.toml`'s `[graph].targets` and
+/// `.github/workflows/release.yml`'s `build` matrix, `SBOMs` loop and `smoke` matrix
+fn target_parity_mismatches(binding: &serde_json::Value, deny_toml: &str, release_yml: &str) -> Vec<String> {
+    use std::collections::BTreeSet;
+    let mut problems = Vec::new();
+    let expected_targets: BTreeSet<String> = binding["napi"]["targets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|t| t.as_str().map(str::to_owned))
+        .collect();
+    if expected_targets.is_empty() {
+        return vec!["crates/elmdb-node/package.json's `napi.targets` holds no targets".to_owned()];
+    }
+    let expected_pairs: BTreeSet<(String, String)> = expected_targets
+        .iter()
+        .filter_map(|triple| {
+            PLATFORMS.iter().find(|(t, _)| *t == triple).map(|(_, platform)| (triple.clone(), (*platform).to_owned()))
+        })
+        .collect();
+    let expected_platforms: BTreeSet<String> = expected_pairs.iter().map(|(_, p)| p.clone()).collect();
+
+    // 1. deny.toml [graph].targets
+    let deny_targets = parse_deny_targets(deny_toml);
+    if deny_targets.is_empty() {
+        problems.push("deny.toml's [graph].targets holds no targets this could read".to_owned());
+    } else {
+        for target in expected_targets.difference(&deny_targets) {
+            problems.push(format!("deny.toml's [graph].targets is missing {target:?} from `napi.targets`"));
+        }
+        for target in deny_targets.difference(&expected_targets) {
+            problems.push(format!("deny.toml's [graph].targets names {target:?}, which is not in `napi.targets`"));
+        }
+    }
+
+    // 2. .github/workflows/release.yml build matrix
+    let build_pairs = parse_release_build_matrix(release_yml);
+    if build_pairs.is_empty() {
+        problems.push(".github/workflows/release.yml's `build` matrix holds no targets this could read".to_owned());
+    } else {
+        for (target, platform) in expected_pairs.difference(&build_pairs) {
+            problems.push(format!(
+                ".github/workflows/release.yml's `build` matrix is missing ({target}, {platform}) from `napi.targets`"
+            ));
+        }
+        for (target, platform) in build_pairs.difference(&expected_pairs) {
+            problems.push(format!(
+                ".github/workflows/release.yml's `build` matrix names ({target}, {platform}), which is not in \
+                 `napi.targets`"
+            ));
+        }
+    }
+
+    // 3. .github/workflows/release.yml SBOMs step
+    let sbom_pairs = parse_release_sboms(release_yml);
+    if sbom_pairs.is_empty() {
+        problems.push(".github/workflows/release.yml's `SBOMs` step holds no target pairs this could read".to_owned());
+    } else {
+        for (target, platform) in expected_pairs.difference(&sbom_pairs) {
+            problems.push(format!(
+                ".github/workflows/release.yml's `SBOMs` step is missing {target}:{platform} from `napi.targets`"
+            ));
+        }
+        for (target, platform) in sbom_pairs.difference(&expected_pairs) {
+            problems.push(format!(
+                ".github/workflows/release.yml's `SBOMs` step names {target}:{platform}, which is not in `napi.targets`"
+            ));
+        }
+    }
+
+    // 4. .github/workflows/release.yml smoke matrix
+    let smoke_platforms = parse_release_smoke_matrix(release_yml);
+    if smoke_platforms.is_empty() {
+        problems.push(".github/workflows/release.yml's `smoke` matrix holds no platforms this could read".to_owned());
+    } else {
+        for platform in expected_platforms.difference(&smoke_platforms) {
+            problems.push(format!(
+                ".github/workflows/release.yml's `smoke` matrix is missing platform {platform:?} from `napi.targets`"
+            ));
+        }
+        for platform in smoke_platforms.difference(&expected_platforms) {
+            problems.push(format!(
+                ".github/workflows/release.yml's `smoke` matrix names platform {platform:?}, which is not in \
+                 `napi.targets`"
+            ));
+        }
+    }
+
+    problems
+}
+
+/// Parses `targets = [ ... ]` from `deny.toml`'s `[graph]` table
+fn parse_deny_targets(deny_toml: &str) -> std::collections::BTreeSet<String> {
+    let quoted = regex::Regex::new(r#""([^"]+)""#).expect("valid regex");
+    let mut targets = std::collections::BTreeSet::new();
+    let mut in_list = false;
+    for raw in table(deny_toml, "[graph]") {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if !in_list {
+            if let Some(rest) = line.strip_prefix("targets")
+                && let Some(after_eq) = rest.trim_start().strip_prefix('=')
+                && let Some(after_bracket) = after_eq.trim_start().strip_prefix('[')
+            {
+                in_list = true;
+                for cap in quoted.captures_iter(after_bracket) {
+                    targets.insert(cap[1].to_owned());
+                }
+                if after_bracket.contains(']') {
+                    break;
+                }
+            }
+        } else {
+            for cap in quoted.captures_iter(line) {
+                targets.insert(cap[1].to_owned());
+            }
+            if line.contains(']') {
+                break;
+            }
+        }
+    }
+    targets
+}
+
+/// Returns the lines of one top-level job under `jobs:` in a GitHub Actions workflow file
+fn workflow_job_lines<'a>(workflow: &'a str, job: &str) -> Vec<&'a str> {
+    let header = format!("  {job}:");
+    let mut lines = workflow.lines().skip_while(|line| line.trim_end() != header);
+    if lines.next().is_none() {
+        return Vec::new();
+    }
+    lines
+        .take_while(|line| {
+            // Next top-level job starts at 2-space indent with a key (not a comment or blank line)
+            let is_next_job = line.starts_with("  ")
+                && !line.starts_with("   ")
+                && !line.trim_start().starts_with('#')
+                && !line.trim().is_empty();
+            let is_top_level = !line.starts_with(' ') && !line.trim_start().starts_with('#') && !line.trim().is_empty();
+            !is_next_job && !is_top_level
+        })
+        .collect()
+}
+
+/// Extracts `(target, platform)` pairs from `.github/workflows/release.yml`'s `build` matrix
+fn parse_release_build_matrix(release_yml: &str) -> std::collections::BTreeSet<(String, String)> {
+    let target_re = regex::Regex::new(r"\btarget:\s*([A-Za-z0-9_-]+)").expect("valid regex");
+    let platform_re = regex::Regex::new(r"\bplatform:\s*([A-Za-z0-9_-]+)").expect("valid regex");
+    let mut pairs = std::collections::BTreeSet::new();
+    let mut in_include = false;
+    for line in workflow_job_lines(release_yml, "build") {
+        let code = line.split('#').next().unwrap_or("");
+        let trimmed = code.trim();
+        if trimmed == "include:" {
+            in_include = true;
+            continue;
+        }
+        if in_include {
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !trimmed.starts_with('-') {
+                break;
+            }
+            if let (Some(t), Some(p)) = (target_re.captures(trimmed), platform_re.captures(trimmed)) {
+                pairs.insert((t[1].to_owned(), p[1].to_owned()));
+            }
+        }
+    }
+    pairs
+}
+
+/// Extracts `(target, platform)` pairs from `.github/workflows/release.yml`'s `pack` job `SBOMs` step
+fn parse_release_sboms(release_yml: &str) -> std::collections::BTreeSet<(String, String)> {
+    let pair_re = regex::Regex::new(r"\b([a-z0-9_]+-[a-z0-9_-]+):([a-z0-9_-]+)\b").expect("valid regex");
+    let mut pairs = std::collections::BTreeSet::new();
+    let mut in_sboms = false;
+    let mut in_for = false;
+    for line in workflow_job_lines(release_yml, "pack") {
+        let trimmed = line.trim();
+        if trimmed == "- name: SBOMs" {
+            in_sboms = true;
+            continue;
+        }
+        if in_sboms {
+            if trimmed.starts_with("- name:") || trimmed.starts_with("- uses:") {
+                break;
+            }
+            if trimmed.starts_with("for pair in ") {
+                in_for = true;
+            }
+            if in_for {
+                for cap in pair_re.captures_iter(trimmed) {
+                    pairs.insert((cap[1].to_owned(), cap[2].to_owned()));
+                }
+                if trimmed.contains("; do") {
+                    break;
+                }
+            }
+        }
+    }
+    pairs
+}
+
+/// Extracts `platform` names from `.github/workflows/release.yml`'s `smoke` matrix
+fn parse_release_smoke_matrix(release_yml: &str) -> std::collections::BTreeSet<String> {
+    let platform_re = regex::Regex::new(r"\bplatform:\s*([A-Za-z0-9_-]+)").expect("valid regex");
+    let mut platforms = std::collections::BTreeSet::new();
+    let mut in_include = false;
+    for line in workflow_job_lines(release_yml, "smoke") {
+        let code = line.split('#').next().unwrap_or("");
+        let trimmed = code.trim();
+        if trimmed == "include:" {
+            in_include = true;
+            continue;
+        }
+        if in_include {
+            if trimmed.is_empty() {
+                continue;
+            }
+            if !trimmed.starts_with('-') {
+                break;
+            }
+            if let Some(p) = platform_re.captures(trimmed) {
+                platforms.insert(p[1].to_owned());
+            }
+        }
+    }
+    platforms
 }
 
 /// Every LMDB `-sys` crate in the build, by name and version. Two copies of LMDB linked into one binary share no locks,
@@ -971,8 +1548,13 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{Skip, exclude_res, skips_in, stale_exclusions, with_skips};
-    use super::{UNMODELLED, direct_dependencies, lmdb_sys_crates, locks_outside_sync, unmodelled_files};
-    use super::{check_deny, platform_package_mismatches, version_mismatches, workspace_root};
+    use super::{
+        UNMODELLED, commit_lines, direct_dependencies, is_modelled_file, lmdb_sys_crates, locks_outside_sync,
+        modelled_sync_violations, unmodelled_files, unmodelled_in_modelled_files,
+    };
+    use super::{
+        check_deny, platform_package_mismatches, target_parity_mismatches, version_mismatches, workspace_root,
+    };
 
     #[test]
     fn the_pair_is_held_to_the_workspace_version_and_the_peer_to_exactly_it() {
@@ -1168,6 +1750,8 @@ fn a() {
         std::fs::create_dir_all(src.join("engine/tests")).unwrap();
         std::fs::create_dir_all(src.join("sync")).unwrap();
         std::fs::write(src.join("engine/locked.rs"), "use std::sync::{Arc, Mutex};\n").unwrap();
+        std::fs::write(src.join("engine/multiline.rs"), "use std::sync::{\n    Arc,\n    Condvar,\n};\n").unwrap();
+        std::fs::write(src.join("engine/nested.rs"), "use std::{\n    sync::{\n        RwLock,\n    },\n};\n").unwrap();
         std::fs::write(src.join("engine/parked.rs"), "fn f(_: parking_lot::Mutex<()>) {}\n").unwrap();
         std::fs::write(src.join("engine/local.rs"), "thread_local! { static X: u8 = 0; }\n").unwrap();
         std::fs::write(
@@ -1175,13 +1759,85 @@ fn a() {
             "use crate::sync::{Mutex, PlainCondvar};\ncrate::sync::thread_local! {}\n",
         )
         .unwrap();
-        std::fs::write(src.join("engine/commented.rs"), "// std::sync::Mutex is not used here\nuse std::sync::Arc;\n")
-            .unwrap();
+        std::fs::write(
+            src.join("engine/commented.rs"),
+            "// std::sync::Mutex is not used here\n/* std::sync::Condvar */\nconst S: &str = \"std::sync::Mutex\";\nuse std::sync::Arc;\n",
+        )
+        .unwrap();
         std::fs::write(src.join("engine/tests/uses.rs"), "use std::sync::Mutex;\n").unwrap();
         std::fs::write(src.join("sync/mod.rs"), "pub(crate) use std::sync::{Condvar, Mutex};\n").unwrap();
         let found: Vec<String> = unmodelled_files(src).unwrap().into_iter().collect();
-        assert_eq!(found, ["engine/local.rs", "engine/locked.rs", "engine/parked.rs"]);
+        assert_eq!(
+            found,
+            ["engine/local.rs", "engine/locked.rs", "engine/multiline.rs", "engine/nested.rs", "engine/parked.rs"]
+        );
         assert!(!locks_outside_sync("    // parking_lot::Mutex"));
+        assert!(!locks_outside_sync("fn f<'a>(_: &'a str) {}"));
+    }
+
+    #[test]
+    fn modelled_files_refuse_unmodelled_atomics_oncelock_and_spawn_outside_inline_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path();
+        std::fs::create_dir_all(src.join("store")).unwrap();
+        std::fs::create_dir_all(src.join("engine")).unwrap();
+        // Clean Shuttle-modelled file: Ordering alone + inline #[cfg(test)] mod tests using std atomics/spawn is fine
+        let clean = "\
+use std::sync::atomic::Ordering;
+use crate::sync::PlainMutex;
+
+pub fn work(_: Ordering) {}
+
+#[cfg(all(test, shuttle))]
+mod model;
+
+#[cfg(all(test, not(shuttle), not(loom)))]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+    #[test]
+    fn real_threads() {
+        let _ = AtomicBool::new(false);
+        std::thread::spawn(|| {});
+    }
+}
+";
+        assert!(is_modelled_file(clean));
+        assert_eq!(modelled_sync_violations(clean), Vec::<&str>::new());
+        std::fs::write(src.join("engine/clean.rs"), clean).unwrap();
+
+        // Modelled file using multiline std::sync::atomic import in production code
+        let bad_atomic = "\
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+#[cfg(all(test, shuttle))]
+mod model;
+";
+        std::fs::write(src.join("store/bad_atomic.rs"), bad_atomic).unwrap();
+
+        // Modelled file using OnceLock and std::thread::spawn in production code
+        let bad_once_spawn = "\
+use std::sync::OnceLock;
+pub fn go() { std::thread::spawn(|| {}); }
+#[cfg(all(test, any(loom, shuttle)))]
+mod model { fn m() {} }
+";
+        std::fs::write(src.join("store/bad_once_spawn.rs"), bad_once_spawn).unwrap();
+
+        // Non-modelled file using OnceLock and AtomicBool: outside the modelled-file scope
+        let non_modelled = "use std::sync::OnceLock;\nuse std::sync::atomic::AtomicBool;\n";
+        assert!(!is_modelled_file(non_modelled));
+        std::fs::write(src.join("engine/search.rs"), non_modelled).unwrap();
+
+        let found = unmodelled_in_modelled_files(src).unwrap();
+        assert_eq!(
+            found,
+            vec![
+                ("store/bad_atomic.rs".to_owned(), vec!["std::sync::atomic"]),
+                ("store/bad_once_spawn.rs".to_owned(), vec!["std::sync::OnceLock/Once", "std::thread::spawn"]),
+            ]
+        );
     }
 
     #[test]
@@ -1193,16 +1849,101 @@ fn a() {
         std::fs::write(src.join("store/commits.rs"), "fn commit(txn: RwTxn) { txn.commit() }\n").unwrap();
         std::fs::write(src.join("store/tests.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
         std::fs::write(src.join("engine/tests/uses.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
-        // A unit's commit takes whether it is durable, the mirror's its sequences, and a comment commits nothing
-        let unit = "fn f(unit: Unit) {\n    // txn.commit() is the store's\n    unit.commit(false);\n    mirror.commit(1, 2, None);\n}\n";
+        // A unit's commit takes whether it is durable, the mirror's its sequences, and comments/strings commit nothing
+        let unit = "fn f(unit: Unit) {\n    // txn.commit() is the store's\n    /* txn\n        .commit() */\n    let _ = \"txn.commit()\";\n    unit.commit(false);\n    mirror.commit(1, 2, None);\n}\n";
         std::fs::write(src.join("engine/unit.rs"), unit).unwrap();
         assert_eq!(super::check_commits(dir.path()), Ok(()));
         std::fs::write(src.join("store/mod.rs"), "fn f(txn: RwTxn) {\n\n    txn.commit()?;\n}\n").unwrap();
         let made = "fn f(env: &Env, wtxn: RwTxn) {\n    env.create_databases_and_commit(wtxn, |_, _| todo!());\n}\n";
         std::fs::write(src.join("engine/made.rs"), made).unwrap();
+        let multi = "fn f(txn: RwTxn) {\n    txn\n        .commit()?;\n    txn\n        .\n        commit(\n            /* none */\n        )?;\n}\n";
+        std::fs::write(src.join("engine/multi.rs"), multi).unwrap();
         let refused = super::check_commits(dir.path()).unwrap_err();
-        assert!(refused.contains(r#"["engine/made.rs:2", "store/mod.rs:3"]"#), "{refused}");
+        assert!(
+            refused.contains(r#"["engine/made.rs:2", "engine/multi.rs:3", "engine/multi.rs:6", "store/mod.rs:3"]"#),
+            "{refused}"
+        );
         assert!(refused.contains("crates/elmdb/src/store/commits.rs"), "{refused}");
+        assert_eq!(
+            commit_lines(
+                "fn f(env: &Env, w: RwTxn) {\n    env.create_databases_and_commit\n        (w, |_, _| {});\n}"
+            ),
+            [2]
+        );
+    }
+
+    #[test]
+    fn targets_must_match_across_package_json_deny_toml_and_release_yml() {
+        let binding = serde_json::json!({
+            "napi": {
+                "packageName": "@elmdb/binding",
+                "targets": ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+            }
+        });
+        let deny = "[graph]\ntargets = [\n    \"aarch64-apple-darwin\",\n    \"x86_64-unknown-linux-gnu\",\n]\n";
+        let release = "\
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-15, platform: darwin-arm64 }
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-24.04, platform: linux-x64-gnu }
+  pack:
+    steps:
+      - name: SBOMs
+        run: |
+          for pair in aarch64-apple-darwin:darwin-arm64 x86_64-unknown-linux-gnu:linux-x64-gnu; do
+            echo $pair
+          done
+  smoke:
+    strategy:
+      matrix:
+        include:
+          - { platform: darwin-arm64, runner: macos-15 }
+          - { platform: linux-x64-gnu, runner: ubuntu-24.04 }
+";
+        assert_eq!(target_parity_mismatches(&binding, deny, release), Vec::<String>::new());
+
+        // Missing target in deny.toml and extra target in deny.toml
+        let bad_deny = "[graph]\ntargets = [\"aarch64-apple-darwin\", \"x86_64-pc-windows-msvc\"]\n";
+        let probs = target_parity_mismatches(&binding, bad_deny, release);
+        assert_eq!(probs.len(), 2, "{probs:?}");
+        assert!(
+            probs[0].contains("deny.toml")
+                && probs[0].contains("missing")
+                && probs[0].contains("x86_64-unknown-linux-gnu")
+        );
+        assert!(probs[1].contains("deny.toml") && probs[1].contains("x86_64-pc-windows-msvc"));
+
+        // Drift in release.yml build, SBOMs, and smoke
+        let bad_release = "\
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, runner: macos-15, platform: darwin-arm64 }
+  pack:
+    steps:
+      - name: SBOMs
+        run: |
+          for pair in aarch64-apple-darwin:darwin-arm64; do
+            echo $pair
+          done
+  smoke:
+    strategy:
+      matrix:
+        include:
+          - { platform: darwin-arm64, runner: macos-15 }
+          - { platform: linux-x64-gnu, runner: ubuntu-24.04 }
+          - { platform: win32-x64-msvc, runner: windows-2022 }
+";
+        let probs = target_parity_mismatches(&binding, deny, bad_release);
+        assert_eq!(probs.len(), 3, "{probs:?}");
+        assert!(probs[0].contains("`build` matrix") && probs[0].contains("x86_64-unknown-linux-gnu"));
+        assert!(probs[1].contains("`SBOMs` step") && probs[1].contains("x86_64-unknown-linux-gnu:linux-x64-gnu"));
+        assert!(probs[2].contains("`smoke` matrix") && probs[2].contains("win32-x64-msvc"));
     }
 
     #[test]
