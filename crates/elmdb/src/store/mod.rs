@@ -348,8 +348,17 @@ impl<'a, G> WriteTxn<'a, G> {
     /// Commits the transaction through `store.commit_txn`, keeping `_writer` and `_gate` alive across commit
     /// accounting and dropping `_writer` before `_gate` afterwards.
     pub(crate) fn commit(self, store: &Store) -> Result<u64> {
+        self.commit_then(store, || ())
+    }
+
+    /// `commit`, running `landed` once the commit has landed and before the writer is let go, so every later writer's
+    /// commit sees what it did
+    pub(crate) fn commit_then(self, store: &Store, landed: impl FnOnce()) -> Result<u64> {
         let Self { _gate, _writer, txn } = self;
         let result = store.commit_txn(txn);
+        if result.is_ok() {
+            landed();
+        }
         drop(_writer);
         drop(_gate);
         result
