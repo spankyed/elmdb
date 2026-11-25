@@ -89,6 +89,12 @@ mod tests {
         numbers.iter().all(|&x| sum.add(x)).then(|| sum.total())
     }
 
+    /// Exact IEEE-754 power of two (`2^exp` for normal exponents `-1022..=1023`), without `f64::powi`'s ULP jitter
+    fn pow2(exp: i32) -> f64 {
+        debug_assert!((-1022..=1023).contains(&exp));
+        f64::from_bits(((1023 + exp) as u64) << 52)
+    }
+
     #[test]
     fn a_sum_is_the_nearest_number_to_what_adding_one_by_one_rounds_away() {
         assert_eq!(sum(&[0.1; 10]), Some(1.0));
@@ -106,7 +112,7 @@ mod tests {
     #[test]
     fn a_tie_goes_to_the_even_number_unless_a_smaller_part_says_which_side() {
         let two_to_53 = 9_007_199_254_740_992.0;
-        let tiny = 2f64.powi(-53);
+        let tiny = pow2(-53);
         // Halfway between two numbers: the even one
         assert_eq!(sum(&[two_to_53, 1.0]), Some(two_to_53));
         assert_eq!(sum(&[two_to_53, 3.0]), Some(two_to_53 + 4.0));
@@ -130,15 +136,15 @@ mod tests {
         assert_eq!(sum(&[1e308, 1e308, -1e308]), None);
         assert_eq!(sum(&[-1e308, -1e308, 1e308]), None);
         // The largest number and half a step more is a tie the even number wins, which is past the largest
-        assert_eq!(sum(&[f64::MAX, 2f64.powi(969), 2f64.powi(969)]), None);
-        assert_eq!(sum(&[f64::MAX, 2f64.powi(969)]), Some(f64::MAX));
+        assert_eq!(sum(&[f64::MAX, pow2(969), pow2(969)]), None);
+        assert_eq!(sum(&[f64::MAX, pow2(969)]), Some(f64::MAX));
         // A quarter of a step and a little more is short of the tie, though twice what was lost added on passes
-        assert_eq!(sum(&[f64::MAX, 2f64.powi(969), 1.0]), Some(f64::MAX));
+        assert_eq!(sum(&[f64::MAX, pow2(969), 1.0]), Some(f64::MAX));
         // The corner short of it: no sum on the way is past the largest number, and the largest, added last, meets
         // the half step before it meets its opposite
-        let short_of_the_largest = -f64::MAX + 2f64.powi(971);
-        assert_eq!(sum(&[short_of_the_largest, 2f64.powi(970), f64::MAX]), None);
-        assert_eq!(sum(&[f64::MAX, short_of_the_largest, 2f64.powi(970)]), Some(3.0 * 2f64.powi(970)));
+        let short_of_the_largest = -f64::MAX + pow2(971);
+        assert_eq!(sum(&[short_of_the_largest, pow2(970), f64::MAX]), None);
+        assert_eq!(sum(&[f64::MAX, short_of_the_largest, pow2(970)]), Some(3.0 * pow2(970)));
     }
 
     #[test]
@@ -150,8 +156,9 @@ mod tests {
             state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
             state >> 33
         };
-        let unit = 2f64.powi(-55);
-        for round in 0..4000 {
+        let unit = pow2(-55);
+        let rounds = if cfg!(miri) { 200 } else { 4000 };
+        for round in 0..rounds {
             let count = 1 + next() as usize % 40;
             let mut numbers = Vec::with_capacity(count);
             let mut exact = 0i128;

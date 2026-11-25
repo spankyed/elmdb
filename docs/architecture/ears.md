@@ -49,7 +49,7 @@ Vocabulary).
 | File | What it holds |
 |---|---|
 | `index.ts` | The root entry |
-| `engine.ts` | `createEarsEngine({ database, warn?, freeze?, callSites? })` and the faces' types (`EarsEngine`, `Ears`, `EarsAdmin`). It composes the modules below over one connection, and reads the names it accepts off the database's schema, again after `admin.setSchema` or `admin.declare` |
+| `engine.ts` | `createEarsEngine({ database, warn?, freeze?, callSites?, clock?, schedule? })` and the faces' types (`EarsEngine`, `Ears`, `EarsAdmin`). It composes the modules below over one connection, and reads the names it accepts off the database's schema, again after `admin.setSchema` or `admin.declare` |
 | `database.ts` | The port (`EarsDatabase`, `EarsUnit`: what an EARS engine needs of the binding's `Database` and `Unit`), the codec (`msgpackr`, `undefined` skipped; a read decoded with maps where a row isn't plain objects, so a field named `__proto__` is a field) and `createConnection`, the one place a read or a write crosses: to the unit `transact` holds open, or to the database outside one. A refusal the database names comes back as an `EarsError` with the matching code |
 | `query.ts` | `createQuery`: the query entry points (`query(type)`, `query.ids`, `query.all`, `query.withTrashed`, `query.trashed`) and the builder, a recipe each terminal compiles to one plan (`engine.md`, Reads: plans); `b64Encode`/`b64Decode` |
 | `write.ts` | `createWrites`: `create`, `upsert`, `write` and the write builder, each call one of the batch's operations (`engine.md`, Writes: batches and units) |
@@ -61,7 +61,7 @@ Vocabulary).
 | `watch.ts` | `createWatches`: `watch(read, observer, { label? })` over tracked reads (each run's reads made under the watch's token, `Connection.track`; each commit's `touched` tokens marking the watches to run again; a result equal to the last delivered not delivered, `sameValue`) and the scheduler that bounds re-runs under any write rate (`WATCH_SCHEDULE`, on an injectable clock): at most one run pending, a gap after each run of four times its cost and at least a frame, an 8 ms slice a flush with the leftovers first next time, and a `warn` naming a watch that keeps exceeding the slice |
 | `calls.ts` | What the connection counts while `admin.calls` is started: each read, each write outside a unit, and each unit with its writes, with their time and the code that made them (the first stack frames outside EARS, as the creator's `CallSiteNaming` finds them), and a watch's runs. Off, it costs one check per call |
 | `observation.ts` | What `admin.observe` hands an observer of each operation crossing to the database (`EarsOperation`, `EarsOperationResult`): its kind and size, never its parameters or values |
-| `lmdb/` | `@elmdb/ears/database` (`database.ts`): `openDatabase({ path, schema?, readOnly?, syncs? })`, `createTemporaryDatabases()` (a database per test or tool run, in a temporary directory, syncs off, each removed when disposed or at exit) and `DATABASE_FORMAT`, the format a backup records |
+| `lmdb/` | `@elmdb/ears/database` (`database.ts`): `openDatabase({ path, schema?, readOnly?, syncs?, syncEachCommit?, syncIdleMs?, syncIntervalMs?, mapSizeBytes? })`, `createTemporaryDatabases()` (a database per test or tool run, in a temporary directory, syncs off, each removed when disposed or at exit) and `DATABASE_FORMAT`, the format a backup records |
 
 **A call is a crossing, and a crossing costs about 3 µs.** Every read and write goes to the database through N-API,
 and a read opens a read transaction (`../evidence/phase-9.md`, Readings). A query answering many entities pays that
@@ -114,7 +114,7 @@ Held by the types and the specs, which say more than a rule over names could:
 
 ## An EARS engine
 
-- **An instance.** `createEarsEngine({ database, warn, freeze, callSites })` returns a new EARS engine over a
+- **An instance.** `createEarsEngine({ database, warn, freeze, callSites, clock, schedule })` returns a new EARS engine over a
   database, which holds everything it knows: it keeps no copy of the data, so a read reads the database. Each module
   is a factory closing over the connection (`createQuery`, `createWrites`, `createNameChecks`), and no module keeps
   anything at module scope, not even a reference to an EARS engine. The database's schema says which names are types,
@@ -126,7 +126,11 @@ Held by the types and the specs, which say more than a rule over names could:
   (`EarsWarning`): an unindexed `where` whose walk visited more than `UNINDEXED_WALK_WARNING` entities (the plan
   answers its `visits`), once per call site, and a watch that keeps costing more than a flush's slice; the data lets
   a creator say where its own declarations make the fix. `callSites` (`CallSiteNaming`) is how a counted call and an
-  unlabelled watch name the code that made them: which stack frames are EARS' own, and where a path is cut. `freeze`
+  unlabelled watch name the code that made them: which stack frames are EARS' own, and where a path is cut. `clock`
+  (`EarsClock`: `{ now(), after(ms, run) }`) injects wall time and monotonic timers across writes (`createdAt`,
+  `updatedAt`, `trash`), generated ids, call tallies, omitted `recency.now` on `search`/`hybrid` reads, and watch
+  scheduling (with `schedule` overriding `WATCH_SCHEDULE`), so deterministic specs run without wall-clock or real-timer
+  dependence. `freeze`
   freezes what a read hands out, so code that mutates a read fails rather than appearing to work. The short code is
   EARS', like the id: `shortCode` is a reserved attribute, so no write sets or deletes it; a created row may bring one
   only as identity (`ShortCodeIdentity`, an import keeping its code), held to the type's `<prefix>-<n>`
@@ -236,7 +240,10 @@ Held by the types and the specs, which say more than a rule over names could:
   flush, and the run after it has its whole gap again. It lifts nothing for a watch that is owed no run, nor for any
   other watch. `admin.watchesSettled()` resolves once no watch at all is waiting to run, a moment such a stream may not
   leave, so it is for a spec or a tool that has stopped writing. `admin.watchStats()` counts the watches and what the
-  database has filed. The model-based harness checks the contract: every watch, after every op, holds what its read
+  database has filed, and `admin.watchDiagnostics()` returns a payload-free snapshot of the scheduler's queue/timers
+  and every open watch's label, owed/soon/running flags, cost, due time, waiter count and last delivered commit. With
+  `recordCauses`, each run's `WatchReadContext` carries bounded invalidating commit `sequences` (`dropped` past the
+  cap), their `sources` (`'local'`, `'builder'`, `'elsewhere'`) and whether any was a `wildcard` invalidation. The model-based harness checks the contract: every watch, after every op, holds what its read
   answers afresh.
 - **One row shape.** A row is `{ id, entityType, ...attributes }` (`EntityRow`) wherever a read returns one.
 - **One relation shape.** A relation is `{ id, kind, source, target, info }` (`RelationRow`), with `weight` for a
@@ -262,7 +269,10 @@ Held by the types and the specs, which say more than a rule over names could:
 - **Units.** `transact(fn, { durable? })` runs `fn` as one unit of the database, opened at its first write, so a
   reader sees all of it or none and a unit that writes nothing commits nothing. Writes inside it read their own
   writes. If `fn` throws, the unit is aborted and keeps nothing; if it returns, it commits. A unit inside another is a
-  savepoint. `durable: true` commits with a sync rather than leaving it to group commit. An `async fn` is refused,
+  savepoint, and a nested `{ durable: true }` propagates durability to the outermost unit when it returns (discarded if
+  the nested unit throws and rolls back). `durable: true` commits with a sync rather than leaving it to group commit;
+  `admin.durable()` waits for the database's group commit to sync pending commits, and `admin.transactWithoutHook(fn,
+  { durable? })` takes the same unit options. An `async fn` is refused,
   since an `await` would split the unit. `admin.clear()` inside a unit is refused too. Outside a unit each write is its
   own unit, committed as it returns.
 - **Typed facades.** `defineEars<Schema>(engine)` returns `query`, `create`, `upsert`, `write`, `transact`, `newId`
@@ -274,7 +284,7 @@ Held by the types and the specs, which say more than a rule over names could:
 
 ## Persistence
 
-- **The database is the binding's.** `openDatabase({ path, schema?, readOnly?, syncs? })` (`@elmdb/ears/database`)
+- **The database is the binding's.** `openDatabase({ path, schema?, readOnly?, syncs?, syncEachCommit?, syncIdleMs?, syncIntervalMs?, mapSizeBytes? })` (`@elmdb/ears/database`)
   opens the database at `path`, giving it `schema` (an `EngineSchema`; a schema that differs from the one it holds
   changes it, as `setSchema` would) or keeping the one it holds. `readOnly` opens existing files without writing.
   Nothing opens on import.
@@ -313,8 +323,8 @@ aliases these types and adds its own entities; its codegen and its checks over b
 
 ## Tests (`packages/ears/tests/`)
 
-- `engine/`: black-box specs of the public API: `writes`, `relations`, `queries`, `transact`, `bulk-load`, `search`,
-  `vector`, `rank-index`, `checkpoints`, `schema-catalog`, `calls` and `observation`. They reach an EARS engine only
+- `engine/`: black-box specs of the public API: `writes`, `relations`, `queries`, `transact`, `durability`, `clock`,
+  `bulk-load`, `search`, `vector`, `rank-index`, `checkpoints`, `schema-catalog`, `calls` and `observation`. They reach an EARS engine only
   through `engine-under-test.ts` (`freshEngine`), each on a temporary database of its own. A few specs pin existing
   quirks; they say so.
 - The correctness harness (`_harness/`: a reference model and random workloads from `fast-check`):
