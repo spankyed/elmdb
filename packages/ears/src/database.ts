@@ -445,7 +445,9 @@ export function createConnection(
     const dash = id.indexOf('-');
     return dash > 0 ? id.slice(0, dash) : undefined;
   };
-  const opWantsHook = (op: Op, wants: (type: string) => boolean): boolean => {
+  // `wants` is called as the hook's method, so a hook may keep what it wants on itself
+  const opWantsHook = (op: Op, hook: BeforeCommit): boolean => {
+    const wants = (type: string) => hook.wants(type);
     const wanted = (id: string | undefined) => {
       if (id === undefined) return false;
       const type = typeOfId(id);
@@ -660,7 +662,7 @@ export function createConnection(
     },
     write(ops, now = Date.now()) {
       // A write the hook has to see runs in a unit of its own. One it doesn't pays for this check and nothing else
-      if (hook && !hookPaused && levels.length === 0 && ops.some((op) => opWantsHook(op, hook!.wants))) {
+      if (hook && !hookPaused && levels.length === 0 && ops.some((op) => opWantsHook(op, hook!))) {
         return transact(() => connection.write(ops, now));
       }
       const inUnit = levels.length > 0;
