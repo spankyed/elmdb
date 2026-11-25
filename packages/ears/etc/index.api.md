@@ -1112,31 +1112,19 @@ export interface WatchCount {
 
 // @public
 export interface WatchDiagnostics {
-    // (undocumented)
     readonly scheduler: WatchSchedulerDiagnostics;
-    // (undocumented)
     readonly watches: readonly WatchEntryDiagnostics[];
 }
 
 // @public
 export interface WatchEntryDiagnostics {
-    // (undocumented)
     readonly costMs: number;
-    // (undocumented)
     readonly dueAt: number | null;
-    // (undocumented)
     readonly label: string;
-    // (undocumented)
     readonly lastDeliveredCommit: number | null;
-    // (undocumented)
     readonly owed: boolean;
-    // (undocumented)
     readonly running: boolean;
-    // (undocumented)
     readonly soon: boolean;
-    // (undocumented)
-    readonly stopped: boolean;
-    // (undocumented)
     readonly waiters: number;
 }
 
@@ -1181,23 +1169,14 @@ export interface WatchSchedule {
 
 // @public
 export interface WatchSchedulerDiagnostics {
-    // (undocumented)
     readonly caughtUpWaiting: number;
-    // (undocumented)
     readonly databaseCommit: number;
-    // (undocumented)
     readonly dirtyCount: number;
-    // (undocumented)
     readonly flushing: boolean;
-    // (undocumented)
     readonly lastSeenCommit: number;
-    // (undocumented)
     readonly queued: 'none' | 'microtask' | 'later';
-    // (undocumented)
     readonly settledWaiting: number;
-    // (undocumented)
     readonly timerAt: number | null;
-    // (undocumented)
     readonly timerHeld: boolean;
 }
 

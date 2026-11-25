@@ -1049,7 +1049,6 @@ describe('waiting for one watch to catch up', () => {
       owed: true,
       soon: false,
       running: false,
-      stopped: false,
       costMs: 0,
       dueAt: null,
       waiters: 0,
@@ -1077,7 +1076,6 @@ describe('waiting for one watch to catch up', () => {
       owed: false,
       soon: false,
       running: false,
-      stopped: false,
       costMs: 2,
       dueAt: null,
       waiters: 0,
@@ -1110,5 +1108,158 @@ describe('waiting for one watch to catch up', () => {
     expect(watches.diagnostics().watches[0]!.lastDeliveredCommit).toBe(initialCommit + 1);
     w.stop();
     expect(watches.diagnostics().watches).toEqual([]);
+  });
+
+  it('resolves settled immediately with no open watches and advances lastSeenCommit after 0-touch commits', async () => {
+    // With 0 open watches, commits advance databaseCommit past lastSeenCommit, yet settled() resolves immediately
+    commit();
+    commit();
+    expect(await resolved(watches.settled())).toBe(true);
+
+    // With an open watch and a 0-touch external/builder commit, the first wait yields once and advances lastSeenCommit
+    let mockSeq = 1;
+    let mockListener: ((c: { sequence: number; touched: ReadonlySet<number> | 'all'; source?: 'local' | 'builder' | 'elsewhere' }) => void) | undefined;
+    const mockConnection = {
+      database: { isOpen: true },
+      untrack() {},
+      tally: () => undefined,
+      callSite: () => 'mock',
+      track: (_t: number, fn: () => unknown) => fn(),
+      lastCommit: () => mockSeq,
+      trackStats: () => ({ keys: 0, ranges: 0 }),
+      onCommit(fn: typeof mockListener) { mockListener = fn; return () => { mockListener = undefined; }; },
+    } as unknown as Connection;
+    const mockWatches = createWatches(mockConnection, { clock: time.clock });
+    const w = mockWatches.watch(() => mockSeq, () => {}, { label: 'zero-touch' });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Advance database sequence with no notification delivered to any watch (0-touch builder / external commit)
+    mockSeq = 2;
+    const firstWait = w.caughtUp();
+    expect(await resolved(firstWait)).toBe(false);
+    await turn();
+    expect(await resolved(firstWait)).toBe(true);
+    expect(mockWatches.diagnostics().scheduler.lastSeenCommit).toBe(2);
+    // Subsequent caughtUp() and settled() resolve immediately without taking the slow path again
+    expect(await resolved(w.caughtUp())).toBe(true);
+    expect(await resolved(mockWatches.settled())).toBe(true);
+
+    // Same for settled() first
+    mockSeq = 3;
+    const firstSettled = mockWatches.settled();
+    expect(await resolved(firstSettled)).toBe(false);
+    await turn();
+    expect(await resolved(firstSettled)).toBe(true);
+    expect(mockWatches.diagnostics().scheduler.lastSeenCommit).toBe(3);
+    expect(await resolved(mockWatches.settled())).toBe(true);
+    w.stop();
+  });
+
+  it('syncs an undelivered builder commit via syncBuilder even after an intervening local commit advanced lastSeenCommit', async () => {
+    let mockSeq = 1;
+    let builtValue = 'pre-build';
+    let mockListener: ((c: { sequence: number; touched: ReadonlySet<number> | 'all'; source?: 'local' | 'builder' | 'elsewhere' }) => void) | undefined;
+    const mockConnection = {
+      database: { isOpen: true },
+      untrack() {},
+      tally: () => undefined,
+      callSite: () => 'mock',
+      track: (_t: number, fn: () => unknown) => fn(),
+      lastCommit: () => mockSeq,
+      trackStats: () => ({ keys: 0, ranges: 0 }),
+      onCommit(fn: typeof mockListener) { mockListener = fn; return () => { mockListener = undefined; }; },
+    } as unknown as Connection;
+    const mockWatches = createWatches(mockConnection, { clock: time.clock });
+    const seen: string[] = [];
+    let runs = 0;
+    const w = mockWatches.watch(() => { runs++; return builtValue; }, (v) => { seen.push(v); }, { label: 'intervening-local' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(seen).toEqual(['pre-build']);
+
+    // Builder commits seq 2 (TSFN callback not yet delivered on JS loop)
+    mockSeq = 2;
+    builtValue = 'post-build';
+    // Synchronous local write commits seq 3 (untouched for w), advancing lastSeenCommit to 3
+    mockSeq = 3;
+    mockListener?.({ sequence: 3, touched: new Set(), source: 'local' });
+    expect(mockWatches.diagnostics().scheduler.lastSeenCommit).toBe(3);
+
+    // waitForIndexBuilds() calls syncBuilder(): must still mark w dirty because builderSyncedThrough < 3
+    const runsBefore = runs;
+    mockWatches.syncBuilder();
+    const waitBuilt = w.caughtUp();
+    expect(await resolved(waitBuilt)).toBe(false);
+    time.advance(gap);
+    await turn();
+    expect(await resolved(waitBuilt)).toBe(true);
+    expect(seen).toEqual(['pre-build', 'post-build']);
+    expect(runs).toBe(runsBefore + 1);
+
+    // Repeated syncBuilder() with no intervening commits is a no-op, and late TSFN for seq 2 is ignored
+    mockWatches.syncBuilder();
+    mockListener?.({ sequence: 2, touched: new Set([1]), source: 'builder' });
+    expect(await resolved(w.caughtUp())).toBe(true);
+    expect(runs).toBe(runsBefore + 1);
+    w.stop();
+  });
+
+  it('leaves no dangling queued flush when an earlier watch in a flush writes to a later watch in the same flush', async () => {
+    connection.write([{ op: 'create', type: 'Row', id: 'Row-trigger', fields: { n: 0 } }]);
+    let writeInObserver = false;
+    const readTrigger = () => connection.read([{ read: 'field', id: 'Row-trigger', field: 'n' }])[0]!.value;
+    const w1 = watches.watch(readTrigger, () => {
+      if (writeInObserver) {
+        writeInObserver = false;
+        // Creates a new Row, touching w2 (`rows()`) without touching w1 (`Row-trigger`'s `n`)
+        commit();
+      }
+    }, { label: 'writer-in-observer' });
+    const w2 = watching(0.1, 'later-in-batch');
+    await drain();
+    time.advance(1000);
+
+    writeInObserver = true;
+    // Update Row-trigger's `n` AND create a Row in one commit so both w1 and w2 enter the same flush batch
+    connection.write([
+      { op: 'set', id: 'Row-trigger', fields: { n: 1 } },
+      { op: 'create', type: 'Row', id: 'Row-batch', fields: { n: 1 } },
+    ]);
+    // Both w1 and w2 run in the single microtask flush; w1's observer creates Row-1 (marking only w2 dirty),
+    // then w2 runs next in the same flush and clears dirty completely
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(w2.last()).toEqual(rows());
+    expect(watches.diagnostics().scheduler.queued).toBe('none');
+    expect(watches.diagnostics().scheduler.dirtyCount).toBe(0);
+    expect(await resolved(watches.settled()), 'settled resolves immediately with no dangling later flush').toBe(true);
+    w1.stop();
+    w2.stop();
+  });
+
+  it('clears queued later flush on stop of the last watch and ignores stale later callbacks', async () => {
+    const first = watching(9, 'first');
+    const second = watching(5, 'second');
+    // Microtask flush runs `first` (9 ms > 8 ms slice), deferring `second` to a `later` flush
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(watches.diagnostics().scheduler.queued).toBe('later');
+    expect(watches.diagnostics().scheduler.dirtyCount).toBe(1);
+
+    const settling = watches.settled();
+    expect(await resolved(settling)).toBe(false);
+
+    // Stopping `second` empties dirty: must clear `queued` and resolve `settled()` immediately without waiting for `later`
+    second.stop();
+    expect(watches.diagnostics().scheduler.queued).toBe('none');
+    expect(await resolved(settling)).toBe(true);
+
+    // Opening a new watch before the stale `later` fires must not have its queued microtask clobbered by the stale `later`
+    const third = watching(1, 'third');
+    await turn();
+    expect(third.seen).toHaveLength(1);
+    first.stop();
+    third.stop();
   });
 });
