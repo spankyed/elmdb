@@ -291,7 +291,7 @@ export type ShortCode<P extends string> = `${P}-${number}`;
 // ─── QueryBuilder fluent interface ─────────────────────────────────────
 
 /** `T` without being an inference site (TypeScript 5.4's NoInfer, for 5.3) */
-type NoInferType<T> = [T][T extends unknown ? 0 : never];
+export type NoInferType<T> = [T][T extends unknown ? 0 : never];
 
 /**
  * What a typed builder is checked against, as one parameter: a program declares its own and names it, so an error or a
@@ -412,9 +412,9 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
    * Each outgoing edge of the kinds whose target this query could reach (of `type`, when given): its relation row,
    * `findRelations`' shape, one per edge
    */
-  outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
+  outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
   /** Each incoming edge of the kinds whose source this query could reach: its relation row */
-  inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
+  inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
   /**
    * Each entity's number of edges of the kinds, in query order, `0` included: those `outEdges` (or with `direction`,
    * `inEdges`, or both) would answer, so only edges whose other end this query could reach, of `type` when given

@@ -118,11 +118,12 @@ export interface EarsDatabase {
 }
 
 // A field holding `undefined` is absent, as it is once stored (msgpackr's `skipValues`, which its declarations omit);
-// Dates are msgpack timestamps, which elmdb keeps
+// Dates are msgpack timestamps, which elmdb keeps. `int64AsType: 'auto'` (also omitted by msgpackr's declarations)
+// decodes integers within ±2^53 as numbers and wider 64-bit integers as BigInt without precision loss.
 const packr = new Packr({ useRecords: false, skipValues: [undefined] } as ConstructorParameters<typeof Packr>[0]);
-const unpackr = new Unpackr({ useRecords: false, mapsAsObjects: true, int64AsType: 'number' });
+const unpackr = new Unpackr({ useRecords: false, mapsAsObjects: true, int64AsType: 'auto' as never });
 // The exact decode, for an answer whose maps may hold a `__proto__` key, which a decode straight to objects renames
-const exact = new Unpackr({ useRecords: false, mapsAsObjects: false, int64AsType: 'number' });
+const exact = new Unpackr({ useRecords: false, mapsAsObjects: false, int64AsType: 'auto' as never });
 
 export const pack = (value: unknown): Uint8Array => packr.pack(value);
 
@@ -150,17 +151,22 @@ function spellsProto(bytes: Uint8Array): boolean {
   return false;
 }
 
+/** Decodes msgpack bytes safely: via `Map`s whenever `__proto__` appears anywhere so own properties never mutate prototypes */
+function unpackValue(bytes: Uint8Array): unknown {
+  return spellsProto(bytes) ? objectsOf(exact.unpack(bytes)) : unpackr.unpack(bytes);
+}
+
 /**
  * Every answer decoded alike, whatever its shape: exactly when its bytes could hold a `__proto__` key anywhere — a
  * row, a field's value, an edge's info, an answer inside another — and straight to objects otherwise
  */
 function unpackAnswers(bytes: Uint8Array): Answer[] {
-  return (spellsProto(bytes) ? objectsOf(exact.unpack(bytes)) : unpackr.unpack(bytes)) as Answer[];
+  return unpackValue(bytes) as Answer[];
 }
 
-/** `value` and everything inside it, frozen */
+/** `value` and everything inside it, frozen; typed arrays and DataViews are skipped because V8 refuses freezing views with elements */
 function deepFreeze<T>(value: T): T {
-  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+  if (value !== null && typeof value === 'object' && !ArrayBuffer.isView(value) && !Object.isFrozen(value)) {
     Object.freeze(value);
     for (const inner of Object.values(value as Record<string, unknown>)) deepFreeze(inner);
   }
@@ -168,18 +174,20 @@ function deepFreeze<T>(value: T): T {
 }
 
 /**
- * The stored values an answer holds, frozen: each row's field values, a field's value and an edge's info. The rows and
- * lists a read builds are the caller's own to change, as they would be unfrozen
+ * The stored values an answer holds, frozen: each row's field values, a field's value, group keys and an edge's info.
+ * The rows and lists a read builds are the caller's own to change, as they would be unfrozen
  */
 function freezeValues(answer: Answer): Answer {
   const row = (r: unknown) => {
     if (r && typeof r === 'object') for (const value of Object.values(r)) deepFreeze(value);
   };
-  if (answer.kind === 'visited') freezeValues(answer.answer as Answer);
+  if (answer.kind === 'visited' || answer.kind === 'explained') freezeValues(answer.answer as Answer);
   if (answer.kind === 'row') row(answer.row);
   if (answer.kind === 'rows') (answer.rows as unknown[]).forEach(row);
   if (answer.kind === 'hits') for (const hit of answer.hits as Array<{ row?: unknown }>) row(hit.row);
   if (answer.kind === 'field') deepFreeze(answer.value);
+  if (answer.kind === 'groups') for (const [key] of answer.groups as Array<[unknown, unknown]>) deepFreeze(key);
+  if (answer.kind === 'least' || answer.kind === 'greatest') deepFreeze(answer.value);
   if (answer.kind === 'relation' && answer.relation) deepFreeze((answer.relation as { info?: unknown }).info);
   if (answer.kind === 'relations') for (const relation of answer.relations as Array<{ info?: unknown }>) deepFreeze(relation.info);
   return answer;
@@ -433,11 +441,46 @@ export function createConnection(
   };
   let hook: BeforeCommit | undefined;
   let hookPaused = false;
-  const typeOfOp = (op: Op): string | undefined => {
-    const named = op as { type?: unknown; id?: unknown; source?: unknown };
-    if (typeof named.type === 'string') return named.type;
-    const id = named.id ?? named.source;
-    return typeof id === 'string' ? id.slice(0, id.indexOf('-')) : undefined;
+  const typeOfId = (id: string): string | undefined => {
+    const dash = id.indexOf('-');
+    return dash > 0 ? id.slice(0, dash) : undefined;
+  };
+  const opWantsHook = (op: Op, wants: (type: string) => boolean): boolean => {
+    const wanted = (id: string | undefined) => {
+      if (id === undefined) return false;
+      const type = typeOfId(id);
+      return type !== undefined && wants(type);
+    };
+    switch (op.op) {
+      case 'create':
+      case 'upsert':
+      case 'takeLabel':
+        return wants(op.type);
+      case 'link':
+        return wanted(op.source) || wanted(op.target);
+      case 'unlink':
+        // Without a target, edges to any type may be removed, so run in a unit for the hook to inspect
+        return op.target === undefined ? true : wanted(op.source) || wanted(op.target);
+      case 'updateRelation':
+      case 'removeRelation':
+        // Existing relation endpoints are not carried by the op, so run in a unit for the hook to inspect
+        return true;
+      case 'grantExclusive':
+        return wanted(op.id) || op.among.some(wanted);
+      case 'set':
+      case 'append':
+      case 'merge':
+      case 'delete':
+      case 'removeAt':
+      case 'removeValue':
+      case 'trash':
+      case 'restore':
+      case 'grant':
+      case 'revoke':
+      case 'destroy':
+      case 'embed':
+        return wanted(op.id);
+    }
   };
   /** A write refused because another process replaced every row says the same as a wake, and a wake can be lost */
   const noticing = <T>(write: () => T): T => {
@@ -515,7 +558,7 @@ export function createConnection(
         (value as unknown as PromiseLike<unknown>).then(undefined, () => {});
         throw new Error('transact() takes a synchronous function: an await inside it would split the unit');
       }
-      if (outermost && unit && hook && !hookPaused) hook.run();
+      if (outermost && unit && level.kept && hook && !hookPaused) hook.run();
     } catch (error) {
       levels.pop();
       const held = unit;
@@ -617,18 +660,26 @@ export function createConnection(
     },
     write(ops, now = Date.now()) {
       // A write the hook has to see runs in a unit of its own. One it doesn't pays for this check and nothing else
-      if (hook && levels.length === 0 && ops.some((op) => { const type = typeOfOp(op); return type !== undefined && hook!.wants(type); })) {
+      if (hook && !hookPaused && levels.length === 0 && ops.some((op) => opWantsHook(op, hook!.wants))) {
         return transact(() => connection.write(ops, now));
       }
-      const written = counting('write', ops.length, () => {
-        const bytes = observation.request(pack({ ops: [...ops], now } satisfies Batch));
-        const target = levels.length ? writable() : undefined;
-        const answer = observation.response(noticing(() => crossing(() => (target ? target.write(bytes) : database.write(bytes, false)))));
-        if (target) levels.at(-1)!.kept = true;
-        // A unit's write answers its results alone, what it changed committing with the unit; a database's write
-        // commits, answering the change set beside them
-        return unpackr.unpack(answer) as BatchResult | Written;
-      });
+      const inUnit = levels.length > 0;
+      let written: BatchResult | Written;
+      try {
+        written = counting('write', ops.length, () => {
+          const bytes = observation.request(pack({ ops: [...ops], now } satisfies Batch));
+          const target = inUnit ? writable() : undefined;
+          const answer = observation.response(noticing(() => crossing(() => (target ? target.write(bytes) : database.write(bytes, false)))));
+          if (target) levels.at(-1)!.kept = true;
+          // A unit's write answers its results alone, what it changed committing with the unit; a database's write
+          // commits, answering the change set beside them
+          return unpackr.unpack(answer) as BatchResult | Written;
+        });
+      } catch (error) {
+        // Under syncEachCommit a write outside a unit can commit and then fail to sync, without returning a change set
+        if (!inUnit && (error as { code?: unknown })?.code === 'NOT_DURABLE') committedEverything();
+        throw error;
+      }
       if ('changes' in written) made(written.changes);
       return written.results;
     },
@@ -650,7 +701,14 @@ export function createConnection(
         tracking = outer;
       }
     },
-    untrack: (token) => database.untrack(token),
+    untrack: (token) => {
+      if (!database.isOpen) return;
+      try {
+        database.untrack(token);
+      } catch (error) {
+        if ((error as { code?: unknown })?.code !== 'CLOSED') throw error;
+      }
+    },
     trackStats: () => {
       const { keys, ranges } = database.trackStats();
       return { keys, ranges };
@@ -667,13 +725,13 @@ export function createConnection(
       if (changed) everyWatch();
       return changed;
     },
-    pendingChanges: () => (unit ? (unpackr.unpack(crossing(() => unit!.pendingChanges())) as PendingChanges) : undefined),
+    pendingChanges: () => (unit ? (unpackValue(crossing(() => unit!.pendingChanges())) as PendingChanges) : undefined),
     changedSince: readChangedSince,
     // A unit opens its write transaction at its first write; asked first, it opens it now, as that write would
     nextSequence: () => (levels.length ? crossing(() => writable().nextSequence()) : undefined),
     checkpoint(name) {
       const bytes = unit ? crossing(() => unit!.checkpoint(name)) : database.checkpoint(name);
-      return bytes ? unpackr.unpack(bytes) : undefined;
+      return bytes ? unpackValue(bytes) : undefined;
     },
     setCheckpoint(name, value) {
       if (!levels.length) throw new Error('A checkpoint is set inside a unit, with the work it records');
@@ -691,8 +749,9 @@ export function createConnection(
     },
     beforeCommit(given) { hook = given; },
     transactWithoutHook(fn) {
+      const wasPaused = hookPaused;
       hookPaused = true;
-      try { return transact(fn); } finally { hookPaused = false; }
+      try { return transact(fn); } finally { hookPaused = wasPaused; }
     },
     onFoundElsewhere(listener) {
       foundElsewhere.add(listener);

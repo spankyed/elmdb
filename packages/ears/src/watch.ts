@@ -74,9 +74,9 @@ export interface WatchClock {
  * (`bench/watch-stress.ts`; elmdb's docs/evidence/next-phase-3.md)
  */
 export interface WatchSchedule {
-  delayFactor: number;
-  minimumGapMs: number;
-  flushSliceMs: number;
+  readonly delayFactor: number;
+  readonly minimumGapMs: number;
+  readonly flushSliceMs: number;
 }
 
 /** The constants the engine's watches run under: a gap of four times a run and at least a frame, an 8 ms slice */
@@ -147,6 +147,8 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   let nextToken = 1;
   /** Watches waiting to run, in the order they run: those a flush left over first, then by when they were marked */
   let dirty = new Set<Watch>();
+  /** Earliest `dueAt` among `dirty` watches, or `undefined` when invalidated by removing a minimum watch */
+  let earliestDue: number | undefined = Infinity;
   /**
    * A flush queued, for a microtask or for a later turn of the event loop, and the timer set for the earliest watch
    * still in its gap. A flush a sooner one replaced still comes, and finds whatever is left to it, often nothing
@@ -162,12 +164,29 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   const dueAt = (watch: Watch) => (watch.ranAt < 0 ? -Infinity
     : watch.ranAt + Math.max(watch.soon ? 0 : schedule.minimumGapMs, schedule.delayFactor * watch.costMs));
 
+  const addDirty = (watch: Watch) => {
+    dirty.add(watch);
+    if (earliestDue !== undefined) {
+      const due = dueAt(watch);
+      if (due < earliestDue) earliestDue = due;
+    }
+  };
+
+  const earliestDirty = (): number => {
+    if (earliestDue !== undefined) return earliestDue;
+    let min = Infinity;
+    for (const watch of dirty) {
+      const due = dueAt(watch);
+      if (due < min) min = due;
+    }
+    return earliestDue = min;
+  };
+
   /** Queues what the dirty watches need: a flush for those due now, a timer for the first of the rest */
   const plan = (soon: boolean, blocked = false) => {
-    const now = clock.now();
-    let earliest = Infinity;
-    for (const watch of dirty) earliest = Math.min(earliest, dueAt(watch));
+    const earliest = earliestDirty();
     if (earliest === Infinity) return;
+    const now = clock.now();
     if (earliest <= now) {
       // A flush runs everything due, so a timer standing for one of them would fire on nothing
       if (timer) {
@@ -198,18 +217,26 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   };
 
   const onCommit = (commit: Commit) => {
-    const marked = commit.touched === 'all' ? [...open.values()]
-      : [...commit.touched].flatMap((token) => open.get(token) ?? []);
-    for (const watch of marked) {
+    let any = false;
+    const mark = (watch: Watch) => {
+      any = true;
       watch.owed = true;
       watch.causes?.add(commit.sequence);
       // A commit landing on a watch already waiting is one whose state the coming run skips
       if (dirty.has(watch)) connection.tally()?.watchSkipped(watch.label);
-      else dirty.add(watch);
+      else addDirty(watch);
+    };
+    if (commit.touched === 'all') {
+      for (const watch of open.values()) mark(watch);
+    } else {
+      for (const token of commit.touched) {
+        const watch = open.get(token);
+        if (watch) mark(watch);
+      }
     }
     // A commit made while a flush runs (a read writing) is planned on a later turn, so a read that writes every time
     // it runs can't keep the microtask queue from ever emptying
-    if (marked.length > 0) plan(!flushing);
+    if (any) plan(!flushing);
   };
 
   /** Resolves `caughtUp` calls: each is answered once, by the run it waited for or by the watch ending */
@@ -247,11 +274,18 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     watch.ranAt = clock.now();
     watch.costMs = watch.ranAt - started;
     connection.tally()?.watchRun(watch.label, watch.costMs);
+    if (closed()) return;
     if (watch.stopped) {
       connection.untrack(watch.token);
       return;
     }
-    const commit = connection.lastCommit();
+    let commit: number;
+    try {
+      commit = connection.lastCommit();
+    } catch (error) {
+      if ((error as { code?: unknown })?.code === 'CLOSED' && closed()) return;
+      throw error;
+    }
     const last = watch.last;
     if (outcome.ok) {
       if (last?.ok && sameValue(last.value, outcome.value)) return;
@@ -291,6 +325,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     }
     open.clear();
     dirty.clear();
+    earliestDue = Infinity;
     unlisten?.();
     unlisten = undefined;
     if (timer) {
@@ -311,10 +346,12 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     // Those something blocked is waiting on go first, so the slice is spent on them before any other
     const batch = [...dirty].sort((a, b) => Number(b.soon) - Number(a.soon));
     dirty = new Set();
+    earliestDue = Infinity;
     const left: Watch[] = [];
     let ranOne = false;
     try {
       for (const watch of batch) {
+        if (closed()) break;
         if (watch.stopped) continue;
         const now = clock.now();
         const spent = now - started;
@@ -329,6 +366,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
         if (dirty.delete(watch)) connection.tally()?.watchSkipped(watch.label);
         try {
           run(watch);
+          if (closed()) break;
           charge(watch);
         } catch (error) {
           // An observer's (or a warning's) own throw: reported, without stopping the other watches' deliveries
@@ -337,8 +375,28 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       }
     } finally {
       flushing = false;
-      // Those left over run first next time, then those this flush's commits marked; one stopped meanwhile doesn't
-      dirty = new Set([...left.filter((watch) => !watch.stopped), ...dirty]);
+      if (closed()) {
+        dirty.clear();
+        earliestDue = Infinity;
+      } else {
+        // Those left over run first next time, then those this flush's commits marked; one stopped meanwhile doesn't
+        const nextDirty = new Set<Watch>();
+        let min = Infinity;
+        for (const watch of left) {
+          if (watch.stopped) continue;
+          nextDirty.add(watch);
+          const due = dueAt(watch);
+          if (due < min) min = due;
+        }
+        for (const watch of dirty) {
+          if (watch.stopped) continue;
+          nextDirty.add(watch);
+          const due = dueAt(watch);
+          if (due < min) min = due;
+        }
+        dirty = nextDirty;
+        earliestDue = min;
+      }
     }
     if (dirty.size > 0) plan(false);
     settleWaiting();
@@ -372,7 +430,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       };
       open.set(watch.token, watch);
       unlisten ??= connection.onCommit(onCommit);
-      dirty.add(watch);
+      addDirty(watch);
       plan(!flushing);
       return {
         stop() {
@@ -380,7 +438,10 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
           watch.stopped = true;
           answer(watch.waiters.splice(0));
           open.delete(watch.token);
-          dirty.delete(watch);
+          if (dirty.delete(watch)) {
+            if (dirty.size === 0) earliestDue = Infinity;
+            else if (earliestDue !== undefined && dueAt(watch) <= earliestDue) earliestDue = undefined;
+          }
           connection.untrack(watch.token);
           if (open.size === 0) {
             unlisten?.();
@@ -397,7 +458,13 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
           return new Promise((resolve) => {
             watch.waiters.push(resolve);
             caughtUpWaiting++;
-            if (options?.soon) watch.soon = true;
+            if (options?.soon) {
+              watch.soon = true;
+              if (dirty.has(watch) && earliestDue !== undefined) {
+                const due = dueAt(watch);
+                if (due < earliestDue) earliestDue = due;
+              }
+            }
             // A timer set for its gap before anything waited is set again: as one to stay alive for, and for
             // sooner where the wait lifted the floor
             if (!flushing) plan(true, watch.soon);
@@ -421,41 +488,74 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   };
 }
 
-/** Whether two results are the same data: primitives, lists, plain objects, maps, sets, bytes and dates, compared through */
-export function sameValue(a: unknown, b: unknown): boolean {
+function sameValueInner(a: unknown, b: unknown, seen?: WeakMap<object, Set<object>>): boolean {
   if (Object.is(a, b)) return true;
   if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
-  if (Array.isArray(a)) {
-    if (!Array.isArray(b) || a.length !== b.length) return false;
-    for (let i = 0; i < a.length; i++) if (!sameValue(a[i], b[i])) return false;
-    return true;
+  const proto = Object.getPrototypeOf(a);
+  if (proto !== Object.getPrototypeOf(b)) return false;
+  if (a instanceof Date) return Object.is(a.getTime(), (b as Date).getTime());
+  if (a instanceof RegExp) {
+    const rb = b as RegExp;
+    return a.source === rb.source && a.flags === rb.flags && a.lastIndex === rb.lastIndex;
   }
-  if (Array.isArray(b)) return false;
-  if (a instanceof Date || b instanceof Date) return a instanceof Date && b instanceof Date && a.getTime() === b.getTime();
-  if (ArrayBuffer.isView(a) || ArrayBuffer.isView(b)) {
-    if (!ArrayBuffer.isView(a) || !ArrayBuffer.isView(b) || a.byteLength !== b.byteLength) return false;
+  if (a instanceof URL) return a.href === (b as URL).href;
+  if (ArrayBuffer.isView(a)) {
+    const vb = b as ArrayBufferView;
+    if (a.byteLength !== vb.byteLength) return false;
     const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-    const y = new Uint8Array(b.buffer, b.byteOffset, b.byteLength);
+    const y = new Uint8Array(vb.buffer, vb.byteOffset, vb.byteLength);
     for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
     return true;
   }
-  if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return false;
-  // Keys of a map and members of a set are compared as the collection itself finds them, by identity
-  if (a instanceof Map && b instanceof Map) {
-    if (a.size !== b.size) return false;
-    for (const [key, value] of a) if (!b.has(key) || !sameValue(value, b.get(key))) return false;
+  if (a instanceof ArrayBuffer) {
+    const bb = b as ArrayBuffer;
+    if (a.byteLength !== bb.byteLength) return false;
+    const x = new Uint8Array(a);
+    const y = new Uint8Array(bb);
+    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
     return true;
   }
-  if (a instanceof Set && b instanceof Set) {
-    if (a.size !== b.size) return false;
-    for (const member of a) if (!b.has(member)) return false;
+  // Members of a set are compared as the collection itself finds them, by identity
+  if (a instanceof Set) {
+    const sb = b as Set<unknown>;
+    if (a.size !== sb.size) return false;
+    for (const member of a) if (!sb.has(member)) return false;
+    return true;
+  }
+  const isArray = Array.isArray(a);
+  const isMap = !isArray && a instanceof Map;
+  // Distinct non-plain objects (Errors, WeakMaps, Promises, custom instances) are never equal by empty own keys
+  if (!isArray && !isMap && proto !== Object.prototype && proto !== null) return false;
+
+  let pairs = seen?.get(a);
+  if (pairs?.has(b)) return true;
+  const nextSeen = seen ?? new WeakMap<object, Set<object>>();
+  if (!pairs) nextSeen.set(a, pairs = new Set());
+  pairs.add(b);
+
+  if (isArray) {
+    const ab = b as unknown[];
+    if (a.length !== ab.length) return false;
+    for (let i = 0; i < a.length; i++) if (!sameValueInner(a[i], ab[i], nextSeen)) return false;
+    return true;
+  }
+  // Keys of a map are compared as the collection itself finds them, by identity
+  if (isMap) {
+    const mb = b as Map<unknown, unknown>;
+    if (a.size !== mb.size) return false;
+    for (const [key, value] of a) if (!mb.has(key) || !sameValueInner(value, mb.get(key), nextSeen)) return false;
     return true;
   }
   const keys = Object.keys(a);
   if (keys.length !== Object.keys(b).length) return false;
   for (const key of keys) {
     if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
-    if (!sameValue((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key])) return false;
+    if (!sameValueInner((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], nextSeen)) return false;
   }
   return true;
+}
+
+/** Whether two results are the same data: primitives, lists, plain objects, maps, sets, bytes, regexes, URLs and dates, compared through */
+export function sameValue(a: unknown, b: unknown): boolean {
+  return sameValueInner(a, b);
 }

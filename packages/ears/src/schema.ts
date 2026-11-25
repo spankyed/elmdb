@@ -90,8 +90,8 @@ const holdsText = (field: ValueType) =>
  * field has a value index of its own, named after it; `role` and `shortCode` are indexed by elmdb on every type. Every
  * relation kind is many-to-many, and its edges may carry any info
  */
-export function toElmdbSchema(schema: EngineSchema): Schema {
-  const declared = new Set(Object.keys(schema.types));
+export function toElmdbSchema(schema: EngineSchema, knownTypes?: Iterable<string>): Schema {
+  const declared = new Set([...(knownTypes ?? []), ...Object.keys(schema.types)]);
   // An entity type or field may be named `__proto__`, so every name is written with `setField`
   const types: Record<string, TypeDef> = {};
   for (const [type, rules] of Object.entries(schema.types)) {
@@ -109,13 +109,13 @@ export function toElmdbSchema(schema: EngineSchema): Schema {
       });
     }
     const has = (field: string) => Object.prototype.hasOwnProperty.call(fields, field);
+    for (const field of rules.required) {
+      if (!isEngineField(field) && !has(field)) setField(fields, field, { type: 'any', nullable: true });
+    }
     for (const field of rules.indexes ?? []) {
       if (isEngineField(field) && !isIndexableEngineField(field)) continue;
       if (!isIndexableEngineField(field) && !has(field)) setField(fields, field, { type: 'any', optional: true, nullable: true });
       setField(indexes, field, { kind: 'value', fields: [field] });
-    }
-    for (const field of rules.required) {
-      if (!isEngineField(field) && !has(field)) setField(fields, field, { type: 'any', nullable: true });
     }
     // The text index (`search`), its fields declared as any field a rule hasn't: elmdb reads a string or a list of
     // strings in one, and no text in any other value

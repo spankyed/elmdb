@@ -190,10 +190,15 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
   // An entity that exists keeps its times: a createdAt or updatedAt in the row is refused, as any write of them
   const upsert = ((type: string, row: Record<string, unknown> & { id: EARS.EntityId }) => {
     requireType(type, 'upsert');
-    const { id, shortCode, ...fields } = row;
+    const { id, shortCode, createdAt, updatedAt, ...rest } = row;
     refuseShortCode('upsert', type, shortCode);
     // A row bringing its times creates the entity with them, as `create` does; an entity that exists refuses them
-    if ((fields.createdAt !== undefined || fields.updatedAt !== undefined) && !exists(id).entity) return create(type, row);
+    if ((createdAt !== undefined || updatedAt !== undefined) && !exists(id).entity) return create(type, row);
+    const fields: Record<string, unknown> = {
+      ...rest,
+      ...(createdAt !== undefined && { createdAt }),
+      ...(updatedAt !== undefined && { updatedAt }),
+    };
     const now = Date.now();
     const defined = definedFields(fields, 'upsert');
     const result = entityOf(one({ op: 'upsert', type, id, fields: defined, shortCode }, now));

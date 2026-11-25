@@ -37,3 +37,18 @@ it('goes with the rows when the database is cleared', () => {
   e.admin.clear();
   expect(e.admin.checkpoint('reader')).toBeUndefined();
 });
+
+it('decodes a checkpoint holding a __proto__ key as an own property without mutating prototypes', () => {
+  const payload = Object.defineProperty({ safe: 1 }, '__proto__', {
+    value: { polluted: true },
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  });
+  e.transact(() => { e.admin.setCheckpoint('proto', payload); });
+  const read = e.admin.checkpoint('proto') as Record<string, unknown>;
+  expect(Object.getPrototypeOf(read)).toBe(Object.prototype);
+  expect(Object.getOwnPropertyDescriptor(read, '__proto__')?.value).toEqual({ polluted: true });
+  expect(read.safe).toBe(1);
+  expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+});

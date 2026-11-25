@@ -568,6 +568,9 @@ export interface LinkOptions {
 // @public
 export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
 
+// @public
+export type NoInferType<T> = [T][T extends unknown ? 0 : never];
+
 export { OpenReport }
 
 // @public
@@ -669,7 +672,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     in<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
     in(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
-    inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
+    inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
     lacks<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
     last(): EARS.EntityId<E> | undefined;
     like(id: EARS.EntityId, options?: {
@@ -693,7 +696,7 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     out<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
     // (undocumented)
     out(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
-    outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
+    outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
     pathTo(to: EARS.EntityId, kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
         direction?: EdgeDirection;
         depth?: number;
@@ -745,6 +748,18 @@ export interface QueryBuilder<E extends string = string, D extends EarsSchema = 
     within(ids: readonly EARS.EntityId[]): QueryBuilder<E, D>;
     // (undocumented)
     withRole(r: D['roles']): QueryBuilder<E, D>;
+}
+
+// @public
+export interface QueryEntries {
+    // (undocumented)
+    <E extends string>(type: TypeName<E>): QueryBuilder<E>;
+    // (undocumented)
+    <E extends string>(types: readonly TypeName<E>[]): QueryBuilder<string>;
+    // (undocumented)
+    all(): QueryBuilder<string>;
+    // (undocumented)
+    ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
 }
 
 // @public
@@ -887,6 +902,9 @@ export const RESERVED_ENTITY_TYPES: {
 };
 
 // @public
+export type RowArg<S extends EntityShapes, E extends string, Row> = [RequiredField<S, E>] extends [never] ? [row?: Row] : [row: Row];
+
+// @public
 export interface RowIdentity {
     createdAt?: number;
     id?: EARS.EntityId;
@@ -978,7 +996,7 @@ export type SimilarityMeasure = 'jaccard' | 'adamicAdar';
 // @public
 export interface TypedCreate<D extends EarsSchema> {
     // (undocumented)
-    <E extends string>(type: Name<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E>>): WriteBuilder<E, D>;
+    <E extends string>(type: EntityNameArg<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E>>): WriteBuilder<E, D>;
 }
 
 // @public (undocumented)
@@ -1008,7 +1026,7 @@ export interface TypedGetAttr<D extends EarsSchema> {
 }
 
 // @public
-export type TypedNewId<D extends EarsSchema> = <E extends string>(t: Name<D['names'], E>) => EARS.EntityId<E extends keyof D['shapes'] ? E : string>;
+export type TypedNewId<D extends EarsSchema> = <E extends string>(t: EntityNameArg<D['names'], E>) => EARS.EntityId<E extends keyof D['shapes'] ? E : string>;
 
 // @public
 export interface TypedQuery<D extends EarsSchema> extends TypedQueryEntries<D> {
@@ -1019,9 +1037,21 @@ export interface TypedQuery<D extends EarsSchema> extends TypedQueryEntries<D> {
 }
 
 // @public
+export interface TypedQueryEntries<D extends EarsSchema> {
+    // (undocumented)
+    <E extends string>(type: EntityNameArg<D['names'], E>): QueryBuilder<E, D>;
+    // (undocumented)
+    <E extends string>(types: readonly EntityNameArg<D['names'], E>[]): QueryBuilder<string, D>;
+    // (undocumented)
+    all(): QueryBuilder<string, D>;
+    // (undocumented)
+    ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, D>;
+}
+
+// @public
 export interface TypedUpsert<D extends EarsSchema> {
     // (undocumented)
-    <E extends string>(type: Name<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E> & {
+    <E extends string>(type: EntityNameArg<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E> & {
         id: EARS.EntityId;
     }): WriteBuilder<E, D>;
 }
@@ -1106,11 +1136,11 @@ export interface WatchReadContext {
 // @public
 export interface WatchSchedule {
     // (undocumented)
-    delayFactor: number;
+    readonly delayFactor: number;
     // (undocumented)
-    flushSliceMs: number;
+    readonly flushSliceMs: number;
     // (undocumented)
-    minimumGapMs: number;
+    readonly minimumGapMs: number;
 }
 
 // @public

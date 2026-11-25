@@ -24,7 +24,158 @@ export interface DatabaseOptions {
 }
 
 // @public
+export interface EarsDatabase {
+    acknowledgeRestore(): void;
+    adoptReplacement(epoch: number): boolean;
+    backup(target: string): void;
+    // (undocumented)
+    begin(): EarsUnit;
+    // (undocumented)
+    bulkLoad(loads: Uint8Array): void;
+    changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
+    checkpoint(name: string): Uint8Array | null;
+    // (undocumented)
+    close(): void;
+    committedElsewhere(): boolean;
+    // (undocumented)
+    durable(): Promise<void>;
+    hearBuilderCommits(listener: (commit: {
+        sequence: number;
+        touched: number[];
+    }) => void): void;
+    hearCommitsElsewhere(listener: () => void): void;
+    // (undocumented)
+    readonly isOpen: boolean;
+    readonly openReport: OpenReport;
+    // (undocumented)
+    readonly path: string;
+    // (undocumented)
+    read(reads: Uint8Array): Uint8Array;
+    // (undocumented)
+    readonly readOnly: boolean;
+    rebuild(type?: string | null, index?: string | null): void;
+    replacedElsewhere(): number | null;
+    replaceWith(source: string): void;
+    reset(): void;
+    readonly schema: Schema | null;
+    readonly sequence: number;
+    // (undocumented)
+    setSchema(schema: Schema): SchemaChange[];
+    // (undocumented)
+    stats(): Stats;
+    trackStats(): {
+        owners: number;
+        keys: number;
+        ranges: number;
+    };
+    untrack(token: number): void;
+    waitForIndexBuilds(): void;
+    // (undocumented)
+    write(batch: Uint8Array, durable?: boolean | null): Uint8Array;
+}
+
+// @public
+export interface EarsUnit {
+    // (undocumented)
+    abort(): void;
+    changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
+    checkpoint(name: string): Uint8Array | null;
+    // (undocumented)
+    commit(durable?: boolean | null): Uint8Array;
+    // (undocumented)
+    readonly isOpen: boolean;
+    nextSequence(): number;
+    pendingChanges(): Uint8Array;
+    // (undocumented)
+    read(reads: Uint8Array): Uint8Array;
+    // (undocumented)
+    release(depth: number): void;
+    // (undocumented)
+    rollbackTo(depth: number): void;
+    // (undocumented)
+    savepoint(): number;
+    setCheckpoint(name: string, value: Uint8Array): void;
+    // (undocumented)
+    write(batch: Uint8Array): Uint8Array;
+}
+
+// @public
+export type EdgeDirection = 'out' | 'in' | 'both';
+
+// @public
+export interface EmbedDeclaration {
+    readonly chunk?: 'whole' | 'paragraph' | 'heading';
+    readonly dims: number;
+    readonly from: readonly string[];
+    readonly model: string;
+}
+
+// @public
+export interface EngineSchema {
+    ranks?: Readonly<Record<string, RankDeclaration>>;
+    relations: Readonly<Record<string, RelationRules>>;
+    // (undocumented)
+    roles: readonly string[];
+    types: Readonly<Record<string, RowRules>>;
+}
+
+// @public
+export type FieldRule = FieldType & {
+    readonly optional?: boolean;
+    readonly nullable?: boolean;
+};
+
+// @public
+export type FieldType = {
+    readonly type: 'string' | 'number' | 'boolean' | 'any';
+} | {
+    readonly type: 'enum';
+    readonly values: readonly string[];
+} | {
+    readonly type: 'ref';
+    readonly to: readonly string[];
+} | {
+    readonly type: 'list';
+    readonly of: FieldType;
+};
+
+// @public
 export function openDatabase(input: DatabaseOptions): EarsDatabase;
+
+// @public
+export interface RankDeclaration {
+    damping?: number;
+    direction?: EdgeDirection;
+    relations: readonly string[];
+    tolerance?: number;
+    types: readonly string[];
+    weights?: boolean;
+}
+
+// @public
+export interface RelationRules {
+    acyclic?: boolean;
+    key?: readonly string[];
+    weighted?: boolean;
+}
+
+// @public
+export interface RowRules {
+    changeOrder?: boolean;
+    embed?: EmbedDeclaration;
+    fields?: Readonly<Record<string, FieldRule>>;
+    indexes?: readonly string[];
+    required: readonly string[];
+    search?: SearchDeclaration;
+    shortCode?: string;
+    substrings?: readonly string[];
+}
+
+// @public
+export interface SearchDeclaration {
+    readonly fields: Readonly<Record<string, number>>;
+    readonly stem?: string;
+}
 
 // @public
 export interface TemporaryDatabases {

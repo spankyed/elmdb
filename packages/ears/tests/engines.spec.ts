@@ -1,7 +1,11 @@
 // An engine is an instance its holder acts on: two share nothing, and a typed facade acts on whichever engine its
 // getter returns when called. Nothing in this package acts on an engine it wasn't given.
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { defineEars, type EARS, type Ears, type UntypedSchema } from '../src/index.ts';
+import { createTemporaryDatabases } from '../src/lmdb/index.ts';
 import { freshEngine } from './engine/engine-under-test.ts';
 
 const newEngine = () => freshEngine({ types: ['Note'], relationKinds: ['refs'], roles: [] });
@@ -67,5 +71,62 @@ describe('the engine', () => {
     const handed: Ears = engine;
     // @ts-expect-error `Ears` has no `admin`
     void handed.admin;
+  });
+});
+
+describe('createTemporaryDatabases', () => {
+  const validSchema = { types: { Note: { required: [] } }, relations: {}, roles: [] };
+
+  it('cleans up the temp directory and leaks no exit listener when open() fails', () => {
+    const beforeListeners = process.listenerCount('exit');
+    const isolated = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-isolated-'));
+    const saved = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+    process.env.TMPDIR = isolated;
+    process.env.TMP = isolated;
+    process.env.TEMP = isolated;
+    try {
+      const temps = createTemporaryDatabases();
+      expect(process.listenerCount('exit')).toBe(beforeListeners);
+
+      expect(() => temps.open({ types: { ['__proto__']: { required: [] } }, relations: {}, roles: [] })).toThrow();
+      expect(process.listenerCount('exit')).toBe(beforeListeners);
+      expect(fs.readdirSync(isolated)).toEqual([]);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      fs.rmSync(isolated, { recursive: true, force: true });
+    }
+  });
+
+  it('detaches its exit listener once all opened databases are disposed and cleans remaining handles on partial failure', () => {
+    const beforeListeners = process.listenerCount('exit');
+    const temps = createTemporaryDatabases();
+    const first = temps.open(validSchema);
+    const second = temps.open(validSchema);
+    const firstPath = first.database.path;
+    const secondPath = second.database.path;
+    expect(process.listenerCount('exit')).toBe(beforeListeners + 1);
+
+    // Hold a unit open on the first database so close() fails with UNIT_OPEN during disposeAll()
+    const unit = first.database.begin();
+    try {
+      expect(() => temps.disposeAll()).toThrow(expect.objectContaining({ code: 'UNIT_OPEN' }));
+      expect(second.database.isOpen, 'second database was still closed').toBe(false);
+      expect(fs.existsSync(secondPath), 'second temp dir was still removed').toBe(false);
+      expect(process.listenerCount('exit'), 'exit listener detached after disposeAll').toBe(beforeListeners);
+    } finally {
+      if (unit.isOpen) unit.abort();
+      if (first.database.isOpen) first.database.close();
+      fs.rmSync(firstPath, { recursive: true, force: true });
+    }
+
+    // Reusing the manager attaches and detaches cleanly again
+    const third = temps.open(validSchema);
+    expect(process.listenerCount('exit')).toBe(beforeListeners + 1);
+    third.dispose();
+    third.dispose();
+    expect(process.listenerCount('exit')).toBe(beforeListeners);
   });
 });

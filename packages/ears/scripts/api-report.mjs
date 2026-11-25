@@ -46,8 +46,7 @@ const configFor = (key, declaration) => ExtractorConfig.prepare({
       compilerMessageReporting: { default: { logLevel: ExtractorLogLevel.Warning } },
       extractorMessageReporting: {
         default: { logLevel: ExtractorLogLevel.Warning },
-        // A type an entry names without exporting it: most are exported by the other entry, where a consumer names them
-        'ae-forgotten-export': { logLevel: ExtractorLogLevel.None },
+        'ae-forgotten-export': { logLevel: ExtractorLogLevel.Error },
         'ae-incompatible-release-tags': { logLevel: ExtractorLogLevel.Warning, addToApiReportFile: true },
         'ae-internal-missing-underscore': { logLevel: ExtractorLogLevel.Warning, addToApiReportFile: true },
         'ae-internal-mixed-release-tag': { logLevel: ExtractorLogLevel.Warning, addToApiReportFile: true },

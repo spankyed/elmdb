@@ -88,7 +88,7 @@ export function relationRow(row: Record<string, unknown>): RelationEdge {
 const FIRST: readonly string[] = ['first', 'exists', 'firstRow'];
 /** The steps that keep or walk the ids one at a time, so the first id of their answer comes from the first ids they're given */
 const STREAMING: readonly string[] = [
-  'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'both', 'limit',
+  'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'both',
 ];
 /** The steps whose hits `hits()` answers */
 const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid', 'rank', 'ranked', 'similar'];
