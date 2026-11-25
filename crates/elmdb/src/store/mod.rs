@@ -18,7 +18,7 @@ mod idle_reads;
 mod kept;
 mod reach;
 mod record;
-pub use record::{left_by_a_backup, written_in};
+pub use record::{is_backup_lock, left_by_a_backup, written_in};
 mod restore;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;
@@ -1880,9 +1880,11 @@ impl Store {
 
     /// LMDB's copy of one read transaction into `target/data.mdb`, compacted: without the pages deletes freed. The
     /// copy uses an owned temporary file, synced and atomically replaced while the destination is reserved against
-    /// opens/publishers in this process. Failure before publication preserves an earlier backup; a later directory
-    /// sync failure reports that the complete copy is visible and a retry is safe. The caller owns the destination
-    /// exclusively against other processes; a backup artifact must not be an actively used database
+    /// opens and other publishers in this process (`ALREADY_OPEN`). Across processes, it holds the destination's
+    /// decision lock (`synced.lock`, created if absent) and, where an open made one, its presence lock (`open.lock`)
+    /// until publication finishes, refusing a target another process has open (`TARGET_IN_USE`) while any open that
+    /// begins there waits for the backup to end. Failure before publication preserves an earlier backup; a later
+    /// directory sync failure reports that the complete copy is visible and a retry is safe
     pub fn copy_to(&self, target: &Path) -> Result<()> {
         backup::copy(self, target)
     }

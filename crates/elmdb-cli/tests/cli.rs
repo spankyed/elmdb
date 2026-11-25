@@ -220,25 +220,33 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
     write_note(&source, "Note-1", "first");
     let src = source.to_str().unwrap();
 
-    // A new directory, then the same one again: an earlier backup, read since and left a copy a stopped run made, is
-    // replaced
+    // A new directory, then the same one again: an earlier backup, read since and left a copy a stopped run made,
+    // a `wake` directory and Finder's `.DS_Store`, is replaced
     let backups = dir.path().join("backups");
     let (code, out) = elmdb(&["backup", src, backups.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     let (code, out) = elmdb(&["check", backups.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     std::fs::write(backups.join(".elmdb-backup-stopped"), b"partial").unwrap();
+    std::fs::create_dir(backups.join("wake")).unwrap();
+    std::fs::write(backups.join(".DS_Store"), b"").unwrap();
     write_note(&source, "Note-2", "second");
     let (code, out) = elmdb(&["backup", src, backups.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     assert_eq!(notes(&backups), 2, "the earlier backup was replaced");
 
-    // An existing empty directory, and one reached through a symbolic link
+    // An existing empty directory, one holding only Finder's `.DS_Store`, and one reached through a symbolic link
     let empty = dir.path().join("empty");
     std::fs::create_dir(&empty).unwrap();
     let (code, out) = elmdb(&["backup", src, empty.to_str().unwrap()]);
     assert_eq!(code, 0, "{out}");
     assert!(empty.join("data.mdb").is_file());
+    let ds_only = dir.path().join("ds-only");
+    std::fs::create_dir(&ds_only).unwrap();
+    std::fs::write(ds_only.join(".DS_Store"), b"").unwrap();
+    let (code, out) = elmdb(&["backup", src, ds_only.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    assert!(ds_only.join("data.mdb").is_file());
     #[cfg(unix)]
     {
         let linked = dir.path().join("linked");
@@ -283,22 +291,91 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
         assert_eq!(std::fs::read(target.join("synced")).unwrap(), synced_before);
     }
 
-    // A directory holding anything a backup doesn't leave is refused untouched: a project's, named where its backup
-    // directory was meant, and another program's LMDB database, whose `data.mdb` a backup would replace
+    // A directory holding anything a backup doesn't leave is refused untouched: a project's or notes directory named
+    // where its backup directory was meant
     let project = dir.path().join("project");
     std::fs::create_dir(&project).unwrap();
     std::fs::write(project.join("package.json"), b"{}").unwrap();
-    let other_lmdb = dir.path().join("other-lmdb");
-    std::fs::create_dir(&other_lmdb).unwrap();
-    std::fs::write(other_lmdb.join("data.mdb"), b"another program's").unwrap();
-    std::fs::write(other_lmdb.join("lock.mdb"), b"").unwrap();
-    std::fs::write(other_lmdb.join("notes.txt"), b"").unwrap();
-    for (target, held) in [(&project, "package.json"), (&other_lmdb, "notes.txt")] {
+    let notes_dir = dir.path().join("notes-dir");
+    std::fs::create_dir(&notes_dir).unwrap();
+    std::fs::write(notes_dir.join("notes.txt"), b"keep").unwrap();
+    for (target, held) in [(&project, "package.json"), (&notes_dir, "notes.txt")] {
         let before: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
         let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
         assert!(out.contains("TARGET_IN_USE") && out.contains(held) && out.contains("no backup leaves"), "{out}");
         let after: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(after, before, "nothing made or replaced");
+    }
+
+    // Another program's bare LMDB database (`data.mdb` and/or `lock.mdb` without `synced.lock`) is refused untouched
+    let other_lmdb = dir.path().join("other-lmdb");
+    std::fs::create_dir(&other_lmdb).unwrap();
+    std::fs::write(other_lmdb.join("data.mdb"), b"another program's").unwrap();
+    std::fs::write(other_lmdb.join("lock.mdb"), b"").unwrap();
+    let data_only = dir.path().join("other-lmdb-data-only");
+    std::fs::create_dir(&data_only).unwrap();
+    std::fs::write(data_only.join("data.mdb"), b"another program's").unwrap();
+    let lock_only = dir.path().join("other-lmdb-lock-only");
+    std::fs::create_dir(&lock_only).unwrap();
+    std::fs::write(lock_only.join("lock.mdb"), b"").unwrap();
+    for target in [&other_lmdb, &data_only, &lock_only] {
+        let before: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
+        let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(
+            out.contains("TARGET_IN_USE") && out.contains("synced.lock") && out.contains("another program"),
+            "{out}"
+        );
+        let after: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(after, before, "nothing made or replaced");
+    }
+    assert_eq!(std::fs::read(other_lmdb.join("data.mdb")).unwrap(), b"another program's");
+
+    // Entries with an unexpected file type (even with `synced.lock` present) are refused untouched: a subdirectory
+    // named `data.mdb`, a regular file named `wake`, and on Unix symbolic links named `data.mdb` or `wake`
+    let subdir_data = dir.path().join("subdir-data");
+    std::fs::create_dir(&subdir_data).unwrap();
+    std::fs::create_dir(subdir_data.join("data.mdb")).unwrap();
+    std::fs::write(subdir_data.join("synced.lock"), b"").unwrap();
+    let file_wake = dir.path().join("file-wake");
+    std::fs::create_dir(&file_wake).unwrap();
+    std::fs::write(file_wake.join("data.mdb"), b"old").unwrap();
+    std::fs::write(file_wake.join("synced.lock"), b"").unwrap();
+    std::fs::write(file_wake.join("wake"), b"not a directory").unwrap();
+    for (target, held) in [(&subdir_data, "data.mdb"), (&file_wake, "wake")] {
+        let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("TARGET_IN_USE") && out.contains(held) && out.contains("unexpected file type"), "{out}");
+    }
+    assert!(subdir_data.join("data.mdb").is_dir());
+    assert_eq!(std::fs::read(file_wake.join("data.mdb")).unwrap(), b"old");
+    #[cfg(unix)]
+    {
+        let symlink_data = dir.path().join("symlink-data");
+        std::fs::create_dir(&symlink_data).unwrap();
+        let real_data = dir.path().join("real-data");
+        std::fs::write(&real_data, b"keep").unwrap();
+        std::os::unix::fs::symlink(&real_data, symlink_data.join("data.mdb")).unwrap();
+        std::fs::write(symlink_data.join("synced.lock"), b"").unwrap();
+        let (code, out) = elmdb(&["backup", src, symlink_data.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(
+            out.contains("TARGET_IN_USE") && out.contains("data.mdb") && out.contains("unexpected file type"),
+            "{out}"
+        );
+        assert_eq!(std::fs::read(&real_data).unwrap(), b"keep");
+
+        let symlink_wake = dir.path().join("symlink-wake");
+        std::fs::create_dir(&symlink_wake).unwrap();
+        let real_wake = dir.path().join("real-wake");
+        std::fs::create_dir(&real_wake).unwrap();
+        std::os::unix::fs::symlink(&real_wake, symlink_wake.join("wake")).unwrap();
+        std::fs::write(symlink_wake.join("data.mdb"), b"old").unwrap();
+        std::fs::write(symlink_wake.join("synced.lock"), b"").unwrap();
+        let (code, out) = elmdb(&["backup", src, symlink_wake.to_str().unwrap()]);
+        assert_eq!(code, 2, "{out}");
+        assert!(out.contains("TARGET_IN_USE") && out.contains("wake") && out.contains("unexpected file type"), "{out}");
+        assert_eq!(std::fs::read(symlink_wake.join("data.mdb")).unwrap(), b"old");
     }
 }
