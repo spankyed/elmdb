@@ -84,6 +84,14 @@ fn unit_set_checkpoint_map_full_poisons_unit() {
         OpenOptions { schema: Some(schema()), syncs: false, map_size_bytes: Some(1 << 20), ..Default::default() },
     )
     .unwrap();
+    // An overlong checkpoint name fails key validation before touching LMDB and must not poison the unit
+    let mut unit = db.begin().unwrap();
+    let too_long = unit.set_checkpoint(&"x".repeat(600), b"v").unwrap_err();
+    assert_eq!(too_long.code, ErrorCode::ValueInvalid, "{too_long}");
+    unit.set_checkpoint("ok", b"v").unwrap();
+    unit.commit(false).unwrap();
+
+    // An LMDB MapFull error during set_checkpoint must poison the unit so it cannot commit
     let mut unit = db.begin().unwrap();
     let err = unit.set_checkpoint("huge", &vec![0x5Au8; 4 << 20]).unwrap_err();
     assert_eq!(err.code, ErrorCode::MapFull, "{err}");

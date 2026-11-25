@@ -146,11 +146,6 @@ impl<'a> CloseGuard<'a> {
     fn restore(&self, shared: Arc<Store>) {
         *self.slot.lock().expect("the store slot's lock is never poisoned") = Slot::Open(shared);
     }
-
-    fn finish_gave_up(mut self) {
-        self.in_flight.finish(CloseOutcome::GaveUp);
-        self.finished = true;
-    }
 }
 
 impl Drop for CloseGuard<'_> {
@@ -616,14 +611,10 @@ impl Database {
                         // The caller's wait is spent: the record's locks are tried, and not waited for
                         let synced = if at_exit { shared.sync_owed(deadline) } else { Ok(()) };
                         close_guard.restore(shared);
-                        if let Err(error) = synced {
-                            close_guard.finish_gave_up();
-                            return Err(error);
-                        }
+                        synced?;
                         if at_exit {
                             // The process is exiting: nothing more is built here, which the building was told as
                             // its thread was let go of
-                            close_guard.finish_gave_up();
                             return Ok(false);
                         }
                         run_point!(CLOSE_GAVE_UP);
@@ -647,7 +638,6 @@ impl Database {
                         if let Ok(Some(builders)) = self.builders() {
                             builders.queue(Vec::new());
                         }
-                        close_guard.finish_gave_up();
                         return Ok(false);
                     }
                     store = shared;

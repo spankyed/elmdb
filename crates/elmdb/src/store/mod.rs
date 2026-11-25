@@ -627,14 +627,13 @@ pub(crate) fn decide_for_reading(dir: &Path) -> Result<impl Sized> {
 
 // LMDB also silently omits its lock table after EROFS, even without NO_LOCK. Beginning a reader first makes
 // mti_numreaders nonzero for every registered environment; a missing lock table always reports zero.
-#[cfg(test)]
 pub(crate) fn require_registered_reader(env: &Env<WithoutTls>, path: &Path) -> Result<()> {
-    registered(env, path, &read_txn(env)?)
+    let opening = Opening { env, dir: path, read_only: true, kept: None };
+    registered(env, path, &opening.read()?)
 }
 
-/// A read-only source database opened for `replace_with`
-pub(crate) struct SourceEnv {
-    pub(crate) env: Env<WithoutTls>,
+/// An opened read-only database handle and snapshot transaction for `replace_with`
+pub(crate) struct SourceSnapshot {
     pub(crate) db: heed::Database<'static, Bytes, Bytes>,
     pub(crate) txn: RoTxn<'static, WithoutTls>,
 }
@@ -653,15 +652,13 @@ fn registered(env: &Env<WithoutTls>, path: &Path, _reader: &RoTxn<'_, WithoutTls
     Ok(())
 }
 
-/// Opens a read-only source database for `replace_with`, verifying reader registration and torn-file integrity
-/// (`short_of_its_pages`), adopting any concurrent map growth (`MapResized`), and validating the format version.
+/// Opens a read-only source LMDB environment for `replace_with`.
 ///
 /// The caller must hold `reserve_source(source)` and `decide_for_reading(source)` for the lifetime of the returned
-/// environment and snapshot.
-pub(crate) fn open_source(source: &Path) -> Result<SourceEnv> {
+/// environment and verify reader registration with `require_registered_reader` before reading from it.
+pub(crate) fn open_source_env(source: &Path) -> Result<Env<WithoutTls>> {
     let canonical = source.canonicalize()?;
-    let data = canonical.join("data.mdb");
-    let file_bytes = std::fs::metadata(&data)?.len();
+    let file_bytes = std::fs::metadata(canonical.join("data.mdb"))?.len();
     let mut options = EnvOpenOptions::new().read_txn_without_tls();
     options.max_dbs(8);
     #[cfg(windows)]
@@ -672,11 +669,17 @@ pub(crate) fn open_source(source: &Path) -> Result<SourceEnv> {
     unsafe { options.flags(EnvFlags::READ_ONLY) };
     // SAFETY: the caller holds `reserve_source(source)`, guaranteeing no other environment in this process has
     // these files open.
-    let env = unsafe { options.open(&canonical) }?;
+    Ok(unsafe { options.open(&canonical) }?)
+}
+
+/// Verifies torn-file integrity (`short_of_its_pages`), adopts any concurrent map growth (`MapResized`), validates the
+/// format version, and returns an immutable snapshot transaction on an opened source environment.
+pub(crate) fn open_source_snapshot(env: &Env<WithoutTls>, source: &Path) -> Result<SourceSnapshot> {
+    let canonical = source.canonicalize()?;
+    let data = canonical.join("data.mdb");
     let mut file = std::fs::File::open(&data)?;
     let page = page_size_of(&mut file, &data)?;
-    let opening = Opening { env: &env, dir: &canonical, read_only: true, kept: None };
-    registered(&env, &canonical, &opening.read()?)?;
+    let opening = Opening { env, dir: &canonical, read_only: true, kept: None };
     short_of_its_pages(&opening, &mut file, page, &data)?;
     let rtxn = opening.read()?;
     let from = env
@@ -685,7 +688,7 @@ pub(crate) fn open_source(source: &Path) -> Result<SourceEnv> {
         })?
         .unwrap_commit()
         .ok_or_else(|| Error::new(ErrorCode::NotADatabase, format!("{} holds no elmdb database", source.display())))?;
-    let rtxn = opening.begin(|| with_reader_recovery(&env, || env.clone().static_read_txn()))?;
+    let rtxn = opening.begin(|| with_reader_recovery(env, || env.clone().static_read_txn()))?;
     let stamped = from.get(&rtxn, &meta_key(meta::FORMAT))?.map(<[u8]>::to_vec);
     if stamped.as_deref() != Some(&format::FORMAT_VERSION.to_be_bytes()[..]) {
         return Err(Error::new(
@@ -693,7 +696,7 @@ pub(crate) fn open_source(source: &Path) -> Result<SourceEnv> {
             format!("{} isn't a database in format {}", source.display(), format::FORMAT_VERSION),
         ));
     }
-    Ok(SourceEnv { env, db: from, txn: rtxn })
+    Ok(SourceSnapshot { db: from, txn: rtxn })
 }
 
 /// Syncs what an open committed, before the open goes on: a new environment's stamp, and the graphs' databases

@@ -1880,8 +1880,10 @@ fn recycle_reset_pages_routes_through_group_commit_and_adopts_grown_map() {
     )
     .unwrap();
     put(&store, "a", b"1").unwrap();
+    let before_txnid = store.env.info().last_txn_id;
     let before_syncs = store.syncs();
     store.recycle_reset_pages().unwrap();
+    assert!(store.env.info().last_txn_id > before_txnid, "recycle_reset_pages must commit a new LMDB transaction");
     assert!(store.syncs() > before_syncs, "recycle_reset_pages must account its commit and sync through GroupCommit");
 
     // Another process grows the map; recycle_reset_pages must adopt the grown map on MapResized and succeed

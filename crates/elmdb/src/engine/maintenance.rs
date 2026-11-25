@@ -401,7 +401,9 @@ impl Database {
         // Opened as an open opens it: at the last synced commit where the record asks for a restore, and held open
         // while it is read, so that no open that finds it alone restores it meanwhile
         let _opened = crate::store::decide_for_reading(source)?;
-        let crate::store::SourceEnv { env, db: from, txn: rtxn } = crate::store::open_source(source)?;
+        let env = crate::store::open_source_env(source)?;
+        crate::store::require_registered_reader(&env, source)?;
+        let crate::store::SourceSnapshot { db: from, txn: rtxn } = crate::store::open_source_snapshot(&env, source)?;
         // Retain one immutable source snapshot through retries, copying primary ranges directly into the write.
         // No source values are retained after each put, and derived source rows are never traversed.
         let store = self.store()?;

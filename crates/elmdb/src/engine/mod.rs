@@ -1184,20 +1184,13 @@ impl Unit {
         checkpoint_name(name)?;
         let key = keys::checkpoint(name);
         let mut t = self.view(0.0)?;
-        let depth = t.state.savepoint();
-        match t.put(&key, value) {
-            Ok(()) => {
-                t.release(depth)?;
-                Ok(())
+        if let Err(error) = t.put(&key, value) {
+            if error.code != ErrorCode::ValueInvalid {
+                self.poisoned = Some(error.clone());
             }
-            Err(error) => {
-                let rolled_back = t.rollback_to(depth);
-                if error.code == ErrorCode::MapFull || rolled_back.is_err() {
-                    self.poisoned = Some(error.clone());
-                }
-                Err(error)
-            }
+            return Err(error);
         }
+        Ok(())
     }
 
     /// The checkpoint named `name`, as this unit sees it
