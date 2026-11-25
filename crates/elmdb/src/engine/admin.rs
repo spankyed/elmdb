@@ -149,10 +149,12 @@ fn requires_declared(declared: bool, what: &str) -> Result<()> {
 pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str) -> Result<()> {
     refuse_engine_field(from, "renameField")?;
     refuse_engine_field(to, "renameField")?;
-    requires_declared(
-        t.schema.types.get(entity_type).is_some_and(|d| d.fields.contains_key(to)),
-        &format!("{entity_type}.{to}"),
-    )?;
+    let to_def = t.schema.types.get(entity_type).and_then(|d| d.fields.get(to)).cloned();
+    requires_declared(to_def.is_some(), &format!("{entity_type}.{to}"))?;
+    if from == to {
+        return Ok(());
+    }
+    let to_def = to_def.expect("declared above");
     for id in ids_of_type(t, entity_type)? {
         if let Some(value) = entities::get(t, &id, from)? {
             if entities::get(t, &id, to)?.is_some() {
@@ -164,6 +166,7 @@ pub fn rename_field(t: &mut Txn<'_, '_>, entity_type: &str, from: &str, to: &str
                     ),
                 ));
             }
+            values::check_field(entity_type, to, &to_def, &value)?;
             entities::delete_field(t, &id, from)?;
             entities::put_field(t, &id, to, &value)?;
         }
@@ -287,6 +290,9 @@ pub fn rename_relation(t: &mut Txn<'_, '_>, from: &str, to: &str) -> Result<()> 
 /// rule a load left broken that names a moved entity
 pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> Result<()> {
     requires_declared(t.schema.types.contains_key(to), &format!("The type {to}"))?;
+    if from == to {
+        return Ok(());
+    }
     let moved: Vec<(String, String)> = ids_of_type(t, from)?
         .into_iter()
         .map(|old| {
@@ -297,7 +303,9 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
     if moved.is_empty() {
         return Ok(());
     }
-    let renamed = |id: &str| moved.iter().find(|(old, _)| old == id).map(|(_, new)| new.clone());
+    let forward: std::collections::HashMap<&str, &str> =
+        moved.iter().map(|(old, new)| (old.as_str(), new.as_str())).collect();
+    let renamed = |id: &str| forward.get(id).map(|&new| new.to_owned());
     // The rules rows break as the rename finds them, which it leaves to `check()`
     let broken_before: std::collections::HashSet<(String, String)> =
         derive::rule_violations(t)?.into_iter().map(|violation| (violation.subject, violation.message)).collect();
@@ -331,15 +339,26 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
             t.put(&keys::value(new, &name), &bytes)?;
             t.del(&keys::value(old, &name))?;
         }
-        // Its embeddings are primary data, keyed by type and id, under each vector index the type keeps
-        for index in super::vector::vector_indexes(t.schema, to) {
-            for (key, bytes) in t.scan(&keys::vectors_of(from, &index.name, old))? {
-                let Some(Part::Number(chunk)) = decode_key(&key)?.pop() else {
-                    return Err(Error::new(ErrorCode::Corrupted, format!("renameType: an embedding key of {old}")));
-                };
-                t.put(&keys::vector(to, &index.name, new, chunk as u32), &bytes)?;
-                t.del(&key)?;
+    }
+    // Primary embeddings (`p/q`) under `from`: move those whose vector index name exists on `to`, and delete orphaned
+    // embeddings whose index name `to` does not declare
+    let to_vectors: std::collections::HashSet<String> =
+        super::vector::vector_indexes(t.schema, to).into_iter().map(|i| i.name).collect();
+    let from_vectors = {
+        let mut key = crate::format::Prefix::Vector.key();
+        key.string(from);
+        key.to_vec()
+    };
+    for (key, bytes) in t.scan(&from_vectors)? {
+        let parts = decode_key(&key)?;
+        let [_, _, Part::String(index), Part::String(old), Part::Number(chunk)] = parts.as_slice() else {
+            return Err(Error::new(ErrorCode::Corrupted, format!("renameType: an embedding key of {from}")));
+        };
+        if let Some(&new) = forward.get(old.as_str()) {
+            if to_vectors.contains(index) {
+                t.put(&keys::vector(to, index, new, *chunk as u32), &bytes)?;
             }
+            t.del(&key)?;
         }
     }
     for (id, stored) in all_relations(t)? {
@@ -426,7 +445,9 @@ pub fn rename_type(t: &mut Txn<'_, '_>, from: &str, to: &str, sequence: u64) -> 
         .into_iter()
         .find(|violation| !broken_before.contains(&(violation.subject.clone(), violation.message.clone())));
     if let Some(violation) = broken {
-        let was = |new: &str| moved.iter().find(|(_, id)| id == new).map(|(old, _)| old.as_str());
+        let reverse: std::collections::HashMap<&str, &str> =
+            moved.iter().map(|(old, new)| (new.as_str(), old.as_str())).collect();
+        let was = |new: &str| reverse.get(new).copied();
         // An entity moved is named with the id it has, and a relation as one, where `check()` names its row's key
         let relation = derive::key_text(&keys::relation(""));
         let subject: Vec<String> = violation
