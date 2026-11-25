@@ -1078,7 +1078,7 @@ impl<R: Read> Query<'_, R> {
             }
             Step::Rank { kinds, direction, seeds, weights, damping, iterations, tolerance } => {
                 // NaN is in none of these ranges
-                let valid = (0.0..1.0).contains(damping) && *damping > 0.0 && *tolerance > 0.0;
+                let valid = (0.0..1.0).contains(damping) && *damping > 0.0 && tolerance.is_finite() && *tolerance > 0.0;
                 if !valid || *iterations == 0 || *iterations > MAX_ITERATIONS {
                     return Err(Error::new(
                         ErrorCode::BatchInvalid,

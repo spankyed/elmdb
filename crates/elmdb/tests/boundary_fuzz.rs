@@ -10,7 +10,7 @@ use elmdb::engine::answer;
 use elmdb::engine::batch::Batch;
 use elmdb::engine::changed::Position;
 use elmdb::engine::maintenance::Load;
-use elmdb::engine::plan::Reads;
+use elmdb::engine::plan::{Direction, Plan, ReadOp, Reads, Scope, Start, Step, Terminal};
 use elmdb::schema::{MAX_LIST_DEPTH, SCHEMA_LANGUAGE, Schema};
 use elmdb::{Database, ErrorCode, OpenOptions};
 use serde_json::{Value as Json, json};
@@ -217,14 +217,27 @@ fn byte_boundaries_survive_seeded_fuzz_and_byte_flips() {
     .unwrap();
     let valid_pos = rmp_serde::to_vec_named(&Position::default()).unwrap();
 
+    let assert_safe_err = |err: elmdb::Error, label: &str| {
+        assert!(
+            !matches!(err.code, ErrorCode::Corrupted | ErrorCode::Io | ErrorCode::Closed),
+            "{label}: unexpected fatal error {err}"
+        );
+    };
+
     for seed in 1..=200u64 {
         let mut r = Rng::new(seed);
         let raw = r.bytes(64);
         let packed = encode_value(&r.value(0));
         for payload in [&raw, &packed] {
-            let _ = db.read_bytes(payload);
-            let _ = db.write_bytes(payload, false);
-            let _ = bulk_db.bulk_load_bytes(payload);
+            if let Err(err) = db.read_bytes(payload) {
+                assert_safe_err(err, &format!("seed {seed} read_bytes"));
+            }
+            if let Err(err) = db.write_bytes(payload, false) {
+                assert_safe_err(err, &format!("seed {seed} write_bytes"));
+            }
+            if let Err(err) = bulk_db.bulk_load_bytes(payload) {
+                assert_safe_err(err, &format!("seed {seed} bulk_load_bytes"));
+            }
             if let Err(err) = db.changed_since_bytes(&types, payload, 16) {
                 assert_eq!(err.code, ErrorCode::BatchInvalid, "seed {seed}: {err}");
             }
@@ -241,16 +254,24 @@ fn byte_boundaries_survive_seeded_fuzz_and_byte_flips() {
             }
             match kind {
                 "batch" => {
-                    let _ = db.write_bytes(&mutated, false);
+                    if let Err(err) = db.write_bytes(&mutated, false) {
+                        assert_safe_err(err, &format!("seed {seed} batch flip"));
+                    }
                 }
                 "reads" => {
-                    let _ = db.read_bytes(&mutated);
+                    if let Err(err) = db.read_bytes(&mutated) {
+                        assert_safe_err(err, &format!("seed {seed} reads flip"));
+                    }
                 }
                 "loads" => {
-                    let _ = bulk_db.bulk_load_bytes(&mutated);
+                    if let Err(err) = bulk_db.bulk_load_bytes(&mutated) {
+                        assert_safe_err(err, &format!("seed {seed} loads flip"));
+                    }
                 }
                 _ => {
-                    let _ = db.changed_since_bytes(&types, &mutated, 16);
+                    if let Err(err) = db.changed_since_bytes(&types, &mutated, 16) {
+                        assert_eq!(err.code, ErrorCode::BatchInvalid, "seed {seed} pos flip: {err}");
+                    }
                 }
             }
         }
@@ -415,6 +436,28 @@ fn rank_and_communities_enforce_iteration_cap() {
         }))
         .unwrap_err();
         assert_eq!(err.code, ErrorCode::BatchInvalid, "communities iterations={bad}: {err}");
+    }
+
+    // Non-finite rank tolerance passed directly over the Rust API must be refused with BatchInvalid
+    for bad_tolerance in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        let plan = Plan {
+            scope: Scope::Live,
+            start: Start::Types { types: vec!["Note".into()] },
+            steps: vec![Step::Rank {
+                kinds: vec!["refs".into()],
+                direction: Direction::Out,
+                seeds: None,
+                weights: true,
+                damping: 0.85,
+                iterations: 100,
+                tolerance: bad_tolerance,
+            }],
+            terminal: Terminal::Ids,
+        };
+        let err = db
+            .read(&Reads { reads: vec![ReadOp::Query { plan, visits: false, explain: false }], track: None })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::BatchInvalid, "rank tolerance={bad_tolerance}: {err}");
     }
 }
 

@@ -367,19 +367,24 @@ mod tests {
         }
 
         // Long label with repeated characters: both miss and hit complete immediately without quadratic rescanning
-        let repeated = "a".repeat(20_000);
+        // (scaled down under Miri to stay well within its interpreter budget while still exercising `score_long`)
+        let (repeat_len, alt_len, alt_query_len) = if cfg!(miri) { (200, 100, 40) } else { (20_000, 10_000, 200) };
+        let repeated = "a".repeat(repeat_len);
         assert!(score("aaaaab", &repeated).is_none());
         let with_tail = format!("{repeated}b");
         let hit = score("aaab", &with_tail).unwrap();
-        assert_eq!(hit.positions, [19_997, 19_998, 19_999, 20_000]);
+        let end = repeat_len as u32;
+        assert_eq!(hit.positions, [end - 3, end - 2, end - 1, end]);
 
         // Worst-case alternating pattern: O(Q * L) completes cleanly and matches exact greedy score
-        let alternating = "ab".repeat(10_000);
-        let alt_query = "ab".repeat(200);
+        let alternating = "ab".repeat(alt_len);
+        let alt_query = "ab".repeat(alt_query_len);
         let alt_hit = score(&alt_query, &alternating).unwrap();
-        let expected_positions: Vec<u32> = (0..400).collect();
+        let q_chars = (alt_query_len * 2) as u32;
+        let expected_positions: Vec<u32> = (0..q_chars).collect();
         assert_eq!(alt_hit.positions, expected_positions);
-        let expected_score = 400.0 * MATCH + WORD_START + 399.0 * CONSECUTIVE - LENGTH * (alternating.len() as f64);
+        let expected_score = f64::from(q_chars) * MATCH + WORD_START + f64::from(q_chars - 1) * CONSECUTIVE
+            - LENGTH * (alternating.len() as f64);
         assert_eq!(alt_hit.score, expected_score);
     }
 }
