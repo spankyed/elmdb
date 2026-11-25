@@ -154,6 +154,7 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
       - run: cargo xtask check-mutant-exclusions
+      - run: python3 -B scripts/test-mutants-in-diff.py
       - name: binding
         run: |
           cargo run -p elmdb --example read-allocations -- --json > "$RUNNER_TEMP/read-allocations.json"

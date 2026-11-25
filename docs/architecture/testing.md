@@ -267,6 +267,8 @@ python3 scripts/mutants-in-diff.py main 3 --shard 1/4
 python3 scripts/mutants-in-diff.py main 3 --windows-only
 # The same again after a run that was stopped: only the mutants no run of this change has caught yet
 python3 scripts/mutants-in-diff.py main 3 --resume
+# A narrow local iteration over one file, mutant regex or nextest filter, keeping the disk floor and exclusions
+python3 scripts/mutants-in-diff.py main 2 --file crates/elmdb/src/engine/ranks.rs --re 'ranks\.rs:(42|58):' --test-filter 'binary(rank_default)'
 # One of CI's four shares alone, on a branch, while the others run or after its runner was lost
 gh workflow run mutants.yml --ref BRANCH -f base=origin/main -f shard=2
 # What the exclusions leave out of a file
@@ -281,7 +283,9 @@ cargo mutants --config "$(cargo xtask mutant-exclusions)" -j 3 -o target/mutants
 
 Run cargo-mutants without `CARGO_TARGET_DIR`: it builds each job's copy of the tree in a directory of its own, and one
 shared by every copy lets a job run another's test binary, which reports a caught mutant as missed.
-`scripts/mutants-in-diff.py` drops it from what it runs.
+`scripts/mutants-in-diff.py` drops it from what it runs, sweeps unlocked `cargo-mutants-*` temporary copies idle past an
+hour when no `cargo-mutants` process is running before enforcing the 20 GB disk floor outside CI, and accepts `--file`,
+`--re` and `--test-filter` so a narrow iteration stays on the same guarded path.
 
 Code behind `cfg(target_os = "linux")` or `cfg(windows)` doesn't compile on a Mac, so its mutants show as missed there:
 the Linux ones are read in a Linux container (`python3 scripts/linux.py -- sh -c 'cargo install --locked

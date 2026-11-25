@@ -58,6 +58,7 @@ const FIRST: &[Step] = &[
             "warnings",
         ],
     ),
+    step("mutants-in-diff's own tests", &[PYTHON, "-B", "scripts/test-mutants-in-diff.py"]),
 ];
 
 /// After the repository checks: the suites, the heap bound and the benchmarks' smoke, and the concurrency models with
