@@ -730,4 +730,385 @@ describe('waiting for one watch to catch up', () => {
     slow.stop();
     cheap.stop();
   });
+
+  it('resolves caughtUp and settled immediately on a closed database without arming a held timer', async () => {
+    const watch = watching(1, 'closed');
+    await drain();
+    commit();
+    await turn();
+    expect(time.held(), 'unheld timer stands for the gap').toEqual([false]);
+
+    connection.database.close();
+    expect(await resolved(watch.caughtUp({ soon: true }))).toBe(true);
+    expect(await resolved(watches.settled())).toBe(true);
+    expect(time.pending(), 'no timer remains armed after close').toBe(0);
+    expect(time.held()).toEqual([]);
+    expect(() => watch.stop()).not.toThrow();
+  });
+
+  it('keeps re-entrant caughtUp pending during runOnce until delivery and any commit made during it finish', async () => {
+    let reentrant: Promise<void> | undefined;
+    let reentrantDuringWrite: Promise<void> | undefined;
+    let mode: 'none' | 'read' | 'read-and-write' = 'none';
+    const seen: string[][] = [];
+    const handle = watches.watch(() => {
+      time.spend(1);
+      if (mode === 'read') {
+        mode = 'none';
+        reentrant = handle.caughtUp();
+      } else if (mode === 'read-and-write') {
+        mode = 'none';
+        const snapshot = rows();
+        reentrantDuringWrite = handle.caughtUp();
+        commit();
+        return snapshot;
+      }
+      return rows();
+    }, (value) => {
+      seen.push(value);
+    }, { label: 'reentrant' });
+    await drain();
+
+    // Case 1: re-entrant caughtUp during read with no extra commit resolves after delivery completes
+    mode = 'read';
+    time.advance(1000);
+    commit();
+    await Promise.resolve();
+    expect(reentrant).toBeDefined();
+    expect(await resolved(reentrant!)).toBe(true);
+    expect(seen.at(-1)).toEqual(['Row-1']);
+
+    // Case 2: re-entrant caughtUp during read that also commits waits for the subsequent owed run
+    mode = 'read-and-write';
+    time.advance(1000);
+    commit();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(reentrantDuringWrite).toBeDefined();
+    expect(seen.at(-1), 'first run delivered pre-write snapshot').toEqual(['Row-1', 'Row-2']);
+    expect(await resolved(reentrantDuringWrite!), 'still waiting for the commit made inside runOnce').toBe(false);
+    await drain();
+    expect(await resolved(reentrantDuringWrite!)).toBe(true);
+    expect(seen.at(-1)).toEqual(['Row-1', 'Row-2', 'Row-3']);
+    handle.stop();
+  });
+
+  it('does not suppress re-delivery or skip slow-watch charging when observer.next throws', async () => {
+    let shouldThrow = true;
+    const attempts: number[] = [];
+    const delivered: number[] = [];
+    const errors: unknown[] = [];
+    const onError = (error: unknown) => { errors.push(error); };
+    process.on('uncaughtException', onError);
+    try {
+      const handle = watches.watch(() => {
+        time.spend(20);
+        // Always returns 1 once any row exists, so throwing on the first delivery must not poison `last`
+        return rows().length > 0 ? 1 : 0;
+      }, (value) => {
+        attempts.push(value);
+        if (value === 1 && shouldThrow) throw new Error('observer failed');
+        delivered.push(value);
+      }, { label: 'throwing-slow' });
+      await drain();
+      expect(delivered).toEqual([0]);
+
+      // Three slow runs where observer throws on value 1: slow watch warning must still fire
+      for (let i = 0; i < 3; i++) {
+        time.advance(1000);
+        commit();
+        await drain();
+      }
+      expect(attempts.filter((v) => v === 1)).toHaveLength(3);
+      expect(errors).toHaveLength(3);
+      expect(warned.some((w) => w.kind === 'slowWatch' && w.label === 'throwing-slow')).toBe(true);
+
+      // Once observer stops throwing, the same value 1 is delivered rather than suppressed by sameValue
+      shouldThrow = false;
+      time.advance(1000);
+      commit();
+      await drain();
+      expect(delivered).toEqual([0, 1]);
+      handle.stop();
+    } finally {
+      process.off('uncaughtException', onError);
+    }
+  });
+
+  it('prioritizes a watch lifted with caughtUp({ soon: true }) mid-flush in the remaining batch and reschedules via microtask', async () => {
+    const order: string[] = [];
+    let liftInFlush = false;
+    let w3!: ReturnType<Watches['watch']>;
+    const w1 = watches.watch(() => {
+      order.push('w1');
+      time.spend(2);
+      if (liftInFlush) {
+        liftInFlush = false;
+        void w3.caughtUp({ soon: true });
+      }
+      return rows();
+    }, () => {}, { label: 'w1' });
+    const w2 = watches.watch(() => {
+      order.push('w2');
+      time.spend(5);
+      return rows();
+    }, () => {}, { label: 'w2' });
+    w3 = watches.watch(() => {
+      order.push('w3');
+      time.spend(5);
+      return rows();
+    }, () => {}, { label: 'w3' });
+    await drain();
+    time.advance(1000);
+    order.length = 0;
+    liftInFlush = true;
+    commit();
+    await Promise.resolve();
+    await Promise.resolve();
+    // w1 took 2 ms and lifted soon on w3 (cost 5 ms), so w3 runs before w2 within the 8 ms slice
+    expect(order).toEqual(['w1', 'w3']);
+    await drain();
+    expect(order).toEqual(['w1', 'w3', 'w2']);
+    w1.stop();
+    w2.stop();
+    w3.stop();
+
+    // Now test rescheduling a deferred watch via microtask when soon is lifted after it was put in `left`
+    const soonDeferred = watches.watch(() => {
+      time.spend(1);
+      return rows();
+    }, () => {}, { label: 'deferred-soon' });
+    await drain();
+    commit();
+    await turn();
+    // 5 ms elapsed: past soonDeferred's 4*1 = 4 ms cost gap, still inside its 16 ms frame gap
+    time.advance(5);
+    let lifted: Promise<void> | undefined;
+    let shouldLift = true;
+    // `freshLifter` flushes on microtask while `soonDeferred` is still in its frame gap (`left`),
+    // then lifts `soon` on `soonDeferred`, so `flush()` must reschedule with microtask `plan(true, true)`
+    const freshLifter = watches.watch(() => rows(), () => {
+      if (shouldLift) {
+        shouldLift = false;
+        lifted = soonDeferred.caughtUp({ soon: true });
+      }
+    }, { label: 'fresh-lifter' });
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(lifted).toBeDefined();
+    expect(await resolved(lifted!), 'rescheduled via microtask, not later() macrotask').toBe(true);
+
+    soonDeferred.stop();
+    freshLifter.stop();
+  });
+
+  it('downgrades or replans the timer when stopping a waited watch while other watches remain dirty', async () => {
+    const fast = watching(5, 'fast');
+    const slow = watching(10, 'slow');
+    await drain();
+    time.advance(1000);
+    commit();
+    await turn();
+    await turn();
+    // fast ran at +5 (gap 20 ms -> due +25), slow ran at +15 (gap 40 ms -> due +55); both are in their gaps now
+    commit();
+    await turn();
+    expect(time.held()).toEqual([false]);
+
+    const waitFast = fast.caughtUp();
+    expect(time.held(), 'timer is held while fast is waited on').toEqual([true]);
+    const beforeDiag = watches.diagnostics();
+    expect(beforeDiag.scheduler.timerHeld).toBe(true);
+    const fastDue = beforeDiag.scheduler.timerAt!;
+
+    fast.stop();
+    expect(await resolved(waitFast)).toBe(true);
+    expect(time.held(), 'stopping the only waited watch clears the held flag').toEqual([false]);
+    const afterDiag = watches.diagnostics();
+    expect(afterDiag.scheduler.timerHeld).toBe(false);
+    expect(afterDiag.scheduler.timerAt!, 'timer replanned to slow watch deadline').toBeGreaterThan(fastDue);
+
+    // Stopping a later waited watch while an earlier unwaited watch remains also clears `held`
+    const earlier = watching(5, 'earlier');
+    await drain();
+    time.advance(1000);
+    commit();
+    await turn();
+    await turn();
+    commit();
+    await turn();
+    const waitSlowAgain = slow.caughtUp();
+    expect(time.held()).toEqual([true]);
+    slow.stop();
+    expect(await resolved(waitSlowAgain)).toBe(true);
+    expect(time.held(), 'remaining earlier watch timer is unheld').toEqual([false]);
+    earlier.stop();
+  });
+
+  it('tags deliveries with the commit sequence before read and does not resolve caughtUp before pending database commits', async () => {
+    const initialCommit = connection.lastCommit();
+    let commitInsideRead = false;
+    const delivered: Array<{ value: string[]; commit: number }> = [];
+    const handle = watches.watch(() => {
+      const snapshot = rows();
+      if (commitInsideRead) {
+        commitInsideRead = false;
+        commit();
+      }
+      return snapshot;
+    }, (value, seq) => {
+      delivered.push({ value, commit: seq });
+    }, { label: 'watermark' });
+    await drain();
+    expect(delivered).toEqual([{ value: [], commit: initialCommit }]);
+
+    time.advance(1000);
+    commitInsideRead = true;
+    commit();
+    await Promise.resolve();
+    await Promise.resolve();
+    // First delivery read commit N+1's rows before writing commit N+2, so it must be tagged with N+1, not N+2
+    expect(delivered[1]).toEqual({ value: ['Row-1'], commit: initialCommit + 1 });
+    await drain();
+    expect(delivered[2]).toEqual({ value: ['Row-1', 'Row-2'], commit: initialCommit + 2 });
+    handle.stop();
+
+    // Builder-commit race: database sequence advances ahead of scheduler's lastSeenCommit before async callback fires
+    let mockSeq = 5;
+    let mockListener: ((c: { sequence: number; touched: ReadonlySet<number> | 'all'; source?: 'local' | 'builder' | 'elsewhere' }) => void) | undefined;
+    const mockConnection = {
+      database: { isOpen: true },
+      untrack() {},
+      tally: () => undefined,
+      callSite: () => 'mock',
+      track: (_t: number, fn: () => unknown) => fn(),
+      lastCommit: () => mockSeq,
+      trackStats: () => ({ keys: 0, ranges: 0 }),
+      onCommit(fn: typeof mockListener) { mockListener = fn; return () => { mockListener = undefined; }; },
+    } as unknown as Connection;
+    const mockWatches = createWatches(mockConnection, { clock: time.clock });
+    const seen: number[] = [];
+    let runs = 0;
+    const w = mockWatches.watch(() => { runs++; return mockSeq; }, (v) => { seen.push(v); }, { label: 'builder-race' });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(seen).toEqual([5]);
+
+    // Simulate Rust builder commit advancing database.sequence to 6 before TSFN fires on the JS event loop
+    mockSeq = 6;
+    const waiting = w.caughtUp();
+    expect(await resolved(waiting), 'caughtUp does not falsely resolve while database is ahead').toBe(false);
+    // Now TSFN delivers the builder commit before the turn finishes
+    mockListener?.({ sequence: 6, touched: new Set([1]), source: 'builder' });
+    time.advance(gap);
+    await turn();
+    expect(await resolved(waiting)).toBe(true);
+    expect(seen).toEqual([5, 6]);
+
+    // syncBuilder() synchronously advances watches and suppresses a later duplicate builder callback
+    mockSeq = 7;
+    const runsBefore = runs;
+    mockWatches.syncBuilder();
+    const waitSynced = w.caughtUp();
+    expect(await resolved(waitSynced)).toBe(false);
+    time.advance(gap);
+    await turn();
+    expect(await resolved(waitSynced)).toBe(true);
+    expect(seen).toEqual([5, 6, 7]);
+    expect(runs).toBe(runsBefore + 1);
+    mockListener?.({ sequence: 7, touched: new Set([1]), source: 'builder' });
+    await turn();
+    expect(runs, 'delayed builder TSFN for already-synced commit does not re-run watch').toBe(runsBefore + 1);
+    w.stop();
+  });
+
+  it('exposes payload-free scheduler and per-watch diagnostics across lifecycle states', async () => {
+    const initialCommit = connection.lastCommit();
+    let midFlushDiag: ReturnType<Watches['diagnostics']> | undefined;
+    const w = watches.watch(() => {
+      time.spend(2);
+      midFlushDiag = watches.diagnostics();
+      return rows();
+    }, () => {}, { label: 'diag-watch' });
+
+    const queuedDiag = watches.diagnostics();
+    expect(queuedDiag.scheduler).toMatchObject({
+      flushing: false,
+      queued: 'microtask',
+      timerAt: null,
+      timerHeld: false,
+      dirtyCount: 1,
+      caughtUpWaiting: 0,
+      settledWaiting: 0,
+      lastSeenCommit: initialCommit,
+      databaseCommit: initialCommit,
+    });
+    expect(queuedDiag.watches).toEqual([{
+      label: 'diag-watch',
+      owed: true,
+      soon: false,
+      running: false,
+      stopped: false,
+      costMs: 0,
+      dueAt: null,
+      waiters: 0,
+      lastDeliveredCommit: null,
+    }]);
+
+    await drain();
+    expect(midFlushDiag?.scheduler.flushing).toBe(true);
+    expect(midFlushDiag?.watches[0]).toMatchObject({ label: 'diag-watch', running: true, owed: false });
+
+    const idleDiag = watches.diagnostics();
+    expect(idleDiag.scheduler).toMatchObject({
+      flushing: false,
+      queued: 'none',
+      timerAt: null,
+      timerHeld: false,
+      dirtyCount: 0,
+      caughtUpWaiting: 0,
+      settledWaiting: 0,
+      lastSeenCommit: initialCommit,
+      databaseCommit: initialCommit,
+    });
+    expect(idleDiag.watches[0]).toMatchObject({
+      label: 'diag-watch',
+      owed: false,
+      soon: false,
+      running: false,
+      stopped: false,
+      costMs: 2,
+      dueAt: null,
+      waiters: 0,
+      lastDeliveredCommit: initialCommit,
+    });
+
+    commit();
+    await turn();
+    const waitSoon = w.caughtUp({ soon: true });
+    const waitingDiag = watches.diagnostics();
+    expect(waitingDiag.scheduler).toMatchObject({
+      flushing: false,
+      timerHeld: true,
+      dirtyCount: 1,
+      caughtUpWaiting: 1,
+      lastSeenCommit: initialCommit + 1,
+      databaseCommit: initialCommit + 1,
+    });
+    expect(waitingDiag.scheduler.timerAt).toBeTypeOf('number');
+    expect(waitingDiag.watches[0]).toMatchObject({
+      label: 'diag-watch',
+      owed: true,
+      soon: true,
+      waiters: 1,
+    });
+    expect(waitingDiag.watches[0]!.dueAt).toBeTypeOf('number');
+
+    await drain();
+    expect(await resolved(waitSoon)).toBe(true);
+    expect(watches.diagnostics().watches[0]!.lastDeliveredCommit).toBe(initialCommit + 1);
+    w.stop();
+    expect(watches.diagnostics().watches).toEqual([]);
+  });
 });

@@ -12,7 +12,7 @@ import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
 import { declaredNames, toElmdbSchema, withDeclarations, type EngineSchema } from './schema.ts';
 import { idSuffix } from './ids.ts';
-import { createWatches, type WatchObserver, type WatchOptions, type WatchReadContext, type Watching } from './watch.ts';
+import { createWatches, type WatchDiagnostics, type WatchObserver, type WatchOptions, type WatchReadContext, type Watching } from './watch.ts';
 import { RESERVED_ENTITY_TYPES } from './errors.ts';
 
 /** An entity as a read gives it: its id and type, and every attribute it holds */
@@ -231,6 +231,8 @@ export interface EarsAdmin {
   watchesSettled(): Promise<void>;
   /** How many watches are open, and how many keys and ranges their read sets hold */
   watchStats(): { watches: number; keys: number; ranges: number };
+  /** Payload-free snapshot of the watch scheduler and open watches, for diagnosing stalls */
+  watchDiagnostics(): WatchDiagnostics;
   /**
    * Counting the engine's calls to its database — reads, writes outside a unit, and units — with their time and the
    * code that made each, off until started: what a measurement of a program's work reads
@@ -257,7 +259,7 @@ export function createEarsEngine({ database, warn, freeze, callSites }: EARSRunt
   const connection = createConnection(database, { freeze, callSites });
   // A write's result names what it touched. An index's own commits have no result to read, so a watch over a `ranked`
   // would otherwise hold its answer until something writes. One engine to a database: elmdb refuses a second listener
-  database.hearBuilderCommits(connection.heard);
+  database.hearBuilderCommits((commit) => connection.heard(commit, 'builder'));
   let declared = declaredNames(database.schema);
   const isEntityType = (name: string) => declared.types.has(name);
   const isRelationKind = (name: string) => declared.relationKinds.has(name);
@@ -464,9 +466,11 @@ export function createEarsEngine({ database, warn, freeze, callSites }: EARSRunt
     waitForIndexBuilds() {
       outsideUnit('waitForIndexBuilds()');
       database.waitForIndexBuilds();
+      watches.syncBuilder();
     },
     watchesSettled: watches.settled,
     watchStats: watches.stats,
+    watchDiagnostics: watches.diagnostics,
     calls: connection.calls,
     observe: connection.observe,
   };

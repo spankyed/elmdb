@@ -247,6 +247,7 @@ export interface EarsAdmin {
     transactWithoutHook<T>(fn: () => T): T;
     updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
     waitForIndexBuilds(): void;
+    watchDiagnostics(): WatchDiagnostics;
     watchesSettled(): Promise<void>;
     watchStats(): {
         watches: number;
@@ -1098,12 +1099,45 @@ export interface Upsert {
 export const WATCH_SCHEDULE: WatchSchedule;
 
 // @public
+export type WatchCauseSource = 'local' | 'builder' | 'elsewhere';
+
+// @public
 export interface WatchCount {
     label: string;
     // (undocumented)
     ms: number;
     runs: number;
     skipped: number;
+}
+
+// @public
+export interface WatchDiagnostics {
+    // (undocumented)
+    readonly scheduler: WatchSchedulerDiagnostics;
+    // (undocumented)
+    readonly watches: readonly WatchEntryDiagnostics[];
+}
+
+// @public
+export interface WatchEntryDiagnostics {
+    // (undocumented)
+    readonly costMs: number;
+    // (undocumented)
+    readonly dueAt: number | null;
+    // (undocumented)
+    readonly label: string;
+    // (undocumented)
+    readonly lastDeliveredCommit: number | null;
+    // (undocumented)
+    readonly owed: boolean;
+    // (undocumented)
+    readonly running: boolean;
+    // (undocumented)
+    readonly soon: boolean;
+    // (undocumented)
+    readonly stopped: boolean;
+    // (undocumented)
+    readonly waiters: number;
 }
 
 // @public
@@ -1131,6 +1165,8 @@ export interface WatchReadContext {
     readonly dropped: number;
     // (undocumented)
     readonly sequences: readonly number[];
+    readonly sources: readonly WatchCauseSource[];
+    readonly wildcard: boolean;
 }
 
 // @public
@@ -1141,6 +1177,28 @@ export interface WatchSchedule {
     readonly flushSliceMs: number;
     // (undocumented)
     readonly minimumGapMs: number;
+}
+
+// @public
+export interface WatchSchedulerDiagnostics {
+    // (undocumented)
+    readonly caughtUpWaiting: number;
+    // (undocumented)
+    readonly databaseCommit: number;
+    // (undocumented)
+    readonly dirtyCount: number;
+    // (undocumented)
+    readonly flushing: boolean;
+    // (undocumented)
+    readonly lastSeenCommit: number;
+    // (undocumented)
+    readonly queued: 'none' | 'microtask' | 'later';
+    // (undocumented)
+    readonly settledWaiting: number;
+    // (undocumented)
+    readonly timerAt: number | null;
+    // (undocumented)
+    readonly timerHeld: boolean;
 }
 
 // @public

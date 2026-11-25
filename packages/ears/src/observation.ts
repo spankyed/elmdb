@@ -1,5 +1,5 @@
 import { EarsError } from './errors.ts';
-import type { WatchReadContext } from './watch.ts';
+import type { WatchCauseSource, WatchReadContext } from './watch.ts';
 
 /** The operation crossing the engine boundary; observer work never changes its outcome. */
 export interface EarsOperation {
@@ -94,23 +94,30 @@ export function createOperationObservation(state: () => Pick<EarsOperation, 'wat
 
 /** Bounded commit causes belong to observation, not the watch scheduler's invalidation policy. */
 export class WatchCauses {
-  #pending: { sequences: Set<number>; dropped: number } | undefined;
+  #pending: { sequences: Set<number>; dropped: number; sources: Set<WatchCauseSource>; wildcard: boolean } | undefined;
   #record: () => boolean;
   constructor(record: () => boolean) { this.#record = record; }
-  add(sequence: number) {
+  add(sequence: number, source: WatchCauseSource = 'local', wildcard = false) {
     try {
       if (!this.#record()) { this.#pending = undefined; return; }
-      const causes = this.#pending ??= { sequences: new Set(), dropped: 0 };
+      const causes = this.#pending ??= { sequences: new Set(), dropped: 0, sources: new Set(), wildcard: false };
       if (causes.sequences.size < 32 || causes.sequences.has(sequence)) causes.sequences.add(sequence);
       else causes.dropped++;
+      causes.sources.add(source);
+      if (wildcard) causes.wildcard = true;
     } catch {
-      const causes = this.#pending ??= { sequences: new Set(), dropped: 0 };
+      const causes = this.#pending ??= { sequences: new Set(), dropped: 0, sources: new Set(), wildcard: false };
       causes.dropped++;
     }
   }
   take(): WatchReadContext | undefined {
     const causes = this.#pending;
     this.#pending = undefined;
-    return causes && Object.freeze({ sequences: Object.freeze([...causes.sequences]), dropped: causes.dropped });
+    return causes && Object.freeze({
+      sequences: Object.freeze([...causes.sequences]),
+      dropped: causes.dropped,
+      sources: Object.freeze([...causes.sources]),
+      wildcard: causes.wildcard,
+    });
   }
 }
