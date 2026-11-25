@@ -1614,6 +1614,9 @@ pub fn violations(r: &impl Read) -> Result<Vec<Violation>> {
             )));
         }
         // The contract: within the reported bound of `rank` over the same graph
+        // mutant-skip: replace \|\| with && in violations
+        // `nodes.is_empty()` implies `estimates == 0.0`, and when `!nodes.is_empty()` with `estimates <= 0.0`,
+        // `error_bound` returns `+Inf` so `distance > bound + 1e-9` is false either way
         if nodes.is_empty() || estimates <= 0.0 {
             continue;
         }
