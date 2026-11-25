@@ -238,6 +238,7 @@ const CODES: { readonly [C in ErrorCode]: EarsErrorCode | null } = {
   NOT_A_DATABASE: null,
   WRONG_FORMAT: null,
   BATCH_INVALID: null,
+  VALUE_TOO_LARGE: null,
   UNKNOWN_FIELD: null,
   ENDPOINT: null,
   CARDINALITY: null,

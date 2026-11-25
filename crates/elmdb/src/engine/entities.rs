@@ -190,6 +190,8 @@ fn place_for(t: &Txn<'_, '_>, id: &str, field: &str) -> Result<Option<u64>> {
 /// for the indexes and the unit's undo log both, and the entity's place once for all its indexes
 pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> Result<()> {
     let key = keys::value(id, field);
+    // Refused for its size before anything of the write is done
+    let bytes = values::stored(value)?;
     let stored = t.get(&key)?;
     let before = stored.as_deref().map(values::decode_stored).transpose()?;
     let seq = place_for(t, id, field)?;
@@ -197,7 +199,7 @@ pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> R
         register_field(t, id, field)?;
     }
     reindex(t, id, field, before.as_ref(), Some(value), seq, false)?;
-    t.put_over(&key, &values::stored(value), stored.as_deref())?;
+    t.put_over(&key, &bytes, stored.as_deref())?;
     super::text::refile(t, id, field, seq, Some(value))?;
     super::vector::refile(t, id, field, seq, Some(value))?;
     super::trigram::refile(t, id, field, seq, before.as_ref(), Some(value))?;

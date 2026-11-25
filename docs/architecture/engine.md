@@ -590,7 +590,8 @@ The operations:
   (`UNKNOWN_TYPE`), no such entity or relation (`NO_SUCH_ENTITY`, `NO_SUCH_RELATION`), a reserved field
   (`RESERVED_FIELD`), a value that isn't a list (`NOT_A_LIST`), an invalid or taken code (`INVALID_SHORT_CODE`,
   `SHORT_CODE_IN_USE`; a code's number is at most 2^53 - 1, JavaScript's largest exact integer, and a numbering that
-  would pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a field its type doesn't declare
+  would pass it is refused, `NUMBERS_EXHAUSTED`), a value its field's type doesn't take (`FIELD_TYPE`), a value past
+  the 64 MiB of msgpack a field holds (`VALUE_TOO_LARGE`; `format.md`, Values), a field its type doesn't declare
   (`UNKNOWN_FIELD`), a weight that isn't a number from 0 to 2^960 or on a kind not declared weighted
   (`VALUE_INVALID`), a time that isn't a finite number, the batch's `now`, a create's `createdAt` or `updatedAt` or a
   trash's `at` (`VALUE_INVALID`), and a link its kind's rules don't allow (`SELF_LINK`, `ENDPOINT`, `CARDINALITY`, `CYCLE`; a cycle

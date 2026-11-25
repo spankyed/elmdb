@@ -41,6 +41,8 @@ pub enum ErrorCode {
     WrongFormat,
     /// A value isn't in the value spec (`docs/architecture/format.md`, Values)
     ValueInvalid,
+    /// A field's value is larger, as msgpack, than a field holds (`docs/architecture/format.md`, Values)
+    ValueTooLarge,
     /// A batch or plan doesn't decode, or holds an operation this version doesn't know
     BatchInvalid,
     /// A type the schema doesn't declare
@@ -164,6 +166,7 @@ impl ErrorCode {
             Self::NotADatabase => "NOT_A_DATABASE",
             Self::WrongFormat => "WRONG_FORMAT",
             Self::ValueInvalid => "VALUE_INVALID",
+            Self::ValueTooLarge => "VALUE_TOO_LARGE",
             Self::BatchInvalid => "BATCH_INVALID",
             Self::UnknownType => "UNKNOWN_TYPE",
             Self::UnknownField => "UNKNOWN_FIELD",
@@ -282,6 +285,7 @@ mod tests {
             NotADatabase,
             WrongFormat,
             ValueInvalid,
+            ValueTooLarge,
             BatchInvalid,
             UnknownType,
             UnknownField,

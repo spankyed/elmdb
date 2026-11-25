@@ -32,11 +32,22 @@ pub const COMPRESS_FROM: usize = 256;
 /// zstd's level: within a few percent of its smallest output on apack's text, and its fastest to encode and decode
 const ZSTD_LEVEL: i32 = 3;
 
-/// A field's value as it is stored: its msgpack, compressed from `COMPRESS_FROM` bytes when that is smaller
-pub fn stored(value: &Value) -> Vec<u8> {
+/// A field's value as it is stored: its msgpack, compressed from `COMPRESS_FROM` bytes when that is smaller. A value
+/// past `MAX_VALUE_BYTES` of msgpack is refused (`VALUE_TOO_LARGE`), so every value stored reads back
+pub fn stored(value: &Value) -> Result<Vec<u8>> {
     let plain = encode(value);
+    if plain.len() > MAX_VALUE_BYTES {
+        return Err(Error::new(
+            ErrorCode::ValueTooLarge,
+            format!(
+                "A value is {} bytes as msgpack, past the {MAX_VALUE_BYTES} a field holds; split it across fields or \
+                 entities, or keep it outside the database",
+                plain.len()
+            ),
+        ));
+    }
     if plain.len() < COMPRESS_FROM {
-        return plain;
+        return Ok(plain);
     }
     match zstd::bulk::compress(&plain, ZSTD_LEVEL) {
         // mutant-skip: replace (< with <=|\+ with -|\+ with \*) in stored
@@ -48,9 +59,9 @@ pub fn stored(value: &Value) -> Vec<u8> {
             let mut out = Vec::with_capacity(frame.len() + 1);
             out.push(COMPRESSED);
             out.extend_from_slice(&frame);
-            out
+            Ok(out)
         }
-        _ => plain,
+        _ => Ok(plain),
     }
 }
 
@@ -76,10 +87,10 @@ pub fn unstored_owned(bytes: Vec<u8>) -> Result<Vec<u8>> {
 // the same bytes, so only what a read costs tells them apart (`benches/reads.rs`)
 const ONE_CALL_UP_TO: u64 = 16 << 20;
 
-/// The largest stored value a frame that records no size expands to: one expanding past this is refused as `CORRUPTED`
-/// rather than exhausting memory. Every frame `stored` writes records its size, which bounds it instead, so no value
-/// written is ever refused for its size when read
-pub const MAX_DECOMPRESSED_BYTES: usize = 64 << 20;
+/// The most msgpack a field's value holds. `stored` refuses a value past it, and a read refuses a frame that expands past
+/// it as `CORRUPTED`, whatever size the frame records: no stored bytes make a read hold more, and every value written
+/// reads back
+pub const MAX_VALUE_BYTES: usize = 64 << 20;
 
 thread_local! {
     /// One decompression context a thread, for every value it reads: a context costs about 100 KB to allocate, where
@@ -106,10 +117,9 @@ fn decompress_stream(frame: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
 fn decompress(frame: &[u8]) -> std::io::Result<Vec<u8>> {
     let size = match zstd::zstd_safe::get_frame_content_size(frame) {
         Ok(Some(size)) if size <= ONE_CALL_UP_TO => size as usize,
-        // Read as a stream up to the size it records, which zstd holds its output to: memory grows only as the frame
-        // gives bytes, so a damaged size asks for nothing up front
-        Ok(Some(size)) => return decompress_stream(frame, usize::try_from(size).unwrap_or(usize::MAX)),
-        _ => return decompress_stream(frame, MAX_DECOMPRESSED_BYTES),
+        // Read as a stream up to the most a field holds, never the size the frame records, which a damaged or crafted
+        // frame sets as it likes: memory grows only as the frame gives bytes, so a damaged size asks for nothing up front
+        _ => return decompress_stream(frame, MAX_VALUE_BYTES),
     };
     DECOMPRESSOR.with(|context| {
         let mut context = context.borrow_mut();
@@ -669,7 +679,7 @@ mod tests {
         let over = stream_compress(&vec![b'x'; 513]);
         assert_eq!(decompress_stream(&over, 512).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 
-        // Full `unstored` rejects a streaming zstd bomb past `MAX_DECOMPRESSED_BYTES` as `CORRUPTED`
+        // Full `unstored` rejects a streaming zstd bomb past `MAX_VALUE_BYTES` as `CORRUPTED`
         let mut enc = zstd::stream::Encoder::new(vec![COMPRESSED], 3).unwrap();
         enc.include_contentsize(false).unwrap();
         let chunk = vec![0u8; 1 << 20];
@@ -682,23 +692,37 @@ mod tests {
     }
 
     #[test]
-    fn a_value_stored_past_the_streaming_bound_reads_back_whole() {
-        // Repetitive, so it compresses to a few kilobytes and is stored as a frame that records its size
-        let large = Value::from("x".repeat(MAX_DECOMPRESSED_BYTES + (6 << 20)));
-        let stored = stored(&large);
-        assert_eq!(stored[0], COMPRESSED);
-        assert!(stored.len() < 1 << 20);
-        assert_eq!(decode_stored(&stored).unwrap(), large);
+    fn a_value_of_the_most_a_field_holds_reads_back_whole_and_one_byte_more_is_refused() {
+        // A string this long is five bytes longer as msgpack. Repetitive, so it compresses to a few kilobytes, stored
+        // as a frame that records its size past the one-call size, and read as a stream
+        let most = Value::from("x".repeat(MAX_VALUE_BYTES - 5));
+        let stored_most = stored(&most).unwrap();
+        assert_eq!(stored_most[0], COMPRESSED);
+        assert!(stored_most.len() < 1 << 20);
+        let read = decode_stored(&stored_most).unwrap();
+        assert!(read == most, "the value read back is the value written");
+        let past = Value::from("x".repeat(MAX_VALUE_BYTES - 4));
+        assert_eq!(stored(&past).unwrap_err().code, ErrorCode::ValueTooLarge);
+    }
+
+    #[test]
+    fn a_frame_that_records_its_size_past_the_most_a_field_holds_is_refused_as_corrupted() {
+        // What a write never stores, and a damaged or crafted file can hold: the size the frame records bounds nothing
+        let frame = zstd::bulk::compress(&vec![0u8; MAX_VALUE_BYTES + 1], 3).unwrap();
+        assert_eq!(zstd::zstd_safe::get_frame_content_size(&frame).unwrap(), Some(MAX_VALUE_BYTES as u64 + 1));
+        let mut bytes = vec![COMPRESSED];
+        bytes.extend_from_slice(&frame);
+        assert_eq!(unstored(&bytes).unwrap_err().code, ErrorCode::Corrupted);
     }
 
     #[test]
     fn compresses_from_the_threshold_on() {
         // A string's msgpack is two bytes longer than it, for these lengths
         let below = Value::from("a".repeat(COMPRESS_FROM - 3));
-        assert_eq!(stored(&below), encode(&below));
+        assert_eq!(stored(&below).unwrap(), encode(&below));
         let at = Value::from("a".repeat(COMPRESS_FROM - 2));
         assert_eq!(encode(&at).len(), COMPRESS_FROM);
-        assert_eq!(stored(&at)[0], COMPRESSED);
+        assert_eq!(stored(&at).unwrap()[0], COMPRESSED);
     }
 
     #[test]
