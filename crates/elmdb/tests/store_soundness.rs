@@ -162,28 +162,35 @@ fn unit_rollback_to_lmdb_error_poisons_unit_and_keeps_levels_consistent() {
 }
 
 #[test]
-fn unit_read_does_not_file_tracking_on_error_or_abort_and_files_on_commit() {
+fn unit_read_files_tracking_on_commit_failed_reads_as_outside_a_unit_and_never_on_abort() {
     let dir = tempfile::tempdir().unwrap();
     let db =
         Database::open(dir.path(), OpenOptions { schema: Some(schema()), syncs: false, ..Default::default() }).unwrap();
 
-    // 1. Failed tracked read inside a unit must NOT file the token
+    // 1. A failed tracked read inside a unit is filed at its commit as one outside a unit is: with what it read before
+    // failing, which decides when it would answer otherwise
     {
+        let bad = |track: u32| -> Reads {
+            serde_json::from_value(json!({
+                "reads": [{
+                    "read": "query",
+                    "plan": {
+                        "start": { "from": "types", "types": ["NoSuchType"] },
+                        "terminal": { "answer": "ids" }
+                    }
+                }],
+                "track": track
+            }))
+            .unwrap()
+        };
+        assert_eq!(db.read(&bad(10)).unwrap_err().code, ErrorCode::UnknownType);
+        let outside = db.track_stats();
+        db.untrack(10);
         let mut unit = db.begin().unwrap();
-        let bad: Reads = serde_json::from_value(json!({
-            "reads": [{
-                "read": "query",
-                "plan": {
-                    "start": { "from": "types", "types": ["NoSuchType"] },
-                    "terminal": { "answer": "ids" }
-                }
-            }],
-            "track": 11
-        }))
-        .unwrap();
-        assert_eq!(unit.read(&bad).unwrap_err().code, ErrorCode::UnknownType);
+        assert_eq!(unit.read(&bad(11)).unwrap_err().code, ErrorCode::UnknownType);
         unit.commit(false).unwrap();
-        assert_eq!(db.track_stats().0, 0, "failed read must not register a token");
+        assert_eq!(db.track_stats(), outside, "a failed read is filed in a unit as outside one");
+        db.untrack(11);
     }
 
     // 2. Succeeded tracked read inside an ABORTED unit must NOT leave its token registered
