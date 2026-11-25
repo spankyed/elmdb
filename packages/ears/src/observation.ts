@@ -30,7 +30,7 @@ export interface EarsOperationObserver {
 export function createOperationObservation(state: () => Pick<EarsOperation, 'watch' | 'inUnit'>, sequence: () => number) {
   const observers = new Set<EarsOperationObserver>();
   let notifying = false;
-  const frames: Array<{ requestBytes: number; responseBytes: number }> = [];
+  const frames: Array<{ requestBytes: number; responseBytes: number; committedNotDurable: boolean }> = [];
   const observedSequence = (): number | undefined => {
     try { return sequence(); } catch { return undefined; }
   };
@@ -46,7 +46,7 @@ export function createOperationObservation(state: () => Pick<EarsOperation, 'wat
         try { finishes.push(observer.start(Object.freeze({ ...operation }))); } catch { /* Diagnostics cannot refuse an operation. */ }
       }
     } finally { notifying = false; }
-    const frame = { requestBytes: 0, responseBytes: 0 };
+    const frame = { requestBytes: 0, responseBytes: 0, committedNotDurable: false };
     frames.push(frame);
     let outcome: EarsOperationResult['outcome'] = 'ok';
     let errorCode: string | undefined;
@@ -54,15 +54,25 @@ export function createOperationObservation(state: () => Pick<EarsOperation, 'wat
     catch (error) {
       // Codes are engine-owned; never record a user-supplied error message or payload.
       try {
-        errorCode = error instanceof EarsError ? error.code
-          : (error as { code?: unknown } | null)?.code === 'NOT_DURABLE' ? 'NOT_DURABLE' : undefined;
+        let root: unknown = error;
+        for (let depth = 0; depth < 8 && root instanceof AggregateError && root.cause !== undefined; depth++) {
+          root = root.cause;
+        }
+        errorCode = root instanceof EarsError ? root.code
+          : (root as { code?: unknown } | null)?.code === 'NOT_DURABLE'
+            || (error as { code?: unknown } | null)?.code === 'NOT_DURABLE' ? 'NOT_DURABLE' : undefined;
       } catch { /* Error metadata may have throwing getters; preserve the original error. */ }
-      const sequence = observedSequence();
-      outcome = errorCode === 'NOT_DURABLE' && sequence !== undefined && operation.sequence !== undefined && sequence > operation.sequence ? 'committed-not-durable' : 'error';
+      outcome = frame.committedNotDurable ? 'committed-not-durable' : 'error';
       throw error;
     } finally {
       frames.pop();
-      const result = Object.freeze({ ...frame, outcome, errorCode, sequence: observedSequence() });
+      const result = Object.freeze({
+        requestBytes: frame.requestBytes,
+        responseBytes: frame.responseBytes,
+        outcome,
+        errorCode,
+        sequence: observedSequence(),
+      });
       notifying = true;
       try {
         for (const finish of finishes) {
@@ -81,10 +91,14 @@ export function createOperationObservation(state: () => Pick<EarsOperation, 'wat
     if (frame) frame.responseBytes += bytes.byteLength;
     return bytes;
   }
+  function committedNotDurable() {
+    const frame = notifying ? undefined : frames.at(-1);
+    if (frame) frame.committedNotDurable = true;
+  }
 
   return {
     get active() { return observers.size > 0 && !notifying; },
-    run, request, response,
+    run, request, response, committedNotDurable,
     observe(observer: EarsOperationObserver) {
       observers.add(observer);
       return () => { observers.delete(observer); };

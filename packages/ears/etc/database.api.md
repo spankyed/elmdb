@@ -17,9 +17,13 @@ export const DATABASE_FORMAT = "elmdb/1";
 
 // @public (undocumented)
 export interface DatabaseOptions {
+    mapSizeBytes?: number;
     path: string;
     readOnly?: boolean;
     schema?: EngineSchema;
+    syncEachCommit?: boolean;
+    syncIdleMs?: number;
+    syncIntervalMs?: number;
     syncs?: boolean;
 }
 

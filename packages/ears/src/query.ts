@@ -76,6 +76,8 @@ export interface QueryScope {
   indexed(type: string, field: string): boolean;
   names: NameChecks;
   warn?: EARSRuntimeDeps['warn'];
+  /** Wall time in milliseconds for recency scoring when a query omits `recency.now` */
+  now?: () => number;
 }
 
 /** A relation row as a read answers it: `info` is left out when the edge holds none */
@@ -121,7 +123,25 @@ const searchOptions = ({ prefix, fuzzy, any, fields, recency }: SearchOptions = 
 const sendable = (v: unknown) =>
   v === null || typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v));
 
-export function createQuery({ read, isEntityType, indexed, names, warn }: QueryScope): Query {
+export function createQuery({ read, isEntityType, indexed, names, warn, now }: QueryScope): Query {
+  /** Fills omitted recency timestamps from the injected clock at read time so recipes stay reusable across ticks */
+  const resolveSteps = (raw: readonly Step[]): Step[] => {
+    if (!now) return [...raw];
+    let stamp: number | undefined;
+    return raw.map((step) => {
+      if ((step.step === 'search' || step.step === 'hybrid') && step.options?.recency && step.options.recency.now === undefined) {
+        stamp ??= now();
+        return {
+          ...step,
+          options: {
+            ...step.options,
+            recency: { ...step.options.recency, now: stamp },
+          },
+        };
+      }
+      return step;
+    });
+  };
   /** The types a start names; refuses a name that isn't a registered type */
   const ofTypes = (start: unknown): string[] => {
     const types = Array.isArray(start) ? start as unknown[] : [start];
@@ -190,9 +210,10 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
     // The first plan answers how many rows its walk reached, which says whether an unindexed `where` should be reported
     let visits = warn !== undefined && recipe.unindexed !== undefined;
     const send = (plan: Plan): Answer => {
-      if (!visits) return read([{ read: 'query', plan }])[0]!;
+      const resolved: Plan = now && plan.steps ? { ...plan, steps: resolveSteps(plan.steps) } : plan;
+      if (!visits) return read([{ read: 'query', plan: resolved }])[0]!;
       visits = false;
-      const [{ answer, visited }] = read([{ read: 'query', plan, visits: true }]) as Array<Answer & { answer: Answer; visited: number }>;
+      const [{ answer, visited }] = read([{ read: 'query', plan: resolved, visits: true }]) as Array<Answer & { answer: Answer; visited: number }>;
       if (visited >= UNINDEXED_WALK_WARNING) unindexed(recipe.unindexed!.types, recipe.unindexed!.field, visited, callSite());
       return answer;
     };
@@ -369,7 +390,7 @@ export function createQuery({ read, isEntityType, indexed, names, warn }: QueryS
       if (this.#recipe.steps.some((p) => !('step' in p))) {
         throw new EarsError('NOT_EXPLAINABLE', 'explain() answers the plan the database runs, and a where(...) given a function runs outside it: explain the query up to that where');
       }
-      const plan: Plan = { scope: this.#recipe.scope, start: this.#recipe.start, steps: stepsOf(this.#recipe.steps), terminal: { answer: 'ids' } };
+      const plan: Plan = { scope: this.#recipe.scope, start: this.#recipe.start, steps: resolveSteps(stepsOf(this.#recipe.steps)), terminal: { answer: 'ids' } };
       const [explained] = read([{ read: 'query', plan, explain: true }]) as Array<Answer & { answer: Answer; visited: number; ms: number; stages: QueryStage[]; }>;
       return { ids: explained!.answer.ids as EARS.EntityId[], visited: explained!.visited, ms: explained!.ms, stages: explained!.stages };
     }

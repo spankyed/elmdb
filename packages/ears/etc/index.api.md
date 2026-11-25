@@ -233,6 +233,7 @@ export interface EarsAdmin {
     countEntities(): Record<string, number>;
     declare(schema: EngineSchema): SchemaChange[];
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
+    durable(): Promise<void>;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     nextSequence(): number | undefined;
@@ -244,7 +245,7 @@ export interface EarsAdmin {
     replaceWith(source: string): void;
     setCheckpoint(name: string, value: unknown): void;
     setSchema(schema: EngineSchema): SchemaChange[];
-    transactWithoutHook<T>(fn: () => T): T;
+    transactWithoutHook<T>(fn: () => T, options?: UnitOptions): T;
     updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
     waitForIndexBuilds(): void;
     watchDiagnostics(): WatchDiagnostics;
@@ -254,6 +255,12 @@ export interface EarsAdmin {
         keys: number;
         ranges: number;
     };
+}
+
+// @public
+export interface EarsClock {
+    after(ms: number, run: () => void): () => void;
+    now(): number;
 }
 
 // @public
@@ -414,8 +421,10 @@ export interface EarsOperationResult {
 // @public
 export interface EARSRuntimeDeps {
     callSites?: CallSiteNaming;
+    clock?: EarsClock;
     database: EarsDatabase;
     freeze?: boolean;
+    schedule?: WatchSchedule;
     warn?: (message: string, warning: EarsWarning) => void;
 }
 
@@ -1006,7 +1015,6 @@ export interface TypedEars<D extends EarsSchema> {
     create: TypedCreate<D>;
     // (undocumented)
     getAttr: TypedGetAttr<D>;
-    // (undocumented)
     newId: TypedNewId<D>;
     // (undocumented)
     query: TypedQuery<D>;

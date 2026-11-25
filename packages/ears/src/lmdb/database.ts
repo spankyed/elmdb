@@ -23,18 +23,41 @@ export interface DatabaseOptions {
    * periodic syncing is disabled for temporary data. Creating an environment still durably initializes its format
    */
   syncs?: boolean;
+  /**
+   * Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
+   * sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default
+   */
+  syncEachCommit?: boolean;
+  /**
+   * Group commit syncs once writes have paused for this many milliseconds: 100 by default. A whole number, or refused
+   * (`VALUE_INVALID`)
+   */
+  syncIdleMs?: number;
+  /** Group commit syncs no later than this many milliseconds after the first commit not yet synced: 1000 by default */
+  syncIntervalMs?: number;
+  /**
+   * The map's size at open: by default twice the data file, and 64 MiB at least. A whole number of 1 at least, or
+   * refused (`VALUE_INVALID`), and a multiple of the system's page size, or refused by LMDB's binding (`IO`)
+   */
+  mapSizeBytes?: number;
 }
 
 /**
  * Opens the elmdb database at `path` for an engine (`createEarsEngine({ database })`): the binding's `Database`, which
  * is an `EarsDatabase` as it is, with no cast (`port.test-d.ts`)
  */
-export function openDatabase({ path: dir, schema, readOnly, syncs }: DatabaseOptions): EarsDatabase {
+export function openDatabase({
+  path: dir, schema, readOnly, syncs, syncEachCommit, syncIdleMs, syncIntervalMs, mapSizeBytes,
+}: DatabaseOptions): EarsDatabase {
   return elmdb.Database.open(dir, {
-    ...(readOnly && { readOnly }),
+    ...(readOnly !== undefined && { readOnly }),
     // elmdb checks the schema whole, naming every problem
     ...(schema && { schema: toElmdbSchema(schema) }),
-    ...(syncs === false && { syncs }),
+    ...(syncs !== undefined && { syncs }),
+    ...(syncEachCommit !== undefined && { syncEachCommit }),
+    ...(syncIdleMs !== undefined && { syncIdleMs }),
+    ...(syncIntervalMs !== undefined && { syncIntervalMs }),
+    ...(mapSizeBytes !== undefined && { mapSizeBytes }),
   });
 }
 

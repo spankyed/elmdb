@@ -75,6 +75,7 @@ export interface TypedEars<D extends EarsSchema> {
   upsert: TypedUpsert<D>;
   write: TypedWrite<D>;
   transact: Ears['transact'];
+  /** Generates a branded entity id using `Date.now()` so a facade can mint ids before its engine exists */
   newId: TypedNewId<D>;
   getAttr: TypedGetAttr<D>;
 }

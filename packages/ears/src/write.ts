@@ -41,6 +41,8 @@ export interface WriteScope {
   exists(id: string): { entity: boolean; relation: boolean };
   getRow(id: EARS.EntityId): Record<string, unknown> | undefined;
   names: NameChecks;
+  /** Wall time in milliseconds for builder timestamps; defaults to `Date.now` */
+  now?: () => number;
 }
 
 /** The fields of a row whose value isn't `undefined`, refusing an engine's own among the rest too, as `setMany` does */
@@ -65,8 +67,8 @@ function refuseShortCode(via: string, type: string, shortCode: unknown): asserts
   throw new EarsError('INVALID_SHORT_CODE', `${via}(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(shortCode)} }): a short code is a string, <prefix>-<n>`);
 }
 
-export function createWrites({ write: send, exists, getRow, names, isEntityType }: WriteScope) {
-  const one = (op: Op, now?: number) => send([op], now)[0]!;
+export function createWrites({ write: send, exists, getRow, names, isEntityType, now = Date.now }: WriteScope) {
+  const one = (op: Op, at?: number) => send([op], at)[0]!;
 
   /**
    * The writes to one entity. Its attribute writes stamp `updatedAt` unless `touch` is off — each with the time of the
@@ -76,7 +78,7 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
     let stampAt = changedAt;
     /** Sends an attribute write, made with the builder's `id` and `touch`, stamped with the builder's time */
     const attribute = (op: Op) => {
-      stampAt ??= Date.now();
+      stampAt ??= now();
       one(op, stampAt);
       return self;
     };
@@ -133,7 +135,7 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
         return self;
       },
 
-      trash(at = Date.now()) {
+      trash(at = now()) {
         one({ op: 'trash', id, at });
         return self;
       },
@@ -199,11 +201,11 @@ export function createWrites({ write: send, exists, getRow, names, isEntityType 
       ...(createdAt !== undefined && { createdAt }),
       ...(updatedAt !== undefined && { updatedAt }),
     };
-    const now = Date.now();
+    const at = now();
     const defined = definedFields(fields, 'upsert');
-    const result = entityOf(one({ op: 'upsert', type, id, fields: defined, shortCode }, now));
+    const result = entityOf(one({ op: 'upsert', type, id, fields: defined, shortCode }, at));
     if (result.created) return builder(id, false);
-    return builder(id, true, Object.keys(defined).length ? now : undefined);
+    return builder(id, true, Object.keys(defined).length ? at : undefined);
   }) as Upsert;
 
   /**
