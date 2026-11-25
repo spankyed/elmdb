@@ -233,6 +233,7 @@ export interface EarsAdmin {
     countEntities(): Record<string, number>;
     declare(schema: EngineSchema): SchemaChange[];
     deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
+    durable(): Promise<void>;
     getAllEntities(): EARS.EntityId[];
     getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
     nextSequence(): number | undefined;
@@ -244,7 +245,7 @@ export interface EarsAdmin {
     replaceWith(source: string): void;
     setCheckpoint(name: string, value: unknown): void;
     setSchema(schema: EngineSchema): SchemaChange[];
-    transactWithoutHook<T>(fn: () => T): T;
+    transactWithoutHook<T>(fn: () => T, options?: UnitOptions): T;
     updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
     waitForIndexBuilds(): void;
     watchDiagnostics(): WatchDiagnostics;

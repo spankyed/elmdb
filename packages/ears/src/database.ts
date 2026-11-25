@@ -260,6 +260,19 @@ const CODES: { readonly [C in ErrorCode]: EarsErrorCode | null } = {
   PANICKED: null,
 };
 
+function mapError(error: unknown): unknown {
+  const code = (error as { code?: unknown })?.code;
+  const mapped = typeof code === 'string' && Object.hasOwn(CODES, code) ? CODES[code as ErrorCode] : null;
+  return mapped ? new EarsError(mapped, (error as Error).message) : error;
+}
+
+/** Wraps an original failure with a cleanup or refresh failure so cleanup never masks what caused it */
+function cleanupFailure(original: unknown, cleanup: unknown, message: string): AggregateError {
+  const aggregate = new AggregateError([original, cleanup], message, { cause: original });
+  const code = (original as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? Object.assign(aggregate, { code }) : aggregate;
+}
+
 /**
  * Runs `fn`, a call into elmdb, rethrowing a refusal the engine names as an `EarsError`; anything else elmdb throws
  * (a full disk, a closed database) is thrown as it is, with its own code
@@ -268,11 +281,19 @@ export function crossing<T>(fn: () => T): T {
   try {
     return fn();
   } catch (error) {
-    const code = (error as { code?: unknown })?.code;
-    const mapped = typeof code === 'string' && Object.hasOwn(CODES, code) ? CODES[code as ErrorCode] : null;
-    if (mapped) throw new EarsError(mapped, (error as Error).message);
-    throw error;
+    throw mapError(error);
   }
+}
+
+/** Runs `fn`, an async call into elmdb, mapping a refusal the engine names into an `EarsError` */
+export function crossingAsync<T>(fn: () => Promise<T>): Promise<T> {
+  let promise: Promise<T>;
+  try {
+    promise = fn();
+  } catch (error) {
+    return Promise.reject(mapError(error));
+  }
+  return promise.catch((error) => { throw mapError(error); });
 }
 
 /** Reports committed state before returning or rethrowing a failed sync. A refusal before commit does not notify.
@@ -286,9 +307,8 @@ export function runCommitted<T>(operation: () => T, notify: () => void): T {
     if ((error as { code?: unknown })?.code === 'NOT_DURABLE') {
       try { notify(); }
       catch (notification) {
-        throw Object.assign(new AggregateError([error, notification],
-          'The operation committed but failed to sync, and refreshing committed state also failed', { cause: error }),
-        { code: 'NOT_DURABLE' });
+        throw cleanupFailure(error, notification,
+          'The operation committed but failed to sync, and refreshing committed state also failed');
       }
     }
     throw error;
@@ -392,7 +412,7 @@ export interface Connection {
   /** Sets what runs in a unit before it commits */
   beforeCommit(hook: BeforeCommit): void;
   /** Runs `fn` in a unit that what's set to run before a commit stays out of */
-  transactWithoutHook<T>(fn: () => T): T;
+  transactWithoutHook<T>(fn: () => T, options?: UnitOptions): T;
   /** Calls `listener` soon after another process commits, starting this database hearing of that. Returns the unregistration */
   onFoundElsewhere(listener: () => void): () => void;
   /** The last commit's sequence, or 0 */
@@ -419,7 +439,7 @@ export function createConnection(
    * savepoint of it, taken then or as the level begins, whichever is later. A level `kept` a write when one landed in
    * it or a level inside it that returned, so an outermost one that kept none aborts its unit rather than commit it
    */
-  const levels: Array<{ savepoint?: number; kept?: boolean }> = [];
+  const levels: Array<{ savepoint?: number; kept?: boolean; durable?: boolean }> = [];
   let unit: EarsUnit | undefined;
   /** The token the reads being made are tracked under, while `track` runs */
   let tracking: number | undefined;
@@ -434,7 +454,9 @@ export function createConnection(
       }
     }
   };
-  const everyWatch = (source: CommitSource = 'local') => tellListeners({ sequence: database.sequence, touched: 'all', source });
+  const everyWatch = (source: CommitSource = 'local') => {
+    if (listeners.size > 0) tellListeners({ sequence: database.sequence, touched: 'all', source });
+  };
   /** A commit this connection made whose writes aren't known key by key */
   const committedEverything = () => everyWatch('local');
   const heard = (changes: { sequence: number; touched: number[] }, source: CommitSource = 'local') => {
@@ -548,7 +570,7 @@ export function createConnection(
   }
 
   function transactUnit<T>(fn: () => T, options?: UnitOptions): T {
-    const level: { savepoint?: number; kept?: boolean } = {};
+    const level: { savepoint?: number; kept?: boolean; durable?: boolean } = { durable: options?.durable };
     const outermost = levels.length === 0;
     if (outermost && tally) counted = { site: callSite(), writes: 0, ops: 0, ms: 0 };
     if (!outermost && unit) {
@@ -571,19 +593,31 @@ export function createConnection(
       const held = unit;
       if (outermost) {
         unit = undefined;
-        if (held?.isOpen) timedInUnit(() => held.abort());
+        if (held?.isOpen) {
+          try {
+            timedInUnit(() => crossing(() => held.abort()));
+          } catch (abortError) {
+            unitEnded();
+            throw cleanupFailure(error, abortError, 'transact() failed and aborting the unit also failed');
+          }
+        }
         unitEnded();
       } else if (held?.isOpen && level.savepoint !== undefined) {
-        held.rollbackTo(level.savepoint);
+        try {
+          crossing(() => held.rollbackTo(level.savepoint!));
+        } catch (rollbackError) {
+          throw cleanupFailure(error, rollbackError, 'Nested transact() failed and rolling back its savepoint also failed');
+        }
       }
       throw error;
     }
     levels.pop();
     const held = unit;
     if (!outermost) {
-      // A unit inside another commits with the outermost
+      // A unit inside another commits with the outermost; propagate durability only if this nested level succeeded
       if (held && level.savepoint !== undefined) crossing(() => held.release(level.savepoint!));
       if (level.kept) levels.at(-1)!.kept = true;
+      if (level.durable) levels.at(-1)!.durable = true;
       return value;
     }
     unit = undefined;
@@ -599,15 +633,30 @@ export function createConnection(
     }
     try {
       // The unit's deferred checks run as it commits; one that fails aborts it
-      const changes = timedInUnit(() => unpackr.unpack(noticing(() => crossing(() => held.commit(options?.durable ?? false)))) as ChangeSet);
+      const changes = timedInUnit(() => unpackr.unpack(noticing(() => crossing(() => held.commit(Boolean(level.durable))))) as ChangeSet);
       unitEnded();
       made(changes);
     } catch (error) {
       const open = held.isOpen;
-      if (open) held.abort();
+      if (open) {
+        try {
+          crossing(() => held.abort());
+        } catch (abortError) {
+          unitEnded();
+          throw cleanupFailure(error, abortError, 'transact() commit failed and aborting the unit also failed');
+        }
+      }
       unitEnded();
       // A durable commit whose sync failed was made all the same, and its change set didn't cross with the error
-      if (!open && (error as { code?: unknown })?.code === 'NOT_DURABLE') committedEverything();
+      if (!open && (error as { code?: unknown })?.code === 'NOT_DURABLE') {
+        observation.committedNotDurable();
+        try {
+          committedEverything();
+        } catch (notification) {
+          throw cleanupFailure(error, notification,
+            'The operation committed but failed to sync, and refreshing committed state also failed');
+        }
+      }
       throw error;
     }
     return value;
@@ -676,7 +725,14 @@ export function createConnection(
         written = counting('write', ops.length, () => {
           const bytes = observation.request(pack({ ops: [...ops], now } satisfies Batch));
           const target = inUnit ? writable() : undefined;
-          const answer = observation.response(noticing(() => crossing(() => (target ? target.write(bytes) : database.write(bytes, false)))));
+          const answer = observation.response(noticing(() => {
+            try {
+              return crossing(() => (target ? target.write(bytes) : database.write(bytes, false)));
+            } catch (error) {
+              if (!inUnit && (error as { code?: unknown })?.code === 'NOT_DURABLE') observation.committedNotDurable();
+              throw error;
+            }
+          }));
           if (target) levels.at(-1)!.kept = true;
           // A unit's write answers its results alone, what it changed committing with the unit; a database's write
           // commits, answering the change set beside them
@@ -684,7 +740,14 @@ export function createConnection(
         });
       } catch (error) {
         // Under syncEachCommit a write outside a unit can commit and then fail to sync, without returning a change set
-        if (!inUnit && (error as { code?: unknown })?.code === 'NOT_DURABLE') committedEverything();
+        if (!inUnit && (error as { code?: unknown })?.code === 'NOT_DURABLE') {
+          try {
+            committedEverything();
+          } catch (notification) {
+            throw cleanupFailure(error, notification,
+              'The operation committed but failed to sync, and refreshing committed state also failed');
+          }
+        }
         throw error;
       }
       if ('changes' in written) made(written.changes);
@@ -692,7 +755,14 @@ export function createConnection(
     },
     load(loads) {
       runCommitted(
-        () => observation.run('load', loads.length, () => crossing(() => database.bulkLoad(observation.request(pack(loads))))),
+        () => observation.run('load', loads.length, () => {
+          try {
+            return crossing(() => database.bulkLoad(observation.request(pack(loads))));
+          } catch (error) {
+            if ((error as { code?: unknown })?.code === 'NOT_DURABLE') observation.committedNotDurable();
+            throw error;
+          }
+        }),
         committedEverything,
       );
     },
@@ -755,10 +825,10 @@ export function createConnection(
       return true;
     },
     beforeCommit(given) { hook = given; },
-    transactWithoutHook(fn) {
+    transactWithoutHook(fn, options) {
       const wasPaused = hookPaused;
       hookPaused = true;
-      try { return transact(fn); } finally { hookPaused = wasPaused; }
+      try { return transact(fn, options); } finally { hookPaused = wasPaused; }
     },
     onFoundElsewhere(listener) {
       foundElsewhere.add(listener);

@@ -6,7 +6,7 @@ import type { EARS } from './entities.ts';
 import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge, RelationPatch } from './runtime.ts';
 import type { CallCounting } from './calls.ts';
 import type { EarsOperationObserver } from './observation.ts';
-import { createConnection, runCommitted, type Answer, type BeforeCommit, type ChangedEntities, type ChangedPosition, type PendingChanges, type SchemaChange, type UnitOptions } from './database.ts';
+import { createConnection, crossingAsync, runCommitted, type Answer, type BeforeCommit, type ChangedEntities, type ChangedPosition, type PendingChanges, type SchemaChange, type UnitOptions } from './database.ts';
 import { createQuery, relationRow, type Query } from './query.ts';
 import { createWrites, type Create, type Upsert, type Write } from './write.ts';
 import { createNameChecks } from './names.ts';
@@ -178,7 +178,12 @@ export interface EarsAdmin {
    */
   beforeCommit(hook: BeforeCommit): void;
   /** Runs `fn` in a unit that what's set to run before a commit stays out of: for that code's own catching up */
-  transactWithoutHook<T>(fn: () => T): T;
+  transactWithoutHook<T>(fn: () => T, options?: UnitOptions): T;
+  /**
+   * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or the
+   * database is closed. Resolves at once where nothing is owed (`syncs: false`, `syncEachCommit`, or read-only)
+   */
+  durable(): Promise<void>;
   /**
    * Calls `listener` soon after another process commits, which `changedElsewhere` then answers. The database hears of
    * one whose wake was lost at its own next commit, and of one that may not be news, so the answer can be false. Throws
@@ -407,7 +412,8 @@ export function createEarsEngine({ database, warn, freeze, callSites, clock, sch
     replacedElsewhere: () => connection.replacedElsewhere(),
     adoptReplacement: (epoch) => connection.adoptReplacement(epoch),
     beforeCommit: (hook) => connection.beforeCommit(hook),
-    transactWithoutHook: (fn) => connection.transactWithoutHook(fn),
+    transactWithoutHook: (fn, options) => connection.transactWithoutHook(fn, options),
+    durable: () => crossingAsync(() => database.durable()),
     onFoundElsewhere: (listener) => connection.onFoundElsewhere(listener),
     getAllEntities: () => query.withTrashed.all().ids(),
     // From every entity, so a type the schema no longer declares is listed too
