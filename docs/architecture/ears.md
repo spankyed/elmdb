@@ -56,7 +56,7 @@ Vocabulary).
 | `schema.ts` | `EngineSchema` (each type's `RowRules`, each relation kind's `RelationRules`, the roles) and `toElmdbSchema`, the database schema it becomes: each field the rules type declared as its type, required and indexed fields declared, every other field allowed; a value index per indexed field, and the text (`search`), vector (`embedding`) and trigram (`substrings`) indexes, a field they read held to text or anything; `withDeclarations`, which `admin.declare` merges with |
 | `errors.ts` | `EarsError` and its codes, `RESERVED_ATTRIBUTES`, which every attribute write refuses, and `RESERVED_ENTITY_TYPES`, the names an EARS engine's own ids are written with (`Relation-…`, `Sequence-…`), which a program's schema must not use as a type |
 | `names.ts` | `createNameChecks`: the refusal of a relation kind (`UNKNOWN_RELATION_KIND`) or a role (`UNKNOWN_ROLE`) the schema doesn't declare, which links, role writes, reads and walks call |
-| `ids.ts`, `utils.ts` | `newId`, `entityTypeOf` (the one reader of an id's type), `setField` (a field written as an own property, `__proto__` included); `isPlainObject`, `idSuffix`, `sameValue` |
+| `ids.ts` | `newId`, `idSuffix`, `entityTypeOf` (the one reader of an id's type), `setField` (a field written as an own property, `__proto__` included), `getTimestamp` |
 | `entities.ts`, `runtime.ts`, `typed.ts` | The typed contract (below): the `EARS` namespace (`Entity`, a name EARS declares none of, `RelKind = { Custom }` and `RoleKind = { Custom }`, its own for tooling and never in a program's facade), `BaseEntity`/`EntityShapes`/`ShapeOf`/`EntityNameArg`; `EARSRuntimeDeps`, `QueryBuilder`/`WriteBuilder`, `RowRules`; `defineEars` and the `Typed*` facade types |
 | `watch.ts` | `createWatches`: `watch(read, observer, { label? })` over tracked reads (each run's reads made under the watch's token, `Connection.track`; each commit's `touched` tokens marking the watches to run again; a result equal to the last delivered not delivered, `sameValue`) and the scheduler that bounds re-runs under any write rate (`WATCH_SCHEDULE`, on an injectable clock): at most one run pending, a gap after each run of four times its cost and at least a frame, an 8 ms slice a flush with the leftovers first next time, and a `warn` naming a watch that keeps exceeding the slice |
 | `calls.ts` | What the connection counts while `admin.calls` is started: each read, each write outside a unit, and each unit with its writes, with their time and the code that made them (the first stack frames outside EARS, as the creator's `CallSiteNaming` finds them), and a watch's runs. Off, it costs one check per call |
@@ -211,7 +211,11 @@ Held by the types and the specs, which say more than a rule over names could:
   patterns as built); a type with none refuses them (`UNKNOWN_INDEX`).
 - **Watches.** `watch(read, observer)` runs `read` and delivers its result, then runs it again after every commit that
   wrote into what it read, delivering each result that differs from the last, with the commit's sequence
-  (`lastCommit()`). Tracking is the database's (`engine.md`, Change sets and watch): each run drops what the watch's
+  (`lastCommit()`). A result differs unless `sameValue` finds it equal: plain objects and arrays by their contents, a map
+  by the values under the keys it finds, a set by the members it finds, and dates, regular expressions, URLs and bytes
+  by their value. Any other object, a class's instance or a plain
+  object from another realm, is taken as differing every time, since what it holds may not be its own enumerable
+  keys, so a watch whose result holds one is delivered after every commit that wrote into what it read. Tracking is the database's (`engine.md`, Change sets and watch): each run drops what the watch's
   token held and makes its reads tracked under it, and a commit's change set names the tokens it wrote into, so a
   write's cost doesn't grow with the watches open. **However fast anything commits, a watch's cost is bounded by the
   scheduler, not by its writers** (G14 of `../archive/goals/goal-elmdb-next.md`): a watch has at most one run pending
