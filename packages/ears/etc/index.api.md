@@ -1015,7 +1015,6 @@ export interface TypedEars<D extends EarsSchema> {
     create: TypedCreate<D>;
     // (undocumented)
     getAttr: TypedGetAttr<D>;
-    // (undocumented)
     newId: TypedNewId<D>;
     // (undocumented)
     query: TypedQuery<D>;

@@ -8,7 +8,7 @@ import { createTemporaryDatabases } from '../../src/lmdb/index.ts';
 const databases = createTemporaryDatabases();
 afterAll(() => databases.disposeAll());
 
-/** Deterministic manual clock matching the structural `EarsClock` (`@apackdev/clock` / `@apackdev/orderings`) contract */
+/** Deterministic manual clock matching the structural `EarsClock` contract */
 function createVirtualClock(initialMs = 1_700_000_000_000) {
   let current = initialMs;
   let nextId = 0;
@@ -435,6 +435,82 @@ describe('injectable EarsClock', () => {
     await flushMicrotasks();
     expect(await isResolved(waitCaughtUp)).toBe(true);
     expect(await isResolved(waitSettled)).toBe(true);
+    expect(virtual.pending()).toBe(0);
+
+    // Stopping the watch cancels any pending sequence-ahead defer timers so none leak in the virtual clock
+    sequenceOffset = 2;
+    const stopCaughtUp = w.caughtUp();
+    const stopSettled = engine.admin.watchesSettled();
+    await flushMicrotasks();
+    expect(virtual.pending()).toBe(2);
     w.stop();
+    expect(virtual.pending(), 'stop() cancelled pending sequence-ahead defers').toBe(0);
+    expect(await isResolved(stopCaughtUp)).toBe(true);
+    expect(await isResolved(stopSettled)).toBe(true);
+
+    // With 0 open watches, watchesSettled() resolves immediately without scheduling any virtual clock timer
+    sequenceOffset = 3;
+    expect(await isResolved(engine.admin.watchesSettled())).toBe(true);
+    expect(virtual.pending()).toBe(0);
+
+    // Closing the database cancels pending sequence-ahead defer timers as well
+    const w2 = engine.watch(() => engine.query('Task').count(), () => {});
+    await flushMicrotasks();
+    sequenceOffset = 4;
+    const closeCaughtUp = w2.caughtUp();
+    const closeSettled = engine.admin.watchesSettled();
+    await flushMicrotasks();
+    expect(virtual.pending()).toBe(2);
+    database.close();
+    expect(await isResolved(w2.caughtUp())).toBe(true);
+    expect(virtual.pending(), 'closed() cancelled pending sequence-ahead defers').toBe(0);
+    expect(await isResolved(closeCaughtUp)).toBe(true);
+    expect(await isResolved(closeSettled)).toBe(true);
+  });
+
+  it('cancels a pending slice-deferral timer when stop() clears the last dirty watch, and clamps negative watch costMs', async () => {
+    let nowMs = 1_000;
+    let nextTimer = 0;
+    const timers = new Map<number, () => void>();
+    const clock: EarsClock = {
+      now: () => nowMs,
+      after(_ms, run) {
+        const id = ++nextTimer;
+        timers.set(id, run);
+        return () => { timers.delete(id); };
+      },
+    };
+    const { database } = databases.open({
+      types: { Task: { required: [] } },
+      relations: {},
+      roles: [],
+    });
+    const engine = createEarsEngine({
+      database,
+      clock,
+      schedule: { delayFactor: 4, minimumGapMs: 16, flushSliceMs: 8 },
+    });
+
+    // Non-monotonic clock going backward during a watch read must clamp costMs to 0
+    const backward = engine.watch(() => {
+      nowMs -= 10;
+      return engine.query('Task').count();
+    }, () => {}, { label: 'backward' });
+    await flushMicrotasks();
+    expect(engine.admin.watchDiagnostics().watches.find((w) => w.label === 'backward')?.costMs).toBe(0);
+    backward.stop();
+
+    // Two 5 ms watches: on commit, `a` runs and `b` defers via clock.after(0); stopping `b` cancels that timer
+    const a = engine.watch(() => { nowMs += 5; return engine.query('Task').count(); }, () => {}, { label: 'a' });
+    const b = engine.watch(() => { nowMs += 5; return engine.query('Task').count(); }, () => {}, { label: 'b' });
+    await flushMicrotasks();
+    nowMs += 100;
+    engine.create('Task', { title: 't' });
+    await flushMicrotasks();
+    expect(timers.size, 'b deferred via clock.after(0)').toBe(1);
+    b.stop();
+    expect(timers.size, 'stopping the last dirty watch cancelled its pending later flush timer').toBe(0);
+    expect(await isResolved(engine.admin.watchesSettled())).toBe(true);
+    a.stop();
   });
 });

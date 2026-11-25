@@ -54,13 +54,15 @@ export function createOperationObservation(state: () => Pick<EarsOperation, 'wat
     catch (error) {
       // Codes are engine-owned; never record a user-supplied error message or payload.
       try {
-        errorCode = error instanceof EarsError ? error.code
-          : (error as { code?: unknown } | null)?.code === 'NOT_DURABLE' ? 'NOT_DURABLE' : undefined;
+        let root: unknown = error;
+        for (let depth = 0; depth < 8 && root instanceof AggregateError && root.cause !== undefined; depth++) {
+          root = root.cause;
+        }
+        errorCode = root instanceof EarsError ? root.code
+          : (root as { code?: unknown } | null)?.code === 'NOT_DURABLE'
+            || (error as { code?: unknown } | null)?.code === 'NOT_DURABLE' ? 'NOT_DURABLE' : undefined;
       } catch { /* Error metadata may have throwing getters; preserve the original error. */ }
-      const sequence = observedSequence();
-      outcome = frame.committedNotDurable
-        || (errorCode === 'NOT_DURABLE' && sequence !== undefined && operation.sequence !== undefined && sequence > operation.sequence)
-        ? 'committed-not-durable' : 'error';
+      outcome = frame.committedNotDurable ? 'committed-not-durable' : 'error';
       throw error;
     } finally {
       frames.pop();

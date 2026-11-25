@@ -1,4 +1,4 @@
-// Durability, nested durability propagation, savepoint rollback, cross-layer error preservation, and observation
+// Durability, nested durability propagation, savepoint rollback, rollback error preservation, and observation
 // classification under `NOT_DURABLE` and `MAP_FULL`.
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -481,5 +481,57 @@ describe('observation committed-not-durable classification', () => {
     expect(watchRefreshErr).toBeInstanceOf(AggregateError);
     expect((watchRefreshErr as AggregateError & { code?: string }).code).toBe('NOT_DURABLE');
     expect(observed.find((entry) => entry.kind === 'unit')?.result.outcome).toBe('committed-not-durable');
+  });
+
+  it('extracts EarsError.code when wrapped in AggregateError by a rollback failure', () => {
+    const { database } = openTemp({ syncs: false });
+    const rollbackErr = Object.assign(new Error('rollback failed'), { code: 'LMDB' });
+    const wrapped: EarsDatabase = new Proxy(database, {
+      get(target, key) {
+        if (key === 'begin') {
+          return () => {
+            const unit = target.begin();
+            return new Proxy(unit, {
+              get(held, member) {
+                if (member === 'rollbackTo') return () => { throw rollbackErr; };
+                const value = Reflect.get(held, member, held);
+                return typeof value === 'function' ? value.bind(held) : value;
+              },
+            });
+          };
+        }
+        const value = Reflect.get(target, key, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const e = createEarsEngine({ database: wrapped });
+    const observed: Array<{ kind: string; result: EarsOperationResult }> = [];
+    e.admin.observe({
+      start(op) {
+        return (result) => { observed.push({ kind: op.kind, result }); };
+      },
+    });
+
+    let caught: unknown;
+    try {
+      e.transact(() => {
+        e.create('Task', { title: 'outer' });
+        e.transact(() => {
+          e.write('Task-missing' as never).set('title', 'nope');
+        });
+      });
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(caught).toBeInstanceOf(AggregateError);
+    expect((caught as AggregateError & { code?: string }).code).toBe('NO_SUCH_ENTITY');
+    const unitEvents = observed.filter((entry) => entry.kind === 'unit');
+    expect(unitEvents.length).toBe(2);
+    for (const event of unitEvents) {
+      expect(event.result.outcome).toBe('error');
+      expect(event.result.errorCode).toBe('NO_SUCH_ENTITY');
+    }
   });
 });

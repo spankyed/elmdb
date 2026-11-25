@@ -166,8 +166,8 @@ interface Watch {
   owed: boolean;
   /** Whether `runOnce` is currently executing on the stack for this watch */
   running: boolean;
-  /** What `caughtUp` is waiting to resolve, once the run that is owed has ended */
-  waiters: Array<() => void>;
+  /** What `caughtUp` is waiting to resolve, once the run that is owed has ended, with any pending sequence-ahead defer cancel */
+  waiters: Array<{ resolve: () => void; cancel?: () => void }>;
   /** Whether something blocked is waiting on the run that is owed, which is then not held to the floor */
   soon: boolean;
   /** Commit sequence captured before the watch's last read began, or -1 before its first run */
@@ -247,7 +247,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   let flushing = false;
   /** Set when `caughtUp({ soon: true })` runs mid-flush so remaining batch items are re-prioritized */
   let soonLifted = false;
-  let waiting: Array<() => void> = [];
+  let waiting: Array<{ resolve: () => void; cancel?: () => void }> = [];
   let unlisten: (() => void) | undefined;
   /** Highest commit sequence reported to this scheduler via `onCommit` or when first subscribing */
   let lastSeenCommit = 0;
@@ -388,9 +388,13 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
   };
 
   /** Resolves `caughtUp` calls: each is answered once, by the run it waited for or by the watch ending */
-  const answer = (waiters: Array<() => void>) => {
+  const answer = (waiters: Array<{ resolve: () => void; cancel?: () => void }>) => {
     caughtUpWaiting -= waiters.length;
-    for (const caughtUp of waiters) caughtUp();
+    for (const waiter of waiters) {
+      waiter.cancel?.();
+      waiter.cancel = undefined;
+      waiter.resolve();
+    }
   };
 
   const run = (watch: Watch) => {
@@ -431,7 +435,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       outcome = { ok: false, error };
     }
     watch.ranAt = clock.now();
-    watch.costMs = watch.ranAt - started;
+    watch.costMs = Math.max(0, watch.ranAt - started);
     connection.tally()?.watchRun(watch.label, watch.costMs);
     if (closed()) return;
     if (watch.stopped) {
@@ -592,7 +596,11 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     if (dirty.size > 0 || queued || timer) return;
     const resolve = waiting;
     waiting = [];
-    for (const done of resolve) done();
+    for (const waiter of resolve) {
+      waiter.cancel?.();
+      waiter.cancel = undefined;
+      waiter.resolve();
+    }
   }
 
   return {
@@ -668,11 +676,13 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
             // The database sequence is ahead of the scheduler's last seen commit (e.g. an async builder callback has
             // not fired on the event loop yet): wait one turn so pending commit notifications can mark this watch owed
             return new Promise((resolve) => {
-              watch.waiters.push(resolve);
+              const waiter: { resolve: () => void; cancel?: () => void } = { resolve };
+              watch.waiters.push(waiter);
               caughtUpWaiting++;
-              defer(() => {
+              waiter.cancel = defer(() => {
+                waiter.cancel = undefined;
                 if (closed() || watch.stopped) return;
-                const index = watch.waiters.indexOf(resolve);
+                const index = watch.waiters.indexOf(waiter);
                 if (index === -1) return;
                 if (watch.owed || watch.running) {
                   if (options?.soon && !watch.soon) {
@@ -691,11 +701,11 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
                 caughtUpWaiting--;
                 syncTimerHeld();
                 resolve();
-              });
+              }) ?? undefined;
             });
           }
           return new Promise((resolve) => {
-            watch.waiters.push(resolve);
+            watch.waiters.push({ resolve });
             caughtUpWaiting++;
             if (options?.soon) {
               watch.soon = true;
@@ -720,18 +730,20 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       if (!flushing && !queued && !timer && dirty.size === 0) {
         if (open.size === 0 || currentCommit <= lastSeenCommit) return Promise.resolve();
         return new Promise((resolve) => {
-          waiting.push(resolve);
-          defer(() => {
+          const waiter: { resolve: () => void; cancel?: () => void } = { resolve };
+          waiting.push(waiter);
+          waiter.cancel = defer(() => {
+            waiter.cancel = undefined;
             if (closed()) return;
             if (!flushing && !queued && !timer && dirty.size === 0 && currentCommit > lastSeenCommit) {
               lastSeenCommit = currentCommit;
             }
             settleWaiting();
-          });
+          }) ?? undefined;
         });
       }
       return new Promise((resolve) => {
-        waiting.push(resolve);
+        waiting.push({ resolve });
         // A timer set for a gap before anything waited is set again, as one to stay alive for
         if (!flushing) plan(true);
       });

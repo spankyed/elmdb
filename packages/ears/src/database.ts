@@ -627,7 +627,7 @@ export function createConnection(
     }
     if (!level.kept) {
       // Every write it held was rolled back with a level that threw
-      timedInUnit(() => held.abort());
+      timedInUnit(() => crossing(() => held.abort()));
       unitEnded();
       return value;
     }
