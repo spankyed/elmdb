@@ -672,3 +672,22 @@ fn a_directory_is_written_in_once_an_open_has_written_there_and_never_by_a_backu
         assert!(crate::written_in(other.path()), "a writable open's in each mode");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_backup_is_refused_where_a_lock_file_an_open_made_can_t_be_opened() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    let lock = target.path().join("open.lock");
+    std::fs::write(&lock, b"").unwrap();
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root opens it all the same, and nothing here can make it fail to
+    if std::fs::File::open(&lock).is_ok() {
+        return;
+    }
+    // Not taken for a directory no database was opened in: one may be open there, behind a lock this can't take
+    assert_eq!(db.backup(target.path()).unwrap_err().code, crate::ErrorCode::Io);
+    assert!(!target.path().join("data.mdb").exists());
+}
