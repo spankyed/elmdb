@@ -727,7 +727,9 @@ mod tests {
             assert!(decoded.capacity() <= limit, "capacity {} exceeded limit {limit}", decoded.capacity());
         }
 
-        // Window log boundary: the window `ZSTD_LEVEL` compresses with is accepted, one wider is refused
+        // Window log boundary: 2^21, the window `ZSTD_LEVEL` compresses a value of any size with, is accepted, and one
+        // wider is refused. The most a field holds, streamed, reads back within it
+        // (`a_value_of_the_most_a_field_holds_reads_back_whole_and_one_byte_more_is_refused`)
         let frame_with_window = |window_log: u32| {
             let mut enc = zstd::stream::Encoder::new(vec![COMPRESSED], 3).unwrap();
             enc.include_contentsize(false).unwrap();
@@ -735,9 +737,9 @@ mod tests {
             enc.write_all(b"window-check").unwrap();
             enc.finish().unwrap()
         };
-        let ok_window = frame_with_window(MAX_WINDOW_LOG);
+        let ok_window = frame_with_window(21);
         assert_eq!(unstored(&ok_window).unwrap().as_ref(), b"window-check");
-        let wide_window = frame_with_window(MAX_WINDOW_LOG + 1);
+        let wide_window = frame_with_window(22);
         // Valid under zstd's default window limit, so it is this one that refuses it
         let mut default_dec = zstd::stream::Decoder::new(&wide_window[1..]).unwrap();
         let mut check = Vec::new();
