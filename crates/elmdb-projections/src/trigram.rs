@@ -22,27 +22,27 @@ const TAG_DOC_TRIGS: u8 = 0x03;
 /// Maximum trigrams indexed per single entity to bound worst-case write amplification on huge blobs.
 pub const MAX_TRIGRAMS_PER_DOC: usize = 16_384;
 
-/// Extracts sorted, deduplicated lowercase 3-character Unicode trigrams from `text`.
+/// Extracts sorted, deduplicated lowercase 3-character Unicode trigrams from `text`
+/// via a streaming 3-char sliding window (zero full-string lowercase or `Vec<char>` allocation).
 pub fn extract_trigrams(text: &str) -> Vec<String> {
-    let folded = text.to_lowercase();
-    let chars: Vec<char> = folded.chars().collect();
-    if chars.len() < 3 {
-        return Vec::new();
-    }
     let mut set = BTreeSet::new();
-    for win in chars.windows(3) {
-        // Avoid NUL inside trigram keys (which would collide with the `0x00` separator).
-        if win[0] == '\0' || win[1] == '\0' || win[2] == '\0' {
-            continue;
+    let mut iter = text.chars().flat_map(char::to_lowercase);
+    let (Some(mut c0), Some(mut c1)) = (iter.next(), iter.next()) else {
+        return Vec::new();
+    };
+    for c2 in iter {
+        if c0 != '\0' && c1 != '\0' && c2 != '\0' {
+            let mut s = String::with_capacity(c0.len_utf8() + c1.len_utf8() + c2.len_utf8());
+            s.push(c0);
+            s.push(c1);
+            s.push(c2);
+            set.insert(s);
+            if set.len() >= MAX_TRIGRAMS_PER_DOC {
+                break;
+            }
         }
-        let mut s = String::with_capacity(12);
-        s.push(win[0]);
-        s.push(win[1]);
-        s.push(win[2]);
-        set.insert(s);
-        if set.len() >= MAX_TRIGRAMS_PER_DOC {
-            break;
-        }
+        c0 = c1;
+        c1 = c2;
     }
     set.into_iter().collect()
 }
@@ -143,7 +143,11 @@ fn encode_bitmap(bm: &RoaringBitmap) -> Result<Vec<u8>> {
 }
 
 fn decode_bitmap(raw: &[u8]) -> Result<RoaringBitmap> {
-    RoaringBitmap::deserialize_from(raw).map_err(|e| ElmdbError::new(ErrorCode::Corrupted, e.to_string()))
+    let bm = RoaringBitmap::deserialize_from(raw).map_err(|e| ElmdbError::new(ErrorCode::Corrupted, e.to_string()))?;
+    if bm.max().is_some_and(|m| m > 0xFFFF) {
+        return Err(ElmdbError::new(ErrorCode::Corrupted, "trigram bitmap offset exceeds u16 block range"));
+    }
+    Ok(bm)
 }
 
 fn add_trigram<W: KvMut>(txn: &mut W, db: SubDbHandle, trig: &str, key: EntityKey) -> Result<()> {
@@ -287,7 +291,7 @@ pub fn intersect_trigrams<R: KvRead>(txn: &R, db: SubDbHandle, required: &[Strin
         }
         ranked.push((t.as_str(), df));
     }
-    ranked.sort_by_key(|&(_, df)| df);
+    ranked.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(b.0)));
     ranked.dedup_by_key(|(t, _)| *t);
 
     // Scan blocks of the rarest trigram.
@@ -306,6 +310,9 @@ pub fn intersect_trigrams<R: KvRead>(txn: &R, db: SubDbHandle, required: &[Strin
                 break;
             }
             let block = u64::from_be_bytes(k[prefix.len()..prefix.len() + 8].try_into().expect("8"));
+            if block >= (1u64 << 48) {
+                return Err(ElmdbError::new(ErrorCode::Corrupted, "trigram block exceeds 48-bit key space"));
+            }
             blocks.push((block, decode_bitmap(v)?));
             step = cur.next()?;
         }

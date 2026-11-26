@@ -1,7 +1,7 @@
 //! ICU Collation Order projection (1 sub-DB per index, 1-byte table tags).
 //!
 //! Layout inside the index's pooled `SubDbSlot`:
-//! - `0x00` -> 32-byte `CollatorStamp` (SHA-256 of locale, layout, ICU crate versions, and 24 probe sort keys)
+//! - `0x00` -> 32-byte `CollatorStamp` (SHA-256 of locale, layout, sort-key cap, and 24 probe sort keys)
 //! - `0x01 || escaped_sort_key_prefix || 0x00 0x00 || cut(1B: 0|1) || EntityKey(8B BE)` -> `()`
 //! - `0x02 || EntityKey(8B BE)` -> `()` (missing / null / non-string)
 
@@ -128,6 +128,7 @@ pub fn compute_stamp(locale: &str, collator: &CollatorBorrowed<'static>) -> Coll
     };
     part(locale.as_bytes());
     part(&LAYOUT_VERSION.to_be_bytes());
+    part(&(MAX_SORT_KEY_BYTES as u64).to_be_bytes());
     for probe in PROBES {
         part(&sort_key(collator, probe, usize::MAX).bytes);
     }
@@ -176,9 +177,16 @@ pub fn apply_delta<W: KvMut>(
     before: Option<&PackedRow>,
     after: Option<&PackedRow>,
 ) -> Result<()> {
-    // Ensure stamp is written on first touch.
-    if txn.get(db, &[TAG_STAMP])?.is_none() {
-        write_stamp(txn, db, cached)?;
+    // Enforce collator stamp on write: never silently mix keys from mismatched ICU collator versions!
+    match txn.get(db, &[TAG_STAMP])? {
+        None => write_stamp(txn, db, cached)?,
+        Some(existing) if existing == cached.stamp.as_slice() => {}
+        Some(_) => {
+            return Err(ElmdbError::new(
+                ErrorCode::IndexNotReady,
+                format!("order index collator stamp mismatch for locale '{}'; rebuild required", cached.locale),
+            ));
+        }
     }
     let old_s = before.and_then(|r| extract_str(r, field));
     let new_s = after.and_then(|r| extract_str(r, field));
@@ -224,6 +232,13 @@ pub fn scan_ordered<R: KvRead>(
     if cap == 0 {
         return Ok(Vec::new());
     }
+    // Enforce collator stamp on read: refuse silently mis-ordered scans after ICU upgrades or corruption!
+    if !stamp_matches(txn, db, cached)? {
+        return Err(ElmdbError::new(
+            ErrorCode::IndexNotReady,
+            format!("order index collator stamp mismatch for locale '{}'; rebuild required", cached.locale),
+        ));
+    }
     // Collect entries grouped by identical cut prefix so cut ties resolve cleanly.
     struct Entry {
         prefix: Vec<u8>,
@@ -242,8 +257,11 @@ pub fn scan_ordered<R: KvRead>(
             }
         };
         while let Some((k, _)) = step {
-            if k.first() != Some(&TAG_ORDER) || k.len() < 12 {
+            if k.first() != Some(&TAG_ORDER) {
                 break;
+            }
+            if k.len() < 12 {
+                return Err(ElmdbError::new(ErrorCode::Corrupted, "truncated order index key"));
             }
             let key = EntityKey::from_be_bytes(k[k.len() - 8..].try_into().expect("8"));
             let cut = k[k.len() - 9] != 0;

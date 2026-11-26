@@ -120,27 +120,34 @@ pub(crate) fn encode_order_preserving_bytes(bytes: &[u8], out: &mut Vec<u8>) {
 }
 
 /// Encodes a compound tuple of values into the canonical index payload bytes (without table tag).
+/// Deterministic precedence independent of field order: `Without > Unordered > Long > Indexed`.
 pub fn encode_compound_values(vals: &[&CanonicalValue]) -> ValueKeyClass {
     let mut buf = Vec::with_capacity(vals.len() * 16);
+    let mut has_unordered = false;
+    let mut has_long = false;
     for v in vals {
         match encode_value_part(v, &mut buf) {
             ValuePartStatus::Ok => {}
             ValuePartStatus::Missing => return ValueKeyClass::Without,
-            ValuePartStatus::Unordered => return ValueKeyClass::Unordered,
-            ValuePartStatus::Long => return ValueKeyClass::Long,
+            ValuePartStatus::Unordered => has_unordered = true,
+            ValuePartStatus::Long => has_long = true,
         }
     }
-    // Keep LMDB's 511-byte key ceiling strictly respected even for multi-field compound string keys
-    // (1B tag + payload + 8B bucket <= 511 -> payload <= 502).
-    if buf.len() > 502 {
+    if has_unordered {
+        return ValueKeyClass::Unordered;
+    }
+    if has_long || buf.len() > 502 {
         return ValueKeyClass::Long;
     }
     ValueKeyClass::Indexed(buf)
 }
 
 /// Classifies a live `PackedRow` for a Value index on `fields`.
+/// Deterministic precedence independent of field order: `Without > Unordered > Long > Indexed`.
 pub fn classify_row(row: &PackedRow, fields: &[FieldId]) -> ValueKeyClass {
     let mut buf = Vec::with_capacity(fields.len() * 16);
+    let mut has_unordered = false;
+    let mut has_long = false;
     for &fid in fields {
         let Some(val) = row.fields.get(&fid) else {
             return ValueKeyClass::Without;
@@ -148,11 +155,14 @@ pub fn classify_row(row: &PackedRow, fields: &[FieldId]) -> ValueKeyClass {
         match encode_value_part(val, &mut buf) {
             ValuePartStatus::Ok => {}
             ValuePartStatus::Missing => return ValueKeyClass::Without,
-            ValuePartStatus::Unordered => return ValueKeyClass::Unordered,
-            ValuePartStatus::Long => return ValueKeyClass::Long,
+            ValuePartStatus::Unordered => has_unordered = true,
+            ValuePartStatus::Long => has_long = true,
         }
     }
-    if buf.len() > 502 {
+    if has_unordered {
+        return ValueKeyClass::Unordered;
+    }
+    if has_long || buf.len() > 502 {
         return ValueKeyClass::Long;
     }
     ValueKeyClass::Indexed(buf)
@@ -537,7 +547,113 @@ pub fn count_eq<R: KvRead>(txn: &R, db: SubDbHandle, vals: &[&CanonicalValue]) -
     }
 }
 
+/// Returns the smallest byte vector strictly greater than every byte slice starting with `prefix`.
+fn next_prefix(prefix: &[u8]) -> Option<Vec<u8>> {
+    let mut out = prefix.to_vec();
+    while let Some(last) = out.pop() {
+        if last < u8::MAX {
+            out.push(last + 1);
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// Bounded bucketed-key reader (stops after `limit` keys, respecting `reverse` order!).
+fn read_bucketed_keys_bounded<R: KvRead>(
+    txn: &R,
+    db: SubDbHandle,
+    payload: &[u8],
+    reverse: bool,
+    limit: usize,
+) -> Result<Vec<EntityKey>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut prefix = Vec::with_capacity(1 + payload.len());
+    prefix.push(TAG_BUCKET);
+    prefix.extend_from_slice(payload);
+    let expected_len = prefix.len() + 8;
+    let mut cur = txn.cursor(db)?;
+    let mut out = Vec::with_capacity(limit.min(4096));
+
+    let mut step = if !reverse {
+        cur.seek_ge(&prefix)?
+    } else {
+        match next_prefix(&prefix) {
+            Some(upper) => match cur.seek_ge(&upper)? {
+                Some(_) => cur.prev()?,
+                None => cur.last()?,
+            },
+            None => cur.last()?,
+        }
+    };
+
+    while let Some((k, v)) = step {
+        if k.len() != expected_len || !k.starts_with(&prefix) {
+            break;
+        }
+        let bucket = u64::from_be_bytes(k[prefix.len()..expected_len].try_into().expect("8"));
+        let base = bucket << 8;
+        if !reverse {
+            for &off in v {
+                out.push(EntityKey(base | (off as u64)));
+                if out.len() >= limit {
+                    return Ok(out);
+                }
+            }
+            step = cur.next()?;
+        } else {
+            for &off in v.iter().rev() {
+                out.push(EntityKey(base | (off as u64)));
+                if out.len() >= limit {
+                    return Ok(out);
+                }
+            }
+            step = cur.prev()?;
+        }
+    }
+    Ok(out)
+}
+
+/// Returns all `EntityKey`s stored in the `TAG_LONG` partition (strings > 448 B / compound keys > 502 B)
+/// so query executors never silently miss long-string matches.
+pub fn scan_long_keys<R: KvRead>(txn: &R, db: SubDbHandle) -> Result<Vec<EntityKey>> {
+    scan_aux_partition(txn, db, TAG_LONG)
+}
+
+/// Returns all `EntityKey`s stored in `TAG_WITHOUT` (missing/null indexed fields).
+pub fn scan_without_keys<R: KvRead>(txn: &R, db: SubDbHandle) -> Result<Vec<EntityKey>> {
+    scan_aux_partition(txn, db, TAG_WITHOUT)
+}
+
+/// Returns all `EntityKey`s stored in `TAG_UNORDERED`.
+pub fn scan_unordered_keys<R: KvRead>(txn: &R, db: SubDbHandle) -> Result<Vec<EntityKey>> {
+    scan_aux_partition(txn, db, TAG_UNORDERED)
+}
+
+fn scan_aux_partition<R: KvRead>(txn: &R, db: SubDbHandle, tag: u8) -> Result<Vec<EntityKey>> {
+    let mut cur = txn.cursor(db)?;
+    let mut out = Vec::new();
+    let mut step = cur.seek_ge(&[tag])?;
+    while let Some((k, _)) = step {
+        if k.first() != Some(&tag) {
+            break;
+        }
+        if k.len() != 9 {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "corrupt aux partition key length"));
+        }
+        out.push(EntityKey::from_be_bytes(k[1..9].try_into().expect("8")));
+        step = cur.next()?;
+    }
+    Ok(out)
+}
+
 /// Range scan over `TAG_MAIN` returning matching `EntityKey`s in index order (ascending or descending).
+///
+/// - Handles both full-arity bounds and compound prefix bounds via self-delimiting `next_prefix`.
+/// - When one bound is open (`None`) and the other is `Some`, clamps the open side to the provided
+///   bound's first-field type tag (`PART_*`) so `Any` fields never bleed across distinct scalar types.
 pub fn scan_range<R: KvRead>(
     txn: &R,
     db: SubDbHandle,
@@ -550,14 +666,14 @@ pub fn scan_range<R: KvRead>(
     if cap == 0 {
         return Ok(Vec::new());
     }
-    let low_bound = match low {
+    let low_enc = match low {
         Some((vals, inc)) => match encode_compound_values(vals) {
             ValueKeyClass::Indexed(p) => Some((main_key(&p), inc)),
             _ => return Ok(Vec::new()),
         },
         None => None,
     };
-    let high_bound = match high {
+    let high_enc = match high {
         Some((vals, inc)) => match encode_compound_values(vals) {
             ValueKeyClass::Indexed(p) => Some((main_key(&p), inc)),
             _ => return Ok(Vec::new()),
@@ -565,58 +681,54 @@ pub fn scan_range<R: KvRead>(
         None => None,
     };
 
-    // Collect matching (payload, PostingHead) in order, then expand up to `cap`.
+    // Convert (key, inclusive) into half-open `[start_inc, end_exc)` byte boundaries so compound
+    // prefixes work identically to exact-arity bounds, and clamp open sides to the same first-field type tag!
+    let start_inc: Vec<u8> = match (&low_enc, &high_enc) {
+        (Some((lb, true)), _) => lb.clone(),
+        (Some((lb, false)), _) => match next_prefix(lb) {
+            Some(np) => np,
+            None => return Ok(Vec::new()),
+        },
+        (None, Some((hb, _))) if hb.len() >= 2 => vec![TAG_MAIN, hb[1]],
+        (None, _) => vec![TAG_MAIN],
+    };
+
+    let end_exc: Vec<u8> = match (&high_enc, &low_enc) {
+        (Some((hb, true)), _) => match next_prefix(hb) {
+            Some(np) => np,
+            None => vec![TAG_MAIN + 1],
+        },
+        (Some((hb, false)), _) => hb.clone(),
+        (None, Some((lb, _))) if lb.len() >= 2 => {
+            if lb[1] < u8::MAX {
+                vec![TAG_MAIN, lb[1] + 1]
+            } else {
+                vec![TAG_MAIN + 1]
+            }
+        }
+        (None, _) => vec![TAG_MAIN + 1],
+    };
+
+    if start_inc >= end_exc {
+        return Ok(Vec::new());
+    }
+
     let mut entries: Vec<(Vec<u8>, PostingHead)> = Vec::new();
     let mut collected = 0usize;
     {
         let mut cur = txn.cursor(db)?;
         let mut step = if !reverse {
-            match &low_bound {
-                Some((k, _)) => cur.seek_ge(k)?,
-                None => cur.seek_ge(&[TAG_MAIN])?,
-            }
+            cur.seek_ge(&start_inc)?
         } else {
-            let probe = match &high_bound {
-                Some((k, _)) => k.as_slice(),
-                None => &[TAG_MAIN + 1],
-            };
-            match cur.seek_ge(probe)? {
-                Some((k, v)) => {
-                    if let Some((hb, true)) = &high_bound
-                        && k == hb.as_slice()
-                    {
-                        Some((k, v))
-                    } else {
-                        cur.prev()?
-                    }
-                }
+            match cur.seek_ge(&end_exc)? {
+                Some(_) => cur.prev()?,
                 None => cur.last()?,
             }
         };
 
         while let Some((k, v)) = step {
-            if k.first() != Some(&TAG_MAIN) {
+            if k < start_inc.as_slice() || k >= end_exc.as_slice() {
                 break;
-            }
-            if let Some((lb, inc)) = &low_bound {
-                let cmp = k.cmp(lb.as_slice());
-                if cmp.is_lt() || (!inc && cmp.is_eq()) {
-                    if reverse {
-                        break;
-                    }
-                    step = cur.next()?;
-                    continue;
-                }
-            }
-            if let Some((hb, inc)) = &high_bound {
-                let cmp = k.cmp(hb.as_slice());
-                if cmp.is_gt() || (!inc && cmp.is_eq()) {
-                    if !reverse {
-                        break;
-                    }
-                    step = cur.prev()?;
-                    continue;
-                }
             }
             let head = decode_posting_head(v)?;
             let count = match &head {
@@ -634,17 +746,19 @@ pub fn scan_range<R: KvRead>(
 
     let mut out = Vec::with_capacity(collected.min(cap).min(4096));
     for (payload, head) in entries {
-        let mut keys = match head {
-            PostingHead::Inline(ks) => ks,
-            PostingHead::Bucketed(_) => read_all_bucketed_keys(txn, db, &payload)?,
-        };
-        if reverse {
-            keys.reverse();
+        let remaining = cap - out.len();
+        if remaining == 0 {
+            break;
         }
-        for ek in keys {
-            out.push(ek);
-            if out.len() >= cap {
-                return Ok(out);
+        match head {
+            PostingHead::Inline(mut ks) => {
+                if reverse {
+                    ks.reverse();
+                }
+                out.extend(ks.into_iter().take(remaining));
+            }
+            PostingHead::Bucketed(_) => {
+                out.extend(read_bucketed_keys_bounded(txn, db, &payload, reverse, remaining)?);
             }
         }
     }
@@ -675,6 +789,10 @@ pub fn scan_prefix_string<R: KvRead>(
         } else {
             key_prefix.push(b);
         }
+        // Respect LMDB's 511-byte key ceiling (1B TAG_MAIN + 502B payload ceiling = 503B).
+        if key_prefix.len() > 503 {
+            return Ok(Vec::new());
+        }
     }
 
     let mut entries = Vec::new();
@@ -701,14 +819,14 @@ pub fn scan_prefix_string<R: KvRead>(
     }
     let mut out = Vec::with_capacity(total.min(cap).min(4096));
     for (payload, head) in entries {
-        let keys = match head {
-            PostingHead::Inline(ks) => ks,
-            PostingHead::Bucketed(_) => read_all_bucketed_keys(txn, db, &payload)?,
-        };
-        for ek in keys {
-            out.push(ek);
-            if out.len() >= cap {
-                return Ok(out);
+        let remaining = cap - out.len();
+        if remaining == 0 {
+            break;
+        }
+        match head {
+            PostingHead::Inline(ks) => out.extend(ks.into_iter().take(remaining)),
+            PostingHead::Bucketed(_) => {
+                out.extend(read_bucketed_keys_bounded(txn, db, &payload, false, remaining)?);
             }
         }
     }

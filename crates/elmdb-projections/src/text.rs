@@ -290,20 +290,34 @@ impl PostingBlock {
 
     fn decode(raw: &[u8]) -> Result<Self> {
         let (max_weighted_tf, min_weighted_doc_len, count) = Self::decode_header(raw)?;
+        let max_per_block = 1usize << BLOCK_SHIFT;
+        if (count as usize) > max_per_block {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "posting block count exceeds block capacity"));
+        }
         let mut pos = 14usize;
-        let mut postings = Vec::with_capacity((count as usize).min(128));
+        let mut postings = Vec::with_capacity(count as usize);
         let mut cur_off = 0u8;
-        for _ in 0..count {
+        for i in 0..count {
             if pos >= raw.len() {
                 return Err(ElmdbError::new(ErrorCode::Corrupted, "truncated posting block body"));
             }
+            let delta = raw[pos];
+            if i > 0 && delta == 0 {
+                return Err(ElmdbError::new(ErrorCode::Corrupted, "non-monotonic posting offset delta"));
+            }
             cur_off = cur_off
-                .checked_add(raw[pos])
+                .checked_add(delta)
                 .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "posting offset overflow"))?;
+            if (cur_off as usize) >= max_per_block {
+                return Err(ElmdbError::new(ErrorCode::Corrupted, "posting offset out of block bounds"));
+            }
             pos += 1;
             let tf = read_varint(raw, &mut pos)? as u32;
             let doc_len = read_varint(raw, &mut pos)?;
             postings.push(Posting { offset: cur_off, weighted_tf: tf, weighted_doc_len: doc_len });
+        }
+        if pos != raw.len() {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "trailing bytes in posting block"));
         }
         Ok(Self { max_weighted_tf, min_weighted_doc_len, postings })
     }
@@ -342,6 +356,12 @@ impl StoredDoc {
                     prev = p;
                 }
             }
+        }
+        if raw.len() > MAX_DOC_BYTES {
+            return Err(ElmdbError::new(
+                ErrorCode::ResourceLimit,
+                format!("encoded text doc {} B exceeds {} B cap", raw.len(), MAX_DOC_BYTES),
+            ));
         }
         if raw.len() >= DOC_ZSTD_THRESHOLD {
             let compressed =
@@ -402,13 +422,16 @@ impl StoredDoc {
         let mut terms = Vec::with_capacity(term_count.min(1024));
         for _ in 0..term_count {
             let tlen = read_varint(raw, &mut pos)? as usize;
-            if pos + tlen > raw.len() {
+            let end = pos
+                .checked_add(tlen)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "term length overflow in stored doc"))?;
+            if end > raw.len() {
                 return Err(ElmdbError::new(ErrorCode::Corrupted, "truncated term in stored doc"));
             }
-            let term = std::str::from_utf8(&raw[pos..pos + tlen])
+            let term = std::str::from_utf8(&raw[pos..end])
                 .map_err(|_| ElmdbError::new(ErrorCode::Corrupted, "non-utf8 term"))?
                 .to_owned();
-            pos += tlen;
+            pos = end;
             let wtf = read_varint(raw, &mut pos)? as u32;
             let fcount = read_varint(raw, &mut pos)? as usize;
             let mut fpos = Vec::with_capacity(fcount.min(32));
@@ -428,6 +451,9 @@ impl StoredDoc {
                 fpos.push((fi, positions));
             }
             terms.push((term, wtf, fpos));
+        }
+        if pos != raw.len() {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "trailing bytes in stored doc"));
         }
         Ok(Self { weighted_doc_len, field_lens, terms })
     }
@@ -516,7 +542,14 @@ fn decode_length_block(raw: &[u8]) -> Result<Vec<(u8, u64)>> {
     Ok(out)
 }
 
-fn build_doc_from_row(row: &PackedRow, fields: &[(FieldId, u16)], stem_lang: Option<&str>) -> Option<StoredDoc> {
+fn build_doc_from_row(
+    row: &PackedRow,
+    fields: &[(FieldId, u16)],
+    stem_lang: Option<&str>,
+) -> Result<Option<StoredDoc>> {
+    if fields.len() > 256 {
+        return Err(ElmdbError::new(ErrorCode::InvalidSchema, "text index supports at most 256 fields"));
+    }
     let mut field_lens = vec![0u64; fields.len()];
     let mut weighted_doc_len = 0u64;
     // term -> (weighted_tf, BTreeMap<field_idx, Vec<pos>>)
@@ -562,11 +595,11 @@ fn build_doc_from_row(row: &PackedRow, fields: &[(FieldId, u16)], stem_lang: Opt
     }
 
     if by_term.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let terms = by_term.into_iter().map(|(term, (wtf, fmap))| (term, wtf, fmap.into_iter().collect())).collect();
-    Some(StoredDoc { weighted_doc_len: weighted_doc_len.max(1), field_lens, terms })
+    Ok(Some(StoredDoc { weighted_doc_len: weighted_doc_len.max(1), field_lens, terms }))
 }
 
 fn recompute_dict_bounds_from_blocks<R: KvRead>(txn: &R, db: SubDbHandle, term: &str) -> Result<(u32, u64)> {
@@ -730,7 +763,10 @@ pub fn apply_delta<W: KvMut>(
     };
 
     let existing_doc = txn.get(db, &doc_key(key))?.map(ToOwned::to_owned);
-    let new_doc = after.and_then(|r| build_doc_from_row(r, fields, stem_lang));
+    let new_doc = match after {
+        Some(r) => build_doc_from_row(r, fields, stem_lang)?,
+        None => None,
+    };
 
     if let Some(old_raw) = existing_doc {
         let old_doc = StoredDoc::decode(&old_raw)?;
@@ -804,13 +840,16 @@ pub fn prefix_terms<R: KvRead>(
 
 /// Checks whether document `key` contains `phrase_terms` consecutively within the same field.
 pub fn matches_phrase<R: KvRead>(txn: &R, db: SubDbHandle, key: EntityKey, phrase_terms: &[String]) -> Result<bool> {
-    if phrase_terms.len() <= 1 {
+    if phrase_terms.is_empty() {
         return Ok(true);
     }
     let Some(raw) = txn.get(db, &doc_key(key))? else {
         return Ok(false);
     };
     let doc = StoredDoc::decode(raw)?;
+    if phrase_terms.len() == 1 {
+        return Ok(doc.terms.binary_search_by(|(t, _, _)| t.as_str().cmp(phrase_terms[0].as_str())).is_ok());
+    }
     // Map each phrase term to its per-field position lists.
     let mut lists: Vec<&[(u8, Vec<u32>)]> = Vec::with_capacity(phrase_terms.len());
     for pt in phrase_terms {
@@ -885,12 +924,15 @@ impl Ord for HeapHit {
     }
 }
 
+const MAX_VALID_BUCKET: u64 = 1u64 << (64 - BLOCK_SHIFT);
+
 /// Block-Max WAND cursor over a single term's posting blocks.
 struct BmwTermCursor {
+    term: String,
     idf: f64,
     term_ub: f64,
-    /// `(bucket, max_weighted_tf, min_weighted_doc_len, raw_block_bytes)` — blocks decoded lazily!
-    blocks: Vec<(u64, u32, u64, Vec<u8>)>,
+    /// `(bucket, max_weighted_tf, min_weighted_doc_len)` — raw block payloads are fetched lazily from `txn`!
+    blocks: Vec<(u64, u32, u64)>,
     block_idx: usize,
     decoded_block_idx: Option<usize>,
     decoded: Vec<Posting>,
@@ -928,8 +970,11 @@ impl BmwTermCursor {
                     break;
                 }
                 let bucket = u64::from_be_bytes(k[prefix.len()..prefix.len() + 8].try_into().expect("8"));
+                if bucket >= MAX_VALID_BUCKET {
+                    return Err(ElmdbError::new(ErrorCode::Corrupted, "posting block bucket out of u64 key range"));
+                }
                 let (max_tf, min_len, _) = PostingBlock::decode_header(v)?;
-                blocks.push((bucket, max_tf, min_len, v.to_vec()));
+                blocks.push((bucket, max_tf, min_len));
                 step = cur.next()?;
             }
         }
@@ -937,6 +982,7 @@ impl BmwTermCursor {
             return Ok(None);
         }
         let mut c = Self {
+            term: term.to_owned(),
             idf,
             term_ub,
             blocks,
@@ -948,31 +994,35 @@ impl BmwTermCursor {
             cur_posting: None,
             blocks_pruned: 0,
         };
-        c.advance_to(EntityKey(0))?;
+        c.advance_to(txn, db, EntityKey(0))?;
         Ok(Some(c))
     }
 
-    fn current_block_end_key(&self) -> u64 {
-        if self.block_idx >= self.blocks.len() {
-            return u64::MAX;
+    fn exhaust(&mut self) {
+        if self.block_idx < self.blocks.len() {
+            let remaining =
+                self.blocks.len() - self.block_idx - usize::from(self.decoded_block_idx == Some(self.block_idx));
+            self.blocks_pruned += remaining;
         }
-        let bucket = self.blocks[self.block_idx].0;
-        (bucket << BLOCK_SHIFT) | ((1u64 << BLOCK_SHIFT) - 1)
+        self.block_idx = self.blocks.len();
+        self.decoded_block_idx = None;
+        self.cur_doc = None;
+        self.cur_posting = None;
     }
 
     fn block_ub_at(&self, target: EntityKey, avgdl: f64) -> f64 {
         let target_bucket = target.0 >> BLOCK_SHIFT;
-        let idx = self.blocks[self.block_idx..].partition_point(|(b, _, _, _)| *b < target_bucket) + self.block_idx;
+        let idx = self.blocks[self.block_idx..].partition_point(|(b, _, _)| *b < target_bucket) + self.block_idx;
         if idx >= self.blocks.len() || self.blocks[idx].0 != target_bucket {
             return 0.0;
         }
-        let (_, max_tf, min_len, _) = self.blocks[idx];
+        let (_, max_tf, min_len) = self.blocks[idx];
         bm25_term_score(self.idf, max_tf, min_len, avgdl)
     }
 
     fn block_end_covering(&self, target: EntityKey) -> u64 {
         let target_bucket = target.0 >> BLOCK_SHIFT;
-        let idx = self.blocks[self.block_idx..].partition_point(|(b, _, _, _)| *b < target_bucket) + self.block_idx;
+        let idx = self.blocks[self.block_idx..].partition_point(|(b, _, _)| *b < target_bucket) + self.block_idx;
         if idx >= self.blocks.len() {
             return u64::MAX;
         }
@@ -985,8 +1035,8 @@ impl BmwTermCursor {
         }
     }
 
-    /// Advances cursor to the smallest `EntityKey >= target`, skipping entire blocks without decoding them.
-    fn advance_to(&mut self, target: EntityKey) -> Result<()> {
+    /// Advances cursor to the smallest `EntityKey >= target`, skipping entire blocks without decoding or reading them.
+    fn advance_to<R: KvRead>(&mut self, txn: &R, db: SubDbHandle, target: EntityKey) -> Result<()> {
         if let Some(cur) = self.cur_doc
             && cur >= target
         {
@@ -995,7 +1045,7 @@ impl BmwTermCursor {
         let target_bucket = target.0 >> BLOCK_SHIFT;
         if self.block_idx < self.blocks.len() && self.blocks[self.block_idx].0 < target_bucket {
             let new_idx =
-                self.blocks[self.block_idx..].partition_point(|(b, _, _, _)| *b < target_bucket) + self.block_idx;
+                self.blocks[self.block_idx..].partition_point(|(b, _, _)| *b < target_bucket) + self.block_idx;
             if new_idx > self.block_idx {
                 let skipped = new_idx - self.block_idx - usize::from(self.decoded_block_idx == Some(self.block_idx));
                 self.blocks_pruned += skipped;
@@ -1006,13 +1056,17 @@ impl BmwTermCursor {
         }
 
         while self.block_idx < self.blocks.len() {
+            let bucket = self.blocks[self.block_idx].0;
             if self.decoded_block_idx != Some(self.block_idx) {
-                let blk = PostingBlock::decode(&self.blocks[self.block_idx].3)?;
+                let raw = txn
+                    .get(db, &block_key(&self.term, bucket))?
+                    .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "missing posting block during BMW scan"))?;
+                let blk = PostingBlock::decode(raw)?;
                 self.decoded = blk.postings;
                 self.decoded_block_idx = Some(self.block_idx);
                 self.post_idx = 0;
             }
-            let base = self.blocks[self.block_idx].0 << BLOCK_SHIFT;
+            let base = bucket << BLOCK_SHIFT;
             while self.post_idx < self.decoded.len() {
                 let p = self.decoded[self.post_idx];
                 let ek = EntityKey(base | (p.offset as u64));
@@ -1066,8 +1120,6 @@ pub fn search_bmw<R: KvRead>(
     }
     let avgdl = (stats.total_weighted_len as f64 / stats.doc_count as f64).max(1.0);
 
-    // Deduplicate query terms while preserving order (counting duplicate query terms as weight multiplier if needed;
-    // standard BM25 deduplicates unique query terms).
     let mut terms: Vec<String> = Vec::new();
     let mut seen: FxHashSet<String> = FxHashSet::default();
     for tok in analyze_text(query, stem_lang) {
@@ -1096,14 +1148,21 @@ pub fn search_bmw<R: KvRead>(
 
     let mut heap: BinaryHeap<HeapHit> = BinaryHeap::with_capacity(top_k + 1);
     let mut search_stats = BmwSearchStats::default();
-    const EPS: f64 = 1e-12;
 
     loop {
-        // Drop exhausted cursors (for AND, any exhaustion ends immediately).
+        // Drop exhausted cursors (accounting for their pruned blocks before dropping!).
         if require_all && cursors.iter().any(|c| c.cur_doc.is_none()) {
             break;
         }
-        cursors.retain(|c| c.cur_doc.is_some());
+        let mut i = 0;
+        while i < cursors.len() {
+            if cursors[i].cur_doc.is_none() {
+                search_stats.blocks_pruned += cursors[i].blocks_pruned;
+                cursors.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
         if cursors.is_empty() {
             break;
         }
@@ -1112,22 +1171,22 @@ pub fn search_bmw<R: KvRead>(
         cursors.sort_by_key(|c| c.cur_doc.unwrap());
 
         let threshold = if heap.len() == top_k { heap.peek().unwrap().score } else { 0.0 };
+        let eps = 1e-12 * threshold.abs().max(1.0);
 
         // Pick pivot term.
-        let pivot_idx = if require_all {
-            // For AND, every cursor must match the largest cur_doc among them.
+        let mut pivot_idx = if require_all {
             let total_ub: f64 = cursors.iter().map(|c| c.term_ub).sum();
-            if heap.len() == top_k && total_ub + EPS < threshold {
+            if heap.len() == top_k && total_ub + eps < threshold {
                 break;
             }
             cursors.len() - 1
         } else {
             let mut acc = 0.0;
             let mut found = None;
-            for (i, c) in cursors.iter().enumerate() {
+            for (idx, c) in cursors.iter().enumerate() {
                 acc += c.term_ub;
-                if heap.len() < top_k || acc + EPS >= threshold {
-                    found = Some(i);
+                if heap.len() < top_k || acc + eps >= threshold {
+                    found = Some(idx);
                     break;
                 }
             }
@@ -1138,37 +1197,64 @@ pub fn search_bmw<R: KvRead>(
         };
 
         let pivot_doc = cursors[pivot_idx].cur_doc.unwrap();
+        // Extend `pivot_idx` past any additional cursors tied at `pivot_doc` so `cursors[pivot_idx + 1]`
+        // (if present) is strictly greater than `pivot_doc`.
+        while pivot_idx + 1 < cursors.len() && cursors[pivot_idx + 1].cur_doc == Some(pivot_doc) {
+            pivot_idx += 1;
+        }
 
         // Block-Max upper-bound check before scoring or aligning!
         if heap.len() == top_k {
             let mut block_sum = 0.0;
-            for c in &cursors {
-                if c.cur_doc.unwrap() <= pivot_doc {
-                    block_sum += c.block_ub_at(pivot_doc, avgdl);
-                }
+            for c in &cursors[..=pivot_idx] {
+                block_sum += c.block_ub_at(pivot_doc, avgdl);
             }
-            if block_sum + EPS < threshold {
-                // Skip safely past the shallowest block boundary covering `pivot_doc`!
+            if block_sum + eps < threshold {
+                // Skip safely past the shallowest block boundary covering `pivot_doc`, clamped by the
+                // next cursor strictly after `pivot_doc` in OR mode so we never skip a doc where
+                // trailing terms enter and combine to beat `threshold`!
                 let mut next_target = u64::MAX;
                 for c in &cursors[..=pivot_idx] {
                     next_target = next_target.min(c.block_end_covering(pivot_doc));
                 }
-                let jump_to = EntityKey(next_target.saturating_add(1));
-                let jump = if jump_to <= pivot_doc { EntityKey(pivot_doc.0.saturating_add(1)) } else { jump_to };
+                let next_after_block = next_target.checked_add(1);
+                let next_after_pivot = pivot_doc.0.checked_add(1);
+                let mut jump_opt = match (next_after_block, next_after_pivot) {
+                    (Some(b), Some(p)) => Some(b.max(p)),
+                    (None, Some(_)) => None, // Block reaches u64::MAX -> nothing left in block
+                    (_, None) => None,       // pivot_doc == u64::MAX -> exhaust!
+                };
+                if !require_all && let Some(next_c) = cursors.get(pivot_idx + 1) {
+                    let next_c_doc = next_c.cur_doc.unwrap().0;
+                    jump_opt = Some(match jump_opt {
+                        Some(j) => j.min(next_c_doc),
+                        None => next_c_doc,
+                    });
+                }
+
                 if require_all {
-                    for c in &mut cursors {
-                        c.advance_to(jump)?;
+                    match jump_opt {
+                        Some(j) => {
+                            for c in &mut cursors {
+                                c.advance_to(txn, db, EntityKey(j))?;
+                            }
+                        }
+                        None => {
+                            for c in &mut cursors {
+                                c.exhaust();
+                            }
+                        }
                     }
                 } else {
-                    // Advance cursor 0 (or all cursors <= pivot_idx that sit strictly before jump).
                     let target_cursor = cursors[..=pivot_idx]
                         .iter()
                         .enumerate()
                         .max_by(|(_, a), (_, b)| a.term_ub.total_cmp(&b.term_ub))
-                        .map_or(0, |(i, _)| i);
-                    let cur_end = cursors[target_cursor].current_block_end_key();
-                    let step_to = EntityKey(jump.0.max(cur_end.min(pivot_doc.0).saturating_add(1)));
-                    cursors[target_cursor].advance_to(step_to)?;
+                        .map_or(0, |(idx, _)| idx);
+                    match jump_opt {
+                        Some(j) => cursors[target_cursor].advance_to(txn, db, EntityKey(j))?,
+                        None => cursors[target_cursor].exhaust(),
+                    }
                 }
                 continue;
             }
@@ -1179,10 +1265,8 @@ pub fn search_bmw<R: KvRead>(
             let allowed = candidates.is_none_or(|set| set.contains(&pivot_doc));
             if allowed {
                 let mut score = 0.0;
-                for c in &cursors {
-                    if c.cur_doc == Some(pivot_doc)
-                        && let Some(p) = c.cur_posting
-                    {
+                for c in &cursors[..=pivot_idx] {
+                    if let Some(p) = c.cur_posting {
                         score += bm25_term_score(c.idf, p.weighted_tf, p.weighted_doc_len, avgdl);
                     }
                 }
@@ -1191,22 +1275,28 @@ pub fn search_bmw<R: KvRead>(
                 if heap.len() < top_k {
                     heap.push(candidate);
                 } else if candidate.cmp(heap.peek().unwrap()) == Ordering::Less {
-                    // Note: HeapHit's Ord is reversed for min-heap, so Less means strictly better than current min!
                     heap.pop();
                     heap.push(candidate);
                 }
             }
-            let next_doc = EntityKey(pivot_doc.0.saturating_add(1));
-            for c in &mut cursors {
-                if c.cur_doc == Some(pivot_doc) {
-                    c.advance_to(next_doc)?;
+            match pivot_doc.0.checked_add(1) {
+                Some(next_id) => {
+                    let next_doc = EntityKey(next_id);
+                    for c in &mut cursors[..=pivot_idx] {
+                        c.advance_to(txn, db, next_doc)?;
+                    }
+                }
+                None => {
+                    for c in &mut cursors[..=pivot_idx] {
+                        c.exhaust();
+                    }
                 }
             }
         } else {
             // Align preceding cursors up to `pivot_doc`.
             for c in &mut cursors[..pivot_idx] {
                 if c.cur_doc.unwrap() < pivot_doc {
-                    c.advance_to(pivot_doc)?;
+                    c.advance_to(txn, db, pivot_doc)?;
                 }
             }
         }
@@ -1317,5 +1407,40 @@ mod tests {
 
         let spans = map_utf8_spans_to_utf16(text, &[(rocket_start, rocket_end), (cafe_start, cafe_end)]);
         assert_eq!(spans, vec![(11, 13), (6, 10)]);
+    }
+
+    #[test]
+    fn malformed_stored_doc_and_posting_block_fail_closed_without_panic() {
+        // 1. StoredDoc with tlen = u64::MAX must not overflow `pos + tlen`!
+        let mut bad_doc = vec![DOC_RAW];
+        write_varint(1, &mut bad_doc); // weighted_doc_len
+        write_varint(0, &mut bad_doc); // fl_count
+        write_varint(1, &mut bad_doc); // term_count
+        write_varint(u64::MAX, &mut bad_doc); // malicious tlen
+        let err = StoredDoc::decode(&bad_doc).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Corrupted);
+
+        // 2. PostingBlock with offset >= 128 must fail closed!
+        let mut bad_blk = Vec::new();
+        bad_blk.extend_from_slice(&1u32.to_le_bytes()); // max_tf
+        bad_blk.extend_from_slice(&1u64.to_le_bytes()); // min_len
+        bad_blk.extend_from_slice(&1u16.to_le_bytes()); // count = 1
+        bad_blk.push(128u8); // out-of-bounds offset (>= 1 << BLOCK_SHIFT)
+        write_varint(1, &mut bad_blk);
+        write_varint(1, &mut bad_blk);
+        assert_eq!(PostingBlock::decode(&bad_blk).unwrap_err().code, ErrorCode::Corrupted);
+
+        // 3. PostingBlock with duplicate offset (delta == 0 on i > 0) must fail closed!
+        let mut dup_blk = Vec::new();
+        dup_blk.extend_from_slice(&1u32.to_le_bytes());
+        dup_blk.extend_from_slice(&1u64.to_le_bytes());
+        dup_blk.extend_from_slice(&2u16.to_le_bytes());
+        dup_blk.push(5u8);
+        write_varint(1, &mut dup_blk);
+        write_varint(1, &mut dup_blk);
+        dup_blk.push(0u8); // zero delta on 2nd entry
+        write_varint(1, &mut dup_blk);
+        write_varint(1, &mut dup_blk);
+        assert_eq!(PostingBlock::decode(&dup_blk).unwrap_err().code, ErrorCode::Corrupted);
     }
 }

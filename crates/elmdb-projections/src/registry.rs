@@ -154,6 +154,21 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
     /// Advances watermark-bounded builds by up to `chunk_size` entities across the first `Building` index.
     /// Returns `true` if work was performed (caller can loop until `false` to finish all builds).
     pub fn drive_build_chunk<C: Clock>(&self, engine: &Engine<S, V, C>, chunk_size: usize) -> Result<bool> {
+        // Fast lock-free RO pre-check so idle calls never acquire the write lock or fsync!
+        {
+            let (ro, schema) = engine.begin_read_pinned()?;
+            let dbs = engine.dbs();
+            let mut has_building = false;
+            for def in &schema.indexes {
+                if matches!(read_build_state(&ro, &dbs, def.id)?, Some(BuildState::Building { .. })) {
+                    has_building = true;
+                    break;
+                }
+            }
+            if !has_building {
+                return Ok(false);
+            }
+        }
         let chunk = chunk_size.max(1);
         let (did_work, _) = engine.run_maintenance_write(|txn, schema, dbs| {
             for def in &schema.indexes {
@@ -182,6 +197,9 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                 let chunk_res: Result<()> = txn.with_savepoint(|sp| {
                     for &ek in &batch_keys {
                         if let Some(row) = read_packed_row(sp, dbs, ek)? {
+                            if row.header.is_trashed() {
+                                continue;
+                            }
                             if let Some(ext) = self.find_external(&def.kind) {
                                 let delta = EntityDelta {
                                     key: ek,
@@ -281,12 +299,14 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
         let dbs = engine.dbs();
         let mut report = CheckReport::default();
 
+        let mut found_target = false;
         for def in &schema.indexes {
             if let Some(tid) = target
                 && def.id != tid
             {
                 continue;
             }
+            found_target = true;
             let state = read_build_state(&txn, &dbs, def.id)?.unwrap_or(BuildState::Ready);
             if !state.is_ready() {
                 report.mismatches.push(IndexMismatch {
@@ -306,7 +326,6 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                 continue;
             }
             if matches!(def.kind, IndexKind::Vector { .. } | IndexKind::Rank { .. }) {
-                report.checked_indexes += 1;
                 continue;
             }
 
@@ -327,6 +346,11 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
             let mut m = diff_subdb_against_expected(&txn, actual_db, &expected, def.id, &def.name, 16)?;
             report.mismatches.append(&mut m);
             report.checked_indexes += 1;
+        }
+        if let Some(tid) = target
+            && !found_target
+        {
+            return Err(ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", tid.0)));
         }
         Ok(report)
     }

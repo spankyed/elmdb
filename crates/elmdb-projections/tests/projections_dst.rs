@@ -603,4 +603,209 @@ fn live_lmdb_projections_and_600_index_churn_never_hits_mdb_dbs_full() {
     let db = engine.gate().open_subdb_ro(&txn, &idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
     let keys = value::lookup_eq(&txn, db, &[&CanonicalValue::Float(9.0)]).unwrap();
     assert_eq!(keys, vec![EntityKey(2)]);
+
+    // Regression: NUL-rich prefix > 503 escaped bytes on live LMDB must return empty cleanly (no MDB_BAD_VALSIZE!).
+    let nul_prefix = "\0".repeat(300);
+    let pref = value::scan_prefix_string(&txn, db, &nul_prefix, None).unwrap();
+    assert!(pref.is_empty());
+}
+
+#[test]
+fn review_regression_bmw_or_three_term_no_false_pruning() {
+    // Reproduces P0 #1: Doc in bucket 0 fills top_k=1 heap; in bucket 1 (keys 128..255),
+    // term A & term B have low block_ub in bucket 1 while term C enters later in bucket 1
+    // at doc 150 where B + C strictly beats doc 1!
+    let (engine, reg) = open_sim_engine(BuildPolicy::EagerInSchemaChange);
+    engine.set_schema(&full_schema()).unwrap();
+
+    let mut ops = Vec::with_capacity(200);
+    // EntityKey(1): "alpha" + "beta" in body so top_k=1 threshold is moderate after doc 1.
+    ops.push(WireOp::Create {
+        type_name: "Note".into(),
+        external_id: Some("doc-1".into()),
+        fields: make_fields(&[
+            ("title", CanonicalValue::String("alpha alpha beta".into())),
+            ("body", CanonicalValue::String("alpha beta pad pad pad".into())),
+        ]),
+    });
+    // Fill bucket 0 (keys 2..129) with docs containing "alpha" or "beta" so "gamma" is much rarer (higher IDF)!
+    for i in 2..=129 {
+        let text = if i % 2 == 0 { "alpha filler padding text" } else { "beta filler padding text" };
+        ops.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("pad-{i}")),
+            fields: make_fields(&[("body", CanonicalValue::String(text.into()))]),
+        });
+    }
+    // EntityKey(130): low-tf "alpha" in long doc -> low block_ub in bucket 1.
+    ops.push(WireOp::Create {
+        type_name: "Note".into(),
+        external_id: Some("doc-130".into()),
+        fields: make_fields(&[("body", CanonicalValue::String(format!("alpha {}", "pad ".repeat(60))))]),
+    });
+    for i in 131..140 {
+        ops.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("pad-{i}")),
+            fields: make_fields(&[("body", CanonicalValue::String("filler".into()))]),
+        });
+    }
+    // EntityKey(140): low-tf "beta" in long doc -> low block_ub in bucket 1.
+    ops.push(WireOp::Create {
+        type_name: "Note".into(),
+        external_id: Some("doc-140".into()),
+        fields: make_fields(&[("body", CanonicalValue::String(format!("beta {}", "pad ".repeat(60))))]),
+    });
+    for i in 141..150 {
+        ops.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("pad-{i}")),
+            fields: make_fields(&[("body", CanonicalValue::String("filler".into()))]),
+        });
+    }
+    // EntityKey(150): rare "gamma" (very high IDF!) + "beta" in short title -> MUST WIN top_k=1!
+    ops.push(WireOp::Create {
+        type_name: "Note".into(),
+        external_id: Some("doc-150".into()),
+        fields: make_fields(&[("title", CanonicalValue::String("beta gamma gamma gamma gamma".into()))]),
+    });
+    engine.execute_batch(&ops).unwrap();
+
+    let (txn, schema) = engine.begin_read_pinned().unwrap();
+    let idx = schema.indexes.iter().find(|i| i.name == "search_text").unwrap();
+    let db = engine.gate().open_subdb_ro(&txn, &idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+
+    for top_k in [1, 2, 3, 5] {
+        let (bmw, _) = text::search_bmw(&txn, db, "alpha beta gamma", None, top_k, false, None).unwrap();
+        let ref_hits =
+            text::search_exhaustive_reference(&txn, db, "alpha beta gamma", None, top_k, false, None).unwrap();
+        assert_eq!(bmw.len(), ref_hits.len(), "top_k={top_k}");
+        for (a, b) in bmw.iter().zip(ref_hits.iter()) {
+            assert_eq!(a.key, b.key, "BMW OR false pruning at top_k={top_k}!");
+            assert!((a.score - b.score).abs() < 1e-11);
+        }
+        assert_eq!(bmw[0].key, EntityKey(150));
+    }
+
+    // Also verify 1-term matches_phrase checks term presence (P2 #6).
+    assert!(text::matches_phrase(&txn, db, EntityKey(150), &["gamma".into()]).unwrap());
+    assert!(!text::matches_phrase(&txn, db, EntityKey(150), &["nonexistent".into()]).unwrap());
+    assert!(reg.check(&engine, None).unwrap().is_ok());
+}
+
+#[test]
+fn review_regression_compound_unique_long_plus_null_and_prefix_range_and_stamp_mismatch() {
+    let (engine, reg) = open_sim_engine(BuildPolicy::EagerInSchemaChange);
+    let mut schema = full_schema();
+    // Drop single-field `by_code_unique` so we isolate compound unique `(code, title)`.
+    schema.types.get_mut("Note").unwrap().indexes.remove("by_code_unique");
+    schema.types.get_mut("Note").unwrap().indexes.insert(
+        "compound_u".into(),
+        RawIndex { kind: RawIndexKind::Value { fields: vec!["code".into(), "title".into()], unique: true } },
+    );
+    engine.set_schema(&schema).unwrap();
+
+    // P1 #4: Two rows with (Long string, Null) must BOTH classify as Without and NOT trigger UniqueViolation!
+    let long = "L".repeat(500);
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("ln-1".into()),
+                fields: make_fields(&[("code", CanonicalValue::String(long.clone())), ("title", CanonicalValue::Null)]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("ln-2".into()),
+                fields: make_fields(&[("code", CanonicalValue::String(long)), ("title", CanonicalValue::Null)]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("cp-1".into()),
+                fields: make_fields(&[
+                    ("code", CanonicalValue::String("G1".into())),
+                    ("title", CanonicalValue::String("A".into())),
+                    ("score", CanonicalValue::Int(10)),
+                ]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("cp-2".into()),
+                fields: make_fields(&[
+                    ("code", CanonicalValue::String("G1".into())),
+                    ("title", CanonicalValue::String("B".into())),
+                    ("score", CanonicalValue::String("str-should-not-bleed".into())),
+                ]),
+            },
+        ])
+        .unwrap();
+
+    {
+        let (txn, compiled) = engine.begin_read_pinned().unwrap();
+        // P1 #5a: Compound prefix range scan on ("G1") inclusive returns both ("G1","A") and ("G1","B")!
+        let cidx = compiled.indexes.iter().find(|i| i.name == "compound_u").unwrap();
+        let cdb = engine.gate().open_subdb_ro(&txn, &cidx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        let g1_fwd = value::scan_range(
+            &txn,
+            cdb,
+            Some((&[&CanonicalValue::String("G1".into())], true)),
+            Some((&[&CanonicalValue::String("G1".into())], true)),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(g1_fwd.len(), 2);
+        let g1_rev = value::scan_range(
+            &txn,
+            cdb,
+            Some((&[&CanonicalValue::String("G1".into())], true)),
+            Some((&[&CanonicalValue::String("G1".into())], true)),
+            true,
+            None,
+        )
+        .unwrap();
+        assert_eq!(g1_rev.len(), 2);
+        assert_eq!(g1_rev[0], g1_fwd[1]);
+
+        // P1 #5b: Open-ended numeric scan_range on Any field `score >= 0` must NOT bleed into String keys!
+        let sidx = compiled.indexes.iter().find(|i| i.name == "by_score").unwrap();
+        let sdb = engine.gate().open_subdb_ro(&txn, &sidx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        let num_only =
+            value::scan_range(&txn, sdb, Some((&[&CanonicalValue::Int(0)], true)), None, false, None).unwrap();
+        assert_eq!(num_only.len(), 1);
+        assert_eq!(engine.resolve_ext_id(num_only[0]).unwrap().as_deref(), Some("cp-1"));
+    }
+
+    // P2 #2: check() with unknown IndexId returns UnknownIndex!
+    assert_eq!(reg.check(&engine, Some(elmdb_engine::IndexId(9999))).unwrap_err().code, ErrorCode::UnknownIndex);
+
+    // P1 #7: Corrupt/mismatch collator stamp in Order index -> both read and write reject with IndexNotReady!
+    let order_idx = engine.schema().indexes.iter().find(|i| i.name == "title_order_sv").unwrap().clone();
+    engine
+        .run_maintenance_write(|txn, _schema, _dbs| {
+            let db = txn.open_subdb(&order_idx.subdb_slot().name(), DbFlags::DEFAULT)?;
+            txn.put(db, &[0x00], &[0xFF; 32])?;
+            Ok(())
+        })
+        .unwrap();
+    {
+        let (txn, _) = engine.begin_read_pinned().unwrap();
+        let IndexKind::Order { field, locale } = &order_idx.kind else { panic!() };
+        let db = engine.gate().open_subdb_ro(&txn, &order_idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        let cached = reg.collators().get_or_build(locale).unwrap();
+        let err = order::scan_ordered(&txn, &engine.dbs(), db, &cached, *field, false, None).unwrap_err();
+        assert_eq!(err.code, ErrorCode::IndexNotReady);
+    }
+    let write_err = engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("post-stamp-mismatch".into()),
+            fields: make_fields(&[("title", CanonicalValue::String("Fail".into()))]),
+        }])
+        .unwrap_err();
+    assert_eq!(write_err.code, ErrorCode::IndexNotReady);
+
+    // Rebuilding restores the stamp and check() passes!
+    reg.rebuild(&engine, Some(order_idx.id)).unwrap();
+    assert!(reg.check(&engine, None).unwrap().is_ok());
 }
