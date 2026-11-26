@@ -471,3 +471,107 @@ fn before_commit_hooks_see_writes_abort_atomically_and_enforce_cycle_limit() {
 
     assert!(engine.unregister_before_commit(hook1));
 }
+
+#[test]
+fn review_hardening_savepoint_delta_rollback_nested_proto_and_archived_purge() {
+    use elmdb_wire::{ResultDecoder, ResultEncoder};
+
+    // 1. Nested `__proto__` inside CanonicalValue::Object must set `has_proto_key == true`.
+    let mut enc = ResultEncoder::new();
+    let nested = CanonicalValue::object(vec![("__proto__".into(), CanonicalValue::Int(1))]).unwrap();
+    enc.push_row("Task-1", "Task", &[("meta", &nested)], |_| unreachable!()).unwrap();
+    let frame = enc.finish();
+    let decoded = ResultDecoder::decode(&frame).unwrap();
+    assert!(decoded.has_proto_key);
+
+    // 2. Savepoint rollback inside `transact` must roll back BOTH LMDB and delta/hook accumulators!
+    let store = SimKvStore::default();
+    let vfs = SimVfs::default();
+    let (engine, _) =
+        Engine::open(store, vfs, SimClock::default(), Path::new("/sim/sp"), DurabilityMode::Unsafe).unwrap();
+    let schema = engine.set_schema(&sample_schema()).unwrap().0;
+    let task_tid = schema.type_by_name("Task").unwrap().id;
+
+    let hook_fires = Arc::new(AtomicUsize::new(0));
+    let fires_ref = Arc::clone(&hook_fires);
+    let mut wants = TypeMask::empty();
+    wants.insert(task_tid);
+    engine.register_before_commit(BeforeCommitHook {
+        wants,
+        callback: Arc::new(move |_| {
+            fires_ref.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }),
+    });
+
+    engine
+        .transact(|tx| {
+            // Create a Project, then inside a failing savepoint create a Task -> Task rolls back!
+            tx.exec(&WireOp::Create {
+                type_name: "Project".into(),
+                external_id: Some("Project-keep".into()),
+                fields: vec![("name".into(), CanonicalValue::String("Keep".into()))],
+            })?;
+            let _: Result<(), _> = tx.savepoint(|sp| {
+                sp.exec(&WireOp::Create {
+                    type_name: "Task".into(),
+                    external_id: Some("Task-rolledback".into()),
+                    fields: vec![("title".into(), CanonicalValue::String("Gone".into()))],
+                })?;
+                Err(ElmdbError::new(ErrorCode::HookAborted, "rollback"))
+            });
+            Ok(())
+        })
+        .unwrap();
+
+    // Hook watching Task MUST NOT have fired because Task creation was rolled back!
+    assert_eq!(hook_fires.load(Ordering::SeqCst), 0);
+    assert!(engine.get_row("Project-keep").unwrap().is_some());
+    assert!(engine.get_row("Task-rolledback").unwrap().is_none());
+
+    // 3. `get_field` resolves EntityRef to external ID string cleanly.
+    engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Task".into(),
+            external_id: Some("Task-ref".into()),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("Ref".into())),
+                ("projectRestrict".into(), CanonicalValue::String("Project-keep".into())),
+            ],
+        }])
+        .unwrap();
+    assert_eq!(
+        engine.get_field("Task-ref", "projectRestrict").unwrap(),
+        Some(CanonicalValue::String("Project-keep".into()))
+    );
+
+    // 4. Duplicate parallel link on ManyToOne fails with RelationAlreadyExists.
+    engine
+        .execute_batch(&[WireOp::Link {
+            source: EntityTarget::ExternalId("Task-ref".into()),
+            rel_kind: "IN_PROJECT".into(),
+            target: EntityTarget::ExternalId("Project-keep".into()),
+            weight: None,
+            info: None,
+        }])
+        .unwrap();
+    let dup = engine
+        .execute_batch(&[WireOp::Link {
+            source: EntityTarget::ExternalId("Task-ref".into()),
+            rel_kind: "IN_PROJECT".into(),
+            target: EntityTarget::ExternalId("Project-keep".into()),
+            weight: None,
+            info: None,
+        }])
+        .unwrap_err();
+    assert_eq!(dup.code, ErrorCode::RelationAlreadyExists);
+
+    // 5. Archiving Task still lets us Destroy/purge archived Task-ref AND prevents renaming Audit -> Task!
+    let mut reduced = sample_schema();
+    reduced.types.remove("Task");
+    reduced.relations.clear();
+    engine.set_schema(&reduced).unwrap();
+    assert_eq!(engine.rename_type("Audit", "Task", false).unwrap_err().code, ErrorCode::InvalidSchema);
+    engine.execute_batch(&[WireOp::Destroy { target: EntityTarget::ExternalId("Task-ref".into()) }]).unwrap();
+    assert!(engine.get_row("Task-ref").unwrap().is_none());
+}

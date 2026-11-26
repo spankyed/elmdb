@@ -128,6 +128,66 @@ impl CanonicalValue {
             _ => None,
         }
     }
+
+    /// Recursively verifies that a Rust-constructed `CanonicalValue` upholds every wire invariant
+    /// (finite floats, `ns < 1e9`, strictly sorted unique object keys, nesting depth <= 64).
+    pub fn validate_canonical(&self) -> Result<()> {
+        self.validate_canonical_inner(0)
+    }
+
+    fn validate_canonical_inner(&self, depth: usize) -> Result<()> {
+        if depth > MAX_VALUE_DEPTH {
+            return Err(ElmdbError::new(ErrorCode::ValidationFailed, "value nesting depth exceeded"));
+        }
+        match self {
+            Self::Float(f) if !f.is_finite() => {
+                Err(ElmdbError::new(ErrorCode::ValidationFailed, "non-finite float is not permitted"))
+            }
+            Self::Timestamp { ns, .. } if *ns >= 1_000_000_000 => {
+                Err(ElmdbError::new(ErrorCode::ValidationFailed, "timestamp ns must be < 1e9"))
+            }
+            Self::Array(items) => {
+                for item in items {
+                    item.validate_canonical_inner(depth + 1)?;
+                }
+                Ok(())
+            }
+            Self::Object(entries) => {
+                for pair in entries.windows(2) {
+                    if pair[0].0 >= pair[1].0 {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ValidationFailed,
+                            "object keys must be strictly sorted and unique",
+                        ));
+                    }
+                }
+                for (_, v) in entries {
+                    v.validate_canonical_inner(depth + 1)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Returns true if this value contains an internal `EntityRef` or `DanglingRef` anywhere inside.
+    pub fn contains_internal_ref(&self) -> bool {
+        match self {
+            Self::EntityRef(_) | Self::DanglingRef(_) => true,
+            Self::Array(items) => items.iter().any(Self::contains_internal_ref),
+            Self::Object(entries) => entries.iter().any(|(_, v)| v.contains_internal_ref()),
+            _ => false,
+        }
+    }
+
+    /// Returns true if any nested `Object` key equals `"__proto__"`.
+    pub fn contains_proto_key(&self) -> bool {
+        match self {
+            Self::Array(items) => items.iter().any(Self::contains_proto_key),
+            Self::Object(entries) => entries.iter().any(|(k, v)| k == "__proto__" || v.contains_proto_key()),
+            _ => false,
+        }
+    }
 }
 
 impl PartialEq for CanonicalValue {
@@ -136,10 +196,17 @@ impl PartialEq for CanonicalValue {
             (Self::Null, Self::Null) => true,
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Int(a), Self::Int(b)) => a == b,
-            (Self::Float(a), Self::Float(b)) => a.to_bits() == b.to_bits(),
-            // Unified numeric equality: Int(5) == Float(5.0), exact past 2^53.
+            (Self::Float(a), Self::Float(b)) => {
+                if !a.is_finite() || !b.is_finite() {
+                    return false;
+                }
+                let na = if *a == 0.0 { 0.0 } else { *a };
+                let nb = if *b == 0.0 { 0.0 } else { *b };
+                na.to_bits() == nb.to_bits()
+            }
+            // Unified numeric equality: Int(5) == Float(5.0), exact past 2^53; non-finite is never equal.
             (Self::Int(i), Self::Float(f)) | (Self::Float(f), Self::Int(i)) => {
-                compare_int_float(*i, *f) == Ordering::Equal
+                f.is_finite() && compare_int_float(*i, *f) == Ordering::Equal
             }
             (Self::Timestamp { ms: m1, ns: n1 }, Self::Timestamp { ms: m2, ns: n2 }) => m1 == m2 && n1 == n2,
             (Self::EntityRef(a), Self::EntityRef(b)) => a == b,
@@ -219,13 +286,15 @@ pub fn compare_int_float(i: i64, f: f64) -> Ordering {
 pub fn compare_numeric(a: &CanonicalValue, b: &CanonicalValue) -> Option<Ordering> {
     match (a, b) {
         (CanonicalValue::Int(x), CanonicalValue::Int(y)) => Some(x.cmp(y)),
-        (CanonicalValue::Float(x), CanonicalValue::Float(y)) => {
+        (CanonicalValue::Float(x), CanonicalValue::Float(y)) if x.is_finite() && y.is_finite() => {
             let nx = if *x == 0.0 { 0.0 } else { *x };
             let ny = if *y == 0.0 { 0.0 } else { *y };
             nx.partial_cmp(&ny)
         }
-        (CanonicalValue::Int(x), CanonicalValue::Float(y)) => Some(compare_int_float(*x, *y)),
-        (CanonicalValue::Float(x), CanonicalValue::Int(y)) => Some(compare_int_float(*y, *x).reverse()),
+        (CanonicalValue::Int(x), CanonicalValue::Float(y)) if y.is_finite() => Some(compare_int_float(*x, *y)),
+        (CanonicalValue::Float(x), CanonicalValue::Int(y)) if x.is_finite() => {
+            Some(compare_int_float(*y, *x).reverse())
+        }
         _ => None,
     }
 }
@@ -396,7 +465,10 @@ fn decode_inner(r: &mut Reader<'_>, depth: usize) -> Result<CanonicalValue> {
         ValueTag::Int => Ok(CanonicalValue::Int(r.read_i64()?)),
         ValueTag::Float => {
             let f = f64::from_bits(r.read_u64()?);
-            CanonicalValue::float(f)
+            if !f.is_finite() {
+                return Err(ElmdbError::new(ErrorCode::InvalidWireFrame, "non-finite float"));
+            }
+            Ok(CanonicalValue::Float(if f == 0.0 { 0.0 } else { f }))
         }
         ValueTag::Timestamp => {
             let ms = r.read_i64()?;
@@ -421,7 +493,7 @@ fn decode_inner(r: &mut Reader<'_>, depth: usize) -> Result<CanonicalValue> {
             if count > byte_len {
                 return Err(ElmdbError::new(ErrorCode::InvalidWireFrame, "corrupt array count"));
             }
-            let mut items = Vec::with_capacity(count);
+            let mut items = Vec::with_capacity(count.min(256));
             for _ in 0..count {
                 items.push(decode_inner(&mut sub, depth + 1)?);
             }
@@ -438,7 +510,7 @@ fn decode_inner(r: &mut Reader<'_>, depth: usize) -> Result<CanonicalValue> {
             if count > byte_len / 5 + 1 {
                 return Err(ElmdbError::new(ErrorCode::InvalidWireFrame, "corrupt object count"));
             }
-            let mut entries: Vec<(String, CanonicalValue)> = Vec::with_capacity(count);
+            let mut entries: Vec<(String, CanonicalValue)> = Vec::with_capacity(count.min(256));
             for _ in 0..count {
                 let k = sub.read_str()?.to_owned();
                 if let Some((prev, _)) = entries.last()

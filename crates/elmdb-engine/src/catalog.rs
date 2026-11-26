@@ -435,10 +435,36 @@ impl CompiledSchema {
                     None => continue,
                 };
                 if let Some(existing) = tdef.fields.iter_mut().find(|f| f.name == *fname) {
-                    existing.kind = kind;
-                    existing.optional = rfield.optional;
-                    existing.nullable = rfield.nullable;
-                    existing.archived = false;
+                    if !existing.archived && existing.kind != kind {
+                        errors.push(format!(
+                            "types.{type_name}.fields.{fname}: incompatible field kind change on existing field"
+                        ));
+                        continue;
+                    }
+                    if existing.archived && existing.kind != kind {
+                        // Previously archived field revived with a new kind -> allocate a fresh FieldId
+                        // and retire the old archived name to avoid collision.
+                        let old_id = existing.id.0;
+                        existing.name = format!("__archived_{old_id}_{fname}");
+                        let fid = FieldId(tdef.next_field_id);
+                        tdef.next_field_id = tdef
+                            .next_field_id
+                            .checked_add(1)
+                            .ok_or_else(|| ElmdbError::new(ErrorCode::InvalidSchema, "FieldId u16 space exhausted"))?;
+                        tdef.fields.push(FieldDef {
+                            id: fid,
+                            name: fname.clone(),
+                            kind,
+                            optional: rfield.optional,
+                            nullable: rfield.nullable,
+                            archived: false,
+                        });
+                    } else {
+                        existing.kind = kind;
+                        existing.optional = rfield.optional;
+                        existing.nullable = rfield.nullable;
+                        existing.archived = false;
+                    }
                 } else {
                     let fid = FieldId(tdef.next_field_id);
                     tdef.next_field_id = tdef
@@ -523,6 +549,10 @@ impl CompiledSchema {
             let tdef = types.iter().find(|t| t.id == type_id).expect("type exists");
             for (iname, ridx) in &raw_ty.indexes {
                 let path = format!("types.{type_name}.indexes.{iname}");
+                if iname.is_empty() || iname.len() > 128 {
+                    errors.push(format!("{path}: invalid index name"));
+                    continue;
+                }
                 let kind = match &ridx.kind {
                     RawIndexKind::Value { fields, unique } => {
                         if fields.is_empty() {
@@ -538,13 +568,19 @@ impl CompiledSchema {
                         }
                         IndexKind::Value { fields: fids, unique: *unique }
                     }
-                    RawIndexKind::Order { field, locale } => match tdef.field_by_name(field) {
-                        Some(fd) => IndexKind::Order { field: fd.id, locale: locale.clone() },
-                        None => {
-                            errors.push(format!("{path}: unknown field '{field}'"));
+                    RawIndexKind::Order { field, locale } => {
+                        if locale.is_empty() || locale.len() > 64 {
+                            errors.push(format!("{path}: order index requires a non-empty locale"));
                             continue;
                         }
-                    },
+                        match tdef.field_by_name(field) {
+                            Some(fd) => IndexKind::Order { field: fd.id, locale: locale.clone() },
+                            None => {
+                                errors.push(format!("{path}: unknown field '{field}'"));
+                                continue;
+                            }
+                        }
+                    }
                     RawIndexKind::Text { fields } => {
                         if fields.is_empty() {
                             errors.push(format!("{path}: text index requires at least one field"));
@@ -574,6 +610,10 @@ impl CompiledSchema {
                         IndexKind::Trigram { fields: fids }
                     }
                     RawIndexKind::Vector { fields, dims, quantization } => {
+                        if fields.is_empty() {
+                            errors.push(format!("{path}: vector index requires at least one field"));
+                            continue;
+                        }
                         if *dims == 0 || *dims > 16_384 {
                             errors.push(format!("{path}: dims must be 1..=16384"));
                             continue;
@@ -592,6 +632,10 @@ impl CompiledSchema {
                         IndexKind::Vector { fields: fids, dims: *dims, quantization: quantization.clone() }
                     }
                     RawIndexKind::Rank { relations: rel_names, weighted } => {
+                        if rel_names.is_empty() {
+                            errors.push(format!("{path}: rank index requires at least one relation"));
+                            continue;
+                        }
                         let mut rids = Vec::with_capacity(rel_names.len());
                         for rn in rel_names {
                             match rel_name_to_id.get(rn) {
@@ -610,20 +654,39 @@ impl CompiledSchema {
             return Err(ElmdbError::new(ErrorCode::InvalidSchema, errors.join("; ")));
         }
 
-        // Now reconcile indexes against `prev` using a scratch copy of `pool` so errors never
-        // partially mutate `pool`.
+        // Reconcile indexes against `prev`: recycle retired slots BEFORE allocating new ones
+        // so replacing an index at pool capacity (480/480) never spuriously fails with DbsFull.
         let mut working_pool = pool.clone();
         let mut diff = SchemaDiff::default();
-        let mut indexes = Vec::with_capacity(compiled_index_specs.len());
         let mut kept_prev_ids: BTreeSet<IndexId> = BTreeSet::new();
+        let mut matched_specs: Vec<Option<IndexDef>> = Vec::with_capacity(compiled_index_specs.len());
 
-        for (type_id, name, kind) in compiled_index_specs {
+        for (type_id, name, kind) in &compiled_index_specs {
             let matching_prev = prev.and_then(|p| {
-                p.indexes.iter().find(|old| old.type_id == type_id && old.name == name && old.kind == kind)
+                p.indexes.iter().find(|old| old.type_id == *type_id && old.name == *name && old.kind == *kind)
             });
             if let Some(old) = matching_prev {
                 kept_prev_ids.insert(old.id);
-                indexes.push(old.clone());
+                matched_specs.push(Some(old.clone()));
+            } else {
+                matched_specs.push(None);
+            }
+        }
+
+        if let Some(p) = prev {
+            for old in &p.indexes {
+                if !kept_prev_ids.contains(&old.id) {
+                    let slot = old.subdb_slot();
+                    working_pool.recycle(slot)?;
+                    diff.retired_slots.push(slot);
+                }
+            }
+        }
+
+        let mut indexes = Vec::with_capacity(compiled_index_specs.len());
+        for ((type_id, name, kind), kept) in compiled_index_specs.into_iter().zip(matched_specs) {
+            if let Some(old) = kept {
+                indexes.push(old);
             } else {
                 let slot = working_pool.allocate()?;
                 let id = IndexId(next_index_id);
@@ -632,17 +695,6 @@ impl CompiledSchema {
                     .ok_or_else(|| ElmdbError::new(ErrorCode::InvalidSchema, "IndexId u32 space exhausted"))?;
                 indexes.push(IndexDef { id, name, type_id, slot: slot.raw(), kind });
                 diff.added_indexes.push(id);
-            }
-        }
-
-        // Retire any old index not kept (truncating & recycling its SubDbSlot after commit!).
-        if let Some(p) = prev {
-            for old in &p.indexes {
-                if !kept_prev_ids.contains(&old.id) {
-                    let slot = old.subdb_slot();
-                    working_pool.recycle(slot)?;
-                    diff.retired_slots.push(slot);
-                }
             }
         }
 
@@ -663,10 +715,10 @@ impl CompiledSchema {
             .iter_mut()
             .find(|t| !t.archived && t.name == type_name)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{type_name}'")))?;
-        if ty.fields.iter().any(|f| !f.archived && f.name == new_field) {
+        if ty.fields.iter().any(|f| f.name == new_field) {
             return Err(ElmdbError::new(
                 ErrorCode::InvalidSchema,
-                format!("field '{new_field}' already exists on '{type_name}'"),
+                format!("field '{new_field}' already exists (or is archived) on '{type_name}'"),
             ));
         }
         let f = ty.fields.iter_mut().find(|f| !f.archived && f.name == old_field).ok_or_else(|| {
@@ -683,8 +735,11 @@ impl CompiledSchema {
             return Err(ElmdbError::new(ErrorCode::InvalidArgument, "invalid new relation name"));
         }
         let mut next = self.clone();
-        if next.relations.iter().any(|r| !r.archived && r.name == new_rel) {
-            return Err(ElmdbError::new(ErrorCode::InvalidSchema, format!("relation '{new_rel}' already exists")));
+        if next.relations.iter().any(|r| r.name == new_rel) {
+            return Err(ElmdbError::new(
+                ErrorCode::InvalidSchema,
+                format!("relation '{new_rel}' already exists (or is archived)"),
+            ));
         }
         let rel = next
             .relations
@@ -702,8 +757,11 @@ impl CompiledSchema {
             return Err(ElmdbError::new(ErrorCode::InvalidArgument, "invalid new type name"));
         }
         let mut next = self.clone();
-        if next.types.iter().any(|t| !t.archived && t.name == new_type) {
-            return Err(ElmdbError::new(ErrorCode::InvalidSchema, format!("type '{new_type}' already exists")));
+        if next.types.iter().any(|t| t.name == new_type) {
+            return Err(ElmdbError::new(
+                ErrorCode::InvalidSchema,
+                format!("type '{new_type}' already exists (or is archived)"),
+            ));
         }
         let ty = next
             .types

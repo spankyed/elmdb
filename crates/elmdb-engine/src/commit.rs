@@ -249,6 +249,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Default for HookRegistry<S, V, C> {
 }
 
 /// Per-flush accumulator that folds multiple mutations to the same entity/edge into one delta.
+#[derive(Clone)]
 struct DeltaBatch {
     entities: BTreeMap<EntityKey, EntityDelta>,
     edges: BTreeMap<RelKey, EdgeDelta>,
@@ -346,34 +347,55 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         projections: Arc<dyn ProjectionSink<S, V>>,
     ) -> Result<(Self, RecoveryReport)> {
         let (gate, report) = DurabilityGate::open(store, vfs, dir, mode)?;
-        let (dbs, schema, pool) = {
-            let mut txn = gate.begin_write()?;
-            let dbs = SystemDbs::open_or_create(&mut txn)?;
-            let schema = match txn.get(dbs.meta, META_SCHEMA_KEY)? {
-                Some(bytes) => serde_json::from_slice::<CompiledSchema>(bytes)
-                    .map_err(|e| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt meta schema: {e}")))?,
-                None => {
-                    let empty = CompiledSchema::empty();
-                    let encoded =
-                        serde_json::to_vec(&empty).map_err(|e| ElmdbError::new(ErrorCode::Internal, e.to_string()))?;
-                    txn.put(dbs.meta, META_SCHEMA_KEY, &encoded)?;
-                    txn.put(dbs.meta, META_SCHEMA_EPOCH_KEY, &empty.epoch.to_le_bytes())?;
-                    empty
-                }
-            };
-            let pool = match txn.get(dbs.meta, META_POOL_KEY)? {
-                Some(bytes) => SubDbPool::decode(bytes)?,
-                None => {
-                    let fresh = SubDbPool::default();
-                    txn.put(dbs.meta, META_POOL_KEY, &fresh.encode())?;
-                    fresh
-                }
-            };
-            if txn.get(dbs.meta, META_COMMIT_SEQ_KEY)?.is_none() {
-                txn.put(dbs.meta, META_COMMIT_SEQ_KEY, &0u64.to_le_bytes())?;
+
+        // Try read-only fast path first so reopening an existing DB never performs an
+        // unnecessary write transaction / Strict-mode fsync on startup.
+        let existing = {
+            let ro = gate.begin_read()?;
+            if let Some(dbs) = try_open_system_dbs_ro(&gate, &ro)?
+                && let (Some(schema_bytes), Some(pool_bytes)) =
+                    (ro.get(dbs.meta, META_SCHEMA_KEY)?, ro.get(dbs.meta, META_POOL_KEY)?)
+            {
+                let schema: CompiledSchema = serde_json::from_slice(schema_bytes)
+                    .map_err(|e| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt meta schema: {e}")))?;
+                let pool = SubDbPool::decode(pool_bytes)?;
+                Some((dbs, schema, pool))
+            } else {
+                None
             }
-            txn.commit()?;
-            (dbs, schema, pool)
+        };
+
+        let (dbs, schema, pool) = match existing {
+            Some(loaded) => loaded,
+            None => {
+                let mut txn = gate.begin_write()?;
+                let dbs = SystemDbs::open_or_create(&mut txn)?;
+                let schema = match txn.get(dbs.meta, META_SCHEMA_KEY)? {
+                    Some(bytes) => serde_json::from_slice::<CompiledSchema>(bytes)
+                        .map_err(|e| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt meta schema: {e}")))?,
+                    None => {
+                        let empty = CompiledSchema::empty();
+                        let encoded = serde_json::to_vec(&empty)
+                            .map_err(|e| ElmdbError::new(ErrorCode::Internal, e.to_string()))?;
+                        txn.put(dbs.meta, META_SCHEMA_KEY, &encoded)?;
+                        txn.put(dbs.meta, META_SCHEMA_EPOCH_KEY, &empty.epoch.to_le_bytes())?;
+                        empty
+                    }
+                };
+                let pool = match txn.get(dbs.meta, META_POOL_KEY)? {
+                    Some(bytes) => SubDbPool::decode(bytes)?,
+                    None => {
+                        let fresh = SubDbPool::default();
+                        txn.put(dbs.meta, META_POOL_KEY, &fresh.encode())?;
+                        fresh
+                    }
+                };
+                if txn.get(dbs.meta, META_COMMIT_SEQ_KEY)?.is_none() {
+                    txn.put(dbs.meta, META_COMMIT_SEQ_KEY, &0u64.to_le_bytes())?;
+                }
+                txn.commit()?;
+                (dbs, schema, pool)
+            }
         };
 
         let engine = Self {
@@ -427,48 +449,48 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     }
 
     /// Compiles and installs a new schema, retiring dropped index slots via O(1) `truncate`
-    /// without calling `mdb_dbi_close()`.
+    /// without calling `mdb_dbi_close()` and without holding `SchemaEpochLock` (L1) across I/O or builds.
     pub fn set_schema(&self, raw: &RawSchema) -> Result<(Arc<CompiledSchema>, SchemaDiff)> {
-        let mut state = self.schema_state.write();
-        let mut txn = self.gate.begin_write()?;
-        self.refresh_schema_locked(&txn, &mut state)?;
+        let (compiled, next_pool, diff) = {
+            let mut txn = self.gate.begin_write()?;
+            let (cur_schema, mut next_pool) = load_schema_and_pool(&txn, &self.dbs)?;
+            let (compiled, diff) = CompiledSchema::compile(raw, Some(&cur_schema), &mut next_pool)?;
 
-        let mut next_pool = state.pool.clone();
-        let (compiled, diff) = CompiledSchema::compile(raw, Some(&state.schema), &mut next_pool)?;
-
-        // Truncate retired sub-DB slots in O(1) before recycling them into `meta.subdb_pool`.
-        for &slot in &diff.retired_slots {
-            let db = txn.open_subdb(&slot.name(), DbFlags::DEFAULT)?;
-            txn.truncate(db)?;
-        }
-        // Pre-open newly allocated slots at root write txn so readers never need `mdb_dbi_open`.
-        for &idx_id in &diff.added_indexes {
-            if let Some(def) = compiled.index_by_id(idx_id) {
-                let _ = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
+            // Truncate retired sub-DB slots before recycling them into `meta.subdb_pool`.
+            for &slot in &diff.retired_slots {
+                let db = txn.open_subdb(&slot.name(), DbFlags::DEFAULT)?;
+                txn.truncate(db)?;
             }
-        }
+            // Pre-open newly allocated slots at root write txn so readers never need `mdb_dbi_open`.
+            for &idx_id in &diff.added_indexes {
+                if let Some(def) = compiled.index_by_id(idx_id) {
+                    let _ = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
+                }
+            }
 
-        self.projections.on_schema_change(&mut txn, &compiled, &self.dbs, &diff)?;
+            self.projections.on_schema_change(&mut txn, &compiled, &self.dbs, &diff)?;
 
-        let seq = self.next_commit_seq(&txn)?;
-        persist_schema_and_pool(&mut txn, &self.dbs, &compiled, &next_pool, seq)?;
-        write_commit_summary(
-            &mut txn,
-            &self.dbs,
-            CrossProcCommitSummary {
-                seq,
-                schema_epoch: compiled.epoch,
-                touched_types: Vec::new(),
-                touched_rel_kinds: Vec::new(),
-                touched_entities: None,
-            },
-            &[],
-        )?;
-        txn.commit()?;
+            let seq = self.next_commit_seq(&txn)?;
+            persist_schema_and_pool(&mut txn, &self.dbs, &compiled, &next_pool, seq)?;
+            // Note: watchers must check `summary.schema_epoch` (not only `touched_types`) on catch-up.
+            write_commit_summary(
+                &mut txn,
+                &self.dbs,
+                CrossProcCommitSummary {
+                    seq,
+                    schema_epoch: compiled.epoch,
+                    touched_types: Vec::new(),
+                    touched_rel_kinds: Vec::new(),
+                    touched_entities: None,
+                },
+                &[],
+            )?;
+            txn.commit()?;
+            (compiled, next_pool, diff)
+        };
 
         let arc = Arc::new(compiled);
-        state.schema = Arc::clone(&arc);
-        state.pool = next_pool;
+        self.publish_schema_monotonic(Arc::clone(&arc), next_pool);
         Ok((arc, diff))
     }
 
@@ -485,66 +507,69 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// O(1) metadata rename of a type (external IDs stay immutable by default; optional `rewrite_ids`
     /// rewrites `<old>-<suffix>` prefixes in `ext_id` and `PackedRow` headers only).
     pub fn rename_type(&self, old_type: &str, new_type: &str, rewrite_ids: bool) -> Result<Arc<CompiledSchema>> {
-        let mut state = self.schema_state.write();
-        let mut txn = self.gate.begin_write()?;
-        self.refresh_schema_locked(&txn, &mut state)?;
+        let (next, pool) = {
+            let mut txn = self.gate.begin_write()?;
+            let (cur_schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
+            let type_id = cur_schema
+                .type_by_name(old_type)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{old_type}'")))?
+                .id;
+            let next = cur_schema.rename_type(old_type, new_type)?;
+            let seq = self.next_commit_seq(&txn)?;
+            let now_ms = self.clock.now_ms();
 
-        let type_id = state
-            .schema
-            .type_by_name(old_type)
-            .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{old_type}'")))?
-            .id;
-        let next = state.schema.rename_type(old_type, new_type)?;
-
-        if rewrite_ids {
-            let prefix = format!("{old_type}-");
-            let keys = scan_type_keys(&txn, &self.dbs, type_id)?;
-            for key in keys {
-                let raw = txn
-                    .get(self.dbs.entities, &key.to_ne_bytes())?
-                    .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "type_list points to missing entity"))?
-                    .to_vec();
-                let (hdr, _) = decode_row_header(&raw)?;
-                if let Some(suffix) = hdr.ext_id.strip_prefix(&prefix) {
-                    let new_ext = format!("{new_type}-{suffix}");
-                    if new_ext.len() > MAX_EXT_ID_BYTES {
-                        return Err(ElmdbError::new(ErrorCode::InvalidArgument, "rewritten external ID > 256 B"));
+            if rewrite_ids {
+                let prefix = format!("{old_type}-");
+                let keys = scan_type_keys(&txn, &self.dbs, type_id)?;
+                for key in keys {
+                    let raw = txn
+                        .get(self.dbs.entities, &key.to_ne_bytes())?
+                        .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "type_list points to missing entity"))?
+                        .to_vec();
+                    let (hdr, _) = decode_row_header(&raw)?;
+                    if let Some(suffix) = hdr.ext_id.strip_prefix(&prefix) {
+                        let new_ext = format!("{new_type}-{suffix}");
+                        if new_ext.len() > MAX_EXT_ID_BYTES {
+                            return Err(ElmdbError::new(ErrorCode::InvalidArgument, "rewritten external ID > 256 B"));
+                        }
+                        let mut row = decode_row(&raw, |fid| {
+                            Ok(txn.get(self.dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
+                        })?;
+                        txn.del(self.dbs.ext_id, row.header.ext_id.as_bytes())?;
+                        if !txn.put_no_overwrite(self.dbs.ext_id, new_ext.as_bytes(), &key.0.to_le_bytes())? {
+                            return Err(ElmdbError::new(
+                                ErrorCode::EntityAlreadyExists,
+                                format!("rewritten ID '{new_ext}' collides with an existing entity"),
+                            ));
+                        }
+                        row.header.ext_id = new_ext;
+                        row.header.updated_seq = seq;
+                        row.header.updated_at_ms = now_ms;
+                        let enc = encode_row(&row)?;
+                        txn.put(self.dbs.entities, &key.to_ne_bytes(), &enc.row_bytes)?;
                     }
-                    let mut row = decode_row(&raw, |fid| {
-                        Ok(txn.get(self.dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
-                    })?;
-                    txn.del(self.dbs.ext_id, row.header.ext_id.as_bytes())?;
-                    if !txn.put_no_overwrite(self.dbs.ext_id, new_ext.as_bytes(), &key.0.to_le_bytes())? {
-                        return Err(ElmdbError::new(
-                            ErrorCode::EntityAlreadyExists,
-                            format!("rewritten ID '{new_ext}' collides with an existing entity"),
-                        ));
-                    }
-                    row.header.ext_id = new_ext;
-                    let enc = encode_row(&row)?;
-                    txn.put(self.dbs.entities, &key.to_ne_bytes(), &enc.row_bytes)?;
                 }
             }
-        }
 
-        let seq = self.next_commit_seq(&txn)?;
-        persist_schema_and_pool(&mut txn, &self.dbs, &next, &state.pool, seq)?;
-        write_commit_summary(
-            &mut txn,
-            &self.dbs,
-            CrossProcCommitSummary {
-                seq,
-                schema_epoch: next.epoch,
-                touched_types: vec![type_id],
-                touched_rel_kinds: Vec::new(),
-                touched_entities: None,
-            },
-            &[],
-        )?;
-        txn.commit()?;
+            persist_schema_and_pool(&mut txn, &self.dbs, &next, &pool, seq)?;
+            write_commit_summary(
+                &mut txn,
+                &self.dbs,
+                CrossProcCommitSummary {
+                    seq,
+                    schema_epoch: next.epoch,
+                    touched_types: vec![type_id],
+                    touched_rel_kinds: Vec::new(),
+                    touched_entities: None,
+                },
+                &[],
+            )?;
+            txn.commit()?;
+            (next, pool)
+        };
 
         let arc = Arc::new(next);
-        state.schema = Arc::clone(&arc);
+        self.publish_schema_monotonic(Arc::clone(&arc), pool);
         Ok(arc)
     }
 
@@ -552,28 +577,65 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     where
         F: FnOnce(&CompiledSchema) -> Result<CompiledSchema>,
     {
-        let mut state = self.schema_state.write();
-        let mut txn = self.gate.begin_write()?;
-        self.refresh_schema_locked(&txn, &mut state)?;
-        let next = f(&state.schema)?;
-        let seq = self.next_commit_seq(&txn)?;
-        persist_schema_and_pool(&mut txn, &self.dbs, &next, &state.pool, seq)?;
-        write_commit_summary(
-            &mut txn,
-            &self.dbs,
-            CrossProcCommitSummary {
-                seq,
-                schema_epoch: next.epoch,
-                touched_types: Vec::new(),
-                touched_rel_kinds: Vec::new(),
-                touched_entities: None,
-            },
-            &[],
-        )?;
-        txn.commit()?;
+        let (next, pool) = {
+            let mut txn = self.gate.begin_write()?;
+            let (cur_schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
+            let next = f(&cur_schema)?;
+            let seq = self.next_commit_seq(&txn)?;
+            persist_schema_and_pool(&mut txn, &self.dbs, &next, &pool, seq)?;
+            write_commit_summary(
+                &mut txn,
+                &self.dbs,
+                CrossProcCommitSummary {
+                    seq,
+                    schema_epoch: next.epoch,
+                    touched_types: Vec::new(),
+                    touched_rel_kinds: Vec::new(),
+                    touched_entities: None,
+                },
+                &[],
+            )?;
+            txn.commit()?;
+            (next, pool)
+        };
         let arc = Arc::new(next);
-        state.schema = Arc::clone(&arc);
+        self.publish_schema_monotonic(Arc::clone(&arc), pool);
         Ok(arc)
+    }
+
+    fn publish_schema_monotonic(&self, schema: Arc<CompiledSchema>, pool: SubDbPool) {
+        let mut state = self.schema_state.write();
+        if schema.epoch > state.schema.epoch {
+            state.schema = schema;
+            state.pool = pool;
+        }
+    }
+
+    /// Acquires a write transaction and its exact matching `Arc<CompiledSchema>` with zero TOCTOU
+    /// race and strict `L1 -> L3` lock ordering (never holds L1 during the write transaction body!).
+    fn begin_write_with_fresh_schema(&self) -> Result<(GatedWriteTxn<'_, S, V>, Arc<CompiledSchema>)> {
+        {
+            let guard = self.schema_state.read();
+            let txn = self.gate.begin_write()?;
+            let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
+            if guard.schema.epoch == disk_epoch {
+                let schema = Arc::clone(&guard.schema);
+                drop(guard);
+                return Ok((txn, schema));
+            }
+            // Drop L3 before taking L1.write() to uphold strict L1 -> L3 order.
+        }
+        let mut state = self.schema_state.write();
+        let txn = self.gate.begin_write()?;
+        let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
+        if disk_epoch > state.schema.epoch {
+            let (schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
+            state.schema = Arc::new(schema);
+            state.pool = pool;
+        }
+        let schema = Arc::clone(&state.schema);
+        drop(state);
+        Ok((txn, schema))
     }
 
     /// Executes a binary `elmdb-wire` batch frame in one atomic commit.
@@ -589,8 +651,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     }
 
     pub fn execute_batch_with_flags(&self, ops: &[WireOp], flags: CommitReturnFlags) -> Result<BatchOutcome> {
-        let schema = self.load_fresh_schema_for_write()?;
-        let txn = self.gate.begin_write()?;
+        let (txn, schema) = self.begin_write_with_fresh_schema()?;
         let commit_seq = self.next_commit_seq(&txn)?;
         let now_ms = self.clock.now_ms();
 
@@ -624,8 +685,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     where
         F: FnOnce(&mut TxnCtx<'_, S, V, C>) -> Result<T>,
     {
-        let schema = self.load_fresh_schema_for_write()?;
-        let txn = self.gate.begin_write()?;
+        let (txn, schema) = self.begin_write_with_fresh_schema()?;
         let commit_seq = self.next_commit_seq(&txn)?;
         let now_ms = self.clock.now_ms();
 
@@ -669,28 +729,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// Reads a single declared field via O(log F) binary search without decoding sibling fields or blobs.
     pub fn get_field(&self, ext_id: &str, field_name: &str) -> Result<Option<CanonicalValue>> {
         let (ro, schema) = self.begin_read_pinned()?;
-        let Some(key_bytes) = ro.get(self.dbs.ext_id, ext_id.as_bytes())? else {
-            return Ok(None);
-        };
-        let key = EntityKey(u64::from_le_bytes(
-            key_bytes.try_into().map_err(|_| ElmdbError::new(ErrorCode::Corrupted, "corrupt ext_id key bytes"))?,
-        ));
-        let Some(raw) = ro.get(self.dbs.entities, &key.to_ne_bytes())? else {
-            return Ok(None);
-        };
-        let (hdr, _) = decode_row_header(raw)?;
-        let tdef = schema
-            .type_by_id(hdr.type_id)
-            .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
-        if let Some(fdef) = tdef.field_by_name(field_name) {
-            let val = decode_single_field(raw, fdef.id, |fid| {
-                Ok(ro.get(self.dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
-            })?;
-            return Ok(val);
-        }
-        // Fallback for dynamic `additionalFields: allow` extra fields.
-        let full = decode_row(raw, |fid| Ok(ro.get(self.dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
-        Ok(full.extra.get(field_name).cloned())
+        read_single_field(&ro, &schema, &self.dbs, ext_id, field_name)
     }
 
     /// Resolves an internal `EntityKey(u64)` to its external string ID (zero row decompression).
@@ -723,39 +762,13 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// Lists outgoing relations from `ext_id`, optionally filtered by `rel_kind`.
     pub fn relations_out(&self, ext_id: &str, rel_kind: Option<&str>) -> Result<Vec<StoredEdge>> {
         let (ro, schema) = self.begin_read_pinned()?;
-        let Some(key_bytes) = ro.get(self.dbs.ext_id, ext_id.as_bytes())? else {
-            return Ok(Vec::new());
-        };
-        let src = EntityKey(u64::from_le_bytes(key_bytes.try_into().expect("8")));
-        let kind_filter = match rel_kind {
-            Some(name) => Some(
-                schema
-                    .relation_by_name(name)
-                    .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownRelation, format!("unknown relation '{name}'")))?
-                    .id,
-            ),
-            None => None,
-        };
-        read_adj_edges(&ro, &schema, &self.dbs, TAG_ADJ_OUT, src, kind_filter)
+        read_relations_for_ext_id(&ro, &schema, &self.dbs, TAG_ADJ_OUT, ext_id, rel_kind)
     }
 
     /// Lists incoming relations to `ext_id`, optionally filtered by `rel_kind`.
     pub fn relations_in(&self, ext_id: &str, rel_kind: Option<&str>) -> Result<Vec<StoredEdge>> {
         let (ro, schema) = self.begin_read_pinned()?;
-        let Some(key_bytes) = ro.get(self.dbs.ext_id, ext_id.as_bytes())? else {
-            return Ok(Vec::new());
-        };
-        let dst = EntityKey(u64::from_le_bytes(key_bytes.try_into().expect("8")));
-        let kind_filter = match rel_kind {
-            Some(name) => Some(
-                schema
-                    .relation_by_name(name)
-                    .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownRelation, format!("unknown relation '{name}'")))?
-                    .id,
-            ),
-            None => None,
-        };
-        read_adj_edges(&ro, &schema, &self.dbs, TAG_ADJ_IN, dst, kind_filter)
+        read_relations_for_ext_id(&ro, &schema, &self.dbs, TAG_ADJ_IN, ext_id, rel_kind)
     }
 
     /// Reads persisted cross-process commit summaries with `seq > since_seq`.
@@ -788,8 +801,12 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         Ok(Some(out))
     }
 
-    /// Opens a read-only transaction pinned to the exact `Arc<CompiledSchema>` for its MVCC snapshot,
-    /// seamlessly refreshing the cached schema if another process advanced `schema_epoch`.
+    /// Opens a read-only transaction pinned to the exact `Arc<CompiledSchema>` for its MVCC snapshot.
+    ///
+    /// Monotonicity invariant: only advances shared `schema_state` when `disk_epoch > cached.epoch`.
+    /// If a concurrent writer already advanced `schema_state` ahead of `ro`'s snapshot
+    /// (`disk_epoch < cached.epoch`), deserializes the snapshot's historical schema locally so
+    /// shared state never regresses backwards!
     pub fn begin_read_pinned(&self) -> Result<(S::RoTxn<'_>, Arc<CompiledSchema>)> {
         let ro = self.gate.begin_read()?;
         let disk_epoch = read_schema_epoch(&ro, &self.dbs)?;
@@ -797,34 +814,24 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         if cached.epoch == disk_epoch {
             return Ok((ro, cached));
         }
-        // Cross-process schema advance detected: refresh cache under L1 write lock.
-        let mut state = self.schema_state.write();
-        self.refresh_schema_locked(&ro, &mut state)?;
-        Ok((ro, Arc::clone(&state.schema)))
-    }
-
-    fn load_fresh_schema_for_write(&self) -> Result<Arc<CompiledSchema>> {
-        let (_, schema) = self.begin_read_pinned()?;
-        Ok(schema)
-    }
-
-    fn refresh_schema_locked<R: KvRead>(&self, txn: &R, state: &mut SchemaState) -> Result<()> {
-        let disk_epoch = read_schema_epoch(txn, &self.dbs)?;
-        if state.schema.epoch == disk_epoch {
-            return Ok(());
+        if disk_epoch < cached.epoch {
+            let (historical, _) = load_schema_and_pool(&ro, &self.dbs)?;
+            return Ok((ro, Arc::new(historical)));
         }
-        let bytes = txn
-            .get(self.dbs.meta, META_SCHEMA_KEY)?
-            .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "missing meta schema"))?;
-        let schema: CompiledSchema = serde_json::from_slice(bytes)
-            .map_err(|e| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt meta schema: {e}")))?;
-        let pool_bytes = txn
-            .get(self.dbs.meta, META_POOL_KEY)?
-            .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "missing meta subdb_pool"))?;
-        let pool = SubDbPool::decode(pool_bytes)?;
-        state.schema = Arc::new(schema);
-        state.pool = pool;
-        Ok(())
+        // Cross-process schema advance (`disk_epoch > cached.epoch`): refresh shared cache monotonically.
+        let mut state = self.schema_state.write();
+        if disk_epoch > state.schema.epoch {
+            let (schema, pool) = load_schema_and_pool(&ro, &self.dbs)?;
+            state.schema = Arc::new(schema);
+            state.pool = pool;
+            return Ok((ro, Arc::clone(&state.schema)));
+        }
+        if disk_epoch == state.schema.epoch {
+            return Ok((ro, Arc::clone(&state.schema)));
+        }
+        drop(state);
+        let (historical, _) = load_schema_and_pool(&ro, &self.dbs)?;
+        Ok((ro, Arc::new(historical)))
     }
 
     fn next_commit_seq<R: KvRead>(&self, txn: &R) -> Result<u64> {
@@ -841,8 +848,20 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         let Some(key_bytes) = self.txn.get(self.engine.dbs.ext_id, ext_id.as_bytes())? else {
             return Ok(None);
         };
-        let key = EntityKey(u64::from_le_bytes(key_bytes.try_into().expect("8")));
+        let key = EntityKey(decode_u64_le(key_bytes, "ext_id")?);
         read_stored_row(&self.txn, &self.schema, &self.engine.dbs, key)
+    }
+
+    pub fn get_field(&self, ext_id: &str, field_name: &str) -> Result<Option<CanonicalValue>> {
+        read_single_field(&self.txn, &self.schema, &self.engine.dbs, ext_id, field_name)
+    }
+
+    pub fn relations_out(&self, ext_id: &str, rel_kind: Option<&str>) -> Result<Vec<StoredEdge>> {
+        read_relations_for_ext_id(&self.txn, &self.schema, &self.engine.dbs, TAG_ADJ_OUT, ext_id, rel_kind)
+    }
+
+    pub fn relations_in(&self, ext_id: &str, rel_kind: Option<&str>) -> Result<Vec<StoredEdge>> {
+        read_relations_for_ext_id(&self.txn, &self.schema, &self.engine.dbs, TAG_ADJ_IN, ext_id, rel_kind)
     }
 
     pub fn list_by_type(&self, type_name: &str, include_trashed: bool) -> Result<Vec<StoredRow>> {
@@ -862,20 +881,26 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         Ok(out)
     }
 
-    /// Executes a single `WireOp` inside this transaction and immediately flushes its coalesced
-    /// delta to `ProjectionSink` so subsequent reads inside the same transaction see fresh indexes.
+    /// Executes a single `WireOp` atomically inside a native nested savepoint and flushes its
+    /// coalesced delta to `ProjectionSink` so subsequent reads inside the same transaction see fresh indexes.
     pub fn exec(&mut self, op: &WireOp) -> Result<Option<String>> {
-        let mut slots = Vec::new();
-        self.apply_op(op, &mut slots)?;
-        self.flush_projections()?;
-        Ok(slots.into_iter().next().map(|(_, id)| id))
+        self.savepoint(|ctx| {
+            let mut slots = Vec::new();
+            ctx.apply_op(op, &mut slots)?;
+            ctx.flush_projections()?;
+            Ok(slots.into_iter().next().map(|(_, id)| id))
+        })
     }
 
-    /// Executes `f` inside a native LMDB nested savepoint inside this transaction.
+    /// Executes `f` inside a native LMDB nested savepoint, rolling back BOTH LMDB state AND
+    /// in-memory delta/hook accumulators cleanly on `Err`.
     pub fn savepoint<T, F>(&mut self, f: F) -> Result<T>
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
+        let saved_total = self.total_deltas.clone();
+        let saved_round = self.round_touched_types.clone();
+        let saved_pending = self.pending_deltas.clone();
         let depth = self.txn.begin_savepoint()?;
         match f(self) {
             Ok(v) => {
@@ -887,6 +912,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     let d = self.txn.savepoint_depth();
                     let _ = self.txn.abort_savepoint(d);
                 }
+                self.total_deltas = saved_total;
+                self.round_touched_types = saved_round;
+                self.pending_deltas = saved_pending;
                 Err(err)
             }
         }
@@ -903,6 +931,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         self.engine.projections.apply_deltas(&mut self.txn, &self.schema, &self.engine.dbs, &entity_vec, &edge_vec)?;
 
         self.round_touched_types.union_with(&batch.touched_types);
+        self.total_deltas.touched_types.union_with(&batch.touched_types);
         for d in entity_vec {
             self.total_deltas.record_entity(d.key, d.type_id, d.before, d.after, d.changed_fields, d.liveness_changed);
         }
@@ -1004,7 +1033,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 
     fn alloc_entity_key(&mut self) -> Result<EntityKey> {
         let next = match self.txn.get(self.engine.dbs.sequences, SEQ_ENTITY_KEY)? {
-            Some(bytes) => u64::from_le_bytes(bytes.try_into().expect("8")) + 1,
+            Some(bytes) => decode_u64_le(bytes, "SEQ_ENTITY_KEY")?
+                .checked_add(1)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::ResourceLimit, "EntityKey u64 exhausted"))?,
             None => 1,
         };
         self.txn.put(self.engine.dbs.sequences, SEQ_ENTITY_KEY, &next.to_le_bytes())?;
@@ -1013,7 +1044,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 
     fn alloc_rel_key(&mut self) -> Result<RelKey> {
         let next = match self.txn.get(self.engine.dbs.sequences, SEQ_REL_KEY)? {
-            Some(bytes) => u64::from_le_bytes(bytes.try_into().expect("8")) + 1,
+            Some(bytes) => decode_u64_le(bytes, "SEQ_REL_KEY")?
+                .checked_add(1)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::ResourceLimit, "RelKey u64 exhausted"))?,
             None => 1,
         };
         self.txn.put(self.engine.dbs.sequences, SEQ_REL_KEY, &next.to_le_bytes())?;
@@ -1062,11 +1095,18 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 let mut changed_fields = FieldMask::empty();
 
                 for (fname, raw_val) in fields {
+                    raw_val.validate_canonical()?;
                     if let Some(fdef) = tdef.field_by_name(fname) {
                         let resolved = self.validate_and_resolve_field(fdef, raw_val, slots)?;
                         changed_fields.insert(fdef.id);
                         declared.insert(fdef.id, resolved);
                     } else if tdef.additional_fields {
+                        if raw_val.contains_internal_ref() {
+                            return Err(ElmdbError::new(
+                                ErrorCode::ValidationFailed,
+                                format!("extra field '{fname}' cannot contain internal EntityRef/DanglingRef"),
+                            ));
+                        }
                         extra.insert(fname.clone(), raw_val.clone());
                     } else {
                         return Err(ElmdbError::new(
@@ -1123,6 +1163,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 let mut next = old_row.clone();
                 let mut changed_fields = FieldMask::empty();
                 for (fname, raw_val) in fields {
+                    raw_val.validate_canonical()?;
                     if let Some(fdef) = tdef.field_by_name(fname) {
                         let resolved = self.validate_and_resolve_field(fdef, raw_val, slots)?;
                         if next.fields.get(&fdef.id) != Some(&resolved) {
@@ -1130,6 +1171,12 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                             next.fields.insert(fdef.id, resolved);
                         }
                     } else if tdef.additional_fields {
+                        if raw_val.contains_internal_ref() {
+                            return Err(ElmdbError::new(
+                                ErrorCode::ValidationFailed,
+                                format!("extra field '{fname}' cannot contain internal EntityRef/DanglingRef"),
+                            ));
+                        }
                         next.extra.insert(fname.clone(), raw_val.clone());
                     } else {
                         return Err(ElmdbError::new(
@@ -1232,9 +1279,10 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             WireOp::Destroy { target } => {
                 let key = self.resolve_target(target, slots)?;
                 let old_row = self.load_packed_row(key)?;
-                let tdef = self.require_active_type(old_row.header.type_id)?;
+                // Archived types remain purgeable via Destroy so uninstalled pack data can be cleaned up.
+                let type_id = old_row.header.type_id;
 
-                // 1. Enforce `ref_in` `onDelete` policies (Restrict / SetNull / AllowDangling).
+                // 1. Enforce `ref_in` `onDelete` policies (read-only Restrict check first, then SetNull / AllowDangling).
                 self.enforce_ref_in_on_destroy(key, &old_row.header.ext_id)?;
 
                 // 2. Cascade-remove all incident edges (both outgoing and incoming).
@@ -1252,11 +1300,11 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     }
                 }
                 self.txn.del(self.engine.dbs.ext_id, old_row.header.ext_id.as_bytes())?;
-                self.txn.del(self.engine.dbs.adj, &type_list_key(tdef.id, key))?;
+                self.txn.del(self.engine.dbs.adj, &type_list_key(type_id, key))?;
                 self.txn.del(self.engine.dbs.entities, &key.to_ne_bytes())?;
 
-                self.pending_deltas.tombstones.push((key, tdef.id, old_row.header.ext_id.clone()));
-                self.pending_deltas.record_entity(key, tdef.id, Some(old_row), None, FieldMask::empty(), true);
+                self.pending_deltas.tombstones.push((key, type_id, old_row.header.ext_id.clone()));
+                self.pending_deltas.record_entity(key, type_id, Some(old_row), None, FieldMask::empty(), true);
                 Ok(())
             }
             WireOp::Link { source, rel_kind, target, weight, info } => {
@@ -1274,6 +1322,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 let dst_hdr = self.load_row_header(dst)?;
                 let _ = self.require_active_type(src_hdr.type_id)?;
                 let _ = self.require_active_type(dst_hdr.type_id)?;
+                if src_hdr.is_trashed() || dst_hdr.is_trashed() {
+                    return Err(ElmdbError::new(ErrorCode::EntityTrashed, "cannot link a trashed entity"));
+                }
 
                 if !rdef.endpoints.is_empty() && !rdef.endpoints.contains(&(src_hdr.type_id, dst_hdr.type_id)) {
                     return Err(ElmdbError::new(
@@ -1282,7 +1333,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     ));
                 }
 
-                // Enforce cardinality via O(1) adjacency cursor checks.
+                // Enforce cardinality and reject duplicate parallel edges on single-valued cardinalities.
                 self.check_cardinality(&rdef, src, dst)?;
 
                 // Enforce acyclicity via zero-String-allocation `FxHashSet<u64>` DFS.
@@ -1299,10 +1350,25 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                         if !f.is_finite() {
                             return Err(ElmdbError::new(ErrorCode::ValidationFailed, "relation weight must be finite"));
                         }
-                        f
+                        if !rdef.weighted && f != 1.0 {
+                            return Err(ElmdbError::new(
+                                ErrorCode::ValidationFailed,
+                                format!("relation '{}' is unweighted", rdef.name),
+                            ));
+                        }
+                        if f == 0.0 { 0.0 } else { f }
                     }
                     None => 1.0,
                 };
+                if let Some(info_val) = info {
+                    info_val.validate_canonical()?;
+                    if info_val.contains_internal_ref() {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ValidationFailed,
+                            "relation info cannot contain internal EntityRef/DanglingRef",
+                        ));
+                    }
+                }
 
                 let rel_key = self.alloc_rel_key()?;
                 let edge = PackedEdge {
@@ -1323,6 +1389,8 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             }
             WireOp::Unlink { source, rel_kind, target } => {
                 let src = self.resolve_target(source, slots)?;
+                let src_hdr = self.load_row_header(src)?;
+                let _ = self.require_active_type(src_hdr.type_id)?;
                 let kind_filter = match rel_kind {
                     Some(name) => Some(
                         self.schema
@@ -1335,7 +1403,11 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     None => None,
                 };
                 let dst_filter = match target {
-                    Some(t) => Some(self.resolve_target(t, slots)?),
+                    Some(t) => {
+                        let d = self.resolve_target(t, slots)?;
+                        let _ = self.load_row_header(d)?;
+                        Some(d)
+                    }
                     None => None,
                 };
                 let to_delete = self.find_outgoing_edges(src, kind_filter, dst_filter)?;
@@ -1435,11 +1507,19 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             (FieldKind::String, CanonicalValue::String(_))
             | (FieldKind::Boolean, CanonicalValue::Bool(_))
             | (FieldKind::Bytes, CanonicalValue::Bytes(_))
-            | (FieldKind::Timestamp, CanonicalValue::Timestamp { .. })
-            | (FieldKind::Object, CanonicalValue::Object(_))
-            | (FieldKind::Any, _) => Ok(val.clone()),
+            | (FieldKind::Timestamp, CanonicalValue::Timestamp { .. }) => Ok(val.clone()),
+            (FieldKind::Object, CanonicalValue::Object(_)) | (FieldKind::Any, _) => {
+                if val.contains_internal_ref() {
+                    return Err(ElmdbError::new(
+                        ErrorCode::ValidationFailed,
+                        format!("field '{path}' cannot contain internal EntityRef/DanglingRef"),
+                    ));
+                }
+                Ok(val.clone())
+            }
             (FieldKind::Timestamp, CanonicalValue::Int(ms)) => Ok(CanonicalValue::Timestamp { ms: *ms, ns: 0 }),
-            (FieldKind::Number, CanonicalValue::Int(_) | CanonicalValue::Float(_)) => Ok(val.clone()),
+            (FieldKind::Number, CanonicalValue::Int(i)) => Ok(CanonicalValue::Int(*i)),
+            (FieldKind::Number, CanonicalValue::Float(f)) => CanonicalValue::float(*f),
             (FieldKind::Int64, CanonicalValue::Int(_)) => Ok(val.clone()),
             (FieldKind::Integer, CanonicalValue::Int(i))
                 if (-9_007_199_254_740_991..=9_007_199_254_740_991).contains(i) =>
@@ -1475,7 +1555,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 }
                 Ok(CanonicalValue::EntityRef(*raw_key))
             }
-            (FieldKind::Ref { .. }, CanonicalValue::DanglingRef(ext)) => Ok(CanonicalValue::DanglingRef(ext.clone())),
+            (FieldKind::Ref { on_delete: OnDeletePolicy::AllowDangling, .. }, CanonicalValue::DanglingRef(ext)) => {
+                Ok(CanonicalValue::DanglingRef(ext.clone()))
+            }
             (FieldKind::List(elem_kind), CanonicalValue::Array(items)) => {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items {
@@ -1541,7 +1623,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             return Ok(());
         }
 
-        // Group by referrer so each referrer row is rewritten at most once.
+        // Group by referrer so each referrer row is checked & rewritten at most once.
         let mut by_referrer: BTreeMap<EntityKey, Vec<FieldId>> = BTreeMap::new();
         for (r, fid) in refs {
             if r != target {
@@ -1549,6 +1631,15 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             }
         }
 
+        struct RefCleanupPlan {
+            referrer_key: EntityKey,
+            old_row: PackedRow,
+            tdef: crate::catalog::TypeDef,
+            field_policies: Vec<(FieldId, OnDeletePolicy)>,
+        }
+
+        // Pass 1 (read-only): reject immediately if ANY active Restrict referrer exists before mutating anything!
+        let mut plans: Vec<RefCleanupPlan> = Vec::with_capacity(by_referrer.len());
         for (referrer_key, fids) in by_referrer {
             let old_row = self.load_packed_row(referrer_key)?;
             let tdef = self
@@ -1557,24 +1648,40 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "missing TypeDef for referrer"))?
                 .clone();
 
-            let mut next = old_row.clone();
-            let mut changed_fields = FieldMask::empty();
-
+            let mut field_policies = Vec::with_capacity(fids.len());
             for fid in fids {
                 let fdef = tdef
                     .field_by_id(fid)
                     .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "missing FieldDef for ref_in"))?;
-                let policy = fdef.kind.ref_policy().map_or(OnDeletePolicy::Restrict, |(_, p)| p);
+                // Archived types/fields fall back to AllowDangling so archived data never permanently locks active rows.
+                let policy = if tdef.archived || fdef.archived {
+                    OnDeletePolicy::AllowDangling
+                } else {
+                    fdef.kind.ref_policy().map_or(OnDeletePolicy::Restrict, |(_, p)| p)
+                };
+                if policy == OnDeletePolicy::Restrict {
+                    return Err(ElmdbError::new(
+                        ErrorCode::Referenced,
+                        format!(
+                            "cannot destroy '{}': referenced by '{}' field '{}.{}'",
+                            target_ext_id, old_row.header.ext_id, tdef.name, fdef.name
+                        ),
+                    ));
+                }
+                field_policies.push((fid, policy));
+            }
+            plans.push(RefCleanupPlan { referrer_key, old_row, tdef, field_policies });
+        }
+
+        // Pass 2: apply SetNull (recursively through nested lists) and AllowDangling rewrites.
+        for RefCleanupPlan { referrer_key, old_row, tdef, field_policies } in plans {
+            let mut next = old_row.clone();
+            let mut changed_fields = FieldMask::empty();
+
+            for (fid, policy) in field_policies {
+                let fdef = tdef.field_by_id(fid).expect("validated in pass 1");
                 match policy {
-                    OnDeletePolicy::Restrict => {
-                        return Err(ElmdbError::new(
-                            ErrorCode::Referenced,
-                            format!(
-                                "cannot destroy '{}': referenced by '{}' field '{}.{}'",
-                                target_ext_id, old_row.header.ext_id, tdef.name, fdef.name
-                            ),
-                        ));
-                    }
+                    OnDeletePolicy::Restrict => unreachable!("checked in pass 1"),
                     OnDeletePolicy::SetNull => match next.fields.get_mut(&fid) {
                         Some(CanonicalValue::EntityRef(k)) if *k == target.0 => {
                             if fdef.nullable {
@@ -1584,10 +1691,8 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                             }
                             changed_fields.insert(fid);
                         }
-                        Some(CanonicalValue::Array(items)) => {
-                            let before_len = items.len();
-                            items.retain(|item| !matches!(item, CanonicalValue::EntityRef(k) if *k == target.0));
-                            if items.len() != before_len {
+                        Some(val @ CanonicalValue::Array(_)) => {
+                            if remove_ref_from_value(val, target.0) {
                                 changed_fields.insert(fid);
                             }
                         }
@@ -1660,7 +1765,13 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         match rdef.cardinality {
             Cardinality::ManyToMany => Ok(()),
             Cardinality::ManyToOne => {
-                if self.has_adj_with_other(TAG_ADJ_OUT, src, rdef.id, dst)? {
+                if let Some(existing) = self.first_adj_far(TAG_ADJ_OUT, src, rdef.id)? {
+                    if existing == dst {
+                        return Err(ElmdbError::new(
+                            ErrorCode::RelationAlreadyExists,
+                            format!("relation '{}' already links these entities", rdef.name),
+                        ));
+                    }
                     return Err(ElmdbError::new(
                         ErrorCode::CardinalityViolation,
                         format!("relation '{}' is many-to-one (source already linked elsewhere)", rdef.name),
@@ -1669,7 +1780,13 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 Ok(())
             }
             Cardinality::OneToMany => {
-                if self.has_adj_with_other(TAG_ADJ_IN, dst, rdef.id, src)? {
+                if let Some(existing) = self.first_adj_far(TAG_ADJ_IN, dst, rdef.id)? {
+                    if existing == src {
+                        return Err(ElmdbError::new(
+                            ErrorCode::RelationAlreadyExists,
+                            format!("relation '{}' already links these entities", rdef.name),
+                        ));
+                    }
                     return Err(ElmdbError::new(
                         ErrorCode::CardinalityViolation,
                         format!("relation '{}' is one-to-many (target already linked from elsewhere)", rdef.name),
@@ -1678,9 +1795,19 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 Ok(())
             }
             Cardinality::OneToOne => {
-                if self.has_adj_with_other(TAG_ADJ_OUT, src, rdef.id, dst)?
-                    || self.has_adj_with_other(TAG_ADJ_IN, dst, rdef.id, src)?
-                {
+                if let Some(existing) = self.first_adj_far(TAG_ADJ_OUT, src, rdef.id)? {
+                    if existing == dst {
+                        return Err(ElmdbError::new(
+                            ErrorCode::RelationAlreadyExists,
+                            format!("relation '{}' already links these entities", rdef.name),
+                        ));
+                    }
+                    return Err(ElmdbError::new(
+                        ErrorCode::CardinalityViolation,
+                        format!("relation '{}' is one-to-one", rdef.name),
+                    ));
+                }
+                if self.first_adj_far(TAG_ADJ_IN, dst, rdef.id)?.is_some() {
                     return Err(ElmdbError::new(
                         ErrorCode::CardinalityViolation,
                         format!("relation '{}' is one-to-one", rdef.name),
@@ -1691,25 +1818,23 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         }
     }
 
-    fn has_adj_with_other(&self, tag: u8, node: EntityKey, kind: RelKindId, allowed_far: EntityKey) -> Result<bool> {
+    fn first_adj_far(&self, tag: u8, node: EntityKey, kind: RelKindId) -> Result<Option<EntityKey>> {
         let mut prefix = [0u8; 11];
         prefix[0] = tag;
         prefix[1..9].copy_from_slice(&node.to_be_bytes());
         prefix[9..11].copy_from_slice(&kind.0.to_be_bytes());
 
         let mut cur = self.txn.cursor(self.engine.dbs.adj)?;
-        let mut entry = cur.seek_ge(&prefix)?;
-        while let Some((k, v)) = entry {
-            if k.len() != 19 || k[0..11] != prefix {
-                break;
+        if let Some((k, v)) = cur.seek_ge(&prefix)?
+            && k.len() == 19
+            && k[0..11] == prefix
+        {
+            if v.len() < 8 {
+                return Err(ElmdbError::new(ErrorCode::Corrupted, "truncated adj value"));
             }
-            let far = EntityKey::from_be_bytes(v[0..8].try_into().expect("8"));
-            if far != allowed_far {
-                return Ok(true);
-            }
-            entry = cur.next()?;
+            return Ok(Some(EntityKey(decode_u64_be(&v[0..8], "adj far")?)));
         }
-        Ok(false)
+        Ok(None)
     }
 
     fn reachable_via(&self, kind: RelKindId, start: EntityKey, goal: EntityKey) -> Result<bool> {
@@ -1857,6 +1982,138 @@ fn rewrite_ref_to_dangling(val: &mut CanonicalValue, target: u64, ext_id: &str) 
         }
         _ => false,
     }
+}
+
+fn remove_ref_from_value(val: &mut CanonicalValue, target: u64) -> bool {
+    match val {
+        CanonicalValue::Array(items) => {
+            let before = items.len();
+            items.retain(|item| !matches!(item, CanonicalValue::EntityRef(k) if *k == target));
+            let mut changed = items.len() != before;
+            for item in items.iter_mut() {
+                changed |= remove_ref_from_value(item, target);
+            }
+            changed
+        }
+        _ => false,
+    }
+}
+
+fn decode_u64_le(bytes: &[u8], label: &str) -> Result<u64> {
+    let arr: [u8; 8] =
+        bytes.try_into().map_err(|_| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt u64 LE for {label}")))?;
+    Ok(u64::from_le_bytes(arr))
+}
+
+fn decode_u64_be(bytes: &[u8], label: &str) -> Result<u64> {
+    let arr: [u8; 8] =
+        bytes.try_into().map_err(|_| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt u64 BE for {label}")))?;
+    Ok(u64::from_be_bytes(arr))
+}
+
+fn try_open_system_dbs_ro<S: KvStore, V: Vfs>(
+    gate: &DurabilityGate<S, V>,
+    ro: &S::RoTxn<'_>,
+) -> Result<Option<SystemDbs>> {
+    let (
+        Some(meta),
+        Some(ext_id),
+        Some(entities),
+        Some(blobs),
+        Some(relations),
+        Some(rel_blobs),
+        Some(embeddings),
+        Some(sequences),
+        Some(commit_log),
+        Some(adj),
+    ) = (
+        gate.open_subdb_ro(ro, "meta", DbFlags::DEFAULT)?,
+        gate.open_subdb_ro(ro, "ext_id", DbFlags::DEFAULT)?,
+        gate.open_subdb_ro(ro, "entities", DbFlags::INTEGER_KEY)?,
+        gate.open_subdb_ro(ro, "blobs", DbFlags::DEFAULT)?,
+        gate.open_subdb_ro(ro, "relations", DbFlags::INTEGER_KEY)?,
+        gate.open_subdb_ro(ro, "rel_blobs", DbFlags::DEFAULT)?,
+        gate.open_subdb_ro(ro, "embeddings", DbFlags::DEFAULT)?,
+        gate.open_subdb_ro(ro, "sequences", DbFlags::DEFAULT)?,
+        gate.open_subdb_ro(ro, "commit_log", DbFlags::DEFAULT)?,
+        gate.open_subdb_ro(ro, "adj", DbFlags::DEFAULT)?,
+    )
+    else {
+        return Ok(None);
+    };
+    Ok(Some(SystemDbs { meta, ext_id, entities, blobs, relations, rel_blobs, embeddings, sequences, commit_log, adj }))
+}
+
+fn load_schema_and_pool<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<(CompiledSchema, SubDbPool)> {
+    let bytes = txn
+        .get(dbs.meta, META_SCHEMA_KEY)?
+        .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "missing meta schema"))?;
+    let schema: CompiledSchema = serde_json::from_slice(bytes)
+        .map_err(|e| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt meta schema: {e}")))?;
+    let pool_bytes = txn
+        .get(dbs.meta, META_POOL_KEY)?
+        .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "missing meta subdb_pool"))?;
+    let pool = SubDbPool::decode(pool_bytes)?;
+    Ok((schema, pool))
+}
+
+fn read_single_field<R: KvRead>(
+    txn: &R,
+    schema: &CompiledSchema,
+    dbs: &SystemDbs,
+    ext_id: &str,
+    field_name: &str,
+) -> Result<Option<CanonicalValue>> {
+    let Some(key_bytes) = txn.get(dbs.ext_id, ext_id.as_bytes())? else {
+        return Ok(None);
+    };
+    let key = EntityKey(decode_u64_le(key_bytes, "ext_id")?);
+    let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
+        return Ok(None);
+    };
+    let (hdr, _) = decode_row_header(raw)?;
+    let tdef = schema
+        .type_by_id(hdr.type_id)
+        .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
+    let mut ref_cache = FxHashMap::default();
+    if let Some(fdef) = tdef.field_by_name(field_name) {
+        let Some(val) = decode_single_field(raw, fdef.id, |fid| {
+            Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
+        })?
+        else {
+            return Ok(None);
+        };
+        return Ok(Some(resolve_refs_to_strings(txn, dbs, val, &mut ref_cache)?));
+    }
+    if !hdr.has_extra() {
+        return Ok(None);
+    }
+    let full = decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
+    Ok(full.extra.get(field_name).cloned())
+}
+
+fn read_relations_for_ext_id<R: KvRead>(
+    txn: &R,
+    schema: &CompiledSchema,
+    dbs: &SystemDbs,
+    tag: u8,
+    ext_id: &str,
+    rel_kind: Option<&str>,
+) -> Result<Vec<StoredEdge>> {
+    let Some(key_bytes) = txn.get(dbs.ext_id, ext_id.as_bytes())? else {
+        return Ok(Vec::new());
+    };
+    let node = EntityKey(decode_u64_le(key_bytes, "ext_id")?);
+    let kind_filter = match rel_kind {
+        Some(name) => Some(
+            schema
+                .relation_by_name(name)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownRelation, format!("unknown relation '{name}'")))?
+                .id,
+        ),
+        None => None,
+    };
+    read_adj_edges(txn, schema, dbs, tag, node, kind_filter)
 }
 
 fn read_commit_seq<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {

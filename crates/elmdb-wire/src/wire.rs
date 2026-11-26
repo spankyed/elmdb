@@ -188,12 +188,22 @@ pub fn decode_batch(buf: &[u8]) -> Result<DecodedBatch> {
     if r.take(4)? != BATCH_MAGIC {
         return Err(ElmdbError::new(ErrorCode::InvalidWireFrame, "bad batch wire magic"));
     }
-    let return_flags = CommitReturnFlags::from_bits(r.read_u8()?);
+    let raw_flags = r.read_u8()?;
+    let valid_mask = CommitReturnFlags::RESULTS.bits()
+        | CommitReturnFlags::TOUCHED_TOKENS.bits()
+        | CommitReturnFlags::FULL_CHANGESET.bits();
+    if (raw_flags & !valid_mask) != 0 {
+        return Err(ElmdbError::new(
+            ErrorCode::InvalidWireFrame,
+            format!("undefined CommitReturnFlags bits {raw_flags:#04x}"),
+        ));
+    }
+    let return_flags = CommitReturnFlags::from_bits(raw_flags);
     let op_count = r.read_u32()? as usize;
     if op_count > buf.len() {
         return Err(ElmdbError::new(ErrorCode::InvalidWireFrame, "corrupt batch op count"));
     }
-    let mut ops = Vec::with_capacity(op_count);
+    let mut ops = Vec::with_capacity(op_count.min(256));
     for _ in 0..op_count {
         let tag = r.read_u8()?;
         let op = match tag {
@@ -307,7 +317,8 @@ impl ResultEncoder {
         Ok(dict_id)
     }
 
-    /// Appends one row `(external_id, type_name, fields)` to the response frame.
+    /// Appends one row `(external_id, type_name, fields)` to the response frame atomically
+    /// (truncating partial body bytes on error) and resolving nested `EntityRef`s in arrays.
     pub fn push_row<F>(
         &mut self,
         external_id: &str,
@@ -318,34 +329,51 @@ impl ResultEncoder {
     where
         F: FnMut(u64) -> Result<String>,
     {
-        let id_sym = self.intern(external_id)?;
-        let type_sym = self.intern(type_name)?;
-        self.body.extend_from_slice(&id_sym.to_le_bytes());
-        self.body.extend_from_slice(&type_sym.to_le_bytes());
-        let field_count = u16::try_from(fields.len())
-            .map_err(|_| ElmdbError::new(ErrorCode::ResourceLimit, "row field count > 65535"))?;
-        self.body.extend_from_slice(&field_count.to_le_bytes());
-        for (name, val) in fields {
-            let sym = self.intern(name)?;
-            self.body.extend_from_slice(&sym.to_le_bytes());
-            match val {
-                CanonicalValue::EntityRef(key) => {
-                    let ref_sym = self.intern_entity_ref(*key, &mut resolve_ref)?;
-                    self.body.push(0xFE); // interned external ID reference
-                    self.body.extend_from_slice(&ref_sym.to_le_bytes());
-                }
-                CanonicalValue::DanglingRef(ext) => {
-                    let ref_sym = self.intern(ext)?;
-                    self.body.push(0xFE);
-                    self.body.extend_from_slice(&ref_sym.to_le_bytes());
-                }
-                other => {
-                    self.body.push(0xFF); // raw canonical value
-                    encode_value(other, &mut self.body);
+        let next_count = self
+            .row_count
+            .checked_add(1)
+            .ok_or_else(|| ElmdbError::new(ErrorCode::ResourceLimit, "response row count overflow"))?;
+        let checkpoint = self.body.len();
+        let res = (|| -> Result<()> {
+            let id_sym = self.intern(external_id)?;
+            let type_sym = self.intern(type_name)?;
+            self.body.extend_from_slice(&id_sym.to_le_bytes());
+            self.body.extend_from_slice(&type_sym.to_le_bytes());
+            let field_count = u16::try_from(fields.len())
+                .map_err(|_| ElmdbError::new(ErrorCode::ResourceLimit, "row field count > 65535"))?;
+            self.body.extend_from_slice(&field_count.to_le_bytes());
+            for (name, val) in fields {
+                let sym = self.intern(name)?;
+                self.body.extend_from_slice(&sym.to_le_bytes());
+                match val {
+                    CanonicalValue::EntityRef(key) => {
+                        let ref_sym = self.intern_entity_ref(*key, &mut resolve_ref)?;
+                        self.body.push(0xFE); // interned external ID reference
+                        self.body.extend_from_slice(&ref_sym.to_le_bytes());
+                    }
+                    CanonicalValue::DanglingRef(ext) => {
+                        let ref_sym = self.intern(ext)?;
+                        self.body.push(0xFE);
+                        self.body.extend_from_slice(&ref_sym.to_le_bytes());
+                    }
+                    other if other.contains_internal_ref() => {
+                        let resolved = resolve_value_refs(other, &mut resolve_ref)?;
+                        self.body.push(0xFF);
+                        encode_value(&resolved, &mut self.body);
+                    }
+                    other => {
+                        self.body.push(0xFF); // raw canonical value
+                        encode_value(other, &mut self.body);
+                    }
                 }
             }
+            Ok(())
+        })();
+        if let Err(err) = res {
+            self.body.truncate(checkpoint);
+            return Err(err);
         }
-        self.row_count = self.row_count.saturating_add(1);
+        self.row_count = next_count;
         Ok(())
     }
 
@@ -389,7 +417,7 @@ impl ResultDecoder {
             return Err(ElmdbError::new(ErrorCode::InvalidWireFrame, "bad result wire magic"));
         }
         let dict_len = usize::from(r.read_u16()?);
-        let mut dict = Vec::with_capacity(dict_len);
+        let mut dict = Vec::with_capacity(dict_len.min(256));
         let mut has_proto_key = false;
         for _ in 0..dict_len {
             let s = r.read_str()?;
@@ -399,7 +427,7 @@ impl ResultDecoder {
             dict.push(s.to_owned());
         }
         let row_count = r.read_u32()? as usize;
-        let mut rows = Vec::with_capacity(row_count.min(1024));
+        let mut rows = Vec::with_capacity(row_count.min(256));
         for _ in 0..row_count {
             let id_sym = usize::from(r.read_u16()?);
             let type_sym = usize::from(r.read_u16()?);
@@ -412,7 +440,7 @@ impl ResultDecoder {
                 .ok_or_else(|| ElmdbError::new(ErrorCode::InvalidWireFrame, "bad type dict index"))?
                 .clone();
             let field_count = usize::from(r.read_u16()?);
-            let mut fields = Vec::with_capacity(field_count);
+            let mut fields = Vec::with_capacity(field_count.min(64));
             for _ in 0..field_count {
                 let name_sym = usize::from(r.read_u16()?);
                 let name = dict
@@ -428,7 +456,13 @@ impl ResultDecoder {
                             .clone();
                         CanonicalValue::String(ext)
                     }
-                    0xFF => r.read_value()?,
+                    0xFF => {
+                        let v = r.read_value()?;
+                        if !has_proto_key && v.contains_proto_key() {
+                            has_proto_key = true;
+                        }
+                        v
+                    }
                     other => {
                         return Err(ElmdbError::new(
                             ErrorCode::InvalidWireFrame,
@@ -444,6 +478,31 @@ impl ResultDecoder {
             return Err(ElmdbError::new(ErrorCode::InvalidWireFrame, "trailing bytes in result frame"));
         }
         Ok(DecodedResultFrame { dict, has_proto_key, rows })
+    }
+}
+
+fn resolve_value_refs<F>(val: &CanonicalValue, resolve_ref: &mut F) -> Result<CanonicalValue>
+where
+    F: FnMut(u64) -> Result<String>,
+{
+    match val {
+        CanonicalValue::EntityRef(k) => Ok(CanonicalValue::String(resolve_ref(*k)?)),
+        CanonicalValue::DanglingRef(ext) => Ok(CanonicalValue::String(ext.clone())),
+        CanonicalValue::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(resolve_value_refs(item, resolve_ref)?);
+            }
+            Ok(CanonicalValue::Array(out))
+        }
+        CanonicalValue::Object(entries) => {
+            let mut out = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                out.push((k.clone(), resolve_value_refs(v, resolve_ref)?));
+            }
+            Ok(CanonicalValue::Object(out))
+        }
+        other => Ok(other.clone()),
     }
 }
 
