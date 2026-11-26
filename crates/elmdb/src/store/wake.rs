@@ -27,7 +27,7 @@ use std::time::{Duration, SystemTime};
 use crate::error::{Error, ErrorCode, Result};
 use crate::sync::PlainMutex;
 
-thread_local! {
+crate::sync::thread_local! {
     /// Address of the `stopping` flag for the wake listener running on this thread, if any.
     /// Destructor-free (`const`-initialized `Cell`), so `stop()` can check whether it is on the
     /// listener thread even during thread-local or C `atexit` teardown after `std::thread::current()`
@@ -764,10 +764,10 @@ mod tests {
         let wake = Wake::new(dir.path());
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let release = std::sync::Mutex::new(release_rx);
+        let release = PlainMutex::new(release_rx);
         wake.listen(Arc::new(move || {
             let _ = entered_tx.send(());
-            let _ = release.lock().unwrap().recv_timeout(SETTLES);
+            let _ = release.lock().recv_timeout(SETTLES);
         }))
         .unwrap();
         wake.wake_self();
@@ -792,7 +792,7 @@ mod tests {
                     }
                 }
             }
-            thread_local! {
+            crate::sync::thread_local! {
                 static HELD: DropOnExit = const { DropOnExit(std::cell::RefCell::new(None)) };
             }
             let wake = Wake::new(&path);
