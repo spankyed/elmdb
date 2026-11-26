@@ -607,4 +607,60 @@ describe('injectable EarsClock', () => {
       vi.useRealTimers();
     }
   });
+
+  it('stopWatches() synchronously cancels pending watch timers, untracks reads, settles waiters, and allows new watches while open', async () => {
+    let nowMs = 1_000;
+    let nextTimer = 0;
+    const timers = new Map<number, () => void>();
+    const clock: EarsClock = {
+      now: () => nowMs,
+      after(_ms, run) {
+        const id = ++nextTimer;
+        timers.set(id, run);
+        return () => { timers.delete(id); };
+      },
+    };
+    const { database } = databases.open({
+      types: { Task: { required: [] } },
+      relations: {},
+      roles: [],
+    });
+    const engine = createEarsEngine({ database, clock });
+    const delivered: number[] = [];
+    const w = engine.watch(() => engine.query('Task').count(), (n) => { delivered.push(n); });
+    await flushMicrotasks();
+    expect(delivered).toEqual([0]);
+    expect(engine.admin.watchStats().watches).toBe(1);
+
+    // Write within the 16 ms gap so a gap timer is scheduled on the clock
+    engine.create('Task', { title: 'first' });
+    await flushMicrotasks();
+    expect(timers.size, 'gap timer scheduled on clock').toBe(1);
+    const waitCaughtUp = w.caughtUp();
+    const waitSettled = engine.admin.watchesSettled();
+
+    // stopWatches() clears timers, untracks reads, and resolves waiters synchronously
+    engine.admin.stopWatches();
+    expect(timers.size, 'stopWatches cancelled pending gap timer synchronously').toBe(0);
+    expect(engine.admin.watchStats()).toEqual({ watches: 0, keys: 0, ranges: 0 });
+    expect(await isResolved(waitCaughtUp)).toBe(true);
+    expect(await isResolved(waitSettled)).toBe(true);
+
+    // While the database is still open, new watches work normally after stopWatches()
+    const after: number[] = [];
+    const w2 = engine.watch(() => engine.query('Task').count(), (n) => { after.push(n); });
+    await flushMicrotasks();
+    expect(after).toEqual([1]);
+
+    // Trigger another gap timer, then close the database and call stopWatches() after close
+    engine.create('Task', { title: 'second' });
+    await flushMicrotasks();
+    expect(timers.size).toBe(1);
+    const waitAfterClose = w2.caughtUp();
+    database.close();
+    expect(timers.size, 'database.close() alone leaves gap timer until tick').toBe(1);
+    engine.admin.stopWatches();
+    expect(timers.size, 'stopWatches() after close cancels pending timers synchronously').toBe(0);
+    expect(await isResolved(waitAfterClose)).toBe(true);
+  });
 });

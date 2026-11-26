@@ -242,6 +242,11 @@ export interface EarsAdmin {
   waitForIndexBuilds(): void;
   /** Resolves once no watch is waiting to run again: every commit before the call has been delivered */
   watchesSettled(): Promise<void>;
+  /**
+   * Stops every open watch, untracks their read sets when the database is still open, cancels any pending flush or
+   * gap timers, and resolves pending `caughtUp()` and `watchesSettled()` waiters synchronously
+   */
+  stopWatches(): void;
   /** How many watches are open, and how many keys and ranges their read sets hold */
   watchStats(): { watches: number; keys: number; ranges: number };
   /** Payload-free snapshot of the watch scheduler and open watches, for diagnosing stalls */
@@ -487,6 +492,7 @@ export function createEarsEngine({ database, warn, freeze, callSites, clock, sch
       watches.syncBuilder();
     },
     watchesSettled: watches.settled,
+    stopWatches: watches.stopAll,
     watchStats: watches.stats,
     watchDiagnostics: watches.diagnostics,
     calls: connection.calls,
