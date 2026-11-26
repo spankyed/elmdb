@@ -1,0 +1,24 @@
+[package]
+name = "elmdb-vec"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+elmdb-engine.workspace = true
+elmdb-projections.workspace = true
+elmdb-storage.workspace = true
+elmdb-wire.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+elmdb-lmdb.workspace = true
+elmdb-sim.workspace = true
+tempfile.workspace = true

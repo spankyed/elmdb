@@ -18,7 +18,7 @@ use crate::state::{
     BuildState, CheckReport, DEFAULT_BUILD_CHUNK, IndexMismatch, IndexStatus, KvMut, MemCheckTxn, ProjectionStats,
     delete_build_state, diff_subdb_against_expected, list_persisted_state_ids, read_build_state, write_build_state,
 };
-use crate::{text, trigram, value};
+use crate::{rank, text, trigram, value};
 
 /// Optional extension hook allowing sibling crates (`elmdb-vec`, Push PageRank) to register
 /// directly into `ProjectionRegistry` under the exact same `BuildState` / `check()` / `rebuild()` lifecycle.
@@ -268,6 +268,8 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
 
                 if let Some(ext) = self.find_external(&def.kind) {
                     ext.rebuild_index(txn, schema, dbs, def, db)?;
+                } else if let IndexKind::Rank { relations, weighted } = &def.kind {
+                    rank::rebuild_in_txn(txn, dbs, db, def.type_id, relations, *weighted, true)?;
                 } else {
                     if let IndexKind::Order { locale, .. } = &def.kind {
                         let cached = self.collators.get_or_build(locale)?;
@@ -325,7 +327,14 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                 report.checked_indexes += 1;
                 continue;
             }
-            if matches!(def.kind, IndexKind::Vector { .. } | IndexKind::Rank { .. }) {
+            if let IndexKind::Rank { relations, weighted } = &def.kind {
+                let spec = rank::RankSpec { type_id: def.type_id, relations, weighted: *weighted };
+                let mut m = rank::check_rank(&txn, &dbs, actual_db, def.id, &def.name, spec)?;
+                report.mismatches.append(&mut m);
+                report.checked_indexes += 1;
+                continue;
+            }
+            if matches!(def.kind, IndexKind::Vector { .. }) {
                 continue;
             }
 
@@ -413,7 +422,13 @@ impl<S: KvStore, V: Vfs> ProjectionSink<S, V> for ProjectionRegistry<S, V> {
 
         // Dispatch coalesced entity deltas via `TypeId` + `FieldMask` / `liveness_changed`.
         for def in &schema.indexes {
-            if matches!(def.kind, IndexKind::Rank { .. }) {
+            if let IndexKind::Rank { relations, weighted } = &def.kind {
+                let state = read_build_state(txn, dbs, def.id)?.unwrap_or(BuildState::Ready);
+                if state.is_ready() {
+                    let db = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
+                    let spec = rank::RankSpec { type_id: def.type_id, relations, weighted: *weighted };
+                    rank::apply_deltas(txn, dbs, db, spec, entity_deltas, edge_deltas)?;
+                }
                 continue;
             }
             let mask = def.field_mask();
@@ -516,6 +531,12 @@ impl<S: KvStore, V: Vfs> ProjectionSink<S, V> for ProjectionRegistry<S, V> {
             if let Some(ext) = self.find_external(&def.kind) {
                 let state = ext.on_index_added(txn, schema, dbs, def, db)?;
                 write_build_state(txn, dbs, def.id, &state)?;
+                continue;
+            }
+            if let IndexKind::Rank { relations, weighted } = &def.kind {
+                let converge_now = self.build_policy == BuildPolicy::EagerInSchemaChange;
+                rank::rebuild_in_txn(txn, dbs, db, def.type_id, relations, *weighted, converge_now)?;
+                write_build_state(txn, dbs, def.id, &BuildState::Ready)?;
                 continue;
             }
             if let IndexKind::Order { locale, .. } = &def.kind {

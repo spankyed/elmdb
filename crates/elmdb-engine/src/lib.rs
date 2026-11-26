@@ -17,7 +17,7 @@ pub use catalog::{
 pub use commit::{
     BatchOutcome, BeforeCommitHook, CommitDeltaSummary, CrossProcCommitSummary, EdgeDelta, Engine, EntityDelta,
     HookCtx, MAX_HOOK_ROUNDS, ProjectionSink, StoredEdge, StoredRow, SystemDbs, TxnCtx, max_type_key, read_packed_row,
-    scan_edges_by_kind, scan_type_keys, scan_type_keys_in_range,
+    scan_adj_in_raw, scan_adj_out_raw, scan_edges_by_kind, scan_type_keys, scan_type_keys_in_range,
 };
 pub use ids::{EntityKey, FieldId, FieldMask, IndexId, RelKey, RelKindId, RoleId, TypeId, TypeMask};
 pub use row::{INLINE_BLOB_THRESHOLD, MAX_EXT_ID_BYTES, MAX_INLINE_ROW_BYTES, PackedEdge, PackedRow, RowHeader};
