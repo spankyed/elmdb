@@ -1,0 +1,21 @@
+[package]
+name = "elmdb-lmdb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+elmdb-storage.workspace = true
+libc.workspace = true
+lmdb-master-sys.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+elmdb-sim.workspace = true
+proptest.workspace = true
+tempfile.workspace = true
