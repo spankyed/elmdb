@@ -56,6 +56,22 @@ impl LiveQueryHub {
         }
     }
 
+    /// Initializes a `LiveQueryHub` pinned to `engine`'s current `(commit_seq, schema_epoch, last_txnid)`.
+    pub fn from_engine<S: KvStore, V: Vfs, C: Clock>(engine: &Engine<S, V, C>, turn_slice_ms: u64) -> Result<Self> {
+        let (ro, schema) = engine.begin_read_pinned()?;
+        let seq = read_commit_seq(&ro, &engine.dbs())?;
+        let txnid = engine.gate().last_txnid()?;
+        let epoch = schema.epoch;
+        drop(ro);
+        Ok(Self {
+            next_watch_id: AtomicU64::new(1),
+            state: Mutex::new(HubState {
+                index: InvalidationIndex::new_with_txnid(seq, epoch, txnid),
+                scheduler: WatchScheduler::new(turn_slice_ms),
+            }),
+        })
+    }
+
     pub fn alloc_watch_id(&self) -> WatchId {
         WatchId(self.next_watch_id.fetch_add(1, Ordering::Relaxed))
     }
@@ -65,7 +81,7 @@ impl LiveQueryHub {
     }
 
     /// Executes `plan` completely lock-free on a fresh MVCC snapshot, registers `watch_id`'s coalesced
-    /// `ReadSet` with `CommitRing` catch-up, and seeds `WatchScheduler` at virtual time `now_ms`.
+    /// `ReadSet` with `CommitRing` catch-up, and seeds `WatchScheduler` as settled at virtual time `now_ms`.
     #[allow(clippy::too_many_arguments)]
     pub fn register_query_watch<S: KvStore, V: Vfs, C: Clock>(
         &self,
@@ -84,7 +100,12 @@ impl LiveQueryHub {
         let current_schema = engine.schema();
 
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        guard.scheduler.register(watch_id, policy, now_ms, cost_ms, hash);
+        // P0-4: Never leak into `InvalidationIndex` if `stop_watches()` raced with our lock-free snapshot!
+        if guard.scheduler.is_stopped() {
+            return Ok((watch_id, output));
+        }
+        // P0-6: Mark `already_ran = true` even when `hash == None` (e.g. Imperative watches)!
+        guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
         let stale = guard.index.register_after_read(watch_id, read_seq, read_epoch, &read_set, &current_schema);
         if stale {
             guard.scheduler.mark_dirty(&[watch_id], now_ms);
@@ -93,7 +114,8 @@ impl LiveQueryHub {
     }
 
     /// Re-executes an existing due watch lock-free, atomically replaces its `ReadSet` with `CommitRing` catch-up,
-    /// and updates `WatchScheduler`. Returns `(output, should_deliver)`.
+    /// and updates `WatchScheduler`. On query error/cancellation, clears `running = false` so the scheduler never wedges!
+    /// Returns `(output, should_deliver)`.
     #[allow(clippy::too_many_arguments)]
     pub fn rerun_query_watch<S: KvStore, V: Vfs, C: Clock>(
         &self,
@@ -106,11 +128,24 @@ impl LiveQueryHub {
         cost_ms: u64,
         result_hash: impl FnOnce(&QueryOutput) -> Option<[u8; 16]>,
     ) -> Result<(QueryOutput, bool)> {
-        let (read_seq, read_epoch, output, read_set) = run_tracked_snapshot(engine, query_engine, plan, budgets)?;
+        let snap = match run_tracked_snapshot(engine, query_engine, plan, budgets) {
+            Ok(s) => s,
+            Err(e) => {
+                // P0-5: Never leave `running = true` wedged on query error / cancellation!
+                let mut guard = self.state.lock().expect("hub lock poisoned");
+                guard.scheduler.abort_run(watch_id, true, now_ms);
+                return Err(e);
+            }
+        };
+        let (read_seq, read_epoch, output, read_set) = snap;
         let hash = result_hash(&output);
         let current_schema = engine.schema();
 
         let mut guard = self.state.lock().expect("hub lock poisoned");
+        // P0-4: Never resurrect a watch that was unregistered or stopped while our snapshot ran!
+        if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
+            return Ok((output, false));
+        }
         let stale = guard.index.register_after_read(watch_id, read_seq, read_epoch, &read_set, &current_schema);
         if stale {
             guard.scheduler.mark_dirty(&[watch_id], now_ms);
@@ -135,6 +170,22 @@ impl LiveQueryHub {
 
     pub fn notify_subdb_write(&self, seq: u64, schema_epoch: u64, slot: u16, key: &[u8], now_ms: u64) -> Vec<WatchId> {
         let mut guard = self.state.lock().expect("hub lock poisoned");
+        let dirty = guard.index.notify_subdb_write(seq, schema_epoch, slot, key);
+        guard.scheduler.mark_dirty(&dirty, now_ms);
+        dirty
+    }
+
+    pub fn notify_subdb_write_with_txnid(
+        &self,
+        seq: u64,
+        schema_epoch: u64,
+        txnid: u64,
+        slot: u16,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Vec<WatchId> {
+        let mut guard = self.state.lock().expect("hub lock poisoned");
+        guard.index.observe_txnid(txnid);
         let dirty = guard.index.notify_subdb_write(seq, schema_epoch, slot, key);
         guard.scheduler.mark_dirty(&dirty, now_ms);
         dirty
@@ -168,6 +219,10 @@ impl LiveQueryHub {
 
     pub fn begin_run(&self, id: WatchId) -> bool {
         self.state.lock().expect("hub lock poisoned").scheduler.begin_run(id)
+    }
+
+    pub fn abort_run(&self, id: WatchId, requeue_dirty: bool, now_ms: u64) -> bool {
+        self.state.lock().expect("hub lock poisoned").scheduler.abort_run(id, requeue_dirty, now_ms)
     }
 
     pub fn finish_run(&self, id: WatchId, now_ms: u64, cost_ms: u64, new_hash: Option<[u8; 16]>) -> bool {

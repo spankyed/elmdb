@@ -861,30 +861,8 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// Returns `Ok(None)` if `> 4,096` commits elapsed and the caller must perform full invalidation.
     pub fn read_commit_summaries_since(&self, since_seq: u64) -> Result<Option<Vec<CrossProcCommitSummary>>> {
         let (ro, _) = self.begin_read_pinned()?;
-        let tip = read_commit_seq(&ro, &self.dbs)?;
-        if tip <= since_seq {
-            return Ok(Some(Vec::new()));
-        }
-        if tip.saturating_sub(since_seq) > COMMIT_LOG_WINDOW {
-            return Ok(None);
-        }
-        let mut start_key = [0u8; 9];
-        start_key[0] = TAG_COMMIT_SUMMARY;
-        start_key[1..9].copy_from_slice(&(since_seq.saturating_add(1)).to_be_bytes());
-
-        let mut cur = ro.cursor(self.dbs.commit_log)?;
-        let mut out = Vec::new();
-        let mut entry = cur.seek_ge(&start_key)?;
-        while let Some((k, v)) = entry {
-            if k.first() != Some(&TAG_COMMIT_SUMMARY) {
-                break;
-            }
-            let summary: CrossProcCommitSummary = serde_json::from_slice(v)
-                .map_err(|e| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt commit_log summary: {e}")))?;
-            out.push(summary);
-            entry = cur.next()?;
-        }
-        Ok(Some(out))
+        let (_, summaries) = read_commit_summaries_in_txn(&ro, &self.dbs, since_seq)?;
+        Ok(summaries)
     }
 
     /// Opens a read-only transaction pinned to the exact `Arc<CompiledSchema>` for its MVCC snapshot.
@@ -2222,6 +2200,38 @@ pub fn read_schema_epoch<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
         )),
         None => Ok(0),
     }
+}
+
+/// Reads `(tip_seq, summaries_since)` atomically within ONE single MVCC `RoTxn` snapshot (zero TOCTOU race!).
+pub fn read_commit_summaries_in_txn<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    since_seq: u64,
+) -> Result<(u64, Option<Vec<CrossProcCommitSummary>>)> {
+    let tip = read_commit_seq(txn, dbs)?;
+    if tip <= since_seq {
+        return Ok((tip, Some(Vec::new())));
+    }
+    if tip.saturating_sub(since_seq) > COMMIT_LOG_WINDOW {
+        return Ok((tip, None));
+    }
+    let mut start_key = [0u8; 9];
+    start_key[0] = TAG_COMMIT_SUMMARY;
+    start_key[1..9].copy_from_slice(&(since_seq.saturating_add(1)).to_be_bytes());
+
+    let mut cur = txn.cursor(dbs.commit_log)?;
+    let mut out = Vec::new();
+    let mut entry = cur.seek_ge(&start_key)?;
+    while let Some((k, v)) = entry {
+        if k.first() != Some(&TAG_COMMIT_SUMMARY) {
+            break;
+        }
+        let summary: CrossProcCommitSummary = serde_json::from_slice(v)
+            .map_err(|e| ElmdbError::new(ErrorCode::Corrupted, format!("corrupt commit_log summary: {e}")))?;
+        out.push(summary);
+        entry = cur.next()?;
+    }
+    Ok((tip, Some(out)))
 }
 
 fn persist_schema_and_pool<S: KvStore, V: Vfs>(

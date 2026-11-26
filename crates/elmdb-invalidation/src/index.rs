@@ -83,20 +83,26 @@ struct SlotRangeArena {
 }
 
 impl SlotRangeArena {
+    #[inline]
+    fn slice_range(&self, off: u32, len: u32) -> &[u8] {
+        let start = off as usize;
+        let end = start + (len as usize);
+        &self.slab[start..end]
+    }
+
     fn insert(&mut self, owner_idx: u32, watch_id: WatchId, low: &[u8], high: &[u8]) {
-        let low_off = self.slab.len() as u32;
+        // Compact dead slab bytes first if appending would overflow 32-bit offsets.
+        let needed = self.slab.len().saturating_add(low.len()).saturating_add(high.len());
+        if needed > u32::MAX as usize && self.dead_count > 0 {
+            self.compact();
+        }
+        let low_off = u32::try_from(self.slab.len()).expect("tier-2 range slab exceeds 4 GiB");
+        let low_len = u32::try_from(low.len()).expect("range low key exceeds 4 GiB");
         self.slab.extend_from_slice(low);
-        let high_off = self.slab.len() as u32;
+        let high_off = u32::try_from(self.slab.len()).expect("tier-2 range slab exceeds 4 GiB");
+        let high_len = u32::try_from(high.len()).expect("range high key exceeds 4 GiB");
         self.slab.extend_from_slice(high);
-        self.entries.push(IntervalEntry {
-            owner_idx,
-            watch_id,
-            low_off,
-            low_len: low.len() as u32,
-            high_off,
-            high_len: high.len() as u32,
-            alive: true,
-        });
+        self.entries.push(IntervalEntry { owner_idx, watch_id, low_off, low_len, high_off, high_len, alive: true });
     }
 
     fn remove_watch(&mut self, watch_id: WatchId) {
@@ -119,11 +125,11 @@ impl SlotRangeArena {
             if !e.alive {
                 continue;
             }
-            let low = &self.slab[e.low_off as usize..(e.low_off + e.low_len) as usize];
-            let high = &self.slab[e.high_off as usize..(e.high_off + e.high_len) as usize];
-            let low_off = new_slab.len() as u32;
+            let low = self.slice_range(e.low_off, e.low_len);
+            let high = self.slice_range(e.high_off, e.high_len);
+            let low_off = u32::try_from(new_slab.len()).expect("compacted slab exceeds 4 GiB");
             new_slab.extend_from_slice(low);
-            let high_off = new_slab.len() as u32;
+            let high_off = u32::try_from(new_slab.len()).expect("compacted slab exceeds 4 GiB");
             new_slab.extend_from_slice(high);
             new_entries.push(IntervalEntry {
                 owner_idx: e.owner_idx,
@@ -147,12 +153,12 @@ impl SlotRangeArena {
             if !e.alive || touched.get(e.owner_idx) {
                 continue;
             }
-            let low = &self.slab[e.low_off as usize..(e.low_off + e.low_len) as usize];
+            let low = self.slice_range(e.low_off, e.low_len);
             if key < low {
                 continue;
             }
             if e.high_len > 0 {
-                let high = &self.slab[e.high_off as usize..(e.high_off + e.high_len) as usize];
+                let high = self.slice_range(e.high_off, e.high_len);
                 if key >= high {
                     continue;
                 }
@@ -171,14 +177,14 @@ impl SlotRangeArena {
             if !e.alive || touched.get(e.owner_idx) {
                 continue;
             }
-            let low = &self.slab[e.low_off as usize..(e.low_off + e.low_len) as usize];
+            let low = self.slice_range(e.low_off, e.low_len);
             if let Some(hi_b) = tag_hi_byte
                 && low >= [hi_b].as_slice()
             {
                 continue;
             }
             if e.high_len > 0 {
-                let high = &self.slab[e.high_off as usize..(e.high_off + e.high_len) as usize];
+                let high = self.slice_range(e.high_off, e.high_len);
                 if high <= tag_lo.as_slice() {
                     continue;
                 }
@@ -189,7 +195,7 @@ impl SlotRangeArena {
         }
     }
 
-    /// Marks ALL live owners watching any range in this sub-DB slot (used for cross-process type-level catch-up).
+    /// Marks ALL live owners watching any range in this sub-DB slot (used for cross-process & multi-tag projections).
     fn stab_all(&self, touched: &mut BitSet, out: &mut Vec<WatchId>) {
         for e in &self.entries {
             if e.alive && touched.set(e.owner_idx) {
@@ -204,6 +210,14 @@ impl SlotRangeArena {
 
     fn live_count(&self) -> usize {
         self.entries.len().saturating_sub(self.dead_count)
+    }
+
+    fn dead_count(&self) -> usize {
+        self.dead_count
+    }
+
+    fn slab_bytes(&self) -> usize {
+        self.slab.len()
     }
 }
 
@@ -247,6 +261,8 @@ struct CommitRingEntry {
 pub struct InvalidationStats {
     pub active_watches: usize,
     pub tier2_live_ranges: usize,
+    pub tier2_dead_ranges: usize,
+    pub tier2_slab_bytes: usize,
     pub latest_seq: u64,
     pub latest_schema_epoch: u64,
     pub ring_len: usize,
@@ -277,7 +293,11 @@ pub struct InvalidationIndex {
     // Lock-free MVCC CommitRing (last `COMMIT_RING_CAP` commits).
     latest_seq: u64,
     latest_schema_epoch: u64,
+    last_seen_txnid: Option<u64>,
     ring_dropped_up_to: u64,
+    /// Tracks maintenance writes (`set_entity_embeddings`, `drain_rank_chunk`, etc.) that share `commit_seq`!
+    latest_subdb_write_seq: Option<u64>,
+    ring_dropped_subdb_up_to: Option<u64>,
     ring: VecDeque<CommitRingEntry>,
 
     // Reusable scratch bitset for zero-alloc `stab` deduplication.
@@ -294,11 +314,29 @@ impl InvalidationIndex {
         }
     }
 
+    pub fn new_with_txnid(initial_seq: u64, initial_schema_epoch: u64, initial_txnid: u64) -> Self {
+        Self {
+            latest_seq: initial_seq,
+            latest_schema_epoch: initial_schema_epoch,
+            last_seen_txnid: Some(initial_txnid),
+            ring_dropped_up_to: initial_seq,
+            ..Default::default()
+        }
+    }
+
+    pub fn observe_txnid(&mut self, txnid: u64) {
+        self.last_seen_txnid = Some(self.last_seen_txnid.map_or(txnid, |prev| prev.max(txnid)));
+    }
+
     pub fn stats(&self) -> InvalidationStats {
         let tier2_live_ranges = self.slot_arenas.values().map(SlotRangeArena::live_count).sum();
+        let tier2_dead_ranges = self.slot_arenas.values().map(SlotRangeArena::dead_count).sum();
+        let tier2_slab_bytes = self.slot_arenas.values().map(SlotRangeArena::slab_bytes).sum();
         InvalidationStats {
             active_watches: self.watches.len(),
             tier2_live_ranges,
+            tier2_dead_ranges,
+            tier2_slab_bytes,
             latest_seq: self.latest_seq,
             latest_schema_epoch: self.latest_schema_epoch,
             ring_len: self.ring.len(),
@@ -474,30 +512,55 @@ impl InvalidationIndex {
         read_schema_epoch: u64,
         schema: &CompiledSchema,
     ) -> bool {
-        if read_schema_epoch != self.latest_schema_epoch {
+        // P1-2: Verify schema epoch matches BOTH `latest_schema_epoch` AND the `schema` used to evaluate deltas!
+        if read_schema_epoch != self.latest_schema_epoch || read_schema_epoch != schema.epoch {
             return true;
         }
-        if read_at_seq >= self.latest_seq {
+        // P0-1: Maintenance writes (`SubDbWrite`) do not increment `commit_seq`, so also check `latest_subdb_write_seq`!
+        let has_subdb_since = self.latest_subdb_write_seq.is_some_and(|s| s >= read_at_seq);
+        if read_at_seq >= self.latest_seq && !has_subdb_since {
             return false;
         }
-        // Fail strictly safe if `CommitRing` evicted commits between `read_at_seq` and `latest_seq`!
+        // Fail strictly safe if `CommitRing` evicted commits or maintenance writes overlapping `read_at_seq`!
         if read_at_seq < self.ring_dropped_up_to {
             return true;
         }
+        if self.ring_dropped_subdb_up_to.is_some_and(|s| s >= read_at_seq) {
+            return true;
+        }
+        let mut expected_seq = read_at_seq.saturating_add(1);
         for rec in &self.ring {
+            // Maintenance `SubDbWrite` can share `rec.seq == read_at_seq`!
+            if matches!(rec.payload, CommitRingPayload::SubDbWrite { .. }) {
+                if rec.seq < read_at_seq {
+                    continue;
+                }
+                if rec.schema_epoch != read_schema_epoch {
+                    return true;
+                }
+                if let CommitRingPayload::SubDbWrite { slot, key } = &rec.payload
+                    && entry_matches_subdb_key(entry, *slot, key)
+                {
+                    return true;
+                }
+                continue;
+            }
             if rec.seq <= read_at_seq {
                 continue;
             }
             if rec.schema_epoch != read_schema_epoch {
                 return true;
             }
+            // P0-2: Verify contiguous sequence coverage over `(read_at_seq + 1 ..= latest_seq)`!
+            if rec.seq > expected_seq {
+                return true;
+            }
+            if rec.seq == expected_seq {
+                expected_seq = expected_seq.saturating_add(1);
+            }
             match &rec.payload {
                 CommitRingPayload::FullInvalidation => return true,
-                CommitRingPayload::SubDbWrite { slot, key } => {
-                    if entry_matches_subdb_key(entry, *slot, key) {
-                        return true;
-                    }
-                }
+                CommitRingPayload::SubDbWrite { .. } => unreachable!(),
                 CommitRingPayload::Local(summary) => {
                     if entry_matches_local_commit(entry, schema, summary) {
                         return true;
@@ -510,10 +573,14 @@ impl InvalidationIndex {
                 }
             }
         }
-        false
+        // Fail safe if ring did not cover all commits up to `latest_seq`.
+        read_at_seq < self.latest_seq && expected_seq <= self.latest_seq
     }
 
     fn push_ring(&mut self, seq: u64, schema_epoch: u64, payload: CommitRingPayload) {
+        if matches!(payload, CommitRingPayload::SubDbWrite { .. }) {
+            self.latest_subdb_write_seq = Some(self.latest_subdb_write_seq.map_or(seq, |prev| prev.max(seq)));
+        }
         if seq > self.latest_seq {
             self.latest_seq = seq;
         }
@@ -523,18 +590,36 @@ impl InvalidationIndex {
         if self.ring.len() >= COMMIT_RING_CAP
             && let Some(evicted) = self.ring.pop_front()
         {
-            self.ring_dropped_up_to = self.ring_dropped_up_to.max(evicted.seq);
+            if matches!(evicted.payload, CommitRingPayload::SubDbWrite { .. }) {
+                self.ring_dropped_subdb_up_to =
+                    Some(self.ring_dropped_subdb_up_to.map_or(evicted.seq, |prev| prev.max(evicted.seq)));
+            } else {
+                self.ring_dropped_up_to = self.ring_dropped_up_to.max(evicted.seq);
+            }
         }
         self.ring.push_back(CommitRingEntry { seq, schema_epoch, payload });
     }
 
     /// Processes an in-process committed `CommitDeltaSummary`, appends it to `CommitRing`,
     /// and returns the deduplicated list of invalidated `WatchId`s!
+    ///
+    /// Fail-safe guarantee: if `summary.seq > prev_latest_seq + 1` (e.g. an intervening cross-process
+    /// commit or `transact()` bypassed `notify_commit`) or `schema_epoch` changed, invalidates ALL watches!
     pub fn notify_commit(&mut self, schema: &CompiledSchema, summary: &CommitDeltaSummary) -> Vec<WatchId> {
-        let schema_changed = summary.schema_epoch != self.latest_schema_epoch;
+        let prev_seq = self.latest_seq;
+        let prev_epoch = self.latest_schema_epoch;
+        let schema_changed = summary.schema_epoch != prev_epoch;
+        let seq_gap = summary.seq > prev_seq.saturating_add(1);
+
+        self.observe_txnid(summary.txnid);
+        if seq_gap {
+            let missing_up_to = summary.seq.saturating_sub(1);
+            self.ring_dropped_up_to = self.ring_dropped_up_to.max(missing_up_to);
+            self.push_ring(missing_up_to, summary.schema_epoch, CommitRingPayload::FullInvalidation);
+        }
         self.push_ring(summary.seq, summary.schema_epoch, CommitRingPayload::Local(summary.clone()));
 
-        if schema_changed {
+        if schema_changed || seq_gap {
             return self.all_watch_ids();
         }
         if self.watches.is_empty() {
@@ -682,7 +767,8 @@ impl InvalidationIndex {
                             && (d.liveness_changed || fields.iter().any(|(f, _)| d.changed_fields.contains(*f)))
                     });
                     if touched {
-                        arena.stab_tag(0x01, &mut self.scratch_touched, &mut out);
+                        // Cover ALL internal Text sub-DB tags (`TAG_STATS..=TAG_LENGTHS`).
+                        arena.stab_all(&mut self.scratch_touched, &mut out);
                     }
                 }
                 IndexKind::Trigram { fields } | IndexKind::Vector { fields, .. } => {
@@ -695,7 +781,8 @@ impl InvalidationIndex {
                             && (d.liveness_changed || fields.iter().any(|f| d.changed_fields.contains(*f)))
                     });
                     if touched {
-                        arena.stab_tag(0x01, &mut self.scratch_touched, &mut out);
+                        // Cover ALL internal Trigram (`0x01..=0x04`) and Vector (`0x00..=0x03`) tags!
+                        arena.stab_all(&mut self.scratch_touched, &mut out);
                     }
                 }
                 IndexKind::Rank { relations, .. } => {
@@ -705,7 +792,8 @@ impl InvalidationIndex {
                     let edge_touched =
                         summary.edge_deltas.iter().any(|e| relations.is_empty() || relations.contains(&e.kind));
                     if entity_touched || edge_touched {
-                        arena.stab_tag(0x01, &mut self.scratch_touched, &mut out);
+                        // Cover ALL internal Rank tags (`TAG_META`, `TAG_RANK`, `TAG_ORDER`, `TAG_DIRTY`)!
+                        arena.stab_all(&mut self.scratch_touched, &mut out);
                     }
                 }
             }
@@ -716,7 +804,21 @@ impl InvalidationIndex {
 
     /// Notifies a direct sub-DB write outside `execute_batch` (e.g., `set_entity_embeddings` or background vector/rank drain).
     pub fn notify_subdb_write(&mut self, seq: u64, schema_epoch: u64, slot: u16, key: &[u8]) -> Vec<WatchId> {
+        let prev_seq = self.latest_seq;
+        let prev_epoch = self.latest_schema_epoch;
+        let schema_changed = schema_epoch != prev_epoch;
+        let seq_gap = seq > prev_seq.saturating_add(1);
+
+        if seq_gap {
+            let missing_up_to = seq.saturating_sub(1);
+            self.ring_dropped_up_to = self.ring_dropped_up_to.max(missing_up_to);
+            self.push_ring(missing_up_to, schema_epoch, CommitRingPayload::FullInvalidation);
+        }
         self.push_ring(seq, schema_epoch, CommitRingPayload::SubDbWrite { slot, key: key.to_vec() });
+
+        if schema_changed || seq_gap {
+            return self.all_watch_ids();
+        }
         let mut out = Vec::new();
         if let Some(arena) = self.slot_arenas.get(&slot) {
             self.scratch_touched.reset(self.next_owner_idx as usize);
@@ -727,34 +829,65 @@ impl InvalidationIndex {
 
     /// Notifies a schema change (`set_schema`), invalidating all active watches cleanly.
     pub fn notify_schema_change(&mut self, seq: u64, new_schema_epoch: u64) -> Vec<WatchId> {
+        if seq > self.latest_seq.saturating_add(1) {
+            self.ring_dropped_up_to = self.ring_dropped_up_to.max(seq.saturating_sub(1));
+        }
         self.push_ring(seq, new_schema_epoch, CommitRingPayload::FullInvalidation);
         self.all_watch_ids()
     }
 
-    /// Selective cross-process catch-up via persisted `commit_log` (last 4,096 commits)!
-    ///
-    /// - If `engine.read_commit_summaries_since(self.latest_seq)` returns `Ok(Some(summaries))`:
-    ///   selectively invalidates ONLY watches affected by each cross-process commit (or all watches on `schema_epoch` bump).
-    /// - If it returns `Ok(None)` (> 4,096 cross-process commits elapsed): fails strictly safe by invalidating ALL active watches!
+    /// Selective cross-process catch-up via persisted `commit_log` (last 4,096 commits),
+    /// executed atomically inside **ONE single pinned MVCC `RoTxn`** (zero TOCTOU race!)
+    /// AND checking LMDB `last_txnid()` to catch cross-process maintenance writes (`set_entity_embeddings`,
+    /// `drain_rank_chunk`, `build_chunk`, `rebuild`) that don't increment `commit_seq`!
     pub fn catch_up_cross_process<S: KvStore, V: Vfs, C: Clock>(
         &mut self,
         engine: &Engine<S, V, C>,
     ) -> Result<Vec<WatchId>> {
         let (ro, schema) = engine.begin_read_pinned()?;
-        let tip_seq = elmdb_engine::read_commit_seq(&ro, &engine.dbs())?;
+        let cur_txnid = engine.gate().last_txnid()?;
+        let (tip_seq, summaries_opt) = elmdb_engine::read_commit_summaries_in_txn(&ro, &engine.dbs(), self.latest_seq)?;
         let tip_epoch = schema.epoch;
         drop(ro);
 
+        let txnid_advanced = self.last_seen_txnid.is_some_and(|prev| cur_txnid > prev);
+        self.observe_txnid(cur_txnid);
+
         if tip_seq <= self.latest_seq && tip_epoch == self.latest_schema_epoch {
+            // P0-3B: Detect cross-process maintenance writes (LMDB txnid advanced without bumping commit_seq)!
+            if txnid_advanced {
+                self.ring_dropped_subdb_up_to =
+                    Some(self.ring_dropped_subdb_up_to.map_or(tip_seq, |prev| prev.max(tip_seq)));
+                self.push_ring(tip_seq, tip_epoch, CommitRingPayload::FullInvalidation);
+                return Ok(self.all_watch_ids());
+            }
             return Ok(Vec::new());
         }
 
-        let Some(summaries) = engine.read_commit_summaries_since(self.latest_seq)? else {
+        let Some(summaries) = summaries_opt else {
             // > 4,096 commits elapsed cross-process: fail strictly safe!
-            self.push_ring(tip_seq, tip_epoch, CommitRingPayload::FullInvalidation);
             self.ring_dropped_up_to = tip_seq;
+            self.push_ring(tip_seq, tip_epoch, CommitRingPayload::FullInvalidation);
             return Ok(self.all_watch_ids());
         };
+
+        if tip_seq > self.latest_seq {
+            // P0-2: Verify contiguous sequence coverage `self.latest_seq + 1 ..= tip_seq`!
+            let mut expected = self.latest_seq.saturating_add(1);
+            let mut contiguous = !summaries.is_empty();
+            for cp in &summaries {
+                if cp.seq != expected {
+                    contiguous = false;
+                    break;
+                }
+                expected = expected.saturating_add(1);
+            }
+            if !contiguous || expected != tip_seq.saturating_add(1) {
+                self.ring_dropped_up_to = tip_seq;
+                self.push_ring(tip_seq, tip_epoch, CommitRingPayload::FullInvalidation);
+                return Ok(self.all_watch_ids());
+            }
+        }
 
         if summaries.is_empty() {
             if tip_epoch != self.latest_schema_epoch {
@@ -767,6 +900,10 @@ impl InvalidationIndex {
         for cp in summaries {
             let dirty = self.apply_cross_proc_summary(&schema, &cp);
             all_dirty.extend(dirty);
+        }
+        // If `tip_epoch` advanced (e.g. schema change didn't emit a data commit summary), fail safe!
+        if tip_epoch != self.latest_schema_epoch {
+            all_dirty.extend(self.notify_schema_change(tip_seq, tip_epoch));
         }
         Ok(all_dirty.into_iter().collect())
     }
@@ -1052,7 +1189,7 @@ fn entry_matches_local_commit(entry: &WatchEntry, schema: &CompiledSchema, summa
                         d.type_id == def.type_id
                             && (d.liveness_changed || fields.iter().any(|(f, _)| d.changed_fields.contains(*f)))
                     })
-                    && entry.ranges.iter().any(|r| r.slot == def.slot && range_overlaps_tag(r, 0x01))
+                    && entry.ranges.iter().any(|r| r.slot == def.slot)
                 {
                     return true;
                 }
@@ -1063,7 +1200,7 @@ fn entry_matches_local_commit(entry: &WatchEntry, schema: &CompiledSchema, summa
                         d.type_id == def.type_id
                             && (d.liveness_changed || fields.iter().any(|f| d.changed_fields.contains(*f)))
                     })
-                    && entry.ranges.iter().any(|r| r.slot == def.slot && range_overlaps_tag(r, 0x01))
+                    && entry.ranges.iter().any(|r| r.slot == def.slot)
                 {
                     return true;
                 }
@@ -1071,7 +1208,7 @@ fn entry_matches_local_commit(entry: &WatchEntry, schema: &CompiledSchema, summa
             IndexKind::Rank { relations, .. } => {
                 let touched = summary.entity_deltas.iter().any(|d| d.type_id == def.type_id && d.liveness_changed)
                     || summary.edge_deltas.iter().any(|e| relations.is_empty() || relations.contains(&e.kind));
-                if touched && entry.ranges.iter().any(|r| r.slot == def.slot && range_overlaps_tag(r, 0x01)) {
+                if touched && entry.ranges.iter().any(|r| r.slot == def.slot) {
                     return true;
                 }
             }

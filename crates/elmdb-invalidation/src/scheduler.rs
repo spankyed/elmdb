@@ -131,28 +131,35 @@ impl WatchScheduler {
         self.stopped
     }
 
-    /// Registers a watch. If `initial_hash` is provided (from initial snapshot execution), it seeds dedup state
-    /// and sets `last_run_ms = Some(now_ms)` with `dirty = false`; otherwise starts `dirty = true` for immediate run.
+    pub fn contains(&self, id: WatchId) -> bool {
+        self.watches.contains_key(&id)
+    }
+
+    /// Registers a watch.
+    /// - When `already_ran == true` (e.g. initial snapshot just executed): starts settled (`dirty = false`,
+    ///   `last_run_ms = Some(now_ms)`, `last_cost_ms = initial_cost_ms`, `last_result_hash = initial_hash`),
+    ///   even if `initial_hash` is `None` (e.g. imperative watches!).
+    /// - When `already_ran == false`: starts `dirty = true` for immediate execution.
     pub fn register(
         &mut self,
         id: WatchId,
         policy: WatchPolicy,
         now_ms: u64,
         initial_cost_ms: u64,
+        already_ran: bool,
         initial_hash: Option<[u8; 16]>,
     ) {
         if self.stopped {
             return;
         }
-        let has_initial = initial_hash.is_some();
         self.watches.insert(
             id,
             WatchSlot {
                 policy,
-                dirty: !has_initial,
+                dirty: !already_ran,
                 running: false,
-                dirty_since_ms: if has_initial { None } else { Some(now_ms) },
-                last_run_ms: if has_initial { Some(now_ms) } else { None },
+                dirty_since_ms: if already_ran { None } else { Some(now_ms) },
+                last_run_ms: if already_ran { Some(now_ms) } else { None },
                 last_cost_ms: initial_cost_ms,
                 last_result_hash: initial_hash,
             },
@@ -236,6 +243,7 @@ impl WatchScheduler {
         }
         let slice_exhausted = elapsed_turn_ms >= self.turn_slice_ms;
         let mut best_due: Option<(u64, WatchId)> = None;
+        let mut due_count = 0usize;
         let mut min_delay: Option<u64> = None;
         let mut any_pending = false;
 
@@ -250,6 +258,7 @@ impl WatchScheduler {
             any_pending = true;
             let ready_at = slot.ready_at_ms();
             if now_ms >= ready_at {
+                due_count += 1;
                 let key = (slot.dirty_since_ms.unwrap_or(0), id);
                 if best_due.is_none_or(|cur| key < cur) {
                     best_due = Some(key);
@@ -270,24 +279,47 @@ impl WatchScheduler {
                 slot.dirty = false;
                 slot.dirty_since_ms = None;
             }
-            return NextDue { watch_id: Some(id), next_wake_delay_ms: min_delay, settled: false };
+            let wake = if due_count > 1 { Some(0) } else { min_delay };
+            return NextDue { watch_id: Some(id), next_wake_delay_ms: wake, settled: false };
         }
 
         NextDue { watch_id: None, next_wake_delay_ms: min_delay, settled: !any_pending }
     }
 
     /// Marks a watch as started when driven via `tick()` instead of `next_due()`.
+    /// Returns `false` if already running, unregistered, or stopped (preventing duplicate starts
+    /// from wiping mid-run `dirty = true`).
     pub fn begin_run(&mut self, id: WatchId) -> bool {
         if self.stopped {
             return false;
         }
         if let Some(slot) = self.watches.get_mut(&id) {
+            if slot.running {
+                return false;
+            }
             slot.running = true;
             slot.dirty = false;
             slot.dirty_since_ms = None;
             return true;
         }
         false
+    }
+
+    /// Aborts an in-flight run (e.g. after query cancellation or error), clearing `running = false`
+    /// so the scheduler never wedges. When `requeue_dirty == true`, marks the watch dirty again.
+    pub fn abort_run(&mut self, id: WatchId, requeue_dirty: bool, now_ms: u64) -> bool {
+        if self.stopped {
+            return false;
+        }
+        let Some(slot) = self.watches.get_mut(&id) else {
+            return false;
+        };
+        slot.running = false;
+        if requeue_dirty && !slot.dirty {
+            slot.dirty = true;
+            slot.dirty_since_ms = Some(now_ms);
+        }
+        true
     }
 
     /// Records completion of watch `id` at `now_ms` taking `cost_ms`.
@@ -302,7 +334,8 @@ impl WatchScheduler {
             return false;
         };
         slot.running = false;
-        slot.last_run_ms = Some(now_ms);
+        // Clamp `last_run_ms` monotonically so a backward host clock step cannot shorten cooldowns.
+        slot.last_run_ms = Some(slot.last_run_ms.map_or(now_ms, |prev| prev.max(now_ms)));
         slot.last_cost_ms = cost_ms;
         match slot.policy.mode {
             WatchMode::Declarative => {

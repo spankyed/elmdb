@@ -806,10 +806,10 @@ fn sans_io_scheduler_adaptive_gap_turn_slicing_dedup_and_lifecycle() {
     let h1 = hash_result_128(b"payload_v1");
     let h2 = hash_result_128(b"payload_v2");
 
-    // Seed initial runs at t = 100ms
-    sched.register(w_fast, WatchPolicy::default(), 100, 1, Some(h1)); // gap = max(16, 4*1) = 16ms -> ready at 116
-    sched.register(w_slow, WatchPolicy::default(), 100, 10, Some(h1)); // gap = max(16, 4*10) = 40ms -> ready at 140
-    sched.register(w_imp, WatchPolicy { mode: WatchMode::Imperative, ..Default::default() }, 100, 1, Some(h1));
+    // Seed initial runs at t = 100ms (`already_ran = true`)
+    sched.register(w_fast, WatchPolicy::default(), 100, 1, true, Some(h1)); // gap = max(16, 4*1) = 16ms -> ready at 116
+    sched.register(w_slow, WatchPolicy::default(), 100, 10, true, Some(h1)); // gap = max(16, 4*10) = 40ms -> ready at 140
+    sched.register(w_imp, WatchPolicy { mode: WatchMode::Imperative, ..Default::default() }, 100, 1, true, None);
     assert!(sched.watches_settled());
     assert!(sched.caught_up(100, false));
 
@@ -829,11 +829,17 @@ fn sans_io_scheduler_adaptive_gap_turn_slicing_dedup_and_lifecycle() {
     assert_eq!(tick.next_wake_delay_ms, Some(24));
     assert!(!tick.settled);
 
-    // Cooperative 8ms turn slice: first watch runs (elapsed = 0), takes 5ms -> identical hash skipped for Declarative!
+    // P1-3: When 2 watches are immediately due, `next_due` returns `next_wake_delay_ms == Some(0)`!
     let step1 = sched.next_due(116, 0);
     assert_eq!(step1.watch_id, Some(w_fast));
+    assert_eq!(step1.next_wake_delay_ms, Some(0));
+    // P1-4: Duplicate `begin_run` on already-running watch returns `false` and does not wipe mid-run `dirty`!
+    sched.mark_dirty(&[w_fast], 118);
+    assert!(!sched.begin_run(w_fast));
     let deliver_fast = sched.finish_run(w_fast, 121, 5, Some(h1));
     assert!(!deliver_fast, "identical 128-bit binary hash must skip Declarative delivery");
+    // Mid-run dirty MUST still be preserved!
+    assert!(!sched.watches_settled());
 
     // Next watch with elapsed_turn_ms = 8 >= turn_slice_ms (8): MUST yield with delay = Some(0)!
     let step_yield = sched.next_due(121, 8);
@@ -847,13 +853,16 @@ fn sans_io_scheduler_adaptive_gap_turn_slicing_dedup_and_lifecycle() {
     let deliver_imp = sched.finish_run(w_imp, 123, 1, Some(h1));
     assert!(deliver_imp, "Imperative watch must always deliver");
 
-    // At t = 140: `w_slow` becomes due and delivers on changed hash `h2`!
-    let step3 = sched.next_due(140, 0);
+    // At t = 141: both `w_slow` (ready 140) and re-dirtied `w_fast` (ready 121 + 20 = 141) run and settle!
+    let step3 = sched.next_due(141, 0);
     assert_eq!(step3.watch_id, Some(w_slow));
     let deliver_slow = sched.finish_run(w_slow, 142, 2, Some(h2));
     assert!(deliver_slow);
+    let step4 = sched.next_due(142, 0);
+    assert_eq!(step4.watch_id, Some(w_fast));
+    assert!(sched.finish_run(w_fast, 143, 1, Some(h2)));
     assert!(sched.watches_settled());
-    assert!(sched.caught_up(142, false));
+    assert!(sched.caught_up(143, false));
 
     // `stop_watches()` clears everything cleanly
     sched.mark_all_dirty(150);
@@ -861,4 +870,235 @@ fn sans_io_scheduler_adaptive_gap_turn_slicing_dedup_and_lifecycle() {
     sched.stop_watches();
     assert!(sched.watches_settled());
     assert_eq!(sched.next_wake_delay_ms(150), None);
+}
+
+// ---------------------------------------------------------------------------
+// 6. Review Regression Tests (P0-1..P0-6, P1-1..P1-5, Cross-Process Maintenance & Overflow)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn review_regression_subdb_same_seq_seq_gap_resurrection_abort_and_imperative_settled() {
+    use elmdb_wire::ErrorCode;
+    use std::sync::atomic::AtomicBool;
+
+    let (engine, _reg, ids) = open_sim();
+    let qe = QueryEngine::default();
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("v1".into()),
+                fields: vec![("title".into(), CanonicalValue::String("VecDoc".into()))],
+            },
+            WireOp::Create {
+                type_name: "Author".into(),
+                external_id: Some("au".into()),
+                fields: vec![("name".into(), CanonicalValue::String("Ada".into()))],
+            },
+        ])
+        .unwrap();
+    let kv1 = engine.get_row("v1").unwrap().unwrap().key;
+    let hub = LiveQueryHub::from_engine(&engine, 8).unwrap();
+
+    // P0-6: `register_query_watch` with `|_| None` (e.g. Imperative watch) MUST start settled!
+    let note_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+        terminal: TerminalSpec::Ids,
+    });
+    let (w_imp, _) = hub
+        .register_query_watch(
+            &engine,
+            &qe,
+            &note_plan,
+            ExecBudgets::default(),
+            WatchPolicy { mode: WatchMode::Imperative, ..Default::default() },
+            10,
+            1,
+            |_| None,
+        )
+        .unwrap();
+    assert!(hub.watches_settled(), "register_query_watch with None hash must start settled");
+    assert!(hub.tick(10).due_ids.is_empty());
+
+    // P0-1: Concurrent `notify_subdb_write` at `seq == read_at_seq` MUST mark reader stale!
+    let vec_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 5 },
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    let (snap_seq, snap_epoch, _o, vec_rs) =
+        run_tracked_snapshot(&engine, &qe, &vec_plan, ExecBudgets::default()).unwrap();
+    let mut idx = InvalidationIndex::new(snap_seq, snap_epoch);
+    set_entity_embeddings(&engine, ids.idx_vec, kv1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    // Maintenance write shares exact same `commit_seq == snap_seq`!
+    idx.notify_subdb_write(snap_seq, snap_epoch, ids.idx_vec_slot, &[0x01]);
+    let stale = idx.register_after_read(WatchId(99), snap_seq, snap_epoch, &vec_rs, &engine.schema());
+    assert!(stale, "SubDbWrite at same commit_seq MUST mark concurrent reader stale!");
+
+    // P0-2: Sequence gap (`seq = prev + 2`, simulating missed cross-process or `transact()` commit) MUST fail safe!
+    let _skipped = engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("missed_note".into()),
+            fields: vec![("title".into(), CanonicalValue::String("Missed".into()))],
+        }])
+        .unwrap(); // NOT passed to `hub.notify_commit`!
+    let author_sum = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("au".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Ada 2".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    let dirty_on_gap = hub.notify_commit(&engine.schema(), &author_sum, 20);
+    assert!(dirty_on_gap.contains(&w_imp), "sequence gap in notify_commit must fail safe and invalidate all watches");
+
+    // P0-5: `rerun_query_watch` returning `Err(Cancelled)` MUST NOT wedge `running = true`!
+    assert!(hub.begin_run(w_imp));
+    let cancel = AtomicBool::new(true);
+    let err = hub
+        .rerun_query_watch(
+            w_imp,
+            &engine,
+            &qe,
+            &note_plan,
+            ExecBudgets { cancel: Some(&cancel), ..Default::default() },
+            30,
+            1,
+            |_| None,
+        )
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Cancelled);
+    // Watch was requeued dirty (not wedged running!), so `tick(100)` picks it up cleanly!
+    assert!(hub.tick(100).due_ids.contains(&w_imp));
+
+    // P0-4: Unregistering / stopping before `rerun_query_watch` finishes MUST NOT resurrect watch into `InvalidationIndex`!
+    hub.unregister_watch(w_imp);
+    let (_out, deliver) =
+        hub.rerun_query_watch(w_imp, &engine, &qe, &note_plan, ExecBudgets::default(), 110, 1, |_| None).unwrap();
+    assert!(!deliver);
+    assert_eq!(hub.stats().active_watches, 0);
+    assert_eq!(hub.stats().tier2_live_ranges, 0);
+
+    hub.stop_watches();
+    let _ = hub
+        .register_query_watch(&engine, &qe, &note_plan, ExecBudgets::default(), WatchPolicy::default(), 120, 1, |_| {
+            None
+        })
+        .unwrap();
+    assert_eq!(hub.stats().active_watches, 0, "register_query_watch after stop_watches must not leak into index");
+}
+
+#[test]
+fn review_regression_cross_process_maintenance_write_and_4096_overflow() {
+    let dir = tempdir().unwrap();
+    let db_dir = dir.path().join("xproc_maint_db");
+
+    let open_handle = || {
+        let store = LmdbStore::open(&db_dir, LmdbConfig::default()).unwrap();
+        let reg = Arc::new(
+            ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)),
+        );
+        let (eng, _) = Engine::open_with_projections(
+            store,
+            OsVfs,
+            SystemClock::default(),
+            db_dir.clone(),
+            DurabilityMode::Strict,
+            Arc::clone(&reg) as _,
+        )
+        .unwrap();
+        eng
+    };
+
+    let eng_a = open_handle();
+    eng_a.set_schema(&test_schema()).unwrap();
+    eng_a
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("x1".into()),
+                fields: vec![("title".into(), CanonicalValue::String("X1".into()))],
+            },
+            WireOp::Create {
+                type_name: "Author".into(),
+                external_id: Some("xa1".into()),
+                fields: vec![("name".into(), CanonicalValue::String("A1".into()))],
+            },
+        ])
+        .unwrap();
+    let kx1 = eng_a.get_row("x1").unwrap().unwrap().key;
+    let eng_b = open_handle();
+
+    let ids = resolve_ids(&eng_a.schema());
+    let qe = QueryEngine::default();
+    let hub_a = LiveQueryHub::from_engine(&eng_a, 8).unwrap();
+
+    let vec_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 5 },
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    let author_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.author_type, include_trashed: false })),
+        terminal: TerminalSpec::Ids,
+    });
+    let (w_vec, _) = hub_a
+        .register_query_watch(&eng_a, &qe, &vec_plan, ExecBudgets::default(), WatchPolicy::default(), 0, 1, |_| None)
+        .unwrap();
+    let (w_auth, _) = hub_a
+        .register_query_watch(&eng_a, &qe, &author_plan, ExecBudgets::default(), WatchPolicy::default(), 0, 1, |_| None)
+        .unwrap();
+
+    // P0-3B: Process B performs a maintenance write (`set_entity_embeddings`, unchanged `commit_seq`, advanced `txnid`!)
+    set_entity_embeddings(&eng_b, ids.idx_vec, kx1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    let dirty_maint = hub_a.catch_up_cross_process(&eng_a, 100).unwrap();
+    assert!(dirty_maint.contains(&w_vec), "cross-process maintenance write must be detected via txnid advance");
+
+    // Actual > 4,096 cross-process commits window overflow (using fast SimKvStore on a single Engine simulating remote lag)!
+    let (sim_eng, _reg, sim_ids) = open_sim();
+    sim_eng
+        .execute_batch(&[WireOp::Create {
+            type_name: "Author".into(),
+            external_id: Some("a_ovf".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Init".into()))],
+        }])
+        .unwrap();
+    let hub_sim = LiveQueryHub::from_engine(&sim_eng, 8).unwrap();
+    let sim_note_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: sim_ids.note_type, include_trashed: false })),
+        terminal: TerminalSpec::Ids,
+    });
+    let (w_sim_note, _) = hub_sim
+        .register_query_watch(
+            &sim_eng,
+            &qe,
+            &sim_note_plan,
+            ExecBudgets::default(),
+            WatchPolicy::default(),
+            0,
+            1,
+            |_| None,
+        )
+        .unwrap();
+    // Commit 4,100 unrelated Author updates without notifying `hub_sim` -> exceeds COMMIT_LOG_WINDOW (4,096)!
+    for i in 0..4100usize {
+        sim_eng
+            .execute_batch(&[WireOp::Patch {
+                target: EntityTarget::ExternalId("a_ovf".into()),
+                fields: vec![("name".into(), CanonicalValue::String(format!("v{i}")))],
+            }])
+            .unwrap();
+    }
+    let dirty_ovf = hub_sim.catch_up_cross_process(&sim_eng, 500).unwrap();
+    assert!(
+        dirty_ovf.contains(&w_sim_note),
+        "> 4,096 elapsed commits must fail strictly safe and invalidate all watches"
+    );
+    let _ = w_auth;
 }
