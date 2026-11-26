@@ -24,7 +24,9 @@ mod idle_reads;
 mod kept;
 mod reach;
 mod record;
-pub use record::{is_backup_lock, left_by_a_backup, written_in};
+pub use backup::BackupInto;
+#[cfg(test)]
+pub(crate) use record::{left_by_a_backup, written_in};
 mod restore;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;
@@ -1889,10 +1891,16 @@ impl Store {
     /// opens and other publishers in this process (`ALREADY_OPEN`). Across processes, it holds the destination's
     /// decision lock (`synced.lock`, created if absent) and, where an open made one, its presence lock (`open.lock`)
     /// until publication finishes, refusing a target another process has open (`TARGET_IN_USE`) while any open that
-    /// begins there waits for the backup to end. Failure before publication preserves an earlier backup; a later
-    /// directory sync failure reports that the complete copy is visible and a retry is safe
+    /// begins there waits for the backup to end. A data file there is replaced only where it is an elmdb database's
+    /// (`TARGET_REFUSED`, `BackupInto`). Failure before publication preserves an earlier backup; a later directory sync
+    /// failure reports that the complete copy is visible and a retry is safe
     pub fn copy_to(&self, target: &Path) -> Result<()> {
-        backup::copy(self, target)
+        backup::copy(self, target, BackupInto::default())
+    }
+
+    /// `copy_to`, replacing only what `into` lets it
+    pub fn copy_into(&self, target: &Path, into: BackupInto) -> Result<()> {
+        backup::copy(self, target, into)
     }
 
     /// Whether the record beside the data file named another file than this one, which was opened as it is

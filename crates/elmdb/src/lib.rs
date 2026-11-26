@@ -20,5 +20,5 @@ pub use engine::batch::{Batch, BatchResult, Op, OpResult};
 pub use engine::changed::{After, Changed, Position};
 pub use engine::changes::ChangeSet;
 pub use error::{Error, ErrorCode, Result};
+pub use store::BackupInto;
 pub use store::sync::Durable;
-pub use store::{is_backup_lock, left_by_a_backup, written_in};

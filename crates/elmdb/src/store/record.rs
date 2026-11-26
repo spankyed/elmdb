@@ -40,7 +40,7 @@ pub(super) const fn mode_lock(mode: Mode) -> &'static str {
 /// Whether `dir` holds a database an open has written in place: the record, or a mode's lock, which every writable open
 /// leaves and a backup never makes. A backup a read-only open has read leaves neither. A file that can't be looked for
 /// is an error, never taken as absent
-pub fn written_in(dir: &Path) -> Result<bool> {
+pub(crate) fn written_in(dir: &Path) -> Result<bool> {
     for name in std::iter::once(RECORD).chain(Mode::ALL.map(mode_lock)) {
         if dir.join(name).try_exists()? {
             return Ok(true);
@@ -52,14 +52,9 @@ pub fn written_in(dir: &Path) -> Result<bool> {
 /// Whether `name`, in a directory, is what a backup leaves there or a read-only open of its copy does: the data file,
 /// LMDB's lock file, the decision and presence locks, the listeners' `wake`, and the staged copy of a backup that
 /// stopped before publishing it (`docs/architecture/format.md`, Beside the data file)
-pub fn left_by_a_backup(name: &std::ffi::OsStr) -> bool {
+pub(crate) fn left_by_a_backup(name: &std::ffi::OsStr) -> bool {
     let Some(name) = name.to_str() else { return false };
     matches!(name, "data.mdb" | "lock.mdb" | PRESENCE | RECORD_LOCK | "wake") || name.starts_with(".elmdb-backup-")
-}
-
-/// Whether `name` is the decision lock every backup leaves beside its data file (`synced.lock`)
-pub fn is_backup_lock(name: &std::ffi::OsStr) -> bool {
-    name == RECORD_LOCK
 }
 
 /// The bytes of LMDB's `MDB_meta`, which follow a meta page's header: the magic, the version, the fixed address, the
@@ -330,14 +325,17 @@ pub(super) fn open_lock_file(dir: &Path, name: &str) -> std::io::Result<File> {
 pub(super) fn lock_file(dir: &Path, name: &str) -> Result<File> {
     let path = dir.join(name);
     open_lock_file(dir, name).map_err(|error| {
-        Error::new(
-            ErrorCode::Io,
+        // One that is there and can't be opened is the file's own permissions, not the filesystem's
+        let message = if path.exists() {
+            format!("Cannot open the lock file {}: {error}. Let this process read it", path.display())
+        } else {
             format!(
-                "Cannot make the lock file {}: {error}. Open the database on a filesystem this process can \
-                 write, or use a writable copy",
+                "Cannot make the lock file {}: {error}. Open the database on a filesystem this process can write, or \
+                 use a writable copy",
                 path.display()
-            ),
-        )
+            )
+        };
+        Error::new(ErrorCode::Io, message)
     })
 }
 

@@ -331,9 +331,15 @@ fn stats_of(r: &impl Read) -> Result<Stats> {
 }
 
 impl Database {
-    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own
+    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own. It
+    /// replaces the data file of an elmdb database closed there (`BackupInto::AnyClosedDatabase`)
     pub fn backup(&self, target: impl AsRef<Path>) -> Result<()> {
         self.store()?.copy_to(target.as_ref())
+    }
+
+    /// `backup`, replacing only what `into` lets it: `BackupInto::Backups` is the `elmdb` command's
+    pub fn backup_into(&self, target: impl AsRef<Path>, into: crate::BackupInto) -> Result<()> {
+        self.store()?.copy_into(target.as_ref(), into)
     }
 
     /// Atomically removes every entry but the database's own (its format and schema), with durable completion,

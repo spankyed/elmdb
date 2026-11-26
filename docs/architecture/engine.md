@@ -841,10 +841,16 @@ unit is open.
   it where it isn't, and its presence lock where an open made one (Durability), until the copy is published: every
   open decides under the decision lock before it takes the presence lock, so a database another process has open there
   is refused (`TARGET_IN_USE`), and an open that begins there waits for the backup to end. Beside its data file, a
-  backup leaves the decision lock it made. A backup into a directory replaces the data file a backup or a closed
-  database there left. The `elmdb` command refuses a directory holding a database an open has written in place, or
-  anything else no backup or read-only open of one leaves (`TARGET_IN_USE`), so that a backup named in the wrong place
-  replaces nothing, and copies into a new directory, an empty one or an earlier backup. Failure before
+  backup leaves the decision lock it made. A backup into a directory replaces the data file of an elmdb database closed
+  there, a backup's or one written in place (`BackupInto::AnyClosedDatabase`, what `backup` and the binding's
+  `db.backup` do), and refuses (`TARGET_REFUSED`), before anything is made there, a file, the database's own `wake/`,
+  whose commits remove what isn't a listener's mailbox, and a directory whose data file is no elmdb database's, read from the file by seeks: another
+  program's LMDB file, whatever lock files a refused open of it left. The `elmdb` command backs up as
+  `BackupInto::Backups`, which also refuses a directory holding a database an open has written in place, or anything
+  else no backup or read-only open of one leaves, so that a backup named in the wrong place replaces nothing, and
+  copies into a new directory, an empty one or an earlier backup. What the target holds is looked at before the
+  decision lock is made there, so a directory refused is left as it was, and again under it, so what an open made
+  meanwhile is seen too. Failure before
   publication preserves the old backup. Unix backup data files are private to the creating user (mode 0600); arrange ownership/permissions
   explicitly before restoring under another account. Unix syncs affected directories; Windows clears the temporary
   file attribute before requesting a write-through replacement. If directory sync

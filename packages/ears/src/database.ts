@@ -228,6 +228,7 @@ const CODES: { readonly [C in ErrorCode]: EarsErrorCode | null } = {
   CORRUPTED: null,
   ALREADY_OPEN: null,
   TARGET_IN_USE: null,
+  TARGET_REFUSED: null,
   CLOSED: null,
   READ_ONLY: null,
   NO_DATABASE: null,

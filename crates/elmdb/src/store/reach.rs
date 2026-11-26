@@ -194,6 +194,46 @@ pub(super) fn named_roots(page: &[u8]) -> Vec<u64> {
         .collect()
 }
 
+/// Whether `page`, the root of a main tree, is a leaf naming the database `name`. elmdb's main tree names its few
+/// databases and nothing else, so its root is that leaf; another program's file names others, or none, or more than a
+/// leaf holds
+pub(super) fn root_names_database(page: &[u8], name: &[u8]) -> bool {
+    if u16_at(page, 10) & P_LEAF == 0 {
+        return false;
+    }
+    let Some(page_nodes) = nodes(page) else {
+        return false;
+    };
+    page_nodes.filter(|node| node + 8 <= page.len()).filter(|node| u16_at(page, node + 4) & F_SUBDATA != 0).any(
+        |node| {
+            let key = node + 8;
+            page.get(key..key + u16_at(page, node + 6) as usize) == Some(name)
+        },
+    )
+}
+
+/// Whether `file` is an elmdb database's data file, read by seeks at the commit its newer meta page names: a file too
+/// short or not of LMDB's making is not. Reads only what is there to tell, so it is for a file no process is writing
+pub(super) fn is_elmdb_file(file: &mut File) -> std::io::Result<bool> {
+    let mut size = [0u8; 4];
+    file.seek(SeekFrom::Start((PAGE_HEADER + 24) as u64))?;
+    match file.read_exact(&mut size) {
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
+        read => read?,
+    }
+    let psize = u32::from_ne_bytes(size) as usize;
+    if !psize.is_power_of_two() || !(512..=32768).contains(&psize) {
+        return Ok(false);
+    }
+    let Some(meta) = newer_meta_page(file, psize)? else { return Ok(false) };
+    let root = meta.roots()[1];
+    if root == NONE {
+        return Ok(false);
+    }
+    let Some(at) = root.checked_mul(psize as u64) else { return Ok(false) };
+    Ok(read_at(file, at, psize).is_some_and(|page| root_names_database(&page, crate::format::DB_NAME.as_bytes())))
+}
+
 /// The meta page in `slot`, 0 or 1, where it reads as one: LMDB's magic, and whole as far as a read of it goes. None
 /// where the page doesn't carry the magic, and an error where the file can't be read there: a failed read says nothing
 /// of what the page holds

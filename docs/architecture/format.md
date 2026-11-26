@@ -177,7 +177,10 @@ A database's directory holds LMDB's two files, `data.mdb` and `lock.mdb`, and el
 A handle that listens for other processes' commits files a mailbox in the directory `wake/` (`store/wake.rs`): a
 FIFO on Unix, and on Windows a file naming an event. A backup stages its copy in its target as `.elmdb-backup-*`,
 holds the target's `synced.lock`, making it where it isn't, and once the copy is published removes the target's
-`synced` and `synced.restored`, which describe the file it replaced (`store/backup.rs`).
+`synced` and `synced.restored`, which describe the file it replaced (`store/backup.rs`). Every open makes
+`synced.lock` and `open.lock` as it decides, before it reads the data file, and leaves them where it is refused, so
+neither says the data file beside it is elmdb's: a backup reads that from the file itself, whose main tree names
+elmdb's database.
 
 A record of another version reads as no record. The record names an LMDB transaction and a meta page, so a file put
 in place of the data file that the record's commit and root pages don't match is opened as it is, a record that

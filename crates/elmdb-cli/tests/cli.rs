@@ -263,7 +263,7 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
     std::fs::write(&file, b"keep-me").unwrap();
     let (code, out) = elmdb(&["backup", src, file.to_str().unwrap()]);
     assert_eq!(code, 2, "{out}");
-    assert!(out.contains("IO") && out.contains("is a file"), "{out}");
+    assert!(out.contains("TARGET_REFUSED") && out.contains("is not a directory"), "{out}");
     assert_eq!(std::fs::read(&file).unwrap(), b"keep-me");
     // A target that can't be looked at is refused as that, never taken as absent: one under a file, which unix answers
     // as not a directory (Windows answers it as not found)
@@ -286,7 +286,7 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
         let synced_before = std::fs::read(target.join("synced")).unwrap();
         let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
-        assert!(out.contains("TARGET_IN_USE") && out.contains("opened for writing"), "{out}");
+        assert!(out.contains("TARGET_REFUSED") && out.contains("opened for writing"), "{out}");
         assert_eq!(std::fs::read(target.join("data.mdb")).unwrap(), data_before);
         assert_eq!(std::fs::read(target.join("synced")).unwrap(), synced_before);
     }
@@ -303,12 +303,14 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
         let before: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
         let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
-        assert!(out.contains("TARGET_IN_USE") && out.contains(held) && out.contains("no backup leaves"), "{out}");
+        assert!(out.contains("TARGET_REFUSED") && out.contains(held) && out.contains("no backup leaves"), "{out}");
         let after: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(after, before, "nothing made or replaced");
     }
 
-    // Another program's bare LMDB database (`data.mdb` and/or `lock.mdb` without `synced.lock`) is refused untouched
+    // Another program's LMDB files are refused untouched: a data file that is no elmdb database's, with or without
+    // its lock file, and that lock file alone. So is such a data file once an `elmdb check` of it was refused, which
+    // leaves the locks it made deciding beside it, as a backup does
     let other_lmdb = dir.path().join("other-lmdb");
     std::fs::create_dir(&other_lmdb).unwrap();
     std::fs::write(other_lmdb.join("data.mdb"), b"another program's").unwrap();
@@ -316,21 +318,41 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
     let data_only = dir.path().join("other-lmdb-data-only");
     std::fs::create_dir(&data_only).unwrap();
     std::fs::write(data_only.join("data.mdb"), b"another program's").unwrap();
-    let lock_only = dir.path().join("other-lmdb-lock-only");
-    std::fs::create_dir(&lock_only).unwrap();
-    std::fs::write(lock_only.join("lock.mdb"), b"").unwrap();
-    for target in [&other_lmdb, &data_only, &lock_only] {
+    let checked = dir.path().join("other-lmdb-checked");
+    std::fs::create_dir(&checked).unwrap();
+    std::fs::write(checked.join("data.mdb"), b"another program's").unwrap();
+    let (code, out) = elmdb(&["check", checked.to_str().unwrap()]);
+    assert_ne!(code, 0, "{out}");
+    assert!(checked.join("synced.lock").exists(), "the refused check left its decision lock");
+    for target in [&other_lmdb, &data_only, &checked] {
         let before: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
         let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
         assert!(
-            out.contains("TARGET_IN_USE") && out.contains("synced.lock") && out.contains("another program"),
+            out.contains("TARGET_REFUSED") && out.contains("no elmdb database's") && out.contains("another program"),
             "{out}"
         );
         let after: Vec<_> = std::fs::read_dir(target).unwrap().map(|e| e.unwrap().file_name()).collect();
         assert_eq!(after, before, "nothing made or replaced");
+        assert_eq!(std::fs::read(target.join("data.mdb")).unwrap(), b"another program's");
     }
-    assert_eq!(std::fs::read(other_lmdb.join("data.mdb")).unwrap(), b"another program's");
+    let lock_only = dir.path().join("other-lmdb-lock-only");
+    std::fs::create_dir(&lock_only).unwrap();
+    std::fs::write(lock_only.join("lock.mdb"), b"").unwrap();
+    let (code, out) = elmdb(&["backup", src, lock_only.to_str().unwrap()]);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("TARGET_REFUSED") && out.contains("lock.mdb and no data.mdb"), "{out}");
+    assert!(!lock_only.join("data.mdb").exists());
+
+    // What `elmdb load` publishes, its data file alone, is a database a backup may replace
+    let loaded = dir.path().join("loaded");
+    let dumped = dir.path().join("dumped.elmdb-dump");
+    let (code, out) = elmdb(&["dump", src, dumped.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = elmdb(&["load", dumped.to_str().unwrap(), loaded.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
+    let (code, out) = elmdb(&["backup", src, loaded.to_str().unwrap()]);
+    assert_eq!(code, 0, "{out}");
 
     // Entries with an unexpected file type (even with `synced.lock` present) are refused untouched: a subdirectory
     // named `data.mdb`, a regular file named `wake`, and on Unix symbolic links named `data.mdb` or `wake`
@@ -346,7 +368,10 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
     for (target, held) in [(&subdir_data, "data.mdb"), (&file_wake, "wake")] {
         let (code, out) = elmdb(&["backup", src, target.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
-        assert!(out.contains("TARGET_IN_USE") && out.contains(held) && out.contains("unexpected file type"), "{out}");
+        assert!(
+            out.contains("TARGET_REFUSED") && out.contains(held) && out.contains("of a kind no backup leaves"),
+            "{out}"
+        );
     }
     assert!(subdir_data.join("data.mdb").is_dir());
     assert_eq!(std::fs::read(file_wake.join("data.mdb")).unwrap(), b"old");
@@ -361,7 +386,7 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
         let (code, out) = elmdb(&["backup", src, symlink_data.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
         assert!(
-            out.contains("TARGET_IN_USE") && out.contains("data.mdb") && out.contains("unexpected file type"),
+            out.contains("TARGET_REFUSED") && out.contains("data.mdb") && out.contains("of a kind no backup leaves"),
             "{out}"
         );
         assert_eq!(std::fs::read(&real_data).unwrap(), b"keep");
@@ -375,7 +400,10 @@ fn backup_replaces_an_earlier_backup_and_refuses_a_file_a_database_opened_for_wr
         std::fs::write(symlink_wake.join("synced.lock"), b"").unwrap();
         let (code, out) = elmdb(&["backup", src, symlink_wake.to_str().unwrap()]);
         assert_eq!(code, 2, "{out}");
-        assert!(out.contains("TARGET_IN_USE") && out.contains("wake") && out.contains("unexpected file type"), "{out}");
+        assert!(
+            out.contains("TARGET_REFUSED") && out.contains("wake") && out.contains("of a kind no backup leaves"),
+            "{out}"
+        );
         assert_eq!(std::fs::read(symlink_wake.join("data.mdb")).unwrap(), b"old");
     }
 }

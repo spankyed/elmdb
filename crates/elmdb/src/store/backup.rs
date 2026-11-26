@@ -8,12 +8,46 @@ use std::path::PathBuf;
 use super::{Registration, Store, open_paths};
 use crate::error::{Error, ErrorCode, Result};
 
-pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
+/// What a backup may replace in the directory it is made in. Whichever it is, the backup is refused where that
+/// directory is a file or inside the database backed up, where another process has a database there open, and where
+/// its data file is no elmdb database's (`TARGET_REFUSED`, `TARGET_IN_USE`)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BackupInto {
+    /// The data file of any elmdb database closed there: an earlier backup, or a database written in place, whose
+    /// record the backup removes
+    #[default]
+    AnyClosedDatabase,
+    /// Only a new directory, an empty one or an earlier backup, as the `elmdb` command makes them: a directory holding
+    /// a database an open has written in place, or anything no backup or read-only open of one leaves, is refused, so
+    /// that a backup named in the wrong place replaces nothing
+    Backups,
+}
+
+pub(super) fn copy(store: &Store, target: &Path, into: BackupInto) -> Result<()> {
     let target = std::path::absolute(target)?;
+    // The database's listeners' `wake`, whose every commit removes what isn't a mailbox, would remove the backup.
+    // Looked at before anything is made, as the directory will be named
+    let wake = store.path.join("wake");
+    if as_it_will_be_named(&target).map_err(|error| cannot_look_at(&target, &error))?.starts_with(&wake) {
+        let why =
+            format!("is in {}, where the database's commits remove what isn't a listener's mailbox", wake.display());
+        return Err(refused(&target, &why));
+    }
+    match std::fs::metadata(&target) {
+        Ok(meta) if !meta.is_dir() => return Err(refused(&target, "is not a directory")),
+        // Looked at before the decision lock is made there too, so that a directory refused is left as it was. What
+        // changes meanwhile is seen once the lock is held, below
+        Ok(_) => may_replace(&target, into)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        // Never taken as absent: whatever is there may be what a backup mustn't replace
+        Err(error) => return Err(cannot_look_at(&target, &error)),
+    }
     #[cfg(unix)]
     let sync_dirs = directories_to_sync(&target);
-    std::fs::create_dir_all(&target)?;
-    let target = target.canonicalize()?;
+    std::fs::create_dir_all(&target).map_err(|error| {
+        Error::new(ErrorCode::Io, format!("Cannot make the backup's directory {}: {error}", target.display()))
+    })?;
+    let target = target.canonicalize().map_err(|error| cannot_look_at(&target, &error))?;
     if !open_paths().lock().expect("the open-paths lock is never poisoned").insert(target.clone()) {
         return Err(Error::new(
             ErrorCode::AlreadyOpen,
@@ -52,6 +86,10 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
             }
         }
     }
+    // Looked at here, under the decision lock: no open there begins before the copy is published, so what is looked at
+    // is what the copy replaces
+    run_point!(BACKUP_DECIDING);
+    may_replace(&target, into)?;
     let mut partial = tempfile::Builder::new().prefix(".elmdb-backup-").tempfile_in(&target)?;
     loop {
         partial.as_file_mut().set_len(0)?;
@@ -106,9 +144,104 @@ pub(super) fn copy(store: &Store, target: &Path) -> Result<()> {
         target.display())))
 }
 
-/// The lock file `name` in `dir`, when an open made it there: opened to be locked, never made
+/// `path` with links resolved as far as it exists, the rest as it is: the directory it names once made
+fn as_it_will_be_named(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        match at.canonicalize() {
+            Ok(mut named) => {
+                named.extend(rest.iter().rev());
+                return Ok(named);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let (Some(parent), Some(name)) = (at.parent(), at.file_name()) else { return Ok(path.to_owned()) };
+        rest.push(name);
+        at = parent;
+    }
+}
+
+/// Refuses what a backup into `dir` mustn't replace: under `BackupInto::Backups`, a database an open has written in
+/// place and anything no backup leaves, and whatever `into` is, a data file that is no elmdb database's
+fn may_replace(dir: &Path, into: BackupInto) -> Result<()> {
+    if into == BackupInto::Backups {
+        if super::record::written_in(dir).map_err(|error| cannot_look_at(dir, &error))? {
+            return Err(refused(
+                dir,
+                "holds a database that has been opened for writing, which a backup would replace",
+            ));
+        }
+        let mut holds_data = false;
+        let mut holds_lmdb_lock = false;
+        for entry in std::fs::read_dir(dir).map_err(|error| cannot_look_at(dir, &error))? {
+            let entry = entry.map_err(|error| cannot_look_at(dir, &error))?;
+            let name = entry.file_name();
+            // Finder's, beside anything a person has looked at on macOS
+            if name == ".DS_Store" {
+                continue;
+            }
+            if !super::record::left_by_a_backup(&name) {
+                let held = name.to_string_lossy();
+                return Err(refused(dir, &format!("holds {held}, which no backup leaves, so it may not be a backup")));
+            }
+            let kind = entry.file_type().map_err(|error| cannot_look_at(&entry.path(), &error))?;
+            // `wake` is a directory of listeners' mailboxes; all else a backup leaves is a file, never a link
+            let as_left = if name == "wake" { kind.is_dir() } else { kind.is_file() };
+            if !as_left {
+                let held = name.to_string_lossy();
+                return Err(refused(dir, &format!("holds {held} of a kind no backup leaves")));
+            }
+            holds_data |= name == "data.mdb";
+            holds_lmdb_lock |= name == "lock.mdb";
+        }
+        if holds_lmdb_lock && !holds_data {
+            let why = "holds lock.mdb and no data.mdb, which no backup leaves, so it may not be a backup";
+            return Err(refused(dir, why));
+        }
+    }
+    let data = dir.join("data.mdb");
+    let mut file = match std::fs::File::open(&data) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(cannot_look_at(&data, &error)),
+    };
+    if !super::reach::is_elmdb_file(&mut file).map_err(|error| cannot_look_at(&data, &error))? {
+        return Err(refused(
+            dir,
+            "holds a data.mdb that is no elmdb database's, another program's maybe, which a backup would replace",
+        ));
+    }
+    Ok(())
+}
+
+/// A backup refused for the directory it is made in, with the fix
+fn refused(dir: &Path, why: &str) -> Error {
+    Error::new(
+        ErrorCode::TargetRefused,
+        format!("{} {why}; back up into a new directory, an empty one or an earlier backup", dir.display()),
+    )
+}
+
+/// What a backup couldn't look at in the directory it is made in, which it never takes as absent
+fn cannot_look_at(path: &Path, error: &dyn std::fmt::Display) -> Error {
+    Error::new(
+        ErrorCode::Io,
+        format!("Cannot look at {}, which the backup would replace: {error}. Let this process read it", path.display()),
+    )
+}
+
+/// The lock file `name` in `dir`, when an open made it there: opened to be locked, never made. Opened to write where
+/// it may be, since a filesystem that emulates such locks by ranges, NFS's among them, takes an exclusive one only on
+/// a file open for writing; read where it may not be, a lock file another user made
 fn existing_lock(dir: &Path, name: &str) -> Result<Option<std::fs::File>> {
-    match std::fs::File::open(dir.join(name)) {
+    let path = dir.join(name);
+    let opened = std::fs::OpenOptions::new().read(true).write(true).open(&path).or_else(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => Err(error),
+        _ => std::fs::File::open(&path),
+    });
+    match opened {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(lock_failed(dir, name, error.into())),
