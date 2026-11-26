@@ -1,0 +1,606 @@
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use elmdb_engine::{Engine, EntityKey, IndexKind, RawField, RawFieldKind, RawIndex, RawIndexKind, RawSchema, RawType};
+use elmdb_lmdb::{LmdbConfig, LmdbStore};
+use elmdb_projections::{BuildPolicy, BuildState, ProjectionRegistry, order, text, trigram, value};
+use elmdb_sim::{SimClock, SimKvConfig, SimKvStore, SimRng, SimVfs};
+use elmdb_storage::{BootId, DbFlags, DurabilityMode, OsVfs, SystemClock};
+use elmdb_wire::{CanonicalValue, EntityTarget, ErrorCode, WireOp};
+use rustc_hash::FxHashSet;
+
+fn full_schema() -> RawSchema {
+    let mut fields = BTreeMap::new();
+    fields.insert("code".into(), RawField { kind: RawFieldKind::String, optional: true, nullable: true });
+    fields.insert("score".into(), RawField { kind: RawFieldKind::Any, optional: true, nullable: true });
+    fields.insert("title".into(), RawField { kind: RawFieldKind::String, optional: true, nullable: true });
+    fields.insert("body".into(), RawField { kind: RawFieldKind::String, optional: true, nullable: true });
+    fields.insert(
+        "tags".into(),
+        RawField { kind: RawFieldKind::List { of: Box::new(RawFieldKind::String) }, optional: true, nullable: true },
+    );
+
+    let mut indexes = BTreeMap::new();
+    indexes.insert(
+        "by_code_unique".into(),
+        RawIndex { kind: RawIndexKind::Value { fields: vec!["code".into()], unique: true } },
+    );
+    indexes.insert(
+        "by_score".into(),
+        RawIndex { kind: RawIndexKind::Value { fields: vec!["score".into()], unique: false } },
+    );
+    indexes.insert(
+        "title_order_sv".into(),
+        RawIndex { kind: RawIndexKind::Order { field: "title".into(), locale: "sv".into() } },
+    );
+    indexes.insert(
+        "search_text".into(),
+        RawIndex {
+            kind: RawIndexKind::Text { fields: vec![("title".into(), 3), ("body".into(), 1), ("tags".into(), 2)] },
+        },
+    );
+    indexes.insert(
+        "title_trigram".into(),
+        RawIndex { kind: RawIndexKind::Trigram { fields: vec!["title".into(), "body".into()] } },
+    );
+
+    let mut types = BTreeMap::new();
+    types.insert("Note".into(), RawType { fields, indexes, ..Default::default() });
+
+    RawSchema { types, relations: BTreeMap::new() }
+}
+
+fn open_sim_engine(
+    policy: BuildPolicy,
+) -> (Engine<SimKvStore, SimVfs, SimClock>, Arc<ProjectionRegistry<SimKvStore, SimVfs>>) {
+    let store = SimKvStore::new(SimKvConfig::default());
+    let vfs = SimVfs::new(BootId([1; 16]));
+    let clock = SimClock::new(1_700_000_000_000);
+    let reg = Arc::new(ProjectionRegistry::new(policy));
+    let (engine, _) = Engine::open_with_projections(
+        store,
+        vfs,
+        clock,
+        PathBuf::from("/sim/db"),
+        DurabilityMode::Strict,
+        Arc::clone(&reg) as _,
+    )
+    .expect("open sim engine");
+    (engine, reg)
+}
+
+fn make_fields(pairs: &[(&str, CanonicalValue)]) -> Vec<(String, CanonicalValue)> {
+    pairs.iter().map(|(k, v)| ((*k).to_owned(), v.clone())).collect()
+}
+
+#[test]
+fn value_unique_unified_numeric_spill_and_long_string_uniqueness() {
+    let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
+    engine.set_schema(&full_schema()).unwrap();
+
+    // Unified numeric key: Int(5) == Float(5.0), and values past 2^53 stay strictly ordered!
+    let p53 = 1i64 << 53;
+    let ops = vec![
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n-int5".into()),
+            fields: make_fields(&[("code", CanonicalValue::String("A".into())), ("score", CanonicalValue::Int(5))]),
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n-flt5".into()),
+            fields: make_fields(&[("code", CanonicalValue::String("B".into())), ("score", CanonicalValue::Float(5.0))]),
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n-p53-1".into()),
+            fields: make_fields(&[("score", CanonicalValue::Int(p53 + 1))]),
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n-p53-0".into()),
+            fields: make_fields(&[("score", CanonicalValue::Int(p53))]),
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n-unord".into()),
+            fields: make_fields(&[("score", CanonicalValue::Object(vec![("x".into(), CanonicalValue::Int(1))]))]),
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n-null".into()),
+            fields: make_fields(&[("score", CanonicalValue::Null)]),
+        },
+    ];
+    engine.execute_batch(&ops).unwrap();
+
+    // Unique violation on normal code.
+    let dup = engine.execute_batch(&[WireOp::Create {
+        type_name: "Note".into(),
+        external_id: Some("n-dup".into()),
+        fields: make_fields(&[("code", CanonicalValue::String("A".into()))]),
+    }]);
+    assert_eq!(dup.unwrap_err().code, ErrorCode::UniqueViolation);
+
+    // Trashing n-int5 frees unique code "A", allowing another entity to claim it; restoring n-int5 then fails!
+    engine
+        .execute_batch(&[
+            WireOp::Trash { target: EntityTarget::ExternalId("n-int5".into()) },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n-claim".into()),
+                fields: make_fields(&[("code", CanonicalValue::String("A".into()))]),
+            },
+        ])
+        .unwrap();
+    let restore_err = engine.execute_batch(&[WireOp::Restore { target: EntityTarget::ExternalId("n-int5".into()) }]);
+    assert_eq!(restore_err.unwrap_err().code, ErrorCode::UniqueViolation);
+    // Destroy claimant and restore original so n-int5 is live again.
+    engine
+        .execute_batch(&[
+            WireOp::Destroy { target: EntityTarget::ExternalId("n-claim".into()) },
+            WireOp::Restore { target: EntityTarget::ExternalId("n-int5".into()) },
+        ])
+        .unwrap();
+
+    // Unique violation on > 448 B long string!
+    let long_a = "x".repeat(500);
+    engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n-long1".into()),
+            fields: make_fields(&[("code", CanonicalValue::String(long_a.clone()))]),
+        }])
+        .unwrap();
+    let long_dup = engine.execute_batch(&[WireOp::Create {
+        type_name: "Note".into(),
+        external_id: Some("n-long2".into()),
+        fields: make_fields(&[("code", CanonicalValue::String(long_a))]),
+    }]);
+    assert_eq!(long_dup.unwrap_err().code, ErrorCode::UniqueViolation);
+
+    // Verify Int(5) and Float(5.0) live in the same posting bucket and range scan preserves 2^53 ordering.
+    {
+        let (txn, schema) = engine.begin_read_pinned().unwrap();
+        let score_idx = schema.indexes.iter().find(|i| i.name == "by_score").unwrap();
+        let db = engine.gate().open_subdb_ro(&txn, &score_idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        assert_eq!(value::count_eq(&txn, db, &[&CanonicalValue::Int(5)]).unwrap(), 2);
+        assert_eq!(value::count_eq(&txn, db, &[&CanonicalValue::Float(5.0)]).unwrap(), 2);
+        let eq_keys = value::lookup_eq(&txn, db, &[&CanonicalValue::Float(5.0)]).unwrap();
+        assert_eq!(eq_keys.len(), 2);
+
+        let range = value::scan_range(&txn, db, Some((&[&CanonicalValue::Int(p53)], true)), None, false, None).unwrap();
+        assert_eq!(range.len(), 2);
+        let k0 = engine.get_row("n-p53-0").unwrap().unwrap().key;
+        let k1 = engine.get_row("n-p53-1").unwrap().unwrap().key;
+        assert_eq!(range, vec![k0, k1]);
+    }
+
+    // Spill > 256 keys into bucketed mode (320 identical scores), check exact equivalence, then shrink back < 256!
+    let mut bulk = Vec::new();
+    for i in 0..320 {
+        bulk.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("bulk-{i}")),
+            fields: make_fields(&[("score", CanonicalValue::Int(42))]),
+        });
+    }
+    engine.execute_batch(&bulk).unwrap();
+    {
+        let (txn, schema) = engine.begin_read_pinned().unwrap();
+        let score_idx = schema.indexes.iter().find(|i| i.name == "by_score").unwrap();
+        let db = engine.gate().open_subdb_ro(&txn, &score_idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        assert_eq!(value::count_eq(&txn, db, &[&CanonicalValue::Int(42)]).unwrap(), 320);
+        assert_eq!(value::lookup_eq(&txn, db, &[&CanonicalValue::Int(42)]).unwrap().len(), 320);
+    }
+    assert!(reg.check(&engine, None).unwrap().is_ok());
+
+    // Delete 150 entities to drop back to 170 (<= 256) and verify canonical promotion back to inline!
+    let dels: Vec<WireOp> =
+        (0..150).map(|i| WireOp::Destroy { target: EntityTarget::ExternalId(format!("bulk-{i}")) }).collect();
+    engine.execute_batch(&dels).unwrap();
+    let rep = reg.check(&engine, None).unwrap();
+    assert!(rep.is_ok(), "mismatches after bucket->inline shrink: {:?}", rep.mismatches);
+}
+
+#[test]
+fn icu_order_sv_locale_and_long_cut_tie_resolution() {
+    let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
+    engine.set_schema(&full_schema()).unwrap();
+
+    // In Swedish ("sv"), 'ö' sorts strictly AFTER 'z'!
+    // Also include two >300-byte strings sharing an identical 300-byte prefix so `cut == true` tie-break fires!
+    let shared_prefix = "m".repeat(300);
+    let long_b = format!("{shared_prefix}b");
+    let long_a = format!("{shared_prefix}a");
+
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n-oe".into()),
+                fields: make_fields(&[("title", CanonicalValue::String("ö".into()))]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n-z".into()),
+                fields: make_fields(&[("title", CanonicalValue::String("z".into()))]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n-a".into()),
+                fields: make_fields(&[("title", CanonicalValue::String("a".into()))]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n-long-b".into()),
+                fields: make_fields(&[("title", CanonicalValue::String(long_b))]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n-long-a".into()),
+                fields: make_fields(&[("title", CanonicalValue::String(long_a))]),
+            },
+        ])
+        .unwrap();
+
+    let (txn, schema) = engine.begin_read_pinned().unwrap();
+    let idx = schema.indexes.iter().find(|i| i.name == "title_order_sv").unwrap();
+    let IndexKind::Order { field, locale } = &idx.kind else { panic!("expected order") };
+    let db = engine.gate().open_subdb_ro(&txn, &idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+    let cached = reg.collators().get_or_build(locale).unwrap();
+    assert!(order::stamp_matches(&txn, db, &cached).unwrap());
+
+    let ordered = order::scan_ordered(&txn, &engine.dbs(), db, &cached, *field, false, None).unwrap();
+    let names: Vec<String> = ordered.iter().map(|&k| engine.resolve_ext_id(k).unwrap().unwrap()).collect();
+    assert_eq!(names, vec!["n-a", "n-long-a", "n-long-b", "n-z", "n-oe"]);
+
+    // Reverse top-2: should return n-oe, n-z!
+    let rev2 = order::scan_ordered(&txn, &engine.dbs(), db, &cached, *field, true, Some(2)).unwrap();
+    let rev_names: Vec<String> = rev2.iter().map(|&k| engine.resolve_ext_id(k).unwrap().unwrap()).collect();
+    assert_eq!(rev_names, vec!["n-oe", "n-z"]);
+
+    assert!(reg.check(&engine, None).unwrap().is_ok());
+}
+
+#[test]
+fn bmw_full_text_matches_exhaustive_reference_and_prunes_blocks() {
+    let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
+    engine.set_schema(&full_schema()).unwrap();
+
+    // Generate 650 documents (> 5 full 128-entity blocks) where "common" appears in almost all docs
+    // with low tf, while a few docs have very high title/body tf so BMW prunes whole blocks!
+    let mut rng = SimRng::seeded(0xBEEF_1234_CAFE_5678);
+    let vocab = ["common", "alpha", "beta", "gamma", "delta", "rust", "lmdb", "graph", "vector", "query"];
+    let mut ops = Vec::with_capacity(650);
+    for i in 0..650 {
+        let title = if i == 17 || i == 290 || i == 512 {
+            "common common common rust lmdb THR-42".to_owned()
+        } else {
+            let w1 = vocab[rng.gen_range(vocab.len())];
+            let w2 = vocab[rng.gen_range(vocab.len())];
+            format!("common {w1} {w2}")
+        };
+        let mut body = String::from("common ");
+        let body_len = 5 + rng.gen_range(25);
+        for _ in 0..body_len {
+            body.push_str(vocab[rng.gen_range(vocab.len())]);
+            body.push(' ');
+        }
+        let tags = CanonicalValue::Array(vec![
+            CanonicalValue::String("first tag".into()),
+            CanonicalValue::String("second tag".into()),
+        ]);
+        ops.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("doc-{i}")),
+            fields: make_fields(&[
+                ("title", CanonicalValue::String(title)),
+                ("body", CanonicalValue::String(body)),
+                ("tags", tags),
+            ]),
+        });
+    }
+    engine.execute_batch(&ops).unwrap();
+
+    let (txn, schema) = engine.begin_read_pinned().unwrap();
+    let idx = schema.indexes.iter().find(|i| i.name == "search_text").unwrap();
+    let db = engine.gate().open_subdb_ro(&txn, &idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+
+    for (q, require_all, top_k) in [
+        ("common rust", false, 10),
+        ("common rust", true, 5),
+        ("common alpha beta", false, 8),
+        ("THR-42", true, 5),
+        ("common", false, 3),
+    ] {
+        let (bmw_hits, stats) = text::search_bmw(&txn, db, q, None, top_k, require_all, None).unwrap();
+        let ref_hits = text::search_exhaustive_reference(&txn, db, q, None, top_k, require_all, None).unwrap();
+        assert_eq!(bmw_hits.len(), ref_hits.len(), "query '{q}' require_all={require_all}");
+        for (a, b) in bmw_hits.iter().zip(ref_hits.iter()) {
+            assert_eq!(a.key, b.key, "top-k key mismatch for '{q}'");
+            assert!((a.score - b.score).abs() < 1e-11, "score mismatch: {} vs {}", a.score, b.score);
+        }
+        if q == "common rust" && require_all {
+            assert!(stats.docs_scored < 650, "expected BMW/AND to skip non-matching docs");
+        }
+    }
+
+    // Verify candidate filter pushdown matches reference!
+    let mut allowed = FxHashSet::default();
+    for i in (0..650).step_by(7) {
+        allowed.insert(engine.get_row(&format!("doc-{i}")).unwrap().unwrap().key);
+    }
+    let (bmw_f, _) = text::search_bmw(&txn, db, "common alpha", false_or_none(), 10, false, Some(&allowed)).unwrap();
+    let ref_f = text::search_exhaustive_reference(&txn, db, "common alpha", None, 10, false, Some(&allowed)).unwrap();
+    assert_eq!(bmw_f.len(), ref_f.len());
+    for (a, b) in bmw_f.iter().zip(ref_f.iter()) {
+        assert_eq!(a.key, b.key);
+        assert!((a.score - b.score).abs() < 1e-11);
+    }
+
+    // Verify prefix expansion reads dict in O(matched) and phrase match respects ELEMENT_GAP!
+    let pref = text::prefix_terms(&txn, db, "com", 10).unwrap();
+    assert_eq!(pref[0].0, "common");
+    assert_eq!(pref[0].1.doc_freq, 650);
+
+    let k17 = engine.get_row("doc-17").unwrap().unwrap().key;
+    assert!(text::matches_phrase(&txn, db, k17, &["rust".into(), "lmdb".into()]).unwrap());
+    // "tag" + "second" spans two separate list elements separated by ELEMENT_GAP -> must NOT match!
+    assert!(!text::matches_phrase(&txn, db, k17, &["tag".into(), "second".into()]).unwrap());
+    assert!(text::matches_phrase(&txn, db, k17, &["first".into(), "tag".into()]).unwrap());
+
+    assert!(reg.check(&engine, None).unwrap().is_ok());
+}
+
+fn false_or_none() -> Option<&'static str> {
+    None
+}
+
+#[test]
+fn trigram_rarest_first_intersection_and_incremental_updates() {
+    let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
+    engine.set_schema(&full_schema()).unwrap();
+
+    let mut ops = Vec::new();
+    for i in 0..100 {
+        ops.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("t-{i}")),
+            fields: make_fields(&[(
+                "title",
+                CanonicalValue::String(if i == 77 {
+                    "PostgreSQL Xylophone Engine".into()
+                } else {
+                    format!("PostgreSQL Database Note {i}")
+                }),
+            )]),
+        });
+    }
+    engine.execute_batch(&ops).unwrap();
+
+    let (txn, schema) = engine.begin_read_pinned().unwrap();
+    let idx = schema.indexes.iter().find(|i| i.name == "title_trigram").unwrap();
+    let db = engine.gate().open_subdb_ro(&txn, &idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+
+    assert_eq!(trigram::trigram_df(&txn, db, "pos").unwrap(), 100);
+    assert_eq!(trigram::trigram_df(&txn, db, "xyl").unwrap(), 1);
+
+    let required = trigram::extract_trigrams("PostgreSQL Xylophone");
+    let hits = trigram::intersect_trigrams(&txn, db, &required).unwrap();
+    let k77 = engine.get_row("t-77").unwrap().unwrap().key;
+    assert_eq!(hits, vec![k77]);
+
+    // Missing trigram exits in O(1).
+    let none = trigram::intersect_trigrams(&txn, db, &["zzz".into(), "pos".into()]).unwrap();
+    assert!(none.is_empty());
+
+    drop(txn);
+    // Patch t-77 to remove "Xylophone" and verify df drops to 0 and check() stays clean!
+    engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("t-77".into()),
+            fields: make_fields(&[("title", CanonicalValue::String("Plain Updated Title".into()))]),
+        }])
+        .unwrap();
+    {
+        let (txn2, schema2) = engine.begin_read_pinned().unwrap();
+        let idx2 = schema2.indexes.iter().find(|i| i.name == "title_trigram").unwrap();
+        let db2 = engine.gate().open_subdb_ro(&txn2, &idx2.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        assert_eq!(trigram::trigram_df(&txn2, db2, "xyl").unwrap(), 0);
+    }
+    assert!(reg.check(&engine, None).unwrap().is_ok());
+}
+
+#[test]
+fn watermark_deferred_build_with_interleaved_foreground_writes_matches_rebuild() {
+    let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
+
+    // Start with schema WITHOUT any indexes, populate 120 entities!
+    let mut base_schema = full_schema();
+    base_schema.types.get_mut("Note").unwrap().indexes.clear();
+    engine.set_schema(&base_schema).unwrap();
+
+    let mut init_ops = Vec::new();
+    for i in 0..120 {
+        init_ops.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("w-{i}")),
+            fields: make_fields(&[
+                ("code", CanonicalValue::String(format!("C-{i}"))),
+                ("score", CanonicalValue::Int(i % 7)),
+                ("title", CanonicalValue::String(format!("Title {i} alpha"))),
+                ("body", CanonicalValue::String(format!("Body text item {i} common"))),
+            ]),
+        });
+    }
+    engine.execute_batch(&init_ops).unwrap();
+
+    // Now add ALL 5 indexes via set_schema -> all start in `BuildState::Building { 0, hw }`!
+    engine.set_schema(&full_schema()).unwrap();
+    let statuses = reg.index_status(&engine).unwrap();
+    assert_eq!(statuses.len(), 5);
+    assert!(statuses.iter().all(|s| matches!(s.state, BuildState::Building { .. })));
+
+    // Interleave small build chunks (19 entities/chunk) with foreground mutations across ALL watermark zones:
+    // - key <= built_up_to (already built)
+    // - key in (built_up_to, high_water] (not yet built!)
+    // - key > high_water (newly created after schema change!)
+    let mut step = 0usize;
+    while reg.drive_build_chunk(&engine, 19).unwrap() {
+        step += 1;
+        // Patch an early entity (<= built_up_to), patch a late entity (> built_up_to & <= hw),
+        // trash one, restore one, and create a brand-new entity (> high_water)!
+        let mut live_ops = vec![
+            WireOp::Patch {
+                target: EntityTarget::ExternalId("w-2".into()),
+                fields: make_fields(&[
+                    ("score", CanonicalValue::Int(100 + step as i64)),
+                    ("title", CanonicalValue::String(format!("Updated Early {step}"))),
+                ]),
+            },
+            WireOp::Patch {
+                target: EntityTarget::ExternalId("w-115".into()),
+                fields: make_fields(&[
+                    ("score", CanonicalValue::Int(200 + step as i64)),
+                    ("body", CanonicalValue::String(format!("Updated Late {step} xylophone"))),
+                ]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some(format!("new-{step}")),
+                fields: make_fields(&[
+                    ("code", CanonicalValue::String(format!("NEW-{step}"))),
+                    ("score", CanonicalValue::Int(500 + step as i64)),
+                    ("title", CanonicalValue::String(format!("Fresh {step} omega"))),
+                ]),
+            },
+        ];
+        if step == 2 {
+            live_ops.push(WireOp::Trash { target: EntityTarget::ExternalId("w-50".into()) });
+            live_ops.push(WireOp::Destroy { target: EntityTarget::ExternalId("w-10".into()) });
+        }
+        if step == 4 {
+            live_ops.push(WireOp::Restore { target: EntityTarget::ExternalId("w-50".into()) });
+        }
+        engine.execute_batch(&live_ops).unwrap();
+    }
+
+    // All indexes must now be Ready and pass byte-for-byte `check()`!
+    let final_statuses = reg.index_status(&engine).unwrap();
+    assert!(final_statuses.iter().all(|s| s.state == BuildState::Ready));
+    let report = reg.check(&engine, None).unwrap();
+    assert!(report.is_ok(), "watermark build drift: {:?}", report.mismatches);
+    assert_eq!(report.checked_indexes, 5);
+
+    // Verify `stats()` reports positive entries for every index.
+    let stats = reg.stats(&engine).unwrap();
+    assert_eq!(stats.len(), 5);
+    assert!(stats.iter().all(|s| s.entry_count > 0));
+}
+
+#[test]
+fn failed_unique_build_transitions_to_failed_and_recovers_on_rebuild() {
+    let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
+
+    // Create duplicate codes BEFORE unique index exists.
+    let mut base = full_schema();
+    base.types.get_mut("Note").unwrap().indexes.clear();
+    engine.set_schema(&base).unwrap();
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("d-1".into()),
+                fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("d-2".into()),
+                fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
+            },
+        ])
+        .unwrap();
+
+    // Add unique index and drain builds -> must transition cleanly to Failed(UniqueViolation).
+    engine.set_schema(&full_schema()).unwrap();
+    reg.drain_all_builds(&engine).unwrap();
+    let status = reg.index_status(&engine).unwrap().into_iter().find(|s| s.name == "by_code_unique").unwrap();
+    assert!(matches!(status.state, BuildState::Failed { code: ErrorCode::UniqueViolation, .. }));
+
+    // Fix duplicate and rebuild -> Ready and check() clean!
+    engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("d-2".into()),
+            fields: make_fields(&[("code", CanonicalValue::String("UNIQUE-2".into()))]),
+        }])
+        .unwrap();
+    reg.rebuild(&engine, Some(status.index_id)).unwrap();
+    let after = reg.index_status(&engine).unwrap().into_iter().find(|s| s.name == "by_code_unique").unwrap();
+    assert_eq!(after.state, BuildState::Ready);
+    assert!(reg.check(&engine, None).unwrap().is_ok());
+}
+
+#[test]
+fn live_lmdb_projections_and_600_index_churn_never_hits_mdb_dbs_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = LmdbStore::open(dir.path(), LmdbConfig::default()).unwrap();
+    let reg = Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange));
+    let (engine, _) = Engine::open_with_projections(
+        store,
+        OsVfs,
+        SystemClock::new(),
+        dir.path(),
+        DurabilityMode::Strict,
+        Arc::clone(&reg) as _,
+    )
+    .unwrap();
+
+    engine.set_schema(&full_schema()).unwrap();
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("l-1".into()),
+                fields: make_fields(&[
+                    ("code", CanonicalValue::String("L1".into())),
+                    ("score", CanonicalValue::Float(9.5)),
+                    ("title", CanonicalValue::String("LMDB Projections Live Test".into())),
+                    ("body", CanonicalValue::String("Verifying pooled sub-DB reuse without DBI leaks".into())),
+                ]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("l-2".into()),
+                fields: make_fields(&[
+                    ("code", CanonicalValue::String("L2".into())),
+                    ("score", CanonicalValue::Int(9)),
+                    ("title", CanonicalValue::String("Another Note".into())),
+                ]),
+            },
+        ])
+        .unwrap();
+    assert!(reg.check(&engine, None).unwrap().is_ok());
+
+    // Churn index definitions 550 times (> LMDB's 512 max_dbs!) to prove SubDbPool recycling + O(1) truncate
+    // prevents MDB_DBS_FULL forever!
+    for round in 0..550 {
+        let mut s = full_schema();
+        s.types.get_mut("Note").unwrap().indexes.clear();
+        s.types.get_mut("Note").unwrap().indexes.insert(
+            format!("churn_{round}"),
+            RawIndex { kind: RawIndexKind::Value { fields: vec!["score".into()], unique: false } },
+        );
+        engine.set_schema(&s).unwrap();
+    }
+    let rep = reg.check(&engine, None).unwrap();
+    assert!(rep.is_ok(), "mismatches after 550 index churns: {:?}", rep.mismatches);
+
+    // Verify lookup still finds l-2 (score == 9) on live LMDB!
+    let (txn, schema) = engine.begin_read_pinned().unwrap();
+    let idx = &schema.indexes[0];
+    let db = engine.gate().open_subdb_ro(&txn, &idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+    let keys = value::lookup_eq(&txn, db, &[&CanonicalValue::Float(9.0)]).unwrap();
+    assert_eq!(keys, vec![EntityKey(2)]);
+}

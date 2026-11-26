@@ -638,6 +638,18 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         Ok((txn, schema))
     }
 
+    /// Runs a lock-order-safe maintenance write transaction (used by chunked index builders,
+    /// `rebuild()`, vector drain, and ping-pong compaction) with zero schema-epoch TOCTOU.
+    pub fn run_maintenance_write<T, F>(&self, f: F) -> Result<(T, CommitReceipt)>
+    where
+        F: FnOnce(&mut GatedWriteTxn<'_, S, V>, &Arc<CompiledSchema>, &SystemDbs) -> Result<T>,
+    {
+        let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
+        let out = f(&mut txn, &schema, &self.dbs)?;
+        let receipt = txn.commit()?;
+        Ok((out, receipt))
+    }
+
     /// Executes a binary `elmdb-wire` batch frame in one atomic commit.
     pub fn execute_wire_batch(&self, frame: &[u8]) -> Result<BatchOutcome> {
         let decoded = decode_batch(frame)?;
@@ -2200,21 +2212,107 @@ fn write_commit_summary<S: KvStore, V: Vfs>(
     Ok(())
 }
 
-fn scan_type_keys<R: KvRead>(txn: &R, dbs: &SystemDbs, type_id: TypeId) -> Result<Vec<EntityKey>> {
+pub fn scan_type_keys<R: KvRead>(txn: &R, dbs: &SystemDbs, type_id: TypeId) -> Result<Vec<EntityKey>> {
+    scan_type_keys_in_range(txn, dbs, type_id, None, None, usize::MAX)
+}
+
+/// Scans `EntityKey`s of `type_id` strictly greater than `after_exclusive` and `<= max_inclusive`,
+/// returning at most `limit` keys in ascending order.
+pub fn scan_type_keys_in_range<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    type_id: TypeId,
+    after_exclusive: Option<EntityKey>,
+    max_inclusive: Option<EntityKey>,
+    limit: usize,
+) -> Result<Vec<EntityKey>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
     let mut prefix = [0u8; 3];
     prefix[0] = TAG_TYPE_LIST;
     prefix[1..3].copy_from_slice(&type_id.0.to_be_bytes());
+    let mut start = [0u8; 11];
+    start[0..3].copy_from_slice(&prefix);
+    if let Some(after) = after_exclusive {
+        let Some(next_k) = after.0.checked_add(1) else {
+            return Ok(Vec::new());
+        };
+        start[3..11].copy_from_slice(&next_k.to_be_bytes());
+    }
     let mut cur = txn.cursor(dbs.adj)?;
     let mut keys = Vec::new();
+    let mut entry = cur.seek_ge(&start)?;
+    while let Some((k, _)) = entry {
+        if k.len() != 11 || k[0..3] != prefix {
+            break;
+        }
+        let ek = EntityKey::from_be_bytes(k[3..11].try_into().expect("8"));
+        if let Some(max_k) = max_inclusive
+            && ek > max_k
+        {
+            break;
+        }
+        keys.push(ek);
+        if keys.len() >= limit {
+            break;
+        }
+        entry = cur.next()?;
+    }
+    Ok(keys)
+}
+
+/// Returns the highest `EntityKey` currently present for `type_id`, in O(log N).
+pub fn max_type_key<R: KvRead>(txn: &R, dbs: &SystemDbs, type_id: TypeId) -> Result<Option<EntityKey>> {
+    let mut prefix = [0u8; 3];
+    prefix[0] = TAG_TYPE_LIST;
+    prefix[1..3].copy_from_slice(&type_id.0.to_be_bytes());
+    let mut upper = [0u8; 11];
+    upper[0..3].copy_from_slice(&prefix);
+    upper[3..11].copy_from_slice(&u64::MAX.to_be_bytes());
+    let mut cur = txn.cursor(dbs.adj)?;
+    let entry = match cur.seek_ge(&upper)? {
+        Some((k, _)) if k.len() == 11 && k[0..3] == prefix => Some((k, ())),
+        Some(_) => cur.prev()?.map(|(k, _)| (k, ())),
+        None => cur.last()?.map(|(k, _)| (k, ())),
+    };
+    if let Some((k, ())) = entry
+        && k.len() == 11
+        && k[0..3] == prefix
+    {
+        return Ok(Some(EntityKey::from_be_bytes(k[3..11].try_into().expect("8"))));
+    }
+    Ok(None)
+}
+
+/// Decodes a `PackedRow` (resolving any spilled blobs) directly from primary storage.
+pub fn read_packed_row<R: KvRead>(txn: &R, dbs: &SystemDbs, key: EntityKey) -> Result<Option<PackedRow>> {
+    let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
+        return Ok(None);
+    };
+    let packed = decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
+    Ok(Some(packed))
+}
+
+/// Scans all `PackedEdge`s of a given `RelKindId` from `adj_by_kind` + `relations`.
+pub fn scan_edges_by_kind<R: KvRead>(txn: &R, dbs: &SystemDbs, kind: RelKindId) -> Result<Vec<PackedEdge>> {
+    let mut prefix = [0u8; 3];
+    prefix[0] = TAG_ADJ_BY_KIND;
+    prefix[1..3].copy_from_slice(&kind.0.to_be_bytes());
+    let mut cur = txn.cursor(dbs.adj)?;
+    let mut out = Vec::new();
     let mut entry = cur.seek_ge(&prefix)?;
     while let Some((k, _)) = entry {
         if k.len() != 11 || k[0..3] != prefix {
             break;
         }
-        keys.push(EntityKey::from_be_bytes(k[3..11].try_into().expect("8")));
+        let rk = RelKey::from_be_bytes(k[3..11].try_into().expect("8"));
+        if let Some(raw) = txn.get(dbs.relations, &rk.to_ne_bytes())? {
+            out.push(PackedEdge::decode(rk, raw)?);
+        }
         entry = cur.next()?;
     }
-    Ok(keys)
+    Ok(out)
 }
 
 fn read_stored_row<R: KvRead>(
