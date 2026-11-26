@@ -216,14 +216,22 @@ pub(super) fn root_names_database(page: &[u8], name: &[u8]) -> bool {
     })
 }
 
+/// Reads `buf.len()` bytes starting at `at`, returning `Ok(false)` on `UnexpectedEof` and propagating other I/O errors
+fn read_exact_or_eof(file: &mut File, at: u64, buf: &mut [u8]) -> std::io::Result<bool> {
+    file.seek(SeekFrom::Start(at))?;
+    match file.read_exact(buf) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 /// Whether `file` is an elmdb database's data file, read by seeks at the commit its newer meta page names: a file too
 /// short or not of LMDB's making is not. Reads only what is there to tell, so it is for a file no process is writing
 pub(super) fn is_elmdb_file(file: &mut File) -> std::io::Result<bool> {
     let mut size = [0u8; 4];
-    file.seek(SeekFrom::Start((PAGE_HEADER + 24) as u64))?;
-    match file.read_exact(&mut size) {
-        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
-        read => read?,
+    if !read_exact_or_eof(file, (PAGE_HEADER + 24) as u64, &mut size)? {
+        return Ok(false);
     }
     let psize = u32::from_ne_bytes(size) as usize;
     // The page sizes LMDB writes
@@ -236,7 +244,11 @@ pub(super) fn is_elmdb_file(file: &mut File) -> std::io::Result<bool> {
         return Ok(false);
     }
     let Some(at) = root.checked_mul(psize as u64) else { return Ok(false) };
-    Ok(read_at(file, at, psize).is_some_and(|page| root_names_database(&page, crate::format::DB_NAME.as_bytes())))
+    let mut page = vec![0u8; psize];
+    if !read_exact_or_eof(file, at, &mut page)? {
+        return Ok(false);
+    }
+    Ok(root_names_database(&page, crate::format::DB_NAME.as_bytes()))
 }
 
 /// The meta page in `slot`, 0 or 1, where it reads as one: LMDB's magic, and whole as far as a read of it goes. None
@@ -710,6 +722,16 @@ mod tests {
         assert_eq!(newer.map(|meta| meta.txnid), Some(5), "a file torn short refused");
         let mut unreadable = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         assert!(newer_meta_page(&mut unreadable, PSIZE).is_err(), "a failed read taken as no meta page");
+        assert!(is_elmdb_file(&mut unreadable).is_err(), "a failed read taken as not an elmdb file");
+
+        // A valid meta page whose main-tree root lies past EOF answers false rather than erring
+        let mut truncated = vec![0u8; PSIZE];
+        truncated[META_MAGIC..META_MAGIC + 4].copy_from_slice(&MAGIC.to_ne_bytes());
+        truncated[PAGE_HEADER + 24..PAGE_HEADER + 28].copy_from_slice(&(PSIZE as u32).to_ne_bytes());
+        truncated[META_MAIN_ROOT..META_MAIN_ROOT + 8].copy_from_slice(&5u64.to_ne_bytes());
+        truncated[META_TXNID..META_TXNID + 8].copy_from_slice(&1u64.to_ne_bytes());
+        std::fs::write(&path, &truncated).unwrap();
+        assert!(!is_elmdb_file(&mut File::open(&path).unwrap()).unwrap());
     }
 
     #[test]

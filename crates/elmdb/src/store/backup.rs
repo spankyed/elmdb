@@ -27,8 +27,9 @@ pub(super) fn copy(store: &Store, target: &Path, into: BackupInto) -> Result<()>
     let target = std::path::absolute(target)?;
     // The database's listeners' `wake`, whose every commit removes what isn't a mailbox, would remove the backup.
     // Looked at before anything is made, as the directory will be named
-    let wake = store.path.join("wake");
-    if as_it_will_be_named(&target).map_err(|error| cannot_look_at(&target, &error))?.starts_with(&wake) {
+    let named = as_it_will_be_named(&target).map_err(|error| cannot_look_at(&target, &error))?;
+    if is_in_wake(&named, &store.path) {
+        let wake = store.path.join("wake");
         let why =
             format!("is in {}, where the database's commits remove what isn't a listener's mailbox", wake.display());
         return Err(refused(&target, &why));
@@ -38,9 +39,13 @@ pub(super) fn copy(store: &Store, target: &Path, into: BackupInto) -> Result<()>
         if !meta.is_dir() {
             return Err(refused(&target, "is not a directory"));
         }
-        // Looked at before the decision lock is made there too, so that a directory refused is left as it was. What
-        // changes meanwhile is seen once the lock is held, below
-        may_replace(&target, into)?;
+        // Looked at before the decision lock is made there too, so that a directory refused is left as it was. When a
+        // lock file there is already held by an open or another backup, `data.mdb` is left to the check under the lock
+        // below rather than read unlocked against a live writer
+        may_replace_entries(&target, into)?;
+        if !target_busy(&target)? {
+            check_data_is_elmdb(&target)?;
+        }
     }
     #[cfg(unix)]
     let sync_dirs = directories_to_sync(&target);
@@ -144,28 +149,81 @@ pub(super) fn copy(store: &Store, target: &Path, into: BackupInto) -> Result<()>
         target.display())))
 }
 
-/// `path` with links resolved as far as it exists, the rest as it is: the directory it names once made
+/// `path` with links resolved as far as it exists and trailing `..` folded, the rest as it is: the directory it names
+/// once made
 fn as_it_will_be_named(path: &Path) -> std::io::Result<std::path::PathBuf> {
+    enum Step {
+        Parent,
+        Normal(std::ffi::OsString),
+    }
     let mut rest = Vec::new();
-    let mut at = path;
+    let mut at = path.to_path_buf();
     loop {
         match at.canonicalize() {
             Ok(mut named) => {
-                named.extend(rest.iter().rev());
+                for step in rest.into_iter().rev() {
+                    match step {
+                        Step::Parent => {
+                            named.pop();
+                        }
+                        Step::Normal(name) => named.push(name),
+                    }
+                }
                 return Ok(named);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
-        let (Some(parent), Some(name)) = (at.parent(), at.file_name()) else { return Ok(path.to_owned()) };
-        rest.push(name);
-        at = parent;
+        let step = match at.components().next_back() {
+            Some(std::path::Component::ParentDir) => Step::Parent,
+            Some(std::path::Component::Normal(name)) => Step::Normal(name.to_owned()),
+            _ => return Ok(path.to_owned()),
+        };
+        rest.push(step);
+        at.pop();
     }
+}
+
+/// Whether `path` is `store_path/wake` or inside it (matching `"wake"` case-insensitively on case-insensitive OSes so
+/// a backup into `WAKE` before `wake/` exists cannot be wiped by the next commit)
+fn is_in_wake(path: &Path, store_path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(store_path) else { return false };
+    let Some(std::path::Component::Normal(first)) = relative.components().next() else { return false };
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        first.to_str().is_some_and(|name| name.eq_ignore_ascii_case("wake"))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        first == "wake"
+    }
+}
+
+/// Whether an open, restore or backup already holds one of `dir`'s lock files
+fn target_busy(dir: &Path) -> Result<bool> {
+    for name in [super::record::RECORD_LOCK, super::record::PRESENCE] {
+        if let Some(lock) = existing_lock(dir, name)? {
+            match lock.try_lock() {
+                Ok(()) => {}
+                Err(std::fs::TryLockError::WouldBlock) => return Ok(true),
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(lock_failed(dir, name, error.into()));
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Refuses what a backup into `dir` mustn't replace: under `BackupInto::Backups`, a database an open has written in
 /// place and anything no backup leaves, and whatever `into` is, a data file that is no elmdb database's
 fn may_replace(dir: &Path, into: BackupInto) -> Result<()> {
+    may_replace_entries(dir, into)?;
+    check_data_is_elmdb(dir)
+}
+
+/// Directory-level target checks that never read `data.mdb`'s bytes
+fn may_replace_entries(dir: &Path, into: BackupInto) -> Result<()> {
     if into == BackupInto::Backups {
         if super::record::written_in(dir).map_err(|error| cannot_look_at(dir, &error))? {
             return Err(refused(
@@ -193,14 +251,30 @@ fn may_replace(dir: &Path, into: BackupInto) -> Result<()> {
                 let held = name.to_string_lossy();
                 return Err(refused(dir, &format!("holds {held} of a kind no backup leaves")));
             }
-            holds_data |= name == "data.mdb";
-            holds_lmdb_lock |= name == "lock.mdb";
+            if name == "data.mdb" {
+                holds_data = true;
+            } else if name == "lock.mdb" {
+                holds_lmdb_lock = true;
+            }
         }
         if holds_lmdb_lock && !holds_data {
             let why = "holds lock.mdb and no data.mdb, which no backup leaves, so it may not be a backup";
             return Err(refused(dir, why));
         }
+    } else {
+        let data = dir.join("data.mdb");
+        match std::fs::symlink_metadata(&data) {
+            Ok(meta) if !meta.is_file() => return Err(refused(dir, "holds data.mdb of a kind no backup leaves")),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(cannot_look_at(&data, &error)),
+        }
     }
+    Ok(())
+}
+
+/// Refuses a `data.mdb` in `dir` that is not an elmdb database's data file
+fn check_data_is_elmdb(dir: &Path) -> Result<()> {
     let data = dir.join("data.mdb");
     let mut file = match std::fs::File::open(&data) {
         Ok(file) => file,

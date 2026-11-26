@@ -593,7 +593,10 @@ export function createConnection(
         (value as unknown as PromiseLike<unknown>).then(undefined, () => {});
         throw new Error('transact() takes a synchronous function: an await inside it would split the unit');
       }
-      if (outermost && unit && level.kept && hook && !hookPaused) hook.run();
+      if (outermost && unit && level.kept && hook && !hookPaused) {
+        hookPaused = true;
+        try { hook.run(); } finally { hookPaused = false; }
+      }
     } catch (error) {
       levels.pop();
       const held = unit;
@@ -834,8 +837,8 @@ export function createConnection(
     },
     beforeCommit(given) { hook = given; },
     transactWithoutHook(fn, options) {
-      // Inside a unit the hook runs in, this would be a savepoint of it, whose writes the hook would see as it commits
-      if (levels.length > 0 && hook && !hookPaused) {
+      // Inside a normal unit, this would be a savepoint whose writes the outer unit's hook would see as it commits
+      if (levels.length > 0 && !hookPaused) {
         throw new Error(
           'transactWithoutHook() was called inside a unit the beforeCommit hook runs in, whose writes the hook would see; call it outside any transact()',
         );

@@ -66,7 +66,7 @@ fn stored_named(value: &Value, named: impl FnOnce() -> String) -> Result<Vec<u8>
         return Ok(plain);
     }
     match zstd::bulk::compress(&plain, ZSTD_LEVEL) {
-        // mutant-skip: replace (< with <=|\+ with -|\+ with \*) in stored
+        // mutant-skip: replace (< with <=|\+ with -|\+ with \*) in stored_named
         // stored's check that a frame is smaller than the msgpack it holds: moved by a byte, it keeps or drops a frame
         // within a byte of the msgpack's length, which decodes to the same value. Anchored by line, the same operator
         // being the threshold's on the line above; a line moved can hide a mutant of the same kind that lands here,
@@ -726,6 +726,12 @@ mod tests {
             assert!(decoded == input);
             assert!(decoded.capacity() <= limit, "capacity {} exceeded limit {limit}", decoded.capacity());
         }
+
+        // Reaching exact current capacity on a later chunk does not pre-emptively double again
+        let four_chunks = stream_compress(&vec![b'z'; 262_144]);
+        let exact_cap = decompress_stream(&four_chunks, 524_288).unwrap();
+        assert_eq!(exact_cap.len(), 262_144);
+        assert!(exact_cap.capacity() <= 262_144, "capacity {} grew past 262144", exact_cap.capacity());
 
         // Window log boundary: 2^21, the window `ZSTD_LEVEL` compresses a value of any size with, is accepted, and one
         // wider is refused. The most a field holds, streamed, reads back within it

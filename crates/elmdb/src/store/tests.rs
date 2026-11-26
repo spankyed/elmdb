@@ -859,11 +859,25 @@ fn a_backup_into_the_listeners_wake_of_the_database_it_backs_up_is_refused_and_m
     put(&store, "a", b"1").unwrap();
     // What listeners that stopped leave: their directory, empty, which every commit clears of what isn't a mailbox
     std::fs::create_dir(dir.path().join("wake")).unwrap();
-    for into in [dir.path().join("wake"), dir.path().join("wake").join("today")] {
+    for into in [
+        dir.path().join("wake"),
+        dir.path().join("wake").join("today"),
+        dir.path().join("nonexistent").join("..").join("wake"),
+        dir.path().join("nonexistent").join("..").join("wake").join("today"),
+    ] {
         let error = store.copy_to(&into).unwrap_err();
         assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
         assert!(error.message.contains("listener's mailbox"), "{error}");
         assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "{}", into.display());
+    }
+    // On case-insensitive OSes (macOS APFS, Windows NTFS), `WAKE` before `wake/` exists is refused too
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh_store = Store::open(fresh.path(), quiet()).unwrap();
+        let error = fresh_store.copy_to(&fresh.path().join("WAKE")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+        assert!(!fresh.path().join("WAKE").exists());
     }
     // Named through a link to the database too
     #[cfg(unix)]
@@ -906,14 +920,14 @@ fn a_backup_held_to_backups_refuses_a_directory_holding_what_no_backup_leaves_an
     refused(&|at| std::fs::write(at.join("wake"), b"").unwrap(), "holds wake of a kind no backup leaves");
     refused(&|at| std::fs::write(at.join("lock.mdb"), b"").unwrap(), "holds lock.mdb and no data.mdb");
     #[cfg(unix)]
-    refused(
-        &|at| {
-            let backup = tempfile::tempdir().unwrap().keep();
-            store.copy_to(&backup).unwrap();
-            std::os::unix::fs::symlink(backup.join("data.mdb"), at.join("data.mdb")).unwrap();
-        },
-        "holds data.mdb of a kind no backup leaves",
-    );
+    {
+        let linked_backup = tempfile::tempdir().unwrap();
+        store.copy_to(linked_backup.path()).unwrap();
+        refused(
+            &|at| std::os::unix::fs::symlink(linked_backup.path().join("data.mdb"), at.join("data.mdb")).unwrap(),
+            "holds data.mdb of a kind no backup leaves",
+        );
+    }
     // What a backup and a read-only open of it leave is replaced, Finder's `.DS_Store` beside it
     let earlier = tempfile::tempdir().unwrap();
     store.copy_into(earlier.path(), BackupInto::Backups).unwrap();
@@ -976,6 +990,62 @@ fn a_backup_refuses_a_data_file_it_can_t_read_and_takes_a_presence_lock_it_may_o
     std::fs::write(&presence, b"").unwrap();
     std::fs::set_permissions(&presence, std::fs::Permissions::from_mode(0o444)).unwrap();
     store.copy_to(target.path()).unwrap();
+    // An unsearchable target directory fails `symlink_metadata(data.mdb)` as `IO`, never taken as absent
+    let unsearchable = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(unsearchable.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let error = store.copy_to(unsearchable.path()).unwrap_err();
+    std::fs::set_permissions(unsearchable.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(error.code, ErrorCode::Io, "{error}");
+    assert!(error.message.contains("Cannot look at") && error.message.contains("data.mdb"), "{error}");
+}
+
+#[test]
+fn a_backup_refuses_non_file_data_mdb_and_defers_data_inspection_when_locks_are_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+
+    // Another program's `data.mdb` without locks is refused before creating `synced.lock`
+    let bare_other = tempfile::tempdir().unwrap();
+    std::fs::write(bare_other.path().join("data.mdb"), b"not elmdb").unwrap();
+    let error = store.copy_to(bare_other.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+    assert!(!bare_other.path().join(record::RECORD_LOCK).exists(), "no decision lock created on pre-lock refusal");
+
+    // `AnyClosedDatabase` refuses a directory named `data.mdb` as `TARGET_REFUSED`
+    let subdir_data = tempfile::tempdir().unwrap();
+    std::fs::create_dir(subdir_data.path().join("data.mdb")).unwrap();
+    let error = store.copy_to(subdir_data.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+    assert!(error.message.contains("of a kind no backup leaves"), "{error}");
+
+    // When `open.lock` is held, an empty/in-progress `data.mdb` reports `TARGET_IN_USE` rather than racy `TARGET_REFUSED`
+    let in_use = tempfile::tempdir().unwrap();
+    std::fs::write(in_use.path().join("data.mdb"), b"").unwrap();
+    let presence_file = std::fs::File::create(in_use.path().join(record::PRESENCE)).unwrap();
+    presence_file.lock_shared().unwrap();
+    let error = store.copy_to(in_use.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetInUse, "{error}");
+    drop(presence_file);
+
+    // When `synced.lock` is held while another open finishes initializing `data.mdb`, backup waits on `synced.lock`
+    // and then replaces the finished elmdb database instead of returning a racy `TARGET_REFUSED`
+    let initializing = tempfile::tempdir().unwrap();
+    std::fs::write(initializing.path().join("data.mdb"), b"").unwrap();
+    let decision = std::fs::File::create(initializing.path().join(record::RECORD_LOCK)).unwrap();
+    decision.lock().unwrap();
+    let valid_seed = tempfile::tempdir().unwrap();
+    store.copy_to(valid_seed.path()).unwrap();
+    let valid_bytes = std::fs::read(valid_seed.path().join("data.mdb")).unwrap();
+    let init_path = initializing.path().to_path_buf();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(init_path.join("data.mdb"), valid_bytes).unwrap();
+        drop(decision);
+    });
+    store.copy_to(initializing.path()).unwrap();
+    releaser.join().unwrap();
+    assert_eq!(get(&Store::open(initializing.path(), quiet()).unwrap(), "a").as_deref(), Some(&b"1"[..]));
 }
 
 #[test]

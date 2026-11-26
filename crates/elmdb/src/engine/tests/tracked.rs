@@ -191,6 +191,7 @@ fn an_untrack_while_a_unit_holds_a_tracked_read_cancels_it() {
     unit.read(&reads(vec![row("Task-1")], Some(3))).unwrap();
     db.untrack(3);
     unit.commit(false).unwrap();
+    assert!(db.tracks.lock().is_empty(), "the canceled read is neither filed nor left registered");
     assert_eq!(db.track_stats().0, 0);
     assert!(touched(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })]).is_empty());
 }
@@ -210,9 +211,10 @@ fn a_panic_while_a_unit_files_its_tracked_reads_lets_the_tracking_lock_and_the_w
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unit.commit(false)));
         done.send(result.is_err()).unwrap();
     });
-    // The reads still to file drop as the panic unwinds, none of them taking the lock the filing holds
+    // The reads still to file drop after the lock is released, cleaning up their registrations without hanging or leaking
     assert!(unwound.recv_timeout(crate::waits::ARRIVES).expect("the commit unwound rather than hanging"));
     assert!(db.tracks.try_lock().is_some(), "the tracking lock was let go");
+    assert!(db.tracks.lock().is_empty(), "no unfiled pending read was leaked");
     write(&db, vec![json!({ "op": "set", "id": "Task-1", "fields": { "a": 1 } })]).unwrap();
 }
 
