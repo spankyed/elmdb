@@ -757,6 +757,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "elmdb-projections"
+version = "0.1.0"
+dependencies = [
+ "charabia",
+ "elmdb-engine",
+ "elmdb-lmdb",
+ "elmdb-sim",
+ "elmdb-storage",
+ "elmdb-wire",
+ "icu_collator",
+ "icu_locale_core",
+ "proptest",
+ "roaring",
+ "rust-stemmers",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
 name = "elmdb-sim"
 version = "0.1.0"
 dependencies = [
