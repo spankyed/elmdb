@@ -609,7 +609,7 @@ describe('injectable EarsClock', () => {
   });
 
   it('stopWatches() synchronously cancels pending watch timers, untracks reads, settles waiters, and allows new watches while open', async () => {
-    let nowMs = 1_000;
+    const nowMs = 1_000;
     let nextTimer = 0;
     const timers = new Map<number, () => void>();
     const clock: EarsClock = {
@@ -662,5 +662,42 @@ describe('injectable EarsClock', () => {
     engine.admin.stopWatches();
     expect(timers.size, 'stopWatches() after close cancels pending timers synchronously').toBe(0);
     expect(await isResolved(waitAfterClose)).toBe(true);
+  });
+
+  it('stopWatches() called from a watch observer mid-flush skips remaining watches in the batch and leaves no timers', async () => {
+    const nowMs = 1_000;
+    let nextTimer = 0;
+    const timers = new Map<number, () => void>();
+    const clock: EarsClock = {
+      now: () => nowMs,
+      after(_ms, run) {
+        const id = ++nextTimer;
+        timers.set(id, run);
+        return () => { timers.delete(id); };
+      },
+    };
+    const { database } = databases.open({
+      types: { Task: { required: [] } },
+      relations: {},
+      roles: [],
+    });
+    const engine = createEarsEngine({ database, clock });
+    const seenA: number[] = [];
+    const seenB: number[] = [];
+    engine.watch(() => engine.query('Task').count(), (n) => {
+      seenA.push(n);
+      engine.admin.stopWatches();
+    }, { label: 'a' });
+    const wB = engine.watch(() => engine.query('Task').count(), (n) => { seenB.push(n); }, { label: 'b' });
+    const waitB = wB.caughtUp();
+    const waitSettled = engine.admin.watchesSettled();
+    await flushMicrotasks();
+
+    expect(seenA).toEqual([0]);
+    expect(seenB, 'watch B skipped after watch A called stopWatches() mid-flush').toEqual([]);
+    expect(timers.size).toBe(0);
+    expect(engine.admin.watchStats()).toEqual({ watches: 0, keys: 0, ranges: 0 });
+    expect(await isResolved(waitB)).toBe(true);
+    expect(await isResolved(waitSettled)).toBe(true);
   });
 });

@@ -362,19 +362,26 @@ fn a_rename_type_whose_rewritten_ref_list_passes_the_most_a_field_holds_is_refus
     ])
     .unwrap();
 
+    let links_before = db
+        .snapshot(|r| crate::engine::unit::Read::get(r, &keys::value("Holder-1", "links")))
+        .unwrap()
+        .expect("Holder-1 links stored before rename");
+
     let error = db.rename_type("A", "LongRenamedType").unwrap_err();
     assert_eq!(error.code, crate::ErrorCode::ValueTooLarge, "{error}");
     assert!(error.message.contains("`links` of Holder-1"), "refusal must name the field and entity: {error}");
 
     // Atomicity: neither the entity nor the ref list moved
-    let (old_exists, new_exists) = db
+    let (old_exists, new_exists, links_after) = db
         .snapshot(|r| {
             Ok((
                 crate::engine::unit::Read::get(r, &keys::entity(&short_id))?.is_some(),
                 crate::engine::unit::Read::get(r, &keys::entity(&long_id))?.is_some(),
+                crate::engine::unit::Read::get(r, &keys::value("Holder-1", "links"))?,
             ))
         })
         .unwrap();
     assert!(old_exists, "failed rename_type must keep original entity");
     assert!(!new_exists, "failed rename_type must not leave renamed entity");
+    assert_eq!(links_after.as_deref(), Some(links_before.as_slice()), "failed rename_type must keep Holder-1 links");
 }
