@@ -171,14 +171,7 @@ impl Wake {
         let stopping = Arc::new(AtomicBool::new(false));
         let (stop, waiting) = (Arc::clone(&stopping), Arc::clone(&mailbox));
         let thread = match spawn(Box::new(move || {
-            struct ActiveGuard(usize);
-            impl Drop for ActiveGuard {
-                fn drop(&mut self) {
-                    ACTIVE_LISTENER.with(|cell| cell.set(self.0));
-                }
-            }
-            let previous = ACTIVE_LISTENER.with(|cell| cell.replace(Arc::as_ptr(&stop) as usize));
-            let _active = ActiveGuard(previous);
+            ACTIVE_LISTENER.with(|cell| cell.set(Arc::as_ptr(&stop) as usize));
             loop {
                 // Nothing wakes this again after a failure, and whoever asks next learns what was missed
                 if waiting.wait().is_err() || stop.load(Ordering::Acquire) {

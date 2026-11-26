@@ -112,8 +112,6 @@ struct State {
     /// A thread runs this building: claimed by `claim_start` before it is started, given up by the thread as it
     /// ends. One at a time, whoever asks
     running: bool,
-    /// The thread that runs it, while one does: what a caller asks to know it is a listener that thread called
-    thread: Option<std::thread::ThreadId>,
 }
 
 /// How a wait for the builds ended (`Core::waited`)
@@ -142,7 +140,6 @@ struct Core {
 fn holds(state: &State) {
     debug_assert!(state.active.is_none() || state.busy, "work under way with the builder said to be idle");
     debug_assert!(state.active.is_none() || state.running, "work under way with no thread claimed");
-    debug_assert!(state.thread.is_none() || state.running, "a thread recorded that isn't claimed");
     debug_assert!(!state.closed || state.stopping, "closed and not stopping");
     debug_assert!(state.closing == 0 || state.stopping, "a close under way and the thread not told to stop");
     debug_assert!(
@@ -381,11 +378,7 @@ impl Core {
     /// the thread `claim_start` claimed, which it gives up as it ends
     fn run(&self, mut build: impl FnMut(&Work, &dyn Fn() -> bool) -> crate::Result<()>) {
         let previous_active = ACTIVE_BUILDER.with(|cell| cell.replace(self as *const Self as usize));
-        {
-            let mut state = self.lock();
-            debug_assert!(state.running, "a thread runs the building that wasn't claimed");
-            state.thread = Some(std::thread::current().id());
-        }
+        debug_assert!(self.lock().running, "a thread runs the building that wasn't claimed");
         // Ends idle, and given up, whichever way it ends, a panic outside a build's own among them: a thread started
         // after it finds no work under way, and may be started at all, and no wait is left waiting on this one
         struct Ending<'a> {
@@ -399,7 +392,6 @@ impl Core {
                 state.busy = false;
                 state.active = None;
                 state.running = false;
-                state.thread = None;
                 holds(&state);
                 drop(state);
                 self.core.changed.notify_all();
@@ -1525,7 +1517,19 @@ mod tests {
         core.queue([index("a")]);
         assert_eq!(told.recv_timeout(crate::waits::ARRIVES), Ok(true), "the thread didn't know itself");
         runner.join().unwrap();
-        assert!(!core.on_its_thread() && core.lock().thread.is_none(), "the thread kept as it ended");
+        assert!(!core.on_its_thread(), "no other thread is it");
+
+        // Running directly on this thread restores `ACTIVE_BUILDER` once `run` returns
+        let direct = Core::new(Box::new(SystemClock));
+        direct.queue([index("b")]);
+        let mut inside = false;
+        direct.claimed().run(|_, _| {
+            inside = direct.on_its_thread();
+            direct.begin_close();
+            Ok(())
+        });
+        assert!(inside, "the thread didn't know itself");
+        assert!(!direct.on_its_thread(), "the thread kept as it ended");
     }
 
     #[test]
