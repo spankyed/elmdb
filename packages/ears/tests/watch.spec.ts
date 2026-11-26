@@ -182,4 +182,82 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     expect(engine.watches.activeCount).toBe(0);
     expect(errors).toEqual([]);
   });
+
+  it('prevents livelock on schema-broken watches, clears stale timers after flushSync, and cleans up failed immediate registration', () => {
+    const handle = temps.open({ schema: watchSchema });
+    const clock = createFakeClock(20_000);
+    const engine = createEarsEngine({ database: handle.database, clock });
+
+    const brokenErrors: EarsError[] = [];
+    const healthySnapshots: number[] = [];
+
+    const broken = engine.query
+      .of('Task')
+      .where('title', 'hello')
+      .watchIds(() => {}, { minGapMs: 0, onError: (e) => brokenErrors.push(e) });
+    const healthy = engine.query
+      .of('Task')
+      .where('done', false)
+      .watchCount((c) => healthySnapshots.push(c), { minGapMs: 0 });
+
+    // Rename 'title' -> 'heading' breaks `broken` watch permanently; healthy watch stays valid!
+    engine.admin.renameField('Task', 'title', 'heading');
+    engine.create('Task', { heading: 'alive', done: false }, 't-alive');
+
+    // Advancing clock must NOT hang (zero 0ms livelock!) and must report the schema error exactly once.
+    clock.advance(100);
+    expect(brokenErrors).toHaveLength(1);
+    expect(brokenErrors[0]?.code).toBe('UNKNOWN_FIELD');
+    expect(broken.active).toBe(false);
+    expect(healthy.active).toBe(true);
+    expect(healthySnapshots).toEqual([0, 1]);
+    expect(clock.pendingTimers).toBe(0);
+
+    // flushSync clears pending timers when settled
+    engine.create('Task', { heading: 'second', done: false }, 't-second');
+    expect(clock.pendingTimers).toBe(1);
+    engine.watches.flushSync(clock.now() + 50);
+    expect(healthySnapshots).toEqual([0, 1, 2]);
+    expect(clock.pendingTimers).toBe(0);
+
+    // Re-entrant mutation inside flushSync schedules a timer for cooldown watches instead of dropping it
+    const reentrantCounts: number[] = [];
+    let didMutate = false;
+    const reentrant = engine.query.of('Task').watchCount(
+      (c) => {
+        reentrantCounts.push(c);
+        if (!didMutate && c === 3) {
+          didMutate = true;
+          engine.create('Task', { heading: 'from-callback', done: false }, 't-reentrant');
+        }
+      },
+      { minGapMs: 25 },
+    );
+    engine.create('Task', { heading: 'trigger-reentrant', done: false }, 't-trigger');
+    engine.watches.flushSync(clock.now() + 100);
+    expect(reentrantCounts).toEqual([2, 3]);
+    expect(clock.pendingTimers).toBe(1);
+    clock.advance(200);
+    expect(reentrantCounts).toEqual([2, 3, 4]);
+    reentrant.stop();
+
+    // Throwing from onError during immediate registration must NOT leak the watch!
+    const beforeCount = engine.watches.activeCount;
+    expect(() =>
+      engine.query.of('Task').watchCount(
+        () => {
+          throw new Error('initial boom');
+        },
+        {
+          immediate: true,
+          onError: (err) => {
+            throw err;
+          },
+        },
+      ),
+    ).toThrow('initial boom');
+    expect(engine.watches.activeCount).toBe(beforeCount);
+
+    healthy.stop();
+  });
 });

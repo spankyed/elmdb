@@ -198,5 +198,82 @@ describe('@elmdb/ears algebraic QueryBuilder', () => {
     }
     expect(isEarsError(refused)).toBe(true);
     expect((refused as EarsError).code).toBe('INVALID_ARGUMENT');
+
+    // P0-2 & P1-7: jaccard, adamicAdar, explain() on graph analytics, and async aggregate/graph parity!
+    const jaccardHits = engine.query.of('Doc').jaccard('d1', 5, { relKinds: ['cites'], dir: 'both' }).hits();
+    expect(Array.isArray(jaccardHits)).toBe(true);
+    const adamicHits = await engine.query.of('Doc').adamicAdar('d1', 5, { relKinds: ['cites'], dir: 'both' }).hitsAsync();
+    expect(Array.isArray(adamicHits)).toBe(true);
+    expect(engine.query.of('Doc').jaccard('d1', 5, { relKinds: ['cites'] }).explain().explain).not.toBeNull();
+    expect(engine.query.of('Doc').leiden({ relKinds: ['cites'] }).explain().explain).not.toBeNull();
+    expect((await engine.query.of('Doc').groupByAsync('category')).length).toBe(2);
+    expect((await engine.query.of('Doc').groupCountsAsync('category')).length).toBe(2);
+    expect((await engine.query.of('Doc').degreesAsync({ relKinds: ['cites'], dir: 'both' })).length).toBe(3);
+    expect((await engine.query.of('Doc').scc(['cites']).graphGroupsAsync()).length).toBe(1);
+    expect((await engine.query.of('Doc').topoSort(['cites']).graphTopoAsync()).cycles).toBeGreaterThan(0);
+    expect((await engine.query.of('Doc').ppr([['d1', 1.0]], { relKinds: ['cites'] }).graphPprAsync()).scores.length).toBe(3);
+
+    // P0-4, P0-5, P1-8, P1-9: validation of conflicting bounds, empty/typo predicates, bad limit/cursor, filterLocal ordering
+    expect(() => engine.query.of('Doc').where('score', { gte: 10, gt: 20 })).toThrow(/Conflicting lower range bounds/);
+    expect(() => engine.query.of('Doc').where('score', { lte: 10, lt: 20 })).toThrow(/Conflicting upper range bounds/);
+    expect(() => engine.query.of('Doc').where('score', {})).toThrow(/Empty filter predicate/);
+    expect(() => engine.query.of('Doc').where('score', { gte: 10, typo: 20 } as unknown as { gte: number })).toThrow(
+      /Unknown filter predicate key/,
+    );
+    expect(() => engine.query.of('Doc').where('score', undefined as unknown as number)).toThrow(/cannot be undefined/);
+    expect(() => engine.query.of('Doc').limit(Number.NaN)).toThrow(/non-negative safe integer/);
+    expect(() => engine.query.of('Doc').limit(-1)).toThrow(/non-negative safe integer/);
+    expect(() => engine.query.of('Doc').limit(5).orderBy('score', 'desc')).toThrow(/before limit/);
+    expect(() => engine.query.of('Doc').orderBy('score').after({ id: '' })).toThrow(/non-empty string id/);
+    expect(() => engine.query.of('Doc').filterLocal(() => true).hops({ maxHops: 1 })).toThrow(/after filterLocal/);
+    expect(() => engine.query.of('Doc').filterLocal(() => true).limit(1)).toThrow(/after filterLocal/);
+    expect(engine.query.of('Doc').limit(0).first()).toBeNull();
+    expect(await engine.query.of('Doc').limit(0).firstAsync()).toBeNull();
+
+    // P2-14: filterLocal + declarative watch deduplicates post-filter results
+    const localWatchDeliveries: string[][] = [];
+    const lw = engine.query
+      .of('Doc')
+      .orderById('asc')
+      .filterLocal((row) => row.fields['category'] === 'ops')
+      .watch((rows) => localWatchDeliveries.push(rows.map((r) => r.id)), { minGapMs: 0 });
+    expect(localWatchDeliveries).toEqual([['d3']]);
+    // Updating an 'eng' row (rejected by filterLocal) must NOT re-deliver an identical ['d3'] result!
+    engine.patch('d1', { score: 999 });
+    engine.watches.flushSync(Date.now() + 100);
+    expect(localWatchDeliveries).toEqual([['d3']]);
+    lw.stop();
+  });
+
+  it('normalizes Uint8Array and Date values in where() filters and rejects Invalid Date', () => {
+    const typedSchema: Schema = {
+      types: {
+        BlobItem: {
+          fields: {
+            raw: { type: 'bytes' },
+            createdAt: { type: 'timestamp' },
+          },
+          indexes: {
+            byRaw: { kind: 'value', fields: ['raw'] },
+            byCreated: { kind: 'value', fields: ['createdAt'] },
+          },
+        },
+      },
+      relations: {},
+    };
+    const { database } = temps.open({ schema: typedSchema });
+    const engine = createEarsEngine({ database });
+
+    const bytesA = new Uint8Array([1, 2, 3, 255]);
+    const bytesB = new Uint8Array([9, 8, 7]);
+    const tsA = new Date(1_700_000_000_000);
+    const tsB = new Date(1_700_000_500_000);
+
+    engine.create('BlobItem', { raw: bytesA, createdAt: tsA }, 'b-a');
+    engine.create('BlobItem', { raw: bytesB, createdAt: tsB }, 'b-b');
+
+    expect(engine.query.of('BlobItem').where('raw', bytesA).ids()).toEqual(['b-a']);
+    expect(engine.query.of('BlobItem').where('createdAt', { gte: new Date(1_700_000_250_000) }).ids()).toEqual(['b-b']);
+    expect(() => engine.query.of('BlobItem').where('createdAt', new Date('invalid'))).toThrow(/Invalid Date/);
   });
 });

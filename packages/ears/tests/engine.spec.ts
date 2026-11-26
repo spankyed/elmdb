@@ -183,6 +183,19 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     unsub();
     engine.create('Note', { title: 'Allowed now' }, 'n-bad');
     expect(engine.get('n-bad')).not.toBeNull();
+
+    // P1-12: Async beforeCommit callbacks and invalid return types are rejected explicitly
+    const unsubAsync = engine.beforeCommit(['Note'], (async () => {}) as unknown as () => void);
+    let asyncHookErr: unknown;
+    try {
+      engine.create('Note', { title: 'Triggers async hook' }, 'n-async');
+    } catch (err) {
+      asyncHookErr = err;
+    }
+    expect(isEarsError(asyncHookErr)).toBe(true);
+    expect((asyncHookErr as EarsError).code).toBe('HOOK_ABORTED');
+    expect((asyncHookErr as EarsError).message).toContain('synchronous');
+    unsubAsync();
   });
 
   it('handles O(1) schema renames, archive/purge, backup, dump/load, and async openers', async () => {

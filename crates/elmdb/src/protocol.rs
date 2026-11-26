@@ -1303,6 +1303,18 @@ fn resolve_index_id(schema: &CompiledSchema, active_type: Option<elmdb_engine::T
     }
 }
 
+fn json_as_whole_i64(v: &serde_json::Value) -> Option<i64> {
+    if let Some(i) = v.as_i64() {
+        return Some(i);
+    }
+    let f = v.as_f64()?;
+    if f.is_finite() && f.fract() == 0.0 && f >= (i64::MIN as f64) && f < (i64::MAX as f64) {
+        Some(f as i64)
+    } else {
+        None
+    }
+}
+
 /// Coerces a JSON filter/cursor literal according to the target field's `FieldKind`
 /// so queries on `Timestamp`, `Ref`, and `Bytes` fields match stored `CanonicalValue`s cleanly.
 fn coerce_json_for_field<F>(v: &serde_json::Value, kind: &FieldKind, resolve_ext_id: &mut F) -> Result<CanonicalValue>
@@ -1314,17 +1326,19 @@ where
     }
     match kind {
         FieldKind::Timestamp => {
-            if let Some(ms) = v.as_i64() {
+            if let Some(ms) = json_as_whole_i64(v) {
                 return Ok(CanonicalValue::Timestamp { ms, ns: 0 });
             }
             if let Some(obj) = v.as_object()
-                && let Some(ms) = obj.get("ms").and_then(serde_json::Value::as_i64)
+                && let Some(ms) = obj.get("ms").and_then(json_as_whole_i64)
             {
-                let ns = obj.get("ns").and_then(serde_json::Value::as_u64).unwrap_or(0);
-                if ns >= 1_000_000_000 {
-                    return Err(ElmdbError::new(ErrorCode::ValidationFailed, "timestamp ns must be < 1e9"));
+                let ns_raw = obj.get("ns").map_or(Some(0), json_as_whole_i64).ok_or_else(|| {
+                    ElmdbError::new(ErrorCode::ValidationFailed, "timestamp ns must be a whole integer")
+                })?;
+                if !(0..1_000_000_000).contains(&ns_raw) {
+                    return Err(ElmdbError::new(ErrorCode::ValidationFailed, "timestamp ns must be in 0..1e9"));
                 }
-                return Ok(CanonicalValue::Timestamp { ms, ns: ns as u32 });
+                return Ok(CanonicalValue::Timestamp { ms, ns: ns_raw as u32 });
             }
             json_to_canonical(v)
         }
@@ -1341,7 +1355,7 @@ where
             if let Some(arr) = v.as_array() {
                 let mut bytes = Vec::with_capacity(arr.len());
                 for item in arr {
-                    let b = item.as_u64().and_then(|n| u8::try_from(n).ok()).ok_or_else(|| {
+                    let b = json_as_whole_i64(item).and_then(|n| u8::try_from(n).ok()).ok_or_else(|| {
                         ElmdbError::new(ErrorCode::ValidationFailed, "bytes filter elements must be 0..=255")
                     })?;
                     bytes.push(b);

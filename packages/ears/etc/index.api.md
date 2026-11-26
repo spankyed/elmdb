@@ -128,8 +128,13 @@ export type DurabilityMode = 'strict' | 'grouped' | 'unsafe';
 export namespace EARS {
     const // (undocumented)
     entityTypeBrand: unique symbol;
+    const // (undocumented)
+    batchSlotTypeBrand: unique symbol;
     export type EntityId<TName extends string = string> = string & {
-        readonly [entityTypeBrand]?: TName;
+        readonly [entityTypeBrand]: TName;
+    };
+    export type TypedBatchSlot<TName extends string = string> = BatchSlot & {
+        readonly [batchSlotTypeBrand]: TName;
     };
     export {};
 }
@@ -481,7 +486,7 @@ export function isEarsError(error: unknown): error is EarsError;
 // @public
 export interface KeysetCursor {
     // (undocumented)
-    readonly id?: string;
+    readonly id: string;
     // (undocumented)
     readonly score?: number;
     // (undocumented)
@@ -553,6 +558,7 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
     count(): number;
     countAsync(): Promise<number>;
     degrees(opts?: DegreesOptions): Array<[string, number]>;
+    degreesAsync(opts?: DegreesOptions): Promise<Array<[string, number]>>;
     distinct(): QueryBuilder<TResult>;
     exists(): boolean;
     existsAsync(): Promise<boolean>;
@@ -563,10 +569,15 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
     fuse(inputs: ReadonlyArray<readonly [QueryScore, number]>, opts?: FuseOptions): QueryBuilder<TResult>;
     fuzzy(field: string, query: string, maxDistance: number): QueryBuilder<TResult>;
     graphGroups(): string[][];
+    graphGroupsAsync(): Promise<string[][]>;
     graphPpr(): GraphPprResult;
+    graphPprAsync(): Promise<GraphPprResult>;
     graphTopo(): GraphTopoResult;
+    graphTopoAsync(): Promise<GraphTopoResult>;
     groupBy(field: string): Array<[unknown, string[]]>;
+    groupByAsync(field: string): Promise<Array<[unknown, string[]]>>;
     groupCounts(field: string): Array<[unknown, number]>;
+    groupCountsAsync(field: string): Promise<Array<[unknown, number]>>;
     hasLink(opts?: HasLinkOptions): QueryBuilder<TResult>;
     hits(): Hit[];
     hitsAsync(): Promise<Hit[]>;
@@ -707,31 +718,36 @@ export function toEarsError(error: unknown, fallbackCode?: EarsErrorCode): EarsE
 // @public
 export interface TypedBatchWriter<TSchema extends EarsSchemaShape> {
     // (undocumented)
-    create<TName extends EntityTypeName<TSchema>>(typeName: TName, fields: TSchema['entities'][TName], externalId?: EARS.EntityId<TName> | string): BatchSlot;
+    create<TName extends EntityTypeName<TSchema>>(typeName: TName, fields: TSchema['entities'][TName], externalId?: EARS.EntityId<TName> | string): EARS.TypedBatchSlot<TName>;
     // (undocumented)
-    destroy(target: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot): this;
+    destroy(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
     // (undocumented)
     readonly length: number;
     // (undocumented)
-    link(source: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot, relKind: RelationKindName<TSchema>, target: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot, opts?: LinkOptions): this;
+    link(source: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>, relKind: RelationKindName<TSchema>, target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>, opts?: LinkOptions): this;
     // (undocumented)
-    patch<TName extends EntityTypeName<TSchema>>(target: EARS.EntityId<TName> | BatchSlot, fields: Partial<TSchema['entities'][TName]>): this;
+    patch<TName extends EntityTypeName<TSchema>>(target: EARS.EntityId<TName> | EARS.TypedBatchSlot<TName>, fields: Partial<TSchema['entities'][TName]>): this;
     // (undocumented)
-    restore(target: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot): this;
+    restore(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
     // (undocumented)
-    trash(target: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot): this;
+    trash(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
     // (undocumented)
-    unlink(source: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot, relKind?: RelationKindName<TSchema>, target?: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot): this;
+    unlink(source: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>, relKind?: RelationKindName<TSchema>, target?: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
     // (undocumented)
-    unset<TName extends EntityTypeName<TSchema>>(target: EARS.EntityId<TName> | BatchSlot, fields: ReadonlyArray<Extract<keyof TSchema['entities'][TName], string>>): this;
+    unset<TName extends EntityTypeName<TSchema>>(target: EARS.EntityId<TName> | EARS.TypedBatchSlot<TName>, fields: ReadonlyArray<Extract<keyof TSchema['entities'][TName], string>>): this;
 }
+
+// @public
+export type TypedBeforeCommitHook<TSchema extends EarsSchemaShape> = (delta: CommitDelta) => void | Uint8Array | ((batch: TypedBatchWriter<TSchema>) => void);
 
 // @public
 export interface TypedEars<TSchema extends EarsSchemaShape> {
     // (undocumented)
+    readonly admin: () => EarsAdmin;
+    // (undocumented)
     batch(fn: (batch: TypedBatchWriter<TSchema>) => void): BatchResult;
     // (undocumented)
-    beforeCommit(typeNames: readonly EntityTypeName<TSchema>[] | null, callback: BeforeCommitHook): () => void;
+    beforeCommit(typeNames: readonly EntityTypeName<TSchema>[] | null, callback: TypedBeforeCommitHook<TSchema>): () => void;
     // (undocumented)
     create<TName extends EntityTypeName<TSchema>>(typeName: TName, fields: TSchema['entities'][TName], externalId?: EARS.EntityId<TName> | string): EARS.EntityId<TName>;
     // (undocumented)
@@ -751,22 +767,26 @@ export interface TypedEars<TSchema extends EarsSchemaShape> {
     // (undocumented)
     restore(id: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
     // (undocumented)
+    setEmbeddings(indexName: string, id: EARS.EntityId<EntityTypeName<TSchema>>, vectors: ReadonlyArray<ReadonlyArray<number>>): void;
+    // (undocumented)
     trash(id: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
     // (undocumented)
     unlink(sourceId: EARS.EntityId<EntityTypeName<TSchema>>, relKind?: RelationKindName<TSchema>, targetId?: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
     // (undocumented)
     unset<TName extends EntityTypeName<TSchema>>(id: EARS.EntityId<TName>, fields: ReadonlyArray<Extract<keyof TSchema['entities'][TName], string>>): BatchResult;
+    // (undocumented)
+    readonly watches: () => WatchController;
 }
 
 export { TypeDefinition }
 
 // @public
-export type TypedEntityRow<TSchema extends EarsSchemaShape, TName extends EntityTypeName<TSchema>> = {
+export type TypedEntityRow<TSchema extends EarsSchemaShape, TName extends EntityTypeName<TSchema>> = TName extends EntityTypeName<TSchema> ? {
     readonly id: EARS.EntityId<TName>;
     readonly typeName: TName;
     readonly trashed: boolean;
     readonly fields: Readonly<TSchema['entities'][TName]>;
-};
+} : never;
 
 // @public
 export interface TypedQueryRoot<TSchema extends EarsSchemaShape> {
@@ -778,6 +798,10 @@ export interface TypedQueryRoot<TSchema extends EarsSchemaShape> {
     of<TName extends EntityTypeName<TSchema>>(typeName: TName, opts?: SourceOptions): QueryBuilder<TypedEntityRow<TSchema, TName>>;
     // (undocumented)
     ofTypes<TName extends EntityTypeName<TSchema>>(typeNames: readonly TName[], opts?: SourceOptions): QueryBuilder<TypedEntityRow<TSchema, TName>>;
+    // (undocumented)
+    raw(spec: QuerySpec): QueryAnswer;
+    // (undocumented)
+    rawAsync(spec: QuerySpec): Promise<QueryAnswer>;
 }
 
 // @public
@@ -821,6 +845,6 @@ export { WatchRerun }
 export { WatchTick }
 
 // @public
-export type WhereInput = string | number | boolean | null | Uint8Array | FieldPredicate;
+export type WhereInput = string | number | boolean | null | Uint8Array | Date | FieldPredicate;
 
 ```

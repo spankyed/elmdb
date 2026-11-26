@@ -75,21 +75,39 @@ export async function openDatabaseAsync(options: DatabaseOptions): Promise<EarsD
 /** Opens an elmdb v2 database and wraps it in an `EarsEngine` in a single call. */
 export function openEngine(options: OpenEngineOptions): EarsEngine {
   const database = openDatabase(options);
-  return createEarsEngine({
-    database,
-    ...(options.clock !== undefined && { clock: options.clock }),
-    ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
-  });
+  try {
+    return createEarsEngine({
+      database,
+      ...(options.clock !== undefined && { clock: options.clock }),
+      ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
+    });
+  } catch (error) {
+    try {
+      database.close();
+    } catch {
+      // Preserve original failure.
+    }
+    throw toEarsError(error);
+  }
 }
 
 /** Opens an elmdb v2 database asynchronously and wraps it in an `EarsEngine`. */
 export async function openEngineAsync(options: OpenEngineOptions): Promise<EarsEngine> {
   const database = await openDatabaseAsync(options);
-  return createEarsEngine({
-    database,
-    ...(options.clock !== undefined && { clock: options.clock }),
-    ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
-  });
+  try {
+    return createEarsEngine({
+      database,
+      ...(options.clock !== undefined && { clock: options.clock }),
+      ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
+    });
+  } catch (error) {
+    try {
+      database.close();
+    } catch {
+      // Preserve original failure.
+    }
+    throw toEarsError(error);
+  }
 }
 
 /** Loads a portable elmdb v2 JSON dump file into a brand-new database directory. */
@@ -144,7 +162,7 @@ export function createTemporaryDatabases(): TemporaryDatabases {
     } catch (error) {
       if (failure === undefined) failure = error;
     }
-    if (failure !== undefined) throw failure;
+    if (failure !== undefined) throw toEarsError(failure);
   };
 
   const atExit = (): void => {
@@ -178,9 +196,9 @@ export function createTemporaryDatabases(): TemporaryDatabases {
       let database: EarsDatabase;
       try {
         database = openDatabase({
-          durability: 'unsafe',
-          buildPolicy: 'eager',
           ...options,
+          durability: options?.durability ?? 'unsafe',
+          buildPolicy: options?.buildPolicy ?? 'eager',
           path: dir,
         });
       } catch (error) {

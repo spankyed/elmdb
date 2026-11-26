@@ -48,6 +48,7 @@ export type WhereInput =
   | boolean
   | null
   | Uint8Array
+  | Date
   | FieldPredicate;
 
 /** Options for `QueryBuilder.search(...)` (BM25F full-text search). */
@@ -96,9 +97,9 @@ export interface OrderByOptions {
   readonly locale?: string;
 }
 
-/** Keyset pagination cursor for `QueryBuilder.after(...)`. */
+/** Keyset pagination cursor for `QueryBuilder.after(...)`. `id` is required as the tie-breaker key. */
 export interface KeysetCursor {
-  readonly id?: string;
+  readonly id: string;
   readonly score?: number;
   readonly value?: unknown;
 }
@@ -167,51 +168,122 @@ const PREDICATE_KEYS: Readonly<Record<keyof FieldPredicate, true>> = Object.free
   isPresent: true,
 });
 
+const GRAPH_ANALYZE_STEP_KINDS: Readonly<Record<string, true>> = Object.freeze({
+  graphPpr: true,
+  graphWeakComponents: true,
+  graphScc: true,
+  graphTopoSort: true,
+  graphLeiden: true,
+  graphJaccard: true,
+  graphAdamicAdar: true,
+});
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Array.isArray(value) || value instanceof Uint8Array) {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || Array.isArray(value)
+    || value instanceof Uint8Array
+    || value instanceof Date
+  ) {
     return false;
   }
   const proto = Object.getPrototypeOf(value) as unknown;
   return proto === Object.prototype || proto === null;
 }
 
-function isFieldPredicate(value: unknown): value is FieldPredicate {
-  if (!isPlainRecord(value)) return false;
-  const keys = Object.keys(value);
-  return keys.length > 0 && keys.every((k) => Object.prototype.hasOwnProperty.call(PREDICATE_KEYS, k));
+function normalizeQueryValue(value: unknown): unknown {
+  if (value === undefined) {
+    throw new EarsError('INVALID_ARGUMENT', 'Query value cannot be undefined');
+  }
+  if (value instanceof Uint8Array) {
+    // Rust protocol `coerce_json_for_field` decodes `Bytes` fields from JSON `number[]` (0..=255).
+    return Array.from(value);
+  }
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    if (!Number.isFinite(ms)) {
+      throw new EarsError('INVALID_ARGUMENT', 'Invalid Date passed to query filter or cursor');
+    }
+    // Rust protocol `coerce_json_for_field` accepts epoch milliseconds for `Timestamp` fields.
+    return ms;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeQueryValue(item));
+  }
+  if (isPlainRecord(value)) {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      if (key === '__proto__') {
+        throw new EarsError('INVALID_ARGUMENT', "Reserved key '__proto__' is not allowed in query values");
+      }
+      const v = value[key];
+      if (v !== undefined) out[key] = normalizeQueryValue(v);
+    }
+    return out;
+  }
+  return value;
 }
 
 function compileFieldPredicate(field: string, valueOrPredicate: WhereInput): QueryFilter {
-  if (!isFieldPredicate(valueOrPredicate)) {
-    return { op: 'eq', field, value: valueOrPredicate };
+  if (valueOrPredicate === undefined) {
+    throw new EarsError('INVALID_ARGUMENT', `Filter value for field '${field}' cannot be undefined`);
   }
+  if (!isPlainRecord(valueOrPredicate)) {
+    return { op: 'eq', field, value: normalizeQueryValue(valueOrPredicate) };
+  }
+
+  const keys = Object.keys(valueOrPredicate);
+  if (keys.length === 0) {
+    throw new EarsError(
+      'INVALID_ARGUMENT',
+      `Empty filter predicate for field '${field}' (use where({ op: 'eq', field: '${field}', value: {} }) to match an empty object)`,
+    );
+  }
+  const unknownKeys = keys.filter((k) => !Object.prototype.hasOwnProperty.call(PREDICATE_KEYS, k));
+  if (unknownKeys.length > 0) {
+    throw new EarsError(
+      'INVALID_ARGUMENT',
+      `Unknown filter predicate key(s) for field '${field}': ${unknownKeys.join(', ')} (use { eq: obj } to match a plain object value)`,
+    );
+  }
+
+  const pred = valueOrPredicate as FieldPredicate;
+  if (pred.gt !== undefined && pred.gte !== undefined) {
+    throw new EarsError(
+      'INVALID_ARGUMENT',
+      `Conflicting lower range bounds for field '${field}': specify either 'gt' or 'gte', not both`,
+    );
+  }
+  if (pred.lt !== undefined && pred.lte !== undefined) {
+    throw new EarsError(
+      'INVALID_ARGUMENT',
+      `Conflicting upper range bounds for field '${field}': specify either 'lt' or 'lte', not both`,
+    );
+  }
+
   const filters: QueryFilter[] = [];
-  if (valueOrPredicate.eq !== undefined) {
-    filters.push({ op: 'eq', field, value: valueOrPredicate.eq });
+  if (pred.eq !== undefined) {
+    filters.push({ op: 'eq', field, value: normalizeQueryValue(pred.eq) });
   }
-  if (valueOrPredicate.ne !== undefined) {
-    filters.push({ op: 'ne', field, value: valueOrPredicate.ne });
+  if (pred.ne !== undefined) {
+    filters.push({ op: 'ne', field, value: normalizeQueryValue(pred.ne) });
   }
-  if (valueOrPredicate.in !== undefined) {
-    filters.push({ op: 'in', field, values: [...valueOrPredicate.in] });
+  if (pred.in !== undefined) {
+    filters.push({ op: 'in', field, values: pred.in.map((v) => normalizeQueryValue(v)) });
   }
-  if (
-    valueOrPredicate.gt !== undefined
-    || valueOrPredicate.gte !== undefined
-    || valueOrPredicate.lt !== undefined
-    || valueOrPredicate.lte !== undefined
-  ) {
+  if (pred.gt !== undefined || pred.gte !== undefined || pred.lt !== undefined || pred.lte !== undefined) {
     const low: [unknown, boolean] | undefined =
-      valueOrPredicate.gte !== undefined
-        ? [valueOrPredicate.gte, true]
-        : valueOrPredicate.gt !== undefined
-          ? [valueOrPredicate.gt, false]
+      pred.gte !== undefined
+        ? [normalizeQueryValue(pred.gte), true]
+        : pred.gt !== undefined
+          ? [normalizeQueryValue(pred.gt), false]
           : undefined;
     const high: [unknown, boolean] | undefined =
-      valueOrPredicate.lte !== undefined
-        ? [valueOrPredicate.lte, true]
-        : valueOrPredicate.lt !== undefined
-          ? [valueOrPredicate.lt, false]
+      pred.lte !== undefined
+        ? [normalizeQueryValue(pred.lte), true]
+        : pred.lt !== undefined
+          ? [normalizeQueryValue(pred.lt), false]
           : undefined;
     filters.push({
       op: 'range',
@@ -220,25 +292,25 @@ function compileFieldPredicate(field: string, valueOrPredicate: WhereInput): Que
       ...(high !== undefined && { high }),
     });
   }
-  if (valueOrPredicate.startsWith !== undefined) {
-    filters.push({ op: 'startsWith', field, prefix: valueOrPredicate.startsWith });
+  if (pred.startsWith !== undefined) {
+    filters.push({ op: 'startsWith', field, prefix: pred.startsWith });
   }
-  if (valueOrPredicate.contains !== undefined) {
-    filters.push({ op: 'contains', field, needle: valueOrPredicate.contains });
+  if (pred.contains !== undefined) {
+    filters.push({ op: 'contains', field, needle: pred.contains });
   }
-  if (valueOrPredicate.regex !== undefined) {
-    filters.push({ op: 'regex', field, pattern: valueOrPredicate.regex });
+  if (pred.regex !== undefined) {
+    filters.push({ op: 'regex', field, pattern: pred.regex });
   }
-  if (valueOrPredicate.isNull !== undefined) {
+  if (pred.isNull !== undefined) {
     filters.push(
-      valueOrPredicate.isNull
+      pred.isNull
         ? { op: 'isNull', field }
         : { op: 'not', filter: { op: 'isNull', field } },
     );
   }
-  if (valueOrPredicate.isPresent !== undefined) {
+  if (pred.isPresent !== undefined) {
     filters.push(
-      valueOrPredicate.isPresent
+      pred.isPresent
         ? { op: 'isPresent', field }
         : { op: 'not', filter: { op: 'isPresent', field } },
     );
@@ -247,6 +319,14 @@ function compileFieldPredicate(field: string, valueOrPredicate: WhereInput): Que
     throw new EarsError('INVALID_ARGUMENT', `Empty filter predicate for field '${field}'`);
   }
   return filters.length === 1 ? filters[0]! : { op: 'and', filters };
+}
+
+function isGraphAnalyzeStep(step: QueryStep | undefined): boolean {
+  return step !== undefined && Object.prototype.hasOwnProperty.call(GRAPH_ANALYZE_STEP_KINDS, step.kind);
+}
+
+function isGraphHitsStep(step: QueryStep | undefined): boolean {
+  return step !== undefined && (step.kind === 'graphJaccard' || step.kind === 'graphAdamicAdar');
 }
 
 /**
@@ -300,9 +380,9 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
   topoSort(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
   /** Leiden community detection graph analytics step. */
   leiden(opts?: LeidenOptions): QueryBuilder<EntityRow>;
-  /** Top-K Jaccard neighborhood similarity graph step. */
+  /** Top-K Jaccard neighborhood similarity graph step (consume via `hits()` / `hitsAsync()`). */
   jaccard(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow>;
-  /** Top-K Adamic-Adar neighborhood similarity graph step. */
+  /** Top-K Adamic-Adar neighborhood similarity graph step (consume via `hits()` / `hitsAsync()`). */
   adamicAdar(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow>;
 
   /** Orders results by a field (with optional ICU collation `locale`). */
@@ -313,13 +393,13 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
   orderById(dir?: SortDirection): QueryBuilder<TResult>;
   /** Keyset pagination cursor applied to the current ordering. */
   after(cursor: KeysetCursor): QueryBuilder<TResult>;
-  /** Caps the number of returned results. */
+  /** Caps the number of returned results (must be a non-negative safe integer). */
   limit(n: number): QueryBuilder<TResult>;
 
   /**
    * Explicit single-snapshot JavaScript post-filter applied to materialized rows (`all`/`first`/`watch`).
-   * Refused on aggregate/non-row terminals (`count`/`ids`/`sum`/`minMax`/`groupBy`/`degrees`) so it
-   * can never silently produce wrong aggregates.
+   * Must be placed at the end of the pipeline (chaining further Rust steps or calling non-row terminals
+   * like `count`/`ids`/`sum`/`minMax`/`groupBy`/`degrees` throws `INVALID_ARGUMENT`).
    */
   filterLocal(predicate: (row: TResult) => boolean): QueryBuilder<TResult>;
 
@@ -340,9 +420,9 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
   ids(): string[];
   /** Returns matching entity IDs asynchronously. */
   idsAsync(): Promise<string[]>;
-  /** Returns scored `{ id, score }` hits synchronously. */
+  /** Returns scored `{ id, score }` hits synchronously (also consumes `jaccard` / `adamicAdar`). */
   hits(): Hit[];
-  /** Returns scored `{ id, score }` hits asynchronously. */
+  /** Returns scored `{ id, score }` hits asynchronously (also consumes `jaccard` / `adamicAdar`). */
   hitsAsync(): Promise<Hit[]>;
   /** Returns count of matching entities synchronously. */
   count(): number;
@@ -362,16 +442,28 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
   minMaxAsync(field: string): Promise<MinMaxResult>;
   /** Groups matching entity IDs by `field` synchronously. */
   groupBy(field: string): Array<[unknown, string[]]>;
+  /** Groups matching entity IDs by `field` asynchronously. */
+  groupByAsync(field: string): Promise<Array<[unknown, string[]]>>;
   /** Counts matching entities grouped by `field` synchronously. */
   groupCounts(field: string): Array<[unknown, number]>;
+  /** Counts matching entities grouped by `field` asynchronously. */
+  groupCountsAsync(field: string): Promise<Array<[unknown, number]>>;
   /** Computes per-entity edge degrees synchronously. */
   degrees(opts?: DegreesOptions): Array<[string, number]>;
-  /** Executes a community / component graph query (`leiden`, `scc`, `weakComponents`). */
+  /** Computes per-entity edge degrees asynchronously. */
+  degreesAsync(opts?: DegreesOptions): Promise<Array<[string, number]>>;
+  /** Executes a community / component graph query (`leiden`, `scc`, `weakComponents`) synchronously. */
   graphGroups(): string[][];
-  /** Executes a `topoSort` graph query. */
+  /** Executes a community / component graph query (`leiden`, `scc`, `weakComponents`) asynchronously. */
+  graphGroupsAsync(): Promise<string[][]>;
+  /** Executes a `topoSort` graph query synchronously. */
   graphTopo(): GraphTopoResult;
-  /** Executes a `ppr` graph query. */
+  /** Executes a `topoSort` graph query asynchronously. */
+  graphTopoAsync(): Promise<GraphTopoResult>;
+  /** Executes a `ppr` graph query synchronously. */
   graphPpr(): GraphPprResult;
+  /** Executes a `ppr` graph query asynchronously. */
+  graphPprAsync(): Promise<GraphPprResult>;
 
   /** Subscribes to live row updates driven by the engine's sans-I/O `WatchPump`. */
   watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle;
@@ -399,6 +491,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   readonly #source: QuerySource;
   readonly #steps: readonly QueryStep[];
   readonly #localFilters: ReadonlyArray<(row: TResult) => boolean>;
+  readonly #implicitOrderSlice: boolean;
 
   constructor(
     db: EarsDatabase,
@@ -406,63 +499,107 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     source: QuerySource,
     steps: readonly QueryStep[] = [],
     localFilters: ReadonlyArray<(row: TResult) => boolean> = [],
+    implicitOrderSlice = false,
   ) {
     this.#db = db;
     this.#pump = pump;
     this.#source = source;
     this.#steps = steps;
     this.#localFilters = localFilters;
+    this.#implicitOrderSlice = implicitOrderSlice;
   }
 
-  #withStep<TNext extends EntityRow = TResult>(step: QueryStep): QueryBuilderImpl<TNext> {
-    return new QueryBuilderImpl<TNext>(
+  #assertNoLocalFilters(stepName: string): void {
+    if (this.#localFilters.length > 0) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        `Cannot chain '${stepName}()' after filterLocal() — place filterLocal() at the end of the pipeline`,
+      );
+    }
+  }
+
+  #withStep(step: QueryStep, implicitOrderSlice = false): QueryBuilderImpl<TResult> {
+    this.#assertNoLocalFilters(step.kind);
+    return new QueryBuilderImpl<TResult>(
       this.#db,
       this.#pump,
       this.#source,
       [...this.#steps, step],
-      this.#localFilters as unknown as ReadonlyArray<(row: TNext) => boolean>,
+      [],
+      implicitOrderSlice,
     );
   }
 
+  #withUntypedStep(step: QueryStep): QueryBuilderImpl<EntityRow> {
+    this.#assertNoLocalFilters(step.kind);
+    return new QueryBuilderImpl<EntityRow>(
+      this.#db,
+      this.#pump,
+      this.#source,
+      [...this.#steps, step],
+      [],
+      false,
+    );
+  }
+
+  #withOrderStep(step: Extract<QueryStep, { kind: 'orderSlice' }>): QueryBuilderImpl<TResult> {
+    this.#assertNoLocalFilters('orderBy');
+    if (this.#implicitOrderSlice) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        'Call orderBy() / orderByScore() / orderById() before limit() or after()',
+      );
+    }
+    return this.#withStep(step, false);
+  }
+
   #withUpdatedOrderSlice(
-    patch: Partial<{
-      by: string;
-      field?: string;
-      dir: string;
-      locale?: string;
-      afterId?: string;
-      afterScore?: number;
-      afterValue?: unknown | null;
-      limit?: number;
-    }>,
+    patch: {
+      readonly resetCursor?: boolean;
+      readonly afterId?: string;
+      readonly afterScore?: number;
+      readonly afterValue?: unknown | null;
+      readonly limit?: number;
+    },
   ): QueryBuilderImpl<TResult> {
+    this.#assertNoLocalFilters(patch.limit !== undefined ? 'limit' : 'after');
     const last = this.#steps[this.#steps.length - 1];
     if (last && last.kind === 'orderSlice') {
-      const merged: QueryStep = {
-        ...last,
-        ...patch,
+      const next: Extract<QueryStep, { kind: 'orderSlice' }> = {
+        kind: 'orderSlice',
+        by: last.by,
+        dir: last.dir,
+        ...(last.field !== undefined && { field: last.field }),
+        ...(last.locale !== undefined && { locale: last.locale }),
+        ...(!patch.resetCursor && last.afterId !== undefined && { afterId: last.afterId }),
+        ...(!patch.resetCursor && last.afterScore !== undefined && { afterScore: last.afterScore }),
+        ...(!patch.resetCursor && last.afterValue !== undefined && { afterValue: last.afterValue }),
+        ...(last.limit !== undefined && { limit: last.limit }),
+        ...(patch.afterId !== undefined && { afterId: patch.afterId }),
+        ...(patch.afterScore !== undefined && { afterScore: patch.afterScore }),
+        ...(patch.afterValue !== undefined && { afterValue: patch.afterValue }),
+        ...(patch.limit !== undefined && { limit: patch.limit }),
       };
       return new QueryBuilderImpl<TResult>(
         this.#db,
         this.#pump,
         this.#source,
-        [...this.#steps.slice(0, -1), merged],
-        this.#localFilters,
+        [...this.#steps.slice(0, -1), next],
+        [],
+        this.#implicitOrderSlice,
       );
     }
     const hasScore = this.#steps.some((s) => s.kind === 'score');
-    const created: QueryStep = {
+    const created: Extract<QueryStep, { kind: 'orderSlice' }> = {
       kind: 'orderSlice',
-      by: patch.by ?? (hasScore ? 'score' : 'id'),
-      dir: patch.dir ?? (hasScore ? 'desc' : 'asc'),
-      ...(patch.field !== undefined && { field: patch.field }),
-      ...(patch.locale !== undefined && { locale: patch.locale }),
+      by: hasScore ? 'score' : 'id',
+      dir: hasScore ? 'desc' : 'asc',
       ...(patch.afterId !== undefined && { afterId: patch.afterId }),
       ...(patch.afterScore !== undefined && { afterScore: patch.afterScore }),
       ...(patch.afterValue !== undefined && { afterValue: patch.afterValue }),
       ...(patch.limit !== undefined && { limit: patch.limit }),
     };
-    return this.#withStep(created);
+    return this.#withStep(created, true);
   }
 
   #forbidLocalFilter(terminalName: string): void {
@@ -478,6 +615,11 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     const typed = rows as unknown as TResult[];
     if (this.#localFilters.length === 0) return [...typed];
     return typed.filter((row) => this.#localFilters.every((fn) => fn(row)));
+  }
+
+  #existingZeroLimit(): boolean {
+    const last = this.#steps[this.#steps.length - 1];
+    return last !== undefined && last.kind === 'orderSlice' && last.limit === 0;
   }
 
   where(filterOrField: QueryFilter | string, valueOrPredicate?: WhereInput): QueryBuilder<TResult> {
@@ -562,7 +704,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   hops(opts: HopsOptions): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'hops',
       dir: opts.dir ?? 'out',
       minHops: opts.minHops ?? 1,
@@ -572,7 +714,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   shortestPath(targetId: string, opts: ShortestPathOptions): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'shortestPath',
       dir: opts.dir ?? 'out',
       targetId,
@@ -586,7 +728,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   ppr(seeds: ReadonlyArray<readonly [string, number]>, opts?: PprOptions): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'graphPpr',
       seeds: seeds.map(([id, w]) => [id, w]),
       damping: opts?.damping ?? 0.85,
@@ -598,28 +740,28 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   weakComponents(relKinds?: readonly string[]): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'graphWeakComponents',
       ...(relKinds !== undefined && { relKinds: [...relKinds] }),
     });
   }
 
   scc(relKinds?: readonly string[]): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'graphScc',
       ...(relKinds !== undefined && { relKinds: [...relKinds] }),
     });
   }
 
   topoSort(relKinds?: readonly string[]): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'graphTopoSort',
       ...(relKinds !== undefined && { relKinds: [...relKinds] }),
     });
   }
 
   leiden(opts?: LeidenOptions): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'graphLeiden',
       resolution: opts?.resolution ?? 1.0,
       seed: opts?.seed ?? 42,
@@ -630,7 +772,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   jaccard(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'graphJaccard',
       dir: opts?.dir ?? 'both',
       seedId,
@@ -640,7 +782,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   adamicAdar(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow> {
-    return this.#withStep<EntityRow>({
+    return this.#withUntypedStep({
       kind: 'graphAdamicAdar',
       dir: opts?.dir ?? 'both',
       seedId,
@@ -650,7 +792,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   orderBy(field: string, dir: SortDirection = 'asc', opts?: OrderByOptions): QueryBuilder<TResult> {
-    return this.#withStep({
+    return this.#withOrderStep({
       kind: 'orderSlice',
       by: 'field',
       field,
@@ -660,22 +802,32 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   orderByScore(dir: SortDirection = 'desc'): QueryBuilder<TResult> {
-    return this.#withStep({ kind: 'orderSlice', by: 'score', dir });
+    return this.#withOrderStep({ kind: 'orderSlice', by: 'score', dir });
   }
 
   orderById(dir: SortDirection = 'asc'): QueryBuilder<TResult> {
-    return this.#withStep({ kind: 'orderSlice', by: 'id', dir });
+    return this.#withOrderStep({ kind: 'orderSlice', by: 'id', dir });
   }
 
   after(cursor: KeysetCursor): QueryBuilder<TResult> {
+    if (typeof cursor.id !== 'string' || cursor.id.length === 0) {
+      throw new EarsError('INVALID_ARGUMENT', 'Keyset cursor requires a non-empty string id');
+    }
+    if (cursor.score !== undefined && !Number.isFinite(cursor.score)) {
+      throw new EarsError('INVALID_ARGUMENT', 'Keyset cursor score must be a finite number');
+    }
     return this.#withUpdatedOrderSlice({
-      ...(cursor.id !== undefined && { afterId: cursor.id }),
+      resetCursor: true,
+      afterId: cursor.id,
       ...(cursor.score !== undefined && { afterScore: cursor.score }),
-      ...(cursor.value !== undefined && { afterValue: cursor.value }),
+      ...(cursor.value !== undefined && { afterValue: normalizeQueryValue(cursor.value) }),
     });
   }
 
   limit(n: number): QueryBuilder<TResult> {
+    if (!Number.isSafeInteger(n) || n < 0) {
+      throw new EarsError('INVALID_ARGUMENT', `limit() requires a non-negative safe integer, got ${String(n)}`);
+    }
     return this.#withUpdatedOrderSlice({ limit: n });
   }
 
@@ -686,6 +838,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
       this.#source,
       this.#steps,
       [...this.#localFilters, predicate],
+      this.#implicitOrderSlice,
     );
   }
 
@@ -715,7 +868,9 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   explain(terminal?: QueryTerminal): QueryAnswer {
-    return this.#run(terminal ?? { kind: 'rows' }, true);
+    const last = this.#steps[this.#steps.length - 1];
+    const effectiveTerminal = terminal ?? (isGraphAnalyzeStep(last) ? undefined : { kind: 'rows' });
+    return this.#run(effectiveTerminal, true);
   }
 
   all(fields?: readonly string[]): TResult[] {
@@ -737,11 +892,13 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   first(fields?: readonly string[]): TResult | null {
+    if (this.#existingZeroLimit()) return null;
     const rows = this.#localFilters.length === 0 ? this.limit(1).all(fields) : this.all(fields);
     return rows[0] ?? null;
   }
 
   async firstAsync(fields?: readonly string[]): Promise<TResult | null> {
+    if (this.#existingZeroLimit()) return null;
     const rows = this.#localFilters.length === 0 ? await this.limit(1).allAsync(fields) : await this.allAsync(fields);
     return rows[0] ?? null;
   }
@@ -766,7 +923,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
 
   hits(): Hit[] {
     this.#forbidLocalFilter('hits');
-    const ans = this.#run({ kind: 'hits' });
+    const last = this.#steps[this.#steps.length - 1];
+    const ans = this.#run(isGraphHitsStep(last) ? undefined : { kind: 'hits' });
     if (ans.kind !== 'hits') {
       throw new EarsError('INTERNAL', `Expected 'hits' query answer, got '${ans.kind}'`);
     }
@@ -775,7 +933,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
 
   async hitsAsync(): Promise<Hit[]> {
     this.#forbidLocalFilter('hitsAsync');
-    const ans = await this.#runAsync({ kind: 'hits' });
+    const last = this.#steps[this.#steps.length - 1];
+    const ans = await this.#runAsync(isGraphHitsStep(last) ? undefined : { kind: 'hits' });
     if (ans.kind !== 'hits') {
       throw new EarsError('INTERNAL', `Expected 'hits' query answer, got '${ans.kind}'`);
     }
@@ -863,9 +1022,27 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     return ans.groups;
   }
 
+  async groupByAsync(field: string): Promise<Array<[unknown, string[]]>> {
+    this.#forbidLocalFilter('groupByAsync');
+    const ans = await this.#runAsync({ kind: 'groupBy', field, countsOnly: false });
+    if (ans.kind !== 'groups') {
+      throw new EarsError('INTERNAL', `Expected 'groups' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
   groupCounts(field: string): Array<[unknown, number]> {
     this.#forbidLocalFilter('groupCounts');
     const ans = this.#run({ kind: 'groupBy', field, countsOnly: true });
+    if (ans.kind !== 'groupCounts') {
+      throw new EarsError('INTERNAL', `Expected 'groupCounts' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
+  async groupCountsAsync(field: string): Promise<Array<[unknown, number]>> {
+    this.#forbidLocalFilter('groupCountsAsync');
+    const ans = await this.#runAsync({ kind: 'groupBy', field, countsOnly: true });
     if (ans.kind !== 'groupCounts') {
       throw new EarsError('INTERNAL', `Expected 'groupCounts' query answer, got '${ans.kind}'`);
     }
@@ -885,9 +1062,31 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     return ans.degrees;
   }
 
+  async degreesAsync(opts?: DegreesOptions): Promise<Array<[string, number]>> {
+    this.#forbidLocalFilter('degreesAsync');
+    const ans = await this.#runAsync({
+      kind: 'degrees',
+      dir: opts?.dir ?? 'both',
+      ...(opts?.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+    });
+    if (ans.kind !== 'degrees') {
+      throw new EarsError('INTERNAL', `Expected 'degrees' query answer, got '${ans.kind}'`);
+    }
+    return ans.degrees;
+  }
+
   graphGroups(): string[][] {
     this.#forbidLocalFilter('graphGroups');
     const ans = this.#run();
+    if (ans.kind !== 'graphGroups') {
+      throw new EarsError('INTERNAL', `Expected 'graphGroups' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
+  async graphGroupsAsync(): Promise<string[][]> {
+    this.#forbidLocalFilter('graphGroupsAsync');
+    const ans = await this.#runAsync();
     if (ans.kind !== 'graphGroups') {
       throw new EarsError('INTERNAL', `Expected 'graphGroups' query answer, got '${ans.kind}'`);
     }
@@ -903,6 +1102,15 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     return { order: ans.order, cycles: ans.cycles };
   }
 
+  async graphTopoAsync(): Promise<GraphTopoResult> {
+    this.#forbidLocalFilter('graphTopoAsync');
+    const ans = await this.#runAsync();
+    if (ans.kind !== 'graphTopo') {
+      throw new EarsError('INTERNAL', `Expected 'graphTopo' query answer, got '${ans.kind}'`);
+    }
+    return { order: ans.order, cycles: ans.cycles };
+  }
+
   graphPpr(): GraphPprResult {
     this.#forbidLocalFilter('graphPpr');
     const ans = this.#run();
@@ -912,9 +1120,20 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     return { scores: ans.scores, converged: ans.converged, iterations: ans.iterations };
   }
 
+  async graphPprAsync(): Promise<GraphPprResult> {
+    this.#forbidLocalFilter('graphPprAsync');
+    const ans = await this.#runAsync();
+    if (ans.kind !== 'graphPpr') {
+      throw new EarsError('INTERNAL', `Expected 'graphPpr' query answer, got '${ans.kind}'`);
+    }
+    return { scores: ans.scores, converged: ans.converged, iterations: ans.iterations };
+  }
+
   watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle {
     const spec = this.toSpec({ kind: 'rows' });
     const localFilters = this.#localFilters;
+    const dedupPostFilter = localFilters.length > 0 && opts?.mode !== 'imperative';
+    let lastFilteredJson: string | undefined;
     return this.#pump.register(
       spec,
       (answer) => {
@@ -922,7 +1141,13 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
           throw new EarsError('INTERNAL', `Expected 'rows' watch answer, got '${answer.kind}'`);
         }
         const typed = answer.rows as unknown as TResult[];
-        callback(localFilters.length === 0 ? [...typed] : typed.filter((r) => localFilters.every((fn) => fn(r))));
+        const filtered = localFilters.length === 0 ? [...typed] : typed.filter((r) => localFilters.every((fn) => fn(r)));
+        if (dedupPostFilter) {
+          const serialized = JSON.stringify(filtered);
+          if (serialized === lastFilteredJson) return;
+          lastFilteredJson = serialized;
+        }
+        callback(filtered);
       },
       opts,
     );
@@ -944,8 +1169,9 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
 
   watchHits(callback: (hits: Hit[]) => void, opts?: WatchOptions): WatchHandle {
     this.#forbidLocalFilter('watchHits');
+    const last = this.#steps[this.#steps.length - 1];
     return this.#pump.register(
-      this.toSpec({ kind: 'hits' }),
+      this.toSpec(isGraphHitsStep(last) ? undefined : { kind: 'hits' }),
       (answer) => {
         if (answer.kind !== 'hits') {
           throw new EarsError('INTERNAL', `Expected 'hits' watch answer, got '${answer.kind}'`);

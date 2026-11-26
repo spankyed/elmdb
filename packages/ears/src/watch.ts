@@ -1,6 +1,6 @@
 import type { QueryAnswer, QuerySpec, WatchPolicyOptions } from 'elmdb';
 import type { EarsDatabase } from './database.ts';
-import { EarsError, toEarsError } from './errors.ts';
+import { EarsError, toEarsError, type EarsErrorCode } from './errors.ts';
 
 /**
  * Injectable clock and timer interface for deterministic sans-I/O watch scheduling.
@@ -21,7 +21,7 @@ export interface WatchOptions {
   readonly mode?: WatchMode;
   /** Minimum delay between consecutive reruns of this watch in milliseconds. */
   readonly minGapMs?: number;
-  /** Adaptive backoff multiplier applied to rerun duration (default `2`). */
+  /** Adaptive backoff multiplier applied to rerun duration (default `4`). */
   readonly adaptiveMultiplier?: number;
   /** Deliver the initial query snapshot immediately upon registration (default `true`). */
   readonly immediate?: boolean;
@@ -63,20 +63,42 @@ export function createSystemClock(): EarsClock {
   };
 }
 
+/**
+ * Error codes indicating a watch's compiled query can no longer succeed on the current schema/handle.
+ * Such watches are automatically unregistered on rerun failure instead of spinning in a 0ms livelock.
+ */
+const PERMANENT_WATCH_ERROR_CODES: Readonly<Partial<Record<EarsErrorCode, true>>> = Object.freeze({
+  UNKNOWN_TYPE: true,
+  TYPE_ARCHIVED: true,
+  UNKNOWN_FIELD: true,
+  UNKNOWN_RELATION: true,
+  UNKNOWN_INDEX: true,
+  INVALID_ARGUMENT: true,
+  CLOSED: true,
+});
+
+const INITIAL_TRANSIENT_BACKOFF_MS = 50;
+const MAX_TRANSIENT_BACKOFF_MS = 30_000;
+
 interface WatchEntry {
   readonly id: number;
   readonly spec: QuerySpec;
   readonly deliver: (answer: QueryAnswer) => void;
   readonly onError: ((error: EarsError) => void) | undefined;
   active: boolean;
+  /** Measured wall-clock duration (ms) of the previous rerun, fed into Rust's adaptive backoff. */
+  lastCostMs: number;
+  /** Backoff state for transient rerun failures so a broken watch never spins at 0ms. */
+  backoffMs: number;
+  backoffUntilMs: number;
 }
 
 /**
  * Instance-scoped sans-I/O watch pump.
  *
  * All invalidation tracking, coalescing, adaptive throttling, and turn-slicing state lives inside
- * Rust's `LiveQueryHub` on `EarsDatabase`; this pump simply drives `nextDueWatch` / `rerunWatch`
- * using a single injectable `EarsClock` timer (zero hidden Rust background timer threads).
+ * Rust's `LiveQueryHub` on `EarsDatabase`; this pump drives `nextDueWatch` / `rerunWatch` using
+ * a single injectable `EarsClock` timer (zero hidden Rust background timer threads).
  */
 export class WatchPump implements WatchController {
   readonly #db: EarsDatabase;
@@ -125,6 +147,9 @@ export class WatchPump implements WatchController {
       deliver,
       onError: options?.onError,
       active: true,
+      lastCostMs: 1,
+      backoffMs: 0,
+      backoffUntilMs: 0,
     };
     this.#entries.set(reg.watchId, entry);
 
@@ -132,7 +157,24 @@ export class WatchPump implements WatchController {
       try {
         deliver(reg.answer);
       } catch (error) {
-        this.#reportError(entry, toEarsError(error));
+        try {
+          this.#reportError(entry, toEarsError(error), false);
+        } catch (handlerError) {
+          // Never leak the registered watch if the caller's error handler rethrows before we return WatchHandle.
+          this.#unregister(entry.id);
+          throw handlerError;
+        }
+      }
+    }
+
+    // If a concurrent write landed during registration or inside the immediate callback, schedule a wake.
+    if (entry.active && !this.#stopped) {
+      try {
+        if (!this.#db.watchesSettled()) {
+          this.#scheduleNext(this.#clock.now());
+        }
+      } catch {
+        // Ignore if database closed inside callback.
       }
     }
 
@@ -233,25 +275,49 @@ export class WatchPump implements WatchController {
     }
   }
 
-  #scheduleNext(nowMs: number): void {
-    if (this.#stopped || this.#entries.size === 0) return;
-    let tick;
-    try {
-      tick = this.#db.tickWatches(nowMs);
-    } catch {
-      return;
-    }
-    if (tick.settled && tick.dueIds.length === 0 && tick.nextWakeDelayMs === null) {
-      this.#clearTimer();
-      return;
-    }
-    const delayMs = tick.dueIds.length > 0 ? 0 : Math.max(0, tick.nextWakeDelayMs ?? 0);
+  #armTimer(delayMs: number): void {
     this.#clearTimer();
     this.#timer = this.#clock.setTimeout(() => {
       this.#timer = undefined;
       if (this.#stopped) return;
       this.#drain(this.#clock.now(), true);
-    }, delayMs);
+    }, Math.max(0, delayMs));
+  }
+
+  #scheduleNext(nowMs: number): void {
+    if (this.#stopped || this.#entries.size === 0) {
+      this.#clearTimer();
+      return;
+    }
+    let tick;
+    try {
+      tick = this.#db.tickWatches(nowMs);
+    } catch {
+      this.#clearTimer();
+      return;
+    }
+    if (tick.dueIds.length === 0 && tick.nextWakeDelayMs === null) {
+      this.#clearTimer();
+      return;
+    }
+    let delayMs: number | undefined;
+    if (tick.dueIds.length > 0) {
+      // Respect per-watch transient failure backoff so failing watches never spin at 0ms.
+      let earliestReadyDelay = Infinity;
+      for (const id of tick.dueIds) {
+        const entry = this.#entries.get(id);
+        const wait = entry && entry.backoffUntilMs > nowMs ? entry.backoffUntilMs - nowMs : 0;
+        if (wait < earliestReadyDelay) earliestReadyDelay = wait;
+      }
+      delayMs = Number.isFinite(earliestReadyDelay) ? earliestReadyDelay : 0;
+    } else if (tick.nextWakeDelayMs !== null) {
+      delayMs = Math.max(0, tick.nextWakeDelayMs);
+    }
+    if (delayMs === undefined) {
+      this.#clearTimer();
+      return;
+    }
+    this.#armTimer(delayMs);
   }
 
   #drain(startNowMs: number, scheduleTail: boolean): number {
@@ -260,67 +326,165 @@ export class WatchPump implements WatchController {
     this.#rescheduleAfterPump = false;
     let ran = 0;
     let nextWakeDelayMs: number | undefined;
+    let backoffDelayMs: number | undefined;
+    const failedThisTurn = new Set<number>();
+
     try {
       const turnStart = startNowMs;
-      // Guard against pathological self-triggering loops within a single synchronous drain.
       const maxIterations = Math.max(64, this.#entries.size * 8);
       for (let i = 0; i < maxIterations; i++) {
         if (this.#stopped || this.#entries.size === 0) break;
         const nowMs = scheduleTail ? this.#clock.now() : startNowMs;
         const elapsedTurnMs = Math.max(0, nowMs - turnStart);
-        const due = this.#db.nextDueWatch(nowMs, elapsedTurnMs);
-        if (due.watchId === undefined) {
-          nextWakeDelayMs = due.nextWakeDelayMs;
-          break;
+        let watchId: number | undefined;
+
+        if (this.#hasBlockedEntries(nowMs, failedThisTurn)) {
+          let tick;
+          try {
+            tick = this.#db.tickWatches(nowMs);
+          } catch {
+            break;
+          }
+          for (const candidate of tick.dueIds) {
+            const candidateEntry = this.#entries.get(candidate);
+            if (!candidateEntry || !candidateEntry.active) {
+              watchId = candidate;
+              break;
+            }
+            if (!failedThisTurn.has(candidate) && candidateEntry.backoffUntilMs <= nowMs) {
+              watchId = candidate;
+              break;
+            }
+          }
+          if (watchId === undefined) {
+            for (const candidate of tick.dueIds) {
+              const candidateEntry = this.#entries.get(candidate);
+              if (candidateEntry) {
+                const wait = Math.max(INITIAL_TRANSIENT_BACKOFF_MS, candidateEntry.backoffUntilMs - nowMs);
+                backoffDelayMs = backoffDelayMs === undefined ? wait : Math.min(backoffDelayMs, wait);
+              }
+            }
+            if (tick.nextWakeDelayMs !== null) {
+              nextWakeDelayMs = tick.nextWakeDelayMs;
+            }
+            break;
+          }
+        } else {
+          let due;
+          try {
+            due = this.#db.nextDueWatch(nowMs, elapsedTurnMs);
+          } catch {
+            break;
+          }
+          if (due.watchId === undefined) {
+            nextWakeDelayMs = due.nextWakeDelayMs;
+            break;
+          }
+          watchId = due.watchId;
         }
-        const entry = this.#entries.get(due.watchId);
+
+        const entry = this.#entries.get(watchId);
         if (!entry || !entry.active) {
           try {
-            this.#db.unregisterWatch(due.watchId);
+            this.#db.unregisterWatch(watchId);
           } catch {
             // Already gone.
           }
           continue;
         }
+
         const runStart = this.#clock.now();
         try {
-          const rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, Math.max(1, this.#clock.now() - runStart));
+          const rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
+          entry.lastCostMs = Math.max(1, this.#clock.now() - runStart);
+          entry.backoffMs = 0;
+          entry.backoffUntilMs = 0;
           ran++;
           if (entry.active && rerun.changed) {
             try {
               entry.deliver(rerun.answer);
             } catch (callbackErr) {
-              this.#reportError(entry, toEarsError(callbackErr));
+              this.#reportError(entry, toEarsError(callbackErr), true);
             }
           }
         } catch (rerunErr) {
-          this.#reportError(entry, toEarsError(rerunErr));
+          const earsErr = toEarsError(rerunErr);
+          failedThisTurn.add(entry.id);
+          if (Object.prototype.hasOwnProperty.call(PERMANENT_WATCH_ERROR_CODES, earsErr.code)) {
+            // Permanent schema/compile/closed error: stop the broken watch so it cannot livelock or starve others.
+            this.#unregister(entry.id);
+          } else {
+            // Transient error: exponential backoff instead of 0ms spin.
+            entry.backoffMs =
+              entry.backoffMs === 0
+                ? INITIAL_TRANSIENT_BACKOFF_MS
+                : Math.min(MAX_TRANSIENT_BACKOFF_MS, entry.backoffMs * 2);
+            entry.backoffUntilMs = nowMs + entry.backoffMs;
+            backoffDelayMs =
+              backoffDelayMs === undefined ? entry.backoffMs : Math.min(backoffDelayMs, entry.backoffMs);
+          }
+          this.#reportError(entry, earsErr, true);
+          // Break if all remaining due watches are backed off so we don't pop the same watch again in this turn.
+          if (this.#allDueBlocked(nowMs, failedThisTurn)) break;
         }
       }
     } finally {
       this.#pumping = false;
     }
 
-    if (scheduleTail && !this.#stopped && this.#entries.size > 0) {
-      if (this.#rescheduleAfterPump) {
-        this.#scheduleNext(this.#clock.now());
-      } else if (nextWakeDelayMs !== undefined) {
-        this.#clearTimer();
-        this.#timer = this.#clock.setTimeout(() => {
-          this.#timer = undefined;
-          if (!this.#stopped) this.#drain(this.#clock.now(), true);
-        }, Math.max(0, nextWakeDelayMs));
+    if (this.#stopped || this.#entries.size === 0) {
+      this.#clearTimer();
+      return ran;
+    }
+
+    if (backoffDelayMs !== undefined) {
+      this.#armTimer(backoffDelayMs);
+    } else if (this.#rescheduleAfterPump || scheduleTail) {
+      if (nextWakeDelayMs !== undefined && !this.#rescheduleAfterPump) {
+        this.#armTimer(nextWakeDelayMs);
       } else {
         this.#scheduleNext(this.#clock.now());
       }
+    } else {
+      // flushSync tail reconciliation: clear any stale timer if settled, or schedule remaining cooldown work.
+      this.#scheduleNext(this.#clock.now());
     }
     return ran;
   }
 
-  #reportError(entry: WatchEntry, error: EarsError): void {
+  #hasBlockedEntries(nowMs: number, failedThisTurn: ReadonlySet<number>): boolean {
+    if (failedThisTurn.size > 0) return true;
+    for (const entry of this.#entries.values()) {
+      if (entry.backoffUntilMs > nowMs) return true;
+    }
+    return false;
+  }
+
+  #allDueBlocked(nowMs: number, failedThisTurn: ReadonlySet<number>): boolean {
+    try {
+      const tick = this.#db.tickWatches(nowMs);
+      if (tick.dueIds.length === 0) return true;
+      return tick.dueIds.every((id) => {
+        if (failedThisTurn.has(id)) return true;
+        const entry = this.#entries.get(id);
+        return entry !== undefined && entry.backoffUntilMs > nowMs;
+      });
+    } catch {
+      return true;
+    }
+  }
+
+  #reportError(entry: WatchEntry, error: EarsError, isolateHandler: boolean): void {
     const handler = entry.onError ?? this.#onWatchError;
-    if (handler) {
+    if (!handler) return;
+    if (!isolateHandler) {
       handler(error);
+      return;
+    }
+    try {
+      handler(error);
+    } catch {
+      // Isolate throwing error handlers during pump drain so healthy watches still get scheduled.
     }
   }
 }

@@ -437,7 +437,7 @@ export { IndexStatus }
 // @public
 export interface KeysetCursor {
     // (undocumented)
-    readonly id?: string;
+    readonly id: string;
     // (undocumented)
     readonly score?: number;
     // (undocumented)
@@ -526,6 +526,7 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
     count(): number;
     countAsync(): Promise<number>;
     degrees(opts?: DegreesOptions): Array<[string, number]>;
+    degreesAsync(opts?: DegreesOptions): Promise<Array<[string, number]>>;
     distinct(): QueryBuilder<TResult>;
     exists(): boolean;
     existsAsync(): Promise<boolean>;
@@ -536,10 +537,15 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
     fuse(inputs: ReadonlyArray<readonly [QueryScore, number]>, opts?: FuseOptions): QueryBuilder<TResult>;
     fuzzy(field: string, query: string, maxDistance: number): QueryBuilder<TResult>;
     graphGroups(): string[][];
+    graphGroupsAsync(): Promise<string[][]>;
     graphPpr(): GraphPprResult;
+    graphPprAsync(): Promise<GraphPprResult>;
     graphTopo(): GraphTopoResult;
+    graphTopoAsync(): Promise<GraphTopoResult>;
     groupBy(field: string): Array<[unknown, string[]]>;
+    groupByAsync(field: string): Promise<Array<[unknown, string[]]>>;
     groupCounts(field: string): Array<[unknown, number]>;
+    groupCountsAsync(field: string): Promise<Array<[unknown, number]>>;
     hasLink(opts?: HasLinkOptions): QueryBuilder<TResult>;
     hits(): Hit[];
     hitsAsync(): Promise<Hit[]>;
@@ -718,6 +724,6 @@ export { WatchRerun }
 export { WatchTick }
 
 // @public
-export type WhereInput = string | number | boolean | null | Uint8Array | FieldPredicate;
+export type WhereInput = string | number | boolean | null | Uint8Array | Date | FieldPredicate;
 
 ```

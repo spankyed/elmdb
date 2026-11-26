@@ -9,7 +9,7 @@ import type {
   Schema,
   SchemaChange,
 } from 'elmdb';
-import { encodeBatch, type BatchWriter, type LinkOptions } from './batch.ts';
+import { encodeBatch, isThenable, type BatchWriter, type LinkOptions } from './batch.ts';
 import type { CommitDelta, EarsDatabase, EdgeDirection } from './database.ts';
 import { EarsError, toEarsError } from './errors.ts';
 import { createQueryRoot, type EntityRow, type QueryRoot } from './query.ts';
@@ -386,11 +386,23 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         hookId = db.registerBeforeCommit(
           typeNames === null ? null : [...typeNames],
           (delta: CommitDelta): unknown => {
-            const ret = callback(delta);
-            if (typeof ret === 'function') {
-              return encodeBatch(ret);
+            const ret: unknown = callback(delta);
+            if (isThenable(ret)) {
+              throw new EarsError(
+                'ASYNC_CALLBACK_FORBIDDEN',
+                'beforeCommit hooks must be synchronous (Promises and async callbacks are forbidden)',
+              );
             }
-            return ret;
+            if (typeof ret === 'function') {
+              return encodeBatch(ret as (b: BatchWriter) => void);
+            }
+            if (ret === undefined || ret === null || ret instanceof Uint8Array) {
+              return ret;
+            }
+            throw new EarsError(
+              'INVALID_ARGUMENT',
+              'beforeCommit hook must return void, a batch callback, or a Uint8Array wire batch',
+            );
           },
         );
       } catch (error) {

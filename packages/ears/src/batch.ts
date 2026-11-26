@@ -89,7 +89,8 @@ export function createBatchWriter(): BatchWriter {
   return new WireBatchWriterImpl();
 }
 
-function isThenable(value: unknown): boolean {
+/** Internal helper detecting Promise/thenable return values from synchronous-only callbacks. */
+export function isThenable(value: unknown): boolean {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
   return typeof (value as { readonly then?: unknown }).then === 'function';
 }

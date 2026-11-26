@@ -84,18 +84,41 @@ describe('@elmdb/ears defineEars typed facade', () => {
 
     typed.batch((b) => {
       const slot = b.create('Issue', { title: 'Docs', points: 2 }, 'iss-2');
+      b.patch(slot, { points: 3 });
       b.link(slot, 'dependsOn', issueId);
     });
+    expect(typed.get(asEntityId<'Issue'>('iss-2'))?.fields.points).toBe(3);
     expect(typed.getEdges(asEntityId<'Issue'>('iss-2'), { relKind: 'dependsOn', dir: 'out' })).toHaveLength(1);
+
+    // P1-11: Distributive TypedEntityRow union narrowing on ofTypes
+    const mixed = typed.query.ofTypes(['Project', 'Issue']).all();
+    let seenIssuePoints = 0;
+    for (const entry of mixed) {
+      if (entry.typeName === 'Issue') {
+        seenIssuePoints += entry.fields.points;
+      } else {
+        expect(typeof entry.fields.name).toBe('string');
+      }
+    }
+    expect(seenIssuePoints).toBe(11);
+    expect(typed.admin().stats().typeCounts['Issue']).toBe(2);
+    expect(typed.watches().settled()).toBe(true);
 
     // Compile-time negative checks (verified by tsc during `npm run typecheck:ears`):
     const _typeChecks = (): void => {
+      // @ts-expect-error raw unbranded string is rejected where EARS.EntityId is required
+      typed.get('proj-1');
       // @ts-expect-error wrong branded entity id passed to typed.patch
       typed.patch(projId, { points: 1 });
       // @ts-expect-error unknown relation kind
       typed.link(issueId, 'nonexistentRel', projId);
       // @ts-expect-error unknown entity type
       typed.query.of('UnknownType');
+      typed.batch((b) => {
+        const pSlot = b.create('Project', { name: 'P' });
+        // @ts-expect-error Issue field rejected on Project TypedBatchSlot
+        b.unset(pSlot, ['points']);
+      });
     };
     expect(typeof _typeChecks).toBe('function');
   });

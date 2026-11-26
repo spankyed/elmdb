@@ -62,6 +62,19 @@ const KNOWN_ERROR_CODES: Readonly<Record<ErrorCode, true>> = Object.freeze({
   PANICKED: true,
 });
 
+const NAPI_INVALID_ARG_CODES: Readonly<Record<string, true>> = Object.freeze({
+  InvalidArg: true,
+  ObjectExpected: true,
+  StringExpected: true,
+  NameExpected: true,
+  FunctionExpected: true,
+  NumberExpected: true,
+  BooleanExpected: true,
+  ArrayExpected: true,
+  DateExpected: true,
+  BigIntExpected: true,
+});
+
 /**
  * Typed error raised by `@elmdb/ears` carrying a canonical `EarsErrorCode`.
  */
@@ -89,10 +102,14 @@ export function toEarsError(error: unknown, fallbackCode: EarsErrorCode = 'INTER
   if (typeof error === 'object' && error !== null) {
     const maybeCode = 'code' in error ? (error as { readonly code?: unknown }).code : undefined;
     const maybeMessage = 'message' in error ? (error as { readonly message?: unknown }).message : undefined;
-    const code: EarsErrorCode =
-      typeof maybeCode === 'string' && Object.prototype.hasOwnProperty.call(KNOWN_ERROR_CODES, maybeCode)
-        ? (maybeCode as EarsErrorCode)
-        : fallbackCode;
+    let code: EarsErrorCode = fallbackCode;
+    if (typeof maybeCode === 'string') {
+      if (Object.prototype.hasOwnProperty.call(KNOWN_ERROR_CODES, maybeCode)) {
+        code = maybeCode as EarsErrorCode;
+      } else if (Object.prototype.hasOwnProperty.call(NAPI_INVALID_ARG_CODES, maybeCode)) {
+        code = 'INVALID_ARGUMENT';
+      }
+    }
     const message = typeof maybeMessage === 'string' && maybeMessage.length > 0 ? maybeMessage : String(error);
     return new EarsError(code, message, { cause: error });
   }

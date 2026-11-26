@@ -88,6 +88,7 @@ export {
   type EntityTypeName,
   type RelationKindName,
   type TypedBatchWriter,
+  type TypedBeforeCommitHook,
   type TypedEars,
   type TypedEntityRow,
   type TypedQueryRoot,

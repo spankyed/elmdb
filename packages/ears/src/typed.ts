@@ -1,18 +1,29 @@
-import type { BatchResult, RelationRow } from 'elmdb';
+import type { BatchResult, QueryAnswer, QuerySpec, RelationRow } from 'elmdb';
 import type { BatchSlot, BatchWriter, LinkOptions } from './batch.ts';
-import type { BeforeCommitHook, EarsEngine, GetEdgesOptions } from './engine.ts';
+import type { CommitDelta } from './database.ts';
+import type { EarsAdmin, EarsEngine, GetEdgesOptions } from './engine.ts';
 import type { EntityRow, QueryBuilder, SourceOptions } from './query.ts';
+import type { WatchController } from './watch.ts';
 
 /**
- * Compile-time branded entity ID utilities (`EARS.EntityId<'Task'>`).
- * Zero runtime overhead — branded IDs are plain strings at runtime.
+ * Compile-time branded entity ID and intra-batch slot utilities (`EARS.EntityId<'Task'>`).
+ * Zero runtime overhead — branded IDs are plain strings and branded slots are `BatchSlot` instances.
  */
 export namespace EARS {
   declare const entityTypeBrand: unique symbol;
+  declare const batchSlotTypeBrand: unique symbol;
 
-  /** Branded external entity ID carrying its entity type name at compile time. */
+  /**
+   * Branded external entity ID carrying its entity type name at compile time.
+   * Assignable to `string`, while rejecting raw unbranded `string` values where a typed ID is expected.
+   */
   export type EntityId<TName extends string = string> = string & {
-    readonly [entityTypeBrand]?: TName;
+    readonly [entityTypeBrand]: TName;
+  };
+
+  /** Branded intra-batch slot returned by `TypedBatchWriter.create<TName>(...)`. */
+  export type TypedBatchSlot<TName extends string = string> = BatchSlot & {
+    readonly [batchSlotTypeBrand]: TName;
   };
 }
 
@@ -34,16 +45,26 @@ export type EntityTypeName<TSchema extends EarsSchemaShape> = Extract<keyof TSch
 export type RelationKindName<TSchema extends EarsSchemaShape> =
   TSchema['relations'] extends string ? TSchema['relations'] : string;
 
-/** Strongly typed entity row for entity type `TName` in `TSchema`. */
+/**
+ * Strongly typed entity row for entity type `TName` in `TSchema`.
+ * Distributive over union `TName` so `ofTypes(['Project', 'Issue'])` narrows cleanly on `row.typeName`.
+ */
 export type TypedEntityRow<
   TSchema extends EarsSchemaShape,
   TName extends EntityTypeName<TSchema>,
-> = {
-  readonly id: EARS.EntityId<TName>;
-  readonly typeName: TName;
-  readonly trashed: boolean;
-  readonly fields: Readonly<TSchema['entities'][TName]>;
-};
+> = TName extends EntityTypeName<TSchema>
+  ? {
+      readonly id: EARS.EntityId<TName>;
+      readonly typeName: TName;
+      readonly trashed: boolean;
+      readonly fields: Readonly<TSchema['entities'][TName]>;
+    }
+  : never;
+
+/** Synchronous `beforeCommit` hook whose derived batch builder is typed to `TSchema`. */
+export type TypedBeforeCommitHook<TSchema extends EarsSchemaShape> = (
+  delta: CommitDelta,
+) => void | Uint8Array | ((batch: TypedBatchWriter<TSchema>) => void);
 
 /** Strongly typed `BatchWriter` scoped to `TSchema`. */
 export interface TypedBatchWriter<TSchema extends EarsSchemaShape> {
@@ -51,28 +72,28 @@ export interface TypedBatchWriter<TSchema extends EarsSchemaShape> {
     typeName: TName,
     fields: TSchema['entities'][TName],
     externalId?: EARS.EntityId<TName> | string,
-  ): BatchSlot;
+  ): EARS.TypedBatchSlot<TName>;
   patch<TName extends EntityTypeName<TSchema>>(
-    target: EARS.EntityId<TName> | BatchSlot,
+    target: EARS.EntityId<TName> | EARS.TypedBatchSlot<TName>,
     fields: Partial<TSchema['entities'][TName]>,
   ): this;
   unset<TName extends EntityTypeName<TSchema>>(
-    target: EARS.EntityId<TName> | BatchSlot,
+    target: EARS.EntityId<TName> | EARS.TypedBatchSlot<TName>,
     fields: ReadonlyArray<Extract<keyof TSchema['entities'][TName], string>>,
   ): this;
-  trash(target: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot): this;
-  restore(target: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot): this;
-  destroy(target: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot): this;
+  trash(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
+  restore(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
+  destroy(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
   link(
-    source: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot,
+    source: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>,
     relKind: RelationKindName<TSchema>,
-    target: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot,
+    target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>,
     opts?: LinkOptions,
   ): this;
   unlink(
-    source: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot,
+    source: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>,
     relKind?: RelationKindName<TSchema>,
-    target?: EARS.EntityId<EntityTypeName<TSchema>> | BatchSlot,
+    target?: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>,
   ): this;
   readonly length: number;
 }
@@ -91,12 +112,16 @@ export interface TypedQueryRoot<TSchema extends EarsSchemaShape> {
   ids<TName extends EntityTypeName<TSchema>>(
     ids: ReadonlyArray<EARS.EntityId<TName>>,
   ): QueryBuilder<TypedEntityRow<TSchema, TName>>;
+  raw(spec: QuerySpec): QueryAnswer;
+  rawAsync(spec: QuerySpec): Promise<QueryAnswer>;
 }
 
 /** Strongly typed EARS facade returned by `defineEars<TSchema>(getEngine)`. */
 export interface TypedEars<TSchema extends EarsSchemaShape> {
   readonly engine: () => EarsEngine;
   readonly query: TypedQueryRoot<TSchema>;
+  readonly watches: () => WatchController;
+  readonly admin: () => EarsAdmin;
   get<TName extends EntityTypeName<TSchema>>(
     id: EARS.EntityId<TName>,
   ): TypedEntityRow<TSchema, TName> | null;
@@ -131,10 +156,15 @@ export interface TypedEars<TSchema extends EarsSchemaShape> {
     relKind?: RelationKindName<TSchema>,
     targetId?: EARS.EntityId<EntityTypeName<TSchema>>,
   ): BatchResult;
+  setEmbeddings(
+    indexName: string,
+    id: EARS.EntityId<EntityTypeName<TSchema>>,
+    vectors: ReadonlyArray<ReadonlyArray<number>>,
+  ): void;
   batch(fn: (batch: TypedBatchWriter<TSchema>) => void): BatchResult;
   beforeCommit(
     typeNames: readonly EntityTypeName<TSchema>[] | null,
-    callback: BeforeCommitHook,
+    callback: TypedBeforeCommitHook<TSchema>,
   ): () => void;
 }
 
@@ -162,11 +192,19 @@ export function defineEars<TSchema extends EarsSchemaShape>(
     ids<TName extends EntityTypeName<TSchema>>(ids: ReadonlyArray<EARS.EntityId<TName>>) {
       return getEngine().query.ids(ids) as unknown as QueryBuilder<TypedEntityRow<TSchema, TName>>;
     },
+    raw(spec) {
+      return getEngine().query.raw(spec);
+    },
+    rawAsync(spec) {
+      return getEngine().query.rawAsync(spec);
+    },
   };
 
   return {
     engine: getEngine,
     query,
+    watches: () => getEngine().watches,
+    admin: () => getEngine().admin,
     get<TName extends EntityTypeName<TSchema>>(id: EARS.EntityId<TName>) {
       return getEngine().get(id) as TypedEntityRow<TSchema, TName> | null;
     },
@@ -201,13 +239,24 @@ export function defineEars<TSchema extends EarsSchemaShape>(
     unlink(sourceId, relKind, targetId) {
       return getEngine().unlink(sourceId, relKind, targetId);
     },
+    setEmbeddings(indexName, id, vectors) {
+      getEngine().setEmbeddings(indexName, id, vectors);
+    },
     batch(fn) {
       return getEngine().batch((raw: BatchWriter) => {
         fn(raw as unknown as TypedBatchWriter<TSchema>);
       });
     },
     beforeCommit(typeNames, callback) {
-      return getEngine().beforeCommit(typeNames, callback);
+      return getEngine().beforeCommit(typeNames, (delta) => {
+        const ret = callback(delta);
+        if (typeof ret === 'function') {
+          return (raw: BatchWriter) => {
+            ret(raw as unknown as TypedBatchWriter<TSchema>);
+          };
+        }
+        return ret;
+      });
     },
   };
 }
