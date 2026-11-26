@@ -198,18 +198,22 @@ pub(super) fn named_roots(page: &[u8]) -> Vec<u64> {
 /// databases and nothing else, so its root is that leaf; another program's file names others, or none, or more than a
 /// leaf holds
 pub(super) fn root_names_database(page: &[u8], name: &[u8]) -> bool {
+    // mutant-skip: replace & with \| in root_names_database
+    // mutant-skip: replace & with \^ in root_names_database (as above)
+    // A branch taken for a leaf names no database either: where a leaf's node holds its flags, a branch's holds the
+    // high bits of a page number, which no file under 2^32 pages has
     if u16_at(page, 10) & P_LEAF == 0 {
         return false;
     }
-    let Some(page_nodes) = nodes(page) else {
+    let Some(mut page_nodes) = nodes(page) else {
         return false;
     };
-    page_nodes.filter(|node| node + 8 <= page.len()).filter(|node| u16_at(page, node + 4) & F_SUBDATA != 0).any(
-        |node| {
-            let key = node + 8;
-            page.get(key..key + u16_at(page, node + 6) as usize) == Some(name)
-        },
-    )
+    page_nodes.any(|node| {
+        let Some(head) = page.get(node..node + 8) else { return false };
+        let flags = u16::from_ne_bytes([head[4], head[5]]);
+        let key = u16::from_ne_bytes([head[6], head[7]]) as usize;
+        flags & F_SUBDATA != 0 && page.get(node + 8..node + 8 + key) == Some(name)
+    })
 }
 
 /// Whether `file` is an elmdb database's data file, read by seeks at the commit its newer meta page names: a file too
@@ -222,7 +226,8 @@ pub(super) fn is_elmdb_file(file: &mut File) -> std::io::Result<bool> {
         read => read?,
     }
     let psize = u32::from_ne_bytes(size) as usize;
-    if !psize.is_power_of_two() || !(512..=32768).contains(&psize) {
+    // The page sizes LMDB writes
+    if !matches!(psize, 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768) {
         return Ok(false);
     }
     let Some(meta) = newer_meta_page(file, psize)? else { return Ok(false) };

@@ -33,14 +33,14 @@ pub(super) fn copy(store: &Store, target: &Path, into: BackupInto) -> Result<()>
             format!("is in {}, where the database's commits remove what isn't a listener's mailbox", wake.display());
         return Err(refused(&target, &why));
     }
-    match std::fs::metadata(&target) {
-        Ok(meta) if !meta.is_dir() => return Err(refused(&target, "is not a directory")),
+    // What can't be looked at was refused above, as the name it will have couldn't be read: what isn't there is made
+    if let Ok(meta) = std::fs::metadata(&target) {
+        if !meta.is_dir() {
+            return Err(refused(&target, "is not a directory"));
+        }
         // Looked at before the decision lock is made there too, so that a directory refused is left as it was. What
         // changes meanwhile is seen once the lock is held, below
-        Ok(_) => may_replace(&target, into)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        // Never taken as absent: whatever is there may be what a backup mustn't replace
-        Err(error) => return Err(cannot_look_at(&target, &error)),
+        may_replace(&target, into)?;
     }
     #[cfg(unix)]
     let sync_dirs = directories_to_sync(&target);
@@ -237,10 +237,7 @@ fn cannot_look_at(path: &Path, error: &dyn std::fmt::Display) -> Error {
 /// a file open for writing; read where it may not be, a lock file another user made
 fn existing_lock(dir: &Path, name: &str) -> Result<Option<std::fs::File>> {
     let path = dir.join(name);
-    let opened = std::fs::OpenOptions::new().read(true).write(true).open(&path).or_else(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => Err(error),
-        _ => std::fs::File::open(&path),
-    });
+    let opened = std::fs::OpenOptions::new().read(true).write(true).open(&path).or_else(|_| std::fs::File::open(&path));
     match opened {
         Ok(file) => Ok(Some(file)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),

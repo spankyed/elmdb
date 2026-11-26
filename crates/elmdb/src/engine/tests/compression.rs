@@ -286,11 +286,17 @@ fn a_bulk_load_of_a_value_past_the_most_a_field_holds_is_refused_and_writes_noth
 fn a_value_past_the_most_a_field_holds_stored_before_the_cap_refuses_the_loads_naming_it() {
     let dir = tempfile::tempdir().unwrap();
     let db = open(&dir);
+    // A value of the most a field holds is taken as it is
+    let most = "x".repeat(values::MAX_VALUE_BYTES - 5);
     super::write(
         &db,
-        vec![json!({ "op": "create", "type": "Message", "id": "Message-old", "fields": { "blob": "small" } })],
+        vec![
+            json!({ "op": "create", "type": "Message", "id": "Message-most", "fields": { "blob": most } }),
+            json!({ "op": "create", "type": "Message", "id": "Message-old", "fields": { "blob": "small" } }),
+        ],
     )
     .unwrap();
+    db.primary_loads(|_| Ok(())).unwrap();
     // What such a build stored: the value's msgpack as it is, one byte past the most
     let old = values::encode(&rmpv::Value::Binary(vec![7u8; values::MAX_VALUE_BYTES - 4]));
     assert_eq!(old.len(), values::MAX_VALUE_BYTES + 1);
