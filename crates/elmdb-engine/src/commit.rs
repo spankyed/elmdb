@@ -13,7 +13,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{Cardinality, CompiledSchema, FieldDef, FieldKind, OnDeletePolicy, RawSchema, SchemaDiff};
-use crate::ids::{EntityKey, FieldId, FieldMask, RelKey, RelKindId, TypeId, TypeMask};
+use crate::ids::{EntityKey, FieldId, FieldMask, IndexId, RelKey, RelKindId, TypeId, TypeMask};
 use crate::row::{
     MAX_EXT_ID_BYTES, PackedEdge, PackedRow, RowHeader, blob_field_ids_of, blob_key, decode_row, decode_row_header,
     decode_single_field, encode_row, make_trashed_flags,
@@ -636,6 +636,61 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         let schema = Arc::clone(&state.schema);
         drop(state);
         Ok((txn, schema))
+    }
+
+    /// Atomically compacts an index into a fresh staging `SubDbSlot` drawn from `SubDbPool`,
+    /// swaps the index's active slot in `meta`, and truncates the retired slot in O(1) without
+    /// ever calling `mdb_dbi_close()` (zero `MDB_DBS_FULL` leaks!).
+    pub fn swap_index_slot<T, F>(&self, index_id: IndexId, f: F) -> Result<(T, CommitReceipt)>
+    where
+        F: FnOnce(
+            &mut GatedWriteTxn<'_, S, V>,
+            &CompiledSchema,
+            &SystemDbs,
+            SubDbHandle, // current active sub-DB
+            SubDbHandle, // clean staging sub-DB
+        ) -> Result<T>,
+    {
+        let (out, receipt, next_schema, next_pool) = {
+            let mut txn = self.gate.begin_write()?;
+            let (mut schema, mut pool) = load_schema_and_pool(&txn, &self.dbs)?;
+            let idx_pos =
+                schema.indexes.iter().position(|i| i.id == index_id).ok_or_else(|| {
+                    ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0))
+                })?;
+            let old_slot = schema.indexes[idx_pos].subdb_slot();
+            let staging_slot = pool.allocate()?;
+            let old_db = txn.open_subdb(&old_slot.name(), DbFlags::DEFAULT)?;
+            let staging_db = txn.open_subdb(&staging_slot.name(), DbFlags::DEFAULT)?;
+            txn.truncate(staging_db)?;
+
+            let out = f(&mut txn, &schema, &self.dbs, old_db, staging_db)?;
+
+            // Flip active slot -> staging, O(1) truncate retired slot, recycle retired slot into pool!
+            schema.indexes[idx_pos].slot = staging_slot.raw();
+            schema.epoch = schema.epoch.saturating_add(1);
+            txn.truncate(old_db)?;
+            pool.recycle(old_slot)?;
+
+            let seq = self.next_commit_seq(&txn)?;
+            persist_schema_and_pool(&mut txn, &self.dbs, &schema, &pool, seq)?;
+            write_commit_summary(
+                &mut txn,
+                &self.dbs,
+                CrossProcCommitSummary {
+                    seq,
+                    schema_epoch: schema.epoch,
+                    touched_types: Vec::new(),
+                    touched_rel_kinds: Vec::new(),
+                    touched_entities: None,
+                },
+                &[],
+            )?;
+            let receipt = txn.commit()?;
+            (out, receipt, schema, pool)
+        };
+        self.publish_schema_monotonic(Arc::new(next_schema), next_pool);
+        Ok((out, receipt))
     }
 
     /// Runs a lock-order-safe maintenance write transaction (used by chunked index builders,
@@ -2292,6 +2347,104 @@ pub fn read_packed_row<R: KvRead>(txn: &R, dbs: &SystemDbs, key: EntityKey) -> R
     };
     let packed = decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
     Ok(Some(packed))
+}
+
+/// Scans outgoing edges `(target_entity, weight, kind)` from `src` filtered to `kinds` (empty = all kinds)
+/// directly over `adj_out` with zero string allocations!
+pub fn scan_adj_out_raw<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    src: EntityKey,
+    kinds: &[RelKindId],
+) -> Result<Vec<(EntityKey, f64, RelKindId)>> {
+    let mut out = Vec::new();
+    let mut cur = txn.cursor(dbs.adj)?;
+    if kinds.is_empty() {
+        let mut prefix = [0u8; 9];
+        prefix[0] = TAG_ADJ_OUT;
+        prefix[1..9].copy_from_slice(&src.to_be_bytes());
+        let mut entry = cur.seek_ge(&prefix)?;
+        while let Some((k, _)) = entry {
+            if k.len() != 19 || !k.starts_with(&prefix) {
+                break;
+            }
+            let rk = RelKey::from_be_bytes(k[11..19].try_into().expect("8"));
+            if let Some(raw) = txn.get(dbs.relations, &rk.to_ne_bytes())? {
+                let edge = PackedEdge::decode(rk, raw)?;
+                out.push((edge.dst, edge.weight, edge.kind));
+            }
+            entry = cur.next()?;
+        }
+    } else {
+        for &kind in kinds {
+            let mut prefix = [0u8; 11];
+            prefix[0] = TAG_ADJ_OUT;
+            prefix[1..9].copy_from_slice(&src.to_be_bytes());
+            prefix[9..11].copy_from_slice(&kind.0.to_be_bytes());
+            let mut entry = cur.seek_ge(&prefix)?;
+            while let Some((k, _)) = entry {
+                if k.len() != 19 || !k.starts_with(&prefix) {
+                    break;
+                }
+                let rk = RelKey::from_be_bytes(k[11..19].try_into().expect("8"));
+                if let Some(raw) = txn.get(dbs.relations, &rk.to_ne_bytes())? {
+                    let edge = PackedEdge::decode(rk, raw)?;
+                    out.push((edge.dst, edge.weight, edge.kind));
+                }
+                entry = cur.next()?;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Scans incoming edges `(source_entity, weight, kind)` into `dst` filtered to `kinds` (empty = all kinds)
+/// directly over `adj_in` with zero string allocations!
+pub fn scan_adj_in_raw<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    dst: EntityKey,
+    kinds: &[RelKindId],
+) -> Result<Vec<(EntityKey, f64, RelKindId)>> {
+    let mut out = Vec::new();
+    let mut cur = txn.cursor(dbs.adj)?;
+    if kinds.is_empty() {
+        let mut prefix = [0u8; 9];
+        prefix[0] = TAG_ADJ_IN;
+        prefix[1..9].copy_from_slice(&dst.to_be_bytes());
+        let mut entry = cur.seek_ge(&prefix)?;
+        while let Some((k, _)) = entry {
+            if k.len() != 19 || !k.starts_with(&prefix) {
+                break;
+            }
+            let rk = RelKey::from_be_bytes(k[11..19].try_into().expect("8"));
+            if let Some(raw) = txn.get(dbs.relations, &rk.to_ne_bytes())? {
+                let edge = PackedEdge::decode(rk, raw)?;
+                out.push((edge.src, edge.weight, edge.kind));
+            }
+            entry = cur.next()?;
+        }
+    } else {
+        for &kind in kinds {
+            let mut prefix = [0u8; 11];
+            prefix[0] = TAG_ADJ_IN;
+            prefix[1..9].copy_from_slice(&dst.to_be_bytes());
+            prefix[9..11].copy_from_slice(&kind.0.to_be_bytes());
+            let mut entry = cur.seek_ge(&prefix)?;
+            while let Some((k, _)) = entry {
+                if k.len() != 19 || !k.starts_with(&prefix) {
+                    break;
+                }
+                let rk = RelKey::from_be_bytes(k[11..19].try_into().expect("8"));
+                if let Some(raw) = txn.get(dbs.relations, &rk.to_ne_bytes())? {
+                    let edge = PackedEdge::decode(rk, raw)?;
+                    out.push((edge.src, edge.weight, edge.kind));
+                }
+                entry = cur.next()?;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Scans all `PackedEdge`s of a given `RelKindId` from `adj_by_kind` + `relations`.

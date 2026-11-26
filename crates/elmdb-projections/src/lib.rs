@@ -9,6 +9,7 @@
 //!   and Rarest-First Trigram (`RoaringBitmap` + `trig_df`).
 
 pub mod order;
+pub mod rank;
 pub mod registry;
 pub mod state;
 pub mod text;
@@ -16,6 +17,7 @@ pub mod trigram;
 pub mod value;
 
 pub use order::{CachedCollator, CollatorCache, CollatorStamp, SortKey};
+pub use rank::{DEFAULT_DAMPING, DEFAULT_EPSILON, DEFAULT_PUSH_BUDGET, RankMeta, RankNode};
 pub use registry::{BuildPolicy, ExternalProjection, ProjectionRegistry};
 pub use state::{BuildState, CheckReport, DEFAULT_BUILD_CHUNK, IndexMismatch, IndexStatus, ProjectionStats};
 pub use text::{BmwSearchStats, TextHit, TextStats, map_utf8_spans_to_utf16};

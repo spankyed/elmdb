@@ -800,6 +800,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "elmdb-vec"
+version = "0.1.0"
+dependencies = [
+ "elmdb-engine",
+ "elmdb-lmdb",
+ "elmdb-projections",
+ "elmdb-sim",
+ "elmdb-storage",
+ "elmdb-wire",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "elmdb-wire"
 version = "0.1.0"
 dependencies = [
