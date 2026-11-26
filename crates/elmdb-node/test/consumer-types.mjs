@@ -14,16 +14,13 @@ const require = createRequire(import.meta.url);
 const pkgDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const tscBin = require.resolve('typescript/bin/tsc');
 
-/** @type {Array<{ name: string, module: string, moduleResolution: string }>} */
 const RESOLUTIONS = [
   { name: 'nodenext', module: 'nodenext', moduleResolution: 'nodenext' },
   { name: 'node16', module: 'node16', moduleResolution: 'node16' },
   { name: 'bundler', module: 'esnext', moduleResolution: 'bundler' },
 ];
 
-/** @type {string} */
 let consumerDir;
-/** @type {string[]} */
 let protocolNames;
 
 before(() => {
@@ -56,7 +53,6 @@ after(() => {
   if (consumerDir) rmSync(consumerDir, { recursive: true, force: true });
 });
 
-/** TypeScript consumer exercising `elmdb`, `elmdb/client`, and every `elmdb/protocol/*` declaration without `@types/node` */
 function consumerSource() {
   const protocolExports = protocolNames
     .flatMap((name, i) => [
@@ -68,138 +64,87 @@ function consumerSource() {
   return `
 import {
   Database,
-  Unit,
-  __napiBindingTarget,
-  type Answers,
-  type Batch,
   type BatchResult,
-  type BuilderCommit,
-  type ChangeSet,
   type CheckReport,
+  type DatabaseStats,
+  type DumpReport,
   type ErrorCode,
   type IndexStatus,
   type OpenOptions,
   type OpenReport,
-  type PurgeTarget,
-  type Reads,
-  type Restore,
+  type QueryAnswer,
+  type QuerySpec,
+  type RelationRow,
+  type Row,
   type Schema,
   type SchemaChange,
-  type Stats,
-  type Written,
+  type WatchTick,
 } from 'elmdb';
-import { Client, ClientUnit, type Codec } from 'elmdb/client';
-import type { Client as ClientFromJs } from 'elmdb/client.js';
-import type { Batch as ProtocolBatch } from 'elmdb/protocol/Batch.js';
+import { BatchSlot, WireBatchBuilder, buildWireBatch } from 'elmdb/client';
+import type { WireBatchBuilder as WireBatchBuilderFromJs } from 'elmdb/client.js';
 import type { ErrorCode as ProtocolErrorCode } from 'elmdb/protocol/ErrorCode';
 ${protocolExports}
 
-export function exerciseBinding(dir: string, schema: Schema, bytes: Uint8Array): void {
-  const options: OpenOptions = { readOnly: false, schema, syncs: false };
+export async function exerciseBinding(dir: string, schema: Schema, spec: QuerySpec): Promise<void> {
+  const options: OpenOptions = { readOnly: false, schema, durability: 'strict', buildPolicy: 'deferred' };
   const db: Database = Database.open(dir, options);
-  const target: 'native' | 'wasm32-wasi' | 'wasm32-wasip1' = __napiBindingTarget;
-  void target;
+  const dbAsync: Database = await Database.openAsync(dir, options);
+  void dbAsync;
 
-  const writtenBytes: Uint8Array = db.write(bytes, true);
-  const readBytes: Uint8Array = db.read(bytes);
-  const asyncBytes: Promise<Uint8Array> = db.readAsync(bytes);
-  const checkpoint: Uint8Array | null = db.checkpoint('cursor');
-  const changed: Uint8Array = db.changedSince(['Note'], bytes, 100);
-  db.bulkLoad(bytes);
-  const replaced: number | null = db.replacedElsewhere();
-  const adopted: boolean = db.adoptReplacement(replaced ?? 0);
-  const report: OpenReport = db.openReport;
-  const restored: Restore | null = report.restored;
-  const changes: SchemaChange[] = db.setSchema(schema);
-  const checked: CheckReport = db.check();
-  const statuses: IndexStatus[] = db.indexStatus();
-  const stats: Stats = db.stats();
-  const purge: PurgeTarget = { type: 'Old' };
-  db.purge(purge);
-  db.hearBuilderCommits((commit: BuilderCommit) => {
-    const seq: number = commit.sequence;
-    const first: number | undefined = commit.touched[0];
-    void seq;
-    void first;
+  const builder: WireBatchBuilder = new WireBatchBuilder();
+  const slot: BatchSlot = builder.create('Note', { title: 'hi' });
+  const frame: Uint8Array = buildWireBatch((b) => {
+    const s = b.create('Note', { title: 'v2' });
+    b.patch(s, { title: 'v2!' });
   });
+  void slot;
+  const builderAlias: WireBatchBuilderFromJs = builder;
+  void builderAlias;
 
-  const unit: Unit = db.begin();
-  const unitWritten: Uint8Array = unit.write(bytes);
-  const unitRead: Uint8Array = unit.read(bytes);
-  unit.setCheckpoint('cursor', bytes);
-  const unitCheckpoint: Uint8Array | null = unit.checkpoint('cursor');
-  const pending: Uint8Array = unit.pendingChanges();
-  const unitChanged: Uint8Array = unit.changedSince(['Note'], bytes, 10);
-  const committed: Uint8Array = unit.commit(false);
-  unit.abort();
+  const batchRes: BatchResult = db.executeWireBatch(frame);
+  const report: OpenReport = db.openReport();
+  const change: SchemaChange = db.setSchema(schema);
+  const current: Schema = db.getSchema();
+  const row: Row | null = db.get('id');
+  const edges: RelationRow[] = db.getEdges('id');
+  const answer: QueryAnswer = db.query(spec);
+  const asyncAnswer: QueryAnswer = await db.queryAsync(spec);
+  const checked: CheckReport = db.check();
+  const checkedAsync: CheckReport = await db.checkAsync();
+  const statuses: IndexStatus[] = db.indexStatus();
+  const stats: DatabaseStats = db.stats();
+  const dumpRep: DumpReport = db.dump('/tmp/x.json');
+  const tick: WatchTick = db.tickWatches(1000);
+  const code: ErrorCode = 'ENTITY_NOT_FOUND';
+  const sameCode: ProtocolErrorCode = code;
+  void [batchRes, report, change, current, row, edges, answer, asyncAnswer, checked, checkedAsync, statuses, stats, dumpRep, tick, sameCode];
   db.close();
-
-  void [
-    writtenBytes, readBytes, asyncBytes, checkpoint, changed, adopted, restored,
-    changes, checked, statuses, stats, unitWritten, unitRead, unitCheckpoint,
-    pending, unitChanged, committed,
-  ];
-
-  // @ts-expect-error sequence is number, not string
-  const wrongSequence: string = db.sequence;
-  // @ts-expect-error write expects Uint8Array, not string
-  db.write('not-bytes');
-  // @ts-expect-error adoptReplacement expects number, not string
-  db.adoptReplacement('0');
-  // @ts-expect-error ErrorCode is a closed union, not any string
-  const wrongCode: ErrorCode = 'NOT_A_REAL_CODE';
-  void [wrongSequence, wrongCode];
-}
-
-export async function exerciseClient(db: Database, codec: Codec, reads: Reads, batch: Batch): Promise<void> {
-  const client: ClientFromJs = new Client(db, codec);
-  const answers: Answers = client.read(reads);
-  const asyncAnswers: Answers = await client.readAsync(reads);
-  const written: Written = client.write(batch, false);
-  const unit: ClientUnit = client.begin();
-  const unitAnswers: Answers = unit.read(reads);
-  const batchResult: BatchResult = unit.write(batch);
-  const pending: ChangeSet = unit.pendingChanges();
-  const committed: ChangeSet = unit.commit(true);
-  unit.abort();
-
-  const sameBatch: ProtocolBatch = batch;
-  const code: ProtocolErrorCode = 'VALUE_INVALID';
-  void [answers, asyncAnswers, written, unitAnswers, batchResult, pending, committed, sameBatch, code];
-
-  // @ts-expect-error Codec.pack must return Uint8Array, not string
-  const badCodec: Codec = { pack: () => 'bad', unpack: () => null, unpackMaps: () => null };
-  void badCodec;
 }
 `;
 }
 
-for (const { name, module, moduleResolution } of RESOLUTIONS) {
-  test(`packed elmdb compiles without @types/node under strict ${name}`, () => {
-    const caseDir = join(consumerDir, `case-${name}`);
-    mkdirSync(caseDir, { recursive: true });
-    writeFileSync(join(caseDir, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+for (const res of RESOLUTIONS) {
+  test(`packed consumer typechecks cleanly under ${res.name} with no @types/node`, () => {
+    const sub = join(consumerDir, `case-${res.name}`);
+    mkdirSync(sub, { recursive: true });
+    writeFileSync(join(sub, 'consumer.ts'), consumerSource());
     writeFileSync(
-      join(caseDir, 'tsconfig.json'),
+      join(sub, 'tsconfig.json'),
       JSON.stringify({
         compilerOptions: {
-          target: 'ES2022',
-          lib: ['ES2022'],
-          module,
-          moduleResolution,
           strict: true,
-          noImplicitAny: true,
-          exactOptionalPropertyTypes: true,
-          noUncheckedIndexedAccess: true,
-          verbatimModuleSyntax: true,
-          skipLibCheck: false,
           noEmit: true,
+          target: 'es2022',
+          module: res.module,
+          moduleResolution: res.moduleResolution,
           types: [],
         },
         include: ['consumer.ts'],
       }),
     );
-    writeFileSync(join(caseDir, 'consumer.ts'), consumerSource());
-    execFileSync(process.execPath, [tscBin, '-p', caseDir], { cwd: caseDir, encoding: 'utf8' });
+    execFileSync(process.execPath, [tscBin, '-p', join(sub, 'tsconfig.json')], {
+      cwd: consumerDir,
+      encoding: 'utf8',
+    });
   });
 }

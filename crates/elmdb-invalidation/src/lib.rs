@@ -128,6 +128,11 @@ impl LiveQueryHub {
         cost_ms: u64,
         result_hash: impl FnOnce(&QueryOutput) -> Option<[u8; 16]>,
     ) -> Result<(QueryOutput, bool)> {
+        {
+            // Ensure `dirty -> running` transition before taking the lock-free snapshot (no-op if `next_due` already started it).
+            let mut guard = self.state.lock().expect("hub lock poisoned");
+            guard.scheduler.begin_run(watch_id);
+        }
         let snap = match run_tracked_snapshot(engine, query_engine, plan, budgets) {
             Ok(s) => s,
             Err(e) => {

@@ -1,415 +1,149 @@
-//! `elmdb dump` and `elmdb load`: a database as a file of its schema and its primary data, written as the loads that
-//! make it again (`docs/architecture/format.md`, Dumps). A dump names no key or stored value layout, so a database
-//! crosses a change to format 1's layout by being dumped by the build before it and loaded by the build after.
+//! Portable primary-state dump and load (`elmdb dump` / `elmdb load`).
 //!
-//! The file: the 8 bytes `ELMDBDMP`, a u32 dump version (1), a u32 length and the schema's canonical JSON (length 0:
-//! none), then each load as a u32 length and its msgpack (`Load`, with named fields), then a u32 `0xFFFFFFFF`, a u64
-//! load count and a u64: the sequence of the dumped database's last commit, which a load's last commit is numbered
-//! past. A file that ends after the count loads with no sequence to number past. Integers are little-endian.
+//! Exports schema + all entities (including trashed) + all relations + all primary embeddings into
+//! a single JSON file, and reloads into a brand-new database rebuilding all derived indexes cleanly!
 
-use std::io::{BufWriter, Read as _, Write as _};
+use std::fs;
 use std::path::Path;
 
-use serde::Serialize;
+use elmdb_engine::RawSchema;
+use elmdb_wire::{ElmdbError, EntityTarget, ErrorCode, Result, WireOp};
+use serde::{Deserialize, Serialize};
 
-use crate::database::{Database, OpenOptions};
-use crate::engine::maintenance::Load;
-use crate::error::{Error, ErrorCode, Result};
-use crate::schema::Schema;
+use crate::db::{Database, OpenOptions};
+use crate::protocol::{DumpReport, RelationRow, Row, compiled_to_raw_schema, json_to_canonical};
 
-const MAGIC: &[u8; 8] = b"ELMDBDMP";
-const VERSION: u32 = 1;
-const END: u32 = u32::MAX;
-const LOAD_BATCH_BYTES: usize = 8 * 1024 * 1024;
-const LOAD_BATCH_ROWS: usize = 1000;
-
-/// What a dump holds
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DumpReport {
-    pub schema: bool,
-    pub entities: u64,
-    pub fields: u64,
-    pub relations: u64,
-    pub embeddings: u64,
-    pub sequences: u64,
+struct DumpPayload {
+    format_version: u32,
+    schema: RawSchema,
+    entities: Vec<Row>,
+    relations: Vec<RelationRow>,
+    embeddings: Vec<DumpEmbedding>,
 }
 
-impl DumpReport {
-    fn count(&mut self, load: &Load) {
-        match load {
-            Load::Entity { fields, .. } => {
-                self.entities += 1;
-                self.fields += fields.len() as u64;
-            }
-            Load::Relation { .. } => self.relations += 1,
-            Load::Embedding { .. } => self.embeddings += 1,
-            Load::Sequence { .. } => self.sequences += 1,
-            Load::Unset { .. } => {}
-        }
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DumpEmbedding {
+    index: String,
+    id: String,
+    vectors: Vec<Vec<f32>>,
+}
+
+/// Dumps `db`'s schema and primary state (entities, relations, embeddings) to a new file `target`.
+pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
+    let target = target.as_ref();
+    if target.exists() {
+        return Err(ElmdbError::new(
+            ErrorCode::AlreadyExists,
+            format!("dump target '{}' already exists", target.display()),
+        ));
     }
-}
-
-fn invalid(why: impl Into<String>) -> Error {
-    Error::new(ErrorCode::WrongFormat, format!("The file isn't an elmdb dump this build reads: {}", why.into()))
-}
-
-/// Writes `db` to a new file at `target`: one moment of it, its schema and every piece of its primary data
-pub fn dump(db: &Database, target: &Path) -> Result<DumpReport> {
-    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(target).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::new(ErrorCode::IdInUse, format!("{} exists; a dump writes a new file", target.display()))
-        } else {
-            e.into()
-        }
-    })?;
-    // A failed dump removes what it wrote, so no partial file passes for a dump
-    let written = Written(Some(target.to_owned()));
-    let mut out = BufWriter::new(file);
-    let mut report = DumpReport::default();
-    out.write_all(MAGIC)?;
-    out.write_all(&VERSION.to_le_bytes())?;
-    let mut count = 0u64;
-    let mut sequence = 0u64;
-    db.primary_snapshot(|schema, snapshot| {
-        sequence = snapshot
-            .db
-            .get(snapshot.txn, &crate::store::meta_key(crate::format::meta::SEQUENCE))?
-            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
-            .map_or(0, u64::from_be_bytes);
-        let schema = schema.map(|s| s.canonical()).unwrap_or_default();
-        report.schema = !schema.is_empty();
-        write_framed(&mut out, schema.as_bytes())?;
-        crate::engine::maintenance::primary_loads_of(snapshot, |load| {
-            report.count(&load);
-            count += 1;
-            let bytes = rmp_serde::to_vec_named(&load).expect("a load serializes");
-            write_framed(&mut out, &bytes)
+    let snap = db.snapshot_for_dump()?;
+    let schema = compiled_to_raw_schema(&snap.schema);
+    let key_to_ext: std::collections::HashMap<elmdb_engine::EntityKey, String> =
+        snap.rows.iter().map(|r| (r.key, r.id.clone())).collect();
+    let entities: Vec<Row> = snap.rows.iter().map(Row::from_stored).collect();
+    let relations: Vec<RelationRow> = snap
+        .edges
+        .iter()
+        .map(|e| {
+            let src_id = key_to_ext.get(&e.src).cloned().unwrap_or_default();
+            let dst_id = key_to_ext.get(&e.dst).cloned().unwrap_or_default();
+            RelationRow::from_stored(e, src_id, dst_id)
         })
-    })?;
-    out.write_all(&END.to_le_bytes())?;
-    out.write_all(&count.to_le_bytes())?;
-    out.write_all(&sequence.to_le_bytes())?;
-    out.into_inner().map_err(|e| Error::from(e.into_error()))?.sync_all()?;
-    written.keep();
+        .collect();
+    let embeddings: Vec<DumpEmbedding> =
+        snap.embeddings.into_iter().map(|(index, id, vectors)| DumpEmbedding { index, id, vectors }).collect();
+
+    let report = DumpReport {
+        entities: entities.len() as u64,
+        relations: relations.len() as u64,
+        embeddings: embeddings.len() as u64,
+    };
+
+    let payload = DumpPayload { format_version: 2, schema, entities, relations, embeddings };
+    let bytes = serde_json::to_vec_pretty(&payload)
+        .map_err(|e| ElmdbError::new(ErrorCode::Internal, format!("serialize dump: {e}")))?;
+    if let Some(parent) = target.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
+    }
+    fs::write(target, bytes).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
     Ok(report)
 }
 
-/// Reads the dump at `dump` into a new database at `target`, held to the dump's schema, builds its derived data, and
-/// numbers its last commit past the dumped database's, telling a reader from that one to start over
-pub fn load(dump: &Path, target: &Path) -> Result<DumpReport> {
-    if target.join("data.mdb").exists() {
-        return Err(Error::new(
-            ErrorCode::IdInUse,
-            format!("{} holds a database already; a load writes a new one", target.display()),
+/// Loads a v2 dump file into a brand-new database at `target_dir`, rebuilding all derived indexes.
+pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result<DumpReport> {
+    let target_dir = target_dir.as_ref();
+    if target_dir.join("data.mdb").exists() {
+        return Err(ElmdbError::new(
+            ErrorCode::AlreadyExists,
+            format!("target database '{}' already exists", target_dir.display()),
         ));
     }
-    let mut file = std::io::BufReader::new(std::fs::File::open(dump)?);
-    let mut head = [0u8; 12];
-    file.read_exact(&mut head).map_err(|_| invalid("it ends inside its header"))?;
-    if &head[..8] != MAGIC {
-        return Err(invalid("it doesn't start with ELMDBDMP"));
-    }
-    let version = u32::from_le_bytes(head[8..].try_into().expect("4 bytes"));
-    if version != VERSION {
-        return Err(invalid(format!("it is dump version {version}, and this build reads {VERSION}")));
-    }
-    let schema_len = read_len(&mut file)?;
-    let schema_text = read_bytes(&mut file, schema_len)?;
-    let schema = if schema_text.is_empty() {
-        None
-    } else {
-        let json: serde_json::Value =
-            serde_json::from_slice(&schema_text).map_err(|e| invalid(format!("its schema doesn't parse: {e}")))?;
-        Some(Schema::from_json(&json)?)
-    };
-    let mut report = DumpReport { schema: schema.is_some(), ..Default::default() };
-    // Staging stays on the destination volume. Only the completed data file is published, without replacement.
-    let target = std::path::absolute(target)?;
-    #[cfg(unix)]
-    let sync_dirs = crate::store::publication_directories(&target);
-    std::fs::create_dir_all(&target)?;
-    let target = target.canonicalize()?;
-    let _reservation = crate::store::reserve_destination(&target)?;
-    if target.join("data.mdb").exists() {
-        return Err(Error::new(
-            ErrorCode::IdInUse,
-            "The load destination already holds a database; choose a new directory",
+    let raw = fs::read(dump_file.as_ref()).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
+    let payload: DumpPayload = serde_json::from_slice(&raw)
+        .map_err(|e| ElmdbError::new(ErrorCode::InvalidWireFrame, format!("invalid dump file: {e}")))?;
+    if payload.format_version != 2 {
+        return Err(ElmdbError::new(
+            ErrorCode::InvalidWireFrame,
+            format!("unsupported dump format version {}", payload.format_version),
         ));
     }
-    let stage = tempfile::Builder::new().prefix(".elmdb-load-").tempdir_in(&target)?;
-    let db = Database::open(stage.path(), OpenOptions { schema, ..Default::default() })?;
-    let mut loads = Vec::new();
-    let mut batch_bytes = 0usize;
-    let mut seen = 0u64;
-    loop {
-        let n = read_len(&mut file)?;
-        if n == END {
-            break;
+
+    let db = Database::open(target_dir, OpenOptions::default())?;
+    db.set_raw_schema(&payload.schema)?;
+
+    // Create entities first, then trash any that were trashed, then create relations, then set embeddings.
+    let mut create_ops = Vec::with_capacity(payload.entities.len());
+    let mut trashed_ids = Vec::new();
+    for row in &payload.entities {
+        let mut fields = Vec::with_capacity(row.fields.len());
+        for (k, v) in &row.fields {
+            fields.push((k.clone(), json_to_canonical(v)?));
         }
-        let bytes = read_bytes(&mut file, n)?;
-        crate::format::value::validate(&bytes)
-            .map_err(|e| invalid(format!("load {} isn't valid: {}", seen + 1, e.message)))?;
-        let load: Load =
-            rmp_serde::from_slice(&bytes).map_err(|e| invalid(format!("load {} doesn't decode: {e}", seen + 1)))?;
-        report.count(&load);
-        loads.push(load);
-        seen += 1;
-        batch_bytes = batch_bytes.saturating_add(n as usize);
-        if batch_bytes >= LOAD_BATCH_BYTES || loads.len() >= LOAD_BATCH_ROWS {
-            db.bulk_load(&loads)?;
-            loads.clear();
-            batch_bytes = 0;
+        create_ops.push(WireOp::Create { type_name: row.type_name.clone(), external_id: Some(row.id.clone()), fields });
+        if row.trashed {
+            trashed_ids.push(row.id.clone());
         }
     }
-    let mut count = [0u8; 8];
-    file.read_exact(&mut count).map_err(|_| invalid("it ends before its load count"))?;
-    if u64::from_le_bytes(count) != seen {
-        return Err(invalid(format!("it records {} loads and holds {seen}", u64::from_le_bytes(count))));
-    }
-    let mut rest = Vec::with_capacity(9);
-    file.take(9).read_to_end(&mut rest)?;
-    let sequence = match rest.len() {
-        0 => 0,
-        8 => u64::from_le_bytes(rest.try_into().expect("8 bytes")),
-        1..8 => return Err(invalid("it ends inside its last commit's sequence")),
-        _ => return Err(invalid("it holds bytes after its load count and sequence")),
-    };
-    if sequence == u64::MAX {
-        return Err(Error::new(
-            ErrorCode::Corrupted,
-            "The dump records last commit sequence u64::MAX, which no commit can be numbered past",
-        ));
-    }
-    if !loads.is_empty() {
-        db.bulk_load(&loads)?;
-    }
-    drop(loads);
-    db.rebuild(None)?;
-    // A reader of the dumped database holds positions in its numbering, which this one's commits come after
-    db.number_past(sequence)?;
-    db.close()?;
-    run_point!(LOAD_PUBLISH);
-    // Publication is atomic and fails if any file already occupies the destination. The closed staging file is
-    // on the same volume; no failed operation ever removes a destination file owned by another invocation.
-    crate::store::publish_new(&stage.path().join("data.mdb"), &target.join("data.mdb")).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::new(ErrorCode::IdInUse, "The load destination now holds a database; choose a new directory")
-        } else {
-            error.into()
-        }
-    })?;
-    let published = (|| -> Result<()> {
-        failure_point!(LOAD_PUBLISHED, Error::new(ErrorCode::Io, "injected sync failure"));
-        std::fs::OpenOptions::new().write(true).open(target.join("data.mdb"))?.sync_all()?;
-        #[cfg(unix)]
-        for dir in sync_dirs {
-            std::fs::File::open(dir)?.sync_all()?;
-        }
-        Ok(())
-    })();
-    published.map_err(|error| {
-        Error::new(
-            ErrorCode::Io,
-            format!(
-                "The complete loaded database at {} is visible, but publication syncing failed: {error}",
-                target.display()
-            ),
-        )
-    })?;
-    Ok(report)
-}
-
-fn write_framed(out: &mut impl std::io::Write, bytes: &[u8]) -> Result<()> {
-    let n = u32::try_from(bytes.len()).ok().filter(|n| *n != END).ok_or_else(|| {
-        Error::new(ErrorCode::ValueInvalid, format!("A load of {} bytes is past what a dump frames", bytes.len()))
-    })?;
-    out.write_all(&n.to_le_bytes())?;
-    out.write_all(bytes)?;
-    Ok(())
-}
-
-fn read_len(file: &mut impl std::io::Read) -> Result<u32> {
-    let mut len = [0u8; 4];
-    file.read_exact(&mut len).map_err(|_| invalid("it ends before its end marker"))?;
-    Ok(u32::from_le_bytes(len))
-}
-
-/// `n` bytes of the dump, read as they arrive rather than allocated up front, so a damaged length fails as the dump
-/// ending rather than as an allocation of up to 4 GiB
-fn read_bytes(file: &mut impl std::io::Read, n: u32) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    file.take(u64::from(n)).read_to_end(&mut bytes)?;
-    if bytes.len() != n as usize {
-        return Err(invalid(format!("it ends inside a part {n} bytes long")));
-    }
-    Ok(bytes)
-}
-
-/// The files a dump or a load writes, removed unless it finishes
-struct Written(Option<std::path::PathBuf>);
-
-impl Written {
-    fn keep(mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for Written {
-    fn drop(&mut self) {
-        if let Some(target) = self.0.take() {
-            let _ = std::fs::remove_file(target);
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::failpoints::{self, points};
-
-    fn fixture(root: &Path) -> std::path::PathBuf {
-        let db = Database::open(root.join("source"), OpenOptions { syncs: false, ..Default::default() }).unwrap();
-        let loads: Vec<_> = (0..1100)
-            .map(|i| Load::Entity {
-                id: format!("Note-{i}"),
-                fields: [("body".into(), rmpv::Value::from("x".repeat(9000)))].into(),
-                trashed: false,
-            })
-            .collect();
-        db.bulk_load(&loads).unwrap();
-        let path = root.join("primary.dump");
-        dump(&db, &path).unwrap();
-        db.close().unwrap();
-        path
+    if !create_ops.is_empty() {
+        db.execute_batch(&create_ops)?;
     }
 
-    #[test]
-    fn staged_load_preserves_foreign_files_and_refuses_a_publication_race() {
-        let root = tempfile::tempdir().unwrap();
-        let path = fixture(root.path());
-        let target = root.path().join("destination");
-        std::fs::create_dir(&target).unwrap();
-        std::fs::write(target.join("notes.txt"), b"unrelated").unwrap();
-        let publishing = target.clone();
-        failpoints::run_once_here(points::LOAD_PUBLISH, move || {
-            assert!(!publishing.join("data.mdb").exists(), "staged batches are never public");
-            assert!(matches!(
-                Database::open(&publishing, OpenOptions::default()),
-                Err(Error { code: ErrorCode::AlreadyOpen, .. })
-            ));
-            std::fs::write(publishing.join("data.mdb"), b"foreign publisher").unwrap();
+    let mut link_ops = Vec::with_capacity(payload.relations.len());
+    for rel in &payload.relations {
+        let info = rel.info.as_ref().map(json_to_canonical).transpose()?;
+        link_ops.push(WireOp::Link {
+            source: EntityTarget::ExternalId(rel.source_id.clone()),
+            rel_kind: rel.rel_kind.clone(),
+            target: EntityTarget::ExternalId(rel.target_id.clone()),
+            weight: Some(rel.weight.to_bits()),
+            info,
         });
-        assert_eq!(load(&path, &target).unwrap_err().code, ErrorCode::IdInUse);
-        assert_eq!(std::fs::read(target.join("data.mdb")).unwrap(), b"foreign publisher");
-        assert_eq!(std::fs::read(target.join("notes.txt")).unwrap(), b"unrelated");
-        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 2, "private staging cleaned up");
-        std::fs::remove_file(target.join("data.mdb")).unwrap();
-        let report = load(&path, &target).unwrap();
-        assert_eq!(report.entities, 1100);
-        let db = Database::open(&target, OpenOptions { syncs: false, ..Default::default() }).unwrap();
-        let again = root.path().join("again.dump");
-        dump(&db, &again).unwrap();
-        let (again, first) = (std::fs::read(again).unwrap(), std::fs::read(path).unwrap());
-        // All but the last commit's sequence, which is the loaded database's (`engine/tests/changed.rs` holds it)
-        assert_eq!(again[..again.len() - 8], first[..first.len() - 8], "the same schema and loads");
-        assert!(db.check().unwrap().is_clean());
+    }
+    if !link_ops.is_empty() {
+        db.execute_batch(&link_ops)?;
     }
 
-    #[test]
-    fn unwinding_before_publication_cleans_staging_and_postpublication_failure_keeps_the_database() {
-        let root = tempfile::tempdir().unwrap();
-        let path = fixture(root.path());
-        let target = root.path().join("destination");
-        failpoints::run_once_here(points::LOAD_PUBLISH, || panic!("cancel import"));
-        assert!(std::panic::catch_unwind(|| load(&path, &target)).is_err());
-        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
-        failpoints::fail_once_here(points::LOAD_PUBLISHED);
-        let error = load(&path, &target).unwrap_err();
-        assert_eq!(error.code, ErrorCode::Io);
-        assert!(error.message.contains("complete loaded database") && error.message.contains("visible"));
-        let db = Database::open(&target, OpenOptions { syncs: false, ..Default::default() }).unwrap();
-        assert!(db.check().unwrap().is_clean());
-        let mut entities = 0;
-        db.primary_loads(|load| {
-            if matches!(load, Load::Entity { .. }) {
-                entities += 1;
-            }
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(entities, 1100);
-        assert_eq!(load(&path, &target).unwrap_err().code, ErrorCode::IdInUse);
+    if !trashed_ids.is_empty() {
+        let trash_ops: Vec<WireOp> =
+            trashed_ids.into_iter().map(|id| WireOp::Trash { target: EntityTarget::ExternalId(id) }).collect();
+        db.execute_batch(&trash_ops)?;
     }
 
-    #[test]
-    fn late_invalid_input_cleans_staged_batches_and_can_be_retried() {
-        let root = tempfile::tempdir().unwrap();
-        let path = fixture(root.path());
-        let bytes = std::fs::read(&path).unwrap();
-        let target = root.path().join("destination");
-        let bad = root.path().join("bad.dump");
-        for kind in ["count", "truncated", "trailing"] {
-            let mut broken = bytes.clone();
-            match kind {
-                "count" => {
-                    // The count, before the last commit's sequence
-                    let at = broken.len() - 16;
-                    broken[at..at + 8].copy_from_slice(&0u64.to_le_bytes());
-                }
-                "truncated" => {
-                    broken.truncate(broken.len() - 1);
-                }
-                _ => broken.push(0),
-            }
-            std::fs::write(&bad, broken).unwrap();
-            let refused = load(&bad, &target).unwrap_err();
-            assert_eq!(refused.code, ErrorCode::WrongFormat, "{kind}");
-            if kind == "truncated" {
-                assert!(refused.message.contains("ends inside its last commit's sequence"), "{refused}");
-            }
-            assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "{kind}: staging cleaned up");
-        }
-        assert_eq!(load(&path, &target).unwrap().entities, 1100);
+    for emb in &payload.embeddings {
+        db.set_embeddings(&emb.index, &emb.id, &emb.vectors)?;
     }
+    db.flush()?;
+    db.close()?;
 
-    #[test]
-    fn a_dump_that_ends_after_its_count_loads_with_no_sequence_to_number_past() {
-        // As a build before the sequence was written makes it, which the build after a change to format 1 loads
-        let root = tempfile::tempdir().unwrap();
-        let path = fixture(root.path());
-        let mut bytes = std::fs::read(&path).unwrap();
-        bytes.truncate(bytes.len() - 8);
-        let short = root.path().join("short.dump");
-        std::fs::write(&short, bytes).unwrap();
-        let target = root.path().join("destination");
-        assert_eq!(load(&short, &target).unwrap().entities, 1100);
-    }
-
-    #[test]
-    fn load_rejects_sequence_u64_max_as_corrupted_and_bounds_trailing_garbage() {
-        let root = tempfile::tempdir().unwrap();
-        let path = fixture(root.path());
-        let bytes = std::fs::read(&path).unwrap();
-        let target = root.path().join("destination");
-
-        // sequence == u64::MAX must return Corrupted rather than overflowing on commit numbering
-        let mut max_seq = bytes.clone();
-        let at = max_seq.len() - 8;
-        max_seq[at..].copy_from_slice(&u64::MAX.to_le_bytes());
-        let bad_seq = root.path().join("max-seq.dump");
-        std::fs::write(&bad_seq, &max_seq).unwrap();
-        let err = load(&bad_seq, &target).unwrap_err();
-        assert_eq!(err.code, ErrorCode::Corrupted, "{err}");
-        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "staging cleaned up");
-
-        // Large trailing payload is bounded to 9 bytes and rejected as WrongFormat
-        let mut trailing = bytes;
-        trailing.extend(std::iter::repeat_n(0xABu8, 64 * 1024));
-        let bad_trailing = root.path().join("trailing.dump");
-        std::fs::write(&bad_trailing, &trailing).unwrap();
-        let err = load(&bad_trailing, &target).unwrap_err();
-        assert_eq!(err.code, ErrorCode::WrongFormat, "{err}");
-        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0, "staging cleaned up");
-    }
+    Ok(DumpReport {
+        entities: payload.entities.len() as u64,
+        relations: payload.relations.len() as u64,
+        embeddings: payload.embeddings.len() as u64,
+    })
 }

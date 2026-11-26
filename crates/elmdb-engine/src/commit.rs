@@ -912,6 +912,33 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         &self.schema
     }
 
+    /// Returns all coalesced entity deltas accumulated in this transaction so far.
+    pub fn entity_deltas(&self) -> Vec<&EntityDelta> {
+        self.total_deltas.entities.values().collect()
+    }
+
+    /// Returns all coalesced edge deltas accumulated in this transaction so far.
+    pub fn edge_deltas(&self) -> Vec<&EdgeDelta> {
+        self.total_deltas.edges.values().collect()
+    }
+
+    /// Resolves an internal `EntityKey` to its external string ID within this transaction.
+    pub fn resolve_ext_id(&self, key: EntityKey) -> Result<Option<String>> {
+        let Some(raw) = self.txn.get(self.engine.dbs.entities, &key.to_ne_bytes())? else {
+            return Ok(None);
+        };
+        Ok(Some(decode_row_header(raw)?.0.ext_id))
+    }
+
+    /// Executes a batch of wire ops inside this active transaction, supporting intra-batch `BatchSlot` refs.
+    pub fn exec_batch(&mut self, ops: &[WireOp]) -> Result<Vec<String>> {
+        let mut slots = Vec::new();
+        for op in ops {
+            self.apply_op(op, &mut slots)?;
+        }
+        Ok(slots.into_iter().map(|(_, ext_id)| ext_id).collect())
+    }
+
     pub fn get_row(&self, ext_id: &str) -> Result<Option<StoredRow>> {
         let Some(key_bytes) = self.txn.get(self.engine.dbs.ext_id, ext_id.as_bytes())? else {
             return Ok(None);
@@ -2160,6 +2187,25 @@ fn read_single_field<R: KvRead>(
     Ok(full.extra.get(field_name).cloned())
 }
 
+/// Looks up an entity's internal `EntityKey` by external ID within an active transaction.
+pub fn lookup_ext_id_in_txn<R: KvRead>(txn: &R, dbs: &SystemDbs, ext_id: &str) -> Result<Option<EntityKey>> {
+    let Some(key_bytes) = txn.get(dbs.ext_id, ext_id.as_bytes())? else {
+        return Ok(None);
+    };
+    Ok(Some(EntityKey(decode_u64_le(key_bytes, "ext_id")?)))
+}
+
+/// Lists outgoing relations for `ext_id` within an active read/write transaction.
+pub fn read_relations_out_in_txn<R: KvRead>(
+    txn: &R,
+    schema: &CompiledSchema,
+    dbs: &SystemDbs,
+    ext_id: &str,
+    rel_kind: Option<&str>,
+) -> Result<Vec<StoredEdge>> {
+    read_relations_for_ext_id(txn, schema, dbs, TAG_ADJ_OUT, ext_id, rel_kind)
+}
+
 fn read_relations_for_ext_id<R: KvRead>(
     txn: &R,
     schema: &CompiledSchema,
@@ -2509,7 +2555,7 @@ pub fn scan_edges_by_kind<R: KvRead>(txn: &R, dbs: &SystemDbs, kind: RelKindId) 
     Ok(out)
 }
 
-fn read_stored_row<R: KvRead>(
+pub fn read_stored_row<R: KvRead>(
     txn: &R,
     schema: &CompiledSchema,
     dbs: &SystemDbs,

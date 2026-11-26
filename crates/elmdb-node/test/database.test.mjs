@@ -1,185 +1,125 @@
+// Full v2 Database binding lifecycle: open/openAsync, schema + O(1) rename + archive/purge,
+// binary wire batches, beforeCommit savepoint rollback & cascade, backup, dump/load, check/rebuild/flush.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
-import { Packr } from 'msgpackr';
 
 const require = createRequire(import.meta.url);
 const { Database } = require('../index.js');
-const here = dirname(fileURLToPath(import.meta.url));
+const { buildWireBatch } = require('../client.js');
 
-/** A fresh directory, removed when the test ends */
-function tempDir(t) {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
-
-const noteSchema = {
-  $schema: 'https://elmdb.dev/schema/1.json',
-  types: { Note: { shortCode: { prefix: 'NTE' }, fields: { title: { type: 'string' } } } },
+const baseSchema = {
+  types: {
+    Note: {
+      fields: {
+        title: { type: 'string' },
+        tag: { type: 'string', optional: true },
+        audit: { type: 'boolean', optional: true },
+      },
+      indexes: {
+        byTitle: { kind: 'value', fields: ['title'], unique: true },
+      },
+    },
+    Audit: {
+      fields: {
+        noteId: { type: 'string' },
+      },
+    },
+  },
+  relations: {
+    refs: { endpoints: [{ source: 'Note', target: 'Note' }] },
+  },
 };
 
-test('opens a database, creating its files, and closes it', (t) => {
-  const dir = join(tempDir(t), 'db');
-  const db = Database.open(dir, { syncs: false });
-  assert.equal(db.isOpen, true);
+test('open, schema evolution, O(1) rename, archive & purge, backup, dump/load, and async ops', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'elmdb-v2-db-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const dir = join(tmp, 'main');
+
+  const db = await Database.openAsync(dir, { schema: baseSchema, durability: 'strict', buildPolicy: 'eager' });
+  t.after(() => db.close());
+
   assert.equal(db.readOnly, false);
-  assert.equal(db.schema, null);
-  assert.ok(existsSync(join(dir, 'data.mdb')));
-  db.close();
-  assert.equal(db.isOpen, false);
-  db.close();
-  assert.throws(() => db.syncs, { code: 'CLOSED' });
-});
+  assert.equal(db.path, dir);
+  assert.equal(db.openReport().status, 'fresh');
 
-test('a second open in one process throws ALREADY_OPEN', (t) => {
-  const dir = tempDir(t);
-  const db = Database.open(dir, { syncs: false });
-  assert.throws(() => Database.open(dir), { code: 'ALREADY_OPEN' });
-  db.close();
-  Database.open(dir, { syncs: false }).close();
-});
+  // Execute batch + enforce unique index
+  db.executeWireBatch(buildWireBatch((b) => {
+    const a = b.create('Note', { title: 'Unique-1', tag: 'a' }, 'n1');
+    const c = b.create('Note', { title: 'Unique-2', tag: 'b' }, 'n2');
+    b.link(a, 'refs', c);
+  }));
 
-test('a read-only open of an empty directory throws NO_DATABASE', (t) => {
-  const dir = tempDir(t);
-  assert.throws(() => Database.open(dir, { readOnly: true }), { code: 'NO_DATABASE', message: /No database at/ });
-});
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Unique-1' }, 'n3'); })),
+    (err) => err.code === 'UNIQUE_VIOLATION',
+  );
 
-test('stores a schema, reports what opening did, and refuses an invalid one listing every problem', (t) => {
-  const dir = tempDir(t);
-  const db = Database.open(dir, { schema: noteSchema, syncs: false });
-  assert.deepEqual(db.openReport, {
-    schemaChanges: [{ path: 'types.Note', change: 'added', effect: 'applied' }],
-    restored: null,
-    notBorneOut: false,
+  // O(1) rename field
+  const epoch = db.renameField('Note', 'tag', 'label');
+  assert.ok(epoch > 1);
+  assert.equal(db.get('n1').fields.label, 'a');
+
+  // beforeCommit: throwing aborts cleanly via native savepoint; returning a wire batch cascades derived writes!
+  let abortFlag = true;
+  const hookId = db.registerBeforeCommit(['Note'], (ev) => {
+    if (abortFlag) throw new Error('rejected by policy');
+    const created = ev.entities.filter((e) => e.op === 'create');
+    if (created.length === 0) return null;
+    return buildWireBatch((b) => {
+      for (const c of created) b.create('Audit', { noteId: c.id }, `audit-${c.id}`);
+    });
   });
-  // No restore to acknowledge: nothing changes, and a read-only handle is refused
-  db.acknowledgeRestore();
-  assert.equal(db.schema.types.Note.additionalFields, 'refuse', 'the canonical form, defaults written');
+
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Rolled-back' }, 'n-bad'); })),
+    (err) => err.code === 'HOOK_ABORTED',
+  );
+  assert.equal(db.get('n-bad'), null);
+
+  abortFlag = false;
+  db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Cascaded' }, 'n-good'); }));
+  assert.ok(db.get('n-good'));
+  assert.equal(db.get('audit-n-good').fields.noteId, 'n-good');
+  assert.equal(db.unregisterBeforeCommit(hookId), true);
+
+  // Check, rebuild, flush (sync + async)
+  await db.flushAsync();
+  const chk = await db.checkAsync();
+  assert.equal(chk.clean, true);
+  await db.rebuildAsync();
+  assert.equal(db.check().clean, true);
+  assert.ok(db.indexStatus().every((s) => s.state === 'ready'));
+  assert.equal(db.stats().typeCounts.Note, 3);
+
+  // Backup + overwrite guard + async backup
+  const backupDir = join(tmp, 'backup');
+  await db.backupAsync(backupDir, false);
+  assert.throws(() => db.backup(backupDir, false), (err) => err.code === 'ALREADY_EXISTS');
+  db.backup(backupDir, true);
+
+  // Dump + Database.load
+  const dumpFile = join(tmp, 'dump.json');
+  const dumpRep = db.dump(dumpFile);
+  assert.equal(dumpRep.entities, 4); // 3 Notes + 1 Audit
+  assert.equal(dumpRep.relations, 1);
+
+  const loadedDir = join(tmp, 'loaded');
+  const loadRep = Database.load(dumpFile, loadedDir);
+  assert.equal(loadRep.entities, 4);
+  const loaded = Database.open(loadedDir, { readOnly: true });
+  assert.equal(loaded.get('n1').fields.title, 'Unique-1');
+  assert.equal(loaded.check().clean, true);
+  loaded.close();
+
+  // Archive Audit type and purgeArchived
+  db.setSchema({ types: { Note: db.getSchema().types.Note }, relations: baseSchema.relations });
+  assert.equal(db.purgeArchived('Audit'), 1);
+  assert.equal(db.get('audit-n-good'), null);
+
   db.close();
-  const reader = Database.open(dir, { readOnly: true });
-  assert.throws(() => reader.acknowledgeRestore(), { code: 'READ_ONLY' });
-  reader.close();
-  const bad = structuredClone(noteSchema);
-  bad.types.Note.fields.title.type = 'text';
-  bad.types.Note.extra = true;
-  assert.throws(() => Database.open(dir, { schema: bad }), (error) => {
-    assert.equal(error.code, 'SCHEMA_INVALID');
-    assert.match(error.message, /2 problems/);
-    assert.match(error.message, /types\.Note\.extra: unknown key/);
-    assert.match(error.message, /types\.Note\.fields\.title\.type: "text" isn't a field type/);
-    return true;
-  });
-});
-
-test('setSchema changes an open database\'s schema, and refuses while a unit is open', (t) => {
-  const dir = tempDir(t);
-  const db = Database.open(dir, { schema: noteSchema, syncs: false });
-  const wider = structuredClone(noteSchema);
-  wider.types.Note.fields.body = { type: 'string', optional: true };
-  assert.deepEqual(db.setSchema(wider).map((c) => c.path), ['types.Note.fields.body']);
-  assert.ok('body' in db.schema.types.Note.fields);
-  assert.deepEqual(db.setSchema(wider), [], 'the same schema changes nothing');
-  const unit = db.begin();
-  assert.throws(() => db.setSchema(noteSchema), (error) => error.code === 'UNIT_OPEN');
-  unit.abort();
-  assert.throws(() => db.setSchema({ ...noteSchema, types: { note: {} } }), (error) => error.code === 'SCHEMA_INVALID');
-  db.close();
-});
-
-test('durable() resolves once what was committed is on disk', async (t) => {
-  const dir = tempDir(t);
-  const db = Database.open(dir, { schema: noteSchema });
-  // Opening stored the schema with a sync of its own, so nothing is owed
-  const before = db.syncs;
-  await db.durable();
-  assert.equal(db.syncs, before);
-  db.close();
-});
-
-test('rebuild() takes a type and an index, or neither', (t) => {
-  const db = Database.open(tempDir(t), { schema: noteSchema, syncs: false });
-  for (const args of [['Note'], [null, 'byTitle'], [undefined, 'byTitle']]) {
-    assert.throws(() => db.rebuild(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
-  }
-  db.rebuild();
-  db.close();
-});
-
-test('another elmdb binary in the process is refused at open, naming both files', (t) => {
-  const dir = tempDir(t);
-  // The first open claims the process for the binary index.js loaded
-  Database.open(join(dir, 'first'), { syncs: false }).close();
-  const binary = readdirSync(join(here, '..')).find((f) => f.endsWith('.node'));
-  // Windows holds a loaded binary's file open until the process exits, so the copy can't be removed after the test
-  const copyDir = mkdtempSync(join(tmpdir(), 'elmdb-binary-'));
-  t.after(() => {
-    try {
-      rmSync(copyDir, { recursive: true, force: true });
-    } catch (error) {
-      if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
-    }
-  });
-  const copy = join(copyDir, binary);
-  copyFileSync(join(here, '..', binary), copy);
-  const second = require(copy);
-  assert.throws(() => second.Database.open(join(dir, 'second'), { syncs: false }), (error) => {
-    assert.equal(error.code, 'ALREADY_LOADED');
-    assert.ok(error.message.includes(copy), error.message);
-    assert.ok(error.message.includes(binary), error.message);
-    return true;
-  });
-});
-
-test('an open refuses a sync or map option that is not a whole number in range, rather than casting it', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  for (const options of [{ syncIdleMs: -1 }, { syncIntervalMs: 1.5 }, { syncIdleMs: Number.NaN }, { mapSizeBytes: 0 }, { mapSizeBytes: Infinity }]) {
-    assert.throws(() => Database.open(dir, { syncs: false, ...options }), { code: 'VALUE_INVALID' }, JSON.stringify(options));
-  }
-  Database.open(dir, { syncIdleMs: 0, syncIntervalMs: 5000 }).close();
-});
-
-test('adoptReplacement refuses an epoch that is not a non-negative whole number in range, rather than casting it', (t) => {
-  const db = Database.open(tempDir(t), { syncs: false });
-  try {
-    for (const epoch of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2 ** 53 + 2]) {
-      assert.throws(() => db.adoptReplacement(epoch), { code: 'VALUE_INVALID' }, String(epoch));
-    }
-    assert.equal(db.adoptReplacement(0), true);
-    assert.equal(db.adoptReplacement(1), false);
-  } finally {
-    db.close();
-  }
-});
-
-test("committedElsewhere is never a handle's own commit, a unit reads its pending changes, and a checkpoint commits with its unit", () => {
-  const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-changes-'));
-  try {
-    const db = Database.open(join(dir, 'db'), { schema: {
-      $schema: 'https://elmdb.dev/schema/1.json', roles: {}, relations: {}, types: { Task: { fields: {} } },
-    } });
-    db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
-    assert.equal(db.committedElsewhere(), false);
-
-    const unit = db.begin();
-    unit.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-2' }], now: 1 }));
-    assert.deepEqual(Object.keys(packr.unpack(unit.pendingChanges()).entities), ['Task-2']);
-    unit.abort();
-
-    const reading = db.begin();
-    reading.setCheckpoint('reader', Buffer.from('there'));
-    assert.equal(reading.checkpoint('reader').toString(), 'there');
-    assert.equal(db.checkpoint('reader'), null, 'not until it commits');
-    reading.commit();
-    assert.equal(db.checkpoint('reader').toString(), 'there');
-    db.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  assert.throws(() => db.stats(), (err) => err.code === 'CLOSED');
 });

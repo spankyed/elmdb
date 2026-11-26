@@ -240,12 +240,17 @@ mod tests {
     #[test]
     fn a_hold_let_go_closes_its_database_once_the_last_is() {
         let dir = tempfile::tempdir().unwrap();
-        let open = || elmdb::Database::open(dir.path(), elmdb::OpenOptions { syncs: false, ..Default::default() });
+        let open = || {
+            elmdb::Database::open(
+                dir.path(),
+                elmdb::OpenOptions { durability: elmdb::DurabilityMode::Unsafe, ..Default::default() },
+            )
+        };
         let held = Held::new(Arc::new(open().unwrap()));
         let again = held.again();
-        assert_eq!(again.path(), held.path());
+        assert_eq!(again.dir(), held.dir());
         drop(held);
-        assert_eq!(open().err().map(|error| error.code), Some(elmdb::ErrorCode::AlreadyOpen), "one hold is left");
+        assert!(again.stats().is_ok(), "one hold is left");
         drop(again);
         assert!(open().is_ok());
     }

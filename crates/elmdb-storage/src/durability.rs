@@ -176,6 +176,11 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         self.store.page_size()
     }
 
+    pub fn copy_compacted(&self, target_dir: &Path) -> Result<(), StorageError> {
+        self.check_poisoned()?;
+        self.store.copy_compacted(target_dir)
+    }
+
     pub fn last_txnid(&self) -> Result<u64, StorageError> {
         self.check_poisoned()?;
         self.store.last_txnid()

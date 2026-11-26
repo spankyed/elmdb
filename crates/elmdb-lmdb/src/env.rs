@@ -197,6 +197,20 @@ impl LmdbStore {
         &self.inner.data_mdb
     }
 
+    /// Creates a consistent, live, compacted copy of the LMDB environment into `target_dir`
+    /// using `mdb_env_copy2(..., MDB_CP_COMPACT)` without blocking concurrent readers.
+    pub fn copy_compacted(&self, target_dir: impl AsRef<Path>) -> Result<(), StorageError> {
+        let target_dir = target_dir.as_ref();
+        fs::create_dir_all(target_dir)?;
+        let c_path = path_to_cstring(target_dir)?;
+        // SAFETY: `self.inner.env` is an open `MDB_env` and `c_path` is a valid NUL-terminated path.
+        let rc = unsafe { ffi::mdb_env_copy2(self.inner.env.as_ptr(), c_path.as_ptr(), ffi::MDB_CP_COMPACT) };
+        if rc != ffi::MDB_SUCCESS {
+            return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
+        }
+        Ok(())
+    }
+
     pub(crate) fn inner(&self) -> &Arc<LmdbEnvInner> {
         &self.inner
     }
@@ -419,6 +433,10 @@ impl KvStore for LmdbStore {
 
     fn page_size(&self) -> usize {
         self.inner.page_size
+    }
+
+    fn copy_compacted(&self, target_dir: &Path) -> Result<(), StorageError> {
+        LmdbStore::copy_compacted(self, target_dir)
     }
 }
 
