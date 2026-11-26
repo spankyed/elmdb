@@ -11,6 +11,8 @@ use std::path::Path;
 use elmdb_storage::StorageError;
 use sha2::{Digest, Sha256};
 
+const _: () = assert!(std::mem::size_of::<usize>() == 8, "elmdb-lmdb meta-page offsets require a 64-bit platform");
+
 const MDB_MAGIC: u32 = 0xBEEF_C0DE;
 const MDB_DATA_VERSION: u32 = 1;
 const P_META: u16 = 0x08;
@@ -19,6 +21,7 @@ const P_META: u16 = 0x08;
 const PAGE_HDR_SIZE: usize = 16;
 const META_STRUCT_SIZE: usize = 136;
 const MIN_META_BYTES: usize = PAGE_HDR_SIZE + META_STRUCT_SIZE;
+const CANDIDATE_PAGE_SIZES: [u64; 5] = [4096, 8192, 16384, 32768, 65536];
 
 /// Decoded LMDB meta page header fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +76,10 @@ fn parse_meta_page(slot: u8, buf: &[u8]) -> Option<MetaPageInfo> {
     let main_root = read_u64_ne(m, 72 + 40);
     let last_pg = read_u64_ne(m, 120);
     let txnid = read_u64_ne(m, 128);
+    // LMDB writes transaction N to meta page (N & 1); txnid 0 is allowed on initial meta pages.
+    if txnid != 0 && (txnid & 1) != u64::from(slot) {
+        return None;
+    }
 
     // Hash the exact `mm_dbs[0..2]`, `mm_last_pg`, and `mm_txnid` descriptors.
     let mut hasher = Sha256::new();
@@ -82,8 +89,21 @@ fn parse_meta_page(slot: u8, buf: &[u8]) -> Option<MetaPageInfo> {
     Some(MetaPageInfo { slot, page_size, map_size, free_root, main_root, last_pg, txnid, roots_sha256 })
 }
 
+fn read_meta_at(file: &mut File, len: u64, offset: u64, slot: u8) -> Option<MetaPageInfo> {
+    if len < offset.saturating_add(MIN_META_BYTES as u64) {
+        return None;
+    }
+    let mut buf = [0u8; MIN_META_BYTES];
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    file.read_exact(&mut buf).ok()?;
+    parse_meta_page(slot, &buf)
+}
+
 /// Reads page 0 and page 1 from `data.mdb` using standard seek/read I/O (never mmap)
 /// and returns the valid meta page with the higher `txnid`.
+///
+/// If meta page 0 is corrupted, probes all valid power-of-two OS page sizes (`4 KiB..=64 KiB`)
+/// to locate and validate meta page 1 (supporting 16 KiB Apple Silicon and 64 KiB ARM64 pages).
 pub fn read_active_meta_page(data_mdb: &Path) -> Result<MetaPageInfo, StorageError> {
     let mut file = File::open(data_mdb)?;
     let len = file.metadata()?.len();
@@ -91,18 +111,13 @@ pub fn read_active_meta_page(data_mdb: &Path) -> Result<MetaPageInfo, StorageErr
         return Err(StorageError::Corrupted(format!("data.mdb too small for meta page ({len} bytes)")));
     }
 
-    let mut page0 = [0u8; MIN_META_BYTES];
-    file.seek(SeekFrom::Start(0))?;
-    file.read_exact(&mut page0)?;
-    let m0 = parse_meta_page(0, &page0);
-
-    let page_size = m0.map_or(4096u64, |m| u64::from(m.page_size));
-    let m1 = if len >= page_size + (MIN_META_BYTES as u64) {
-        let mut page1 = [0u8; MIN_META_BYTES];
-        file.seek(SeekFrom::Start(page_size))?;
-        if file.read_exact(&mut page1).is_ok() { parse_meta_page(1, &page1) } else { None }
-    } else {
-        None
+    let m0 = read_meta_at(&mut file, len, 0, 0);
+    let m1 = match m0 {
+        Some(a) => read_meta_at(&mut file, len, u64::from(a.page_size), 1),
+        None => CANDIDATE_PAGE_SIZES.into_iter().find_map(|candidate| {
+            let parsed = read_meta_at(&mut file, len, candidate, 1)?;
+            (u64::from(parsed.page_size) == candidate).then_some(parsed)
+        }),
     };
 
     match (m0, m1) {

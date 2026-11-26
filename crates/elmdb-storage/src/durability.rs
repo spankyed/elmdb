@@ -83,15 +83,15 @@ impl SyncSlot {
 /// Outcome of validating the on-disk LMDB state against the dual-slot durability sidecar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryStatus {
-    /// Sidecar does not exist yet (fresh database).
+    /// Sidecar does not exist yet and LMDB has zero committed transactions.
     Fresh,
-    /// LMDB tip matches the highest valid durable record cleanly.
+    /// LMDB tip matches the highest valid durable record cleanly in the same boot session.
     Clean,
     /// LMDB holds newer unsynced commits from the *same* OS boot session (grouped mode).
     SameBootUnsyncedTail,
     /// OS rebooted since the last durable record; LMDB matches the verified durable snapshot.
     RebootVerified,
-    /// OS rebooted and LMDB holds unverified commits past the durable record, or root hashes diverged.
+    /// OS rebooted with unverified commits past the durable record, or non-empty DB lacks sidecar.
     UnsyncedAfterReboot,
 }
 
@@ -106,6 +106,8 @@ pub struct RecoveryReport {
 
 #[derive(Debug, Default)]
 struct WriterState {
+    recovered: bool,
+    dir_synced: bool,
     next_seq: u64,
     last_durable: Option<SyncSlot>,
 }
@@ -113,9 +115,10 @@ struct WriterState {
 /// Sole choke point allowed to commit write transactions and update durability state.
 ///
 /// Enforces:
-/// 1. Serialization under `WriterLock` (L3).
-/// 2. Dual-slot 4 KiB page-aligned durability records with SHA-256 verification.
-/// 3. Fail-stop permanent poisoning if any `sync` fails (no further writes may proceed).
+/// 1. Mandatory `recover()` before any write or sync (via `DurabilityGate::open` or explicit call).
+/// 2. Serialization under `WriterLock` (L3).
+/// 3. Dual-slot 4 KiB page-aligned durability records with SHA-256 verification.
+/// 4. Fail-stop permanent poisoning if any durability sync fails (blocking all further reads & writes).
 pub struct DurabilityGate<S: KvStore, V: Vfs> {
     store: S,
     vfs: V,
@@ -128,7 +131,21 @@ pub struct DurabilityGate<S: KvStore, V: Vfs> {
 }
 
 impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
-    pub fn new(store: S, vfs: V, dir: impl AsRef<Path>, mode: DurabilityMode) -> Self {
+    /// Constructs a `DurabilityGate` and immediately runs `recover()` so slot sequence numbers
+    /// are initialized before any write or sync can occur.
+    pub fn open(
+        store: S,
+        vfs: V,
+        dir: impl AsRef<Path>,
+        mode: DurabilityMode,
+    ) -> Result<(Self, RecoveryReport), StorageError> {
+        let gate = Self::new_unrecovered(store, vfs, dir, mode);
+        let report = gate.recover()?;
+        Ok((gate, report))
+    }
+
+    /// Constructs an unrecovered gate; callers must invoke `recover()` before `begin_write()` or `sync()`.
+    pub fn new_unrecovered(store: S, vfs: V, dir: impl AsRef<Path>, mode: DurabilityMode) -> Self {
         let dir = dir.as_ref().to_path_buf();
         let sidecar_path = dir.join(SYNC_SIDECAR_NAME);
         Self {
@@ -143,14 +160,6 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         }
     }
 
-    pub fn store(&self) -> &S {
-        &self.store
-    }
-
-    pub fn vfs(&self) -> &V {
-        &self.vfs
-    }
-
     pub fn mode(&self) -> DurabilityMode {
         self.mode
     }
@@ -159,17 +168,44 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         self.poisoned.load(Ordering::Acquire)
     }
 
+    pub fn map_size(&self) -> usize {
+        self.store.map_size()
+    }
+
+    pub fn page_size(&self) -> usize {
+        self.store.page_size()
+    }
+
+    pub fn last_txnid(&self) -> Result<u64, StorageError> {
+        self.check_poisoned()?;
+        self.store.last_txnid()
+    }
+
+    pub fn open_subdb_ro(
+        &self,
+        txn: &S::RoTxn<'_>,
+        name: &str,
+        flags: DbFlags,
+    ) -> Result<Option<SubDbHandle>, StorageError> {
+        self.check_poisoned()?;
+        self.store.open_subdb_ro(txn, name, flags)
+    }
+
     /// Validates the dual-slot sidecar against the current `KvStore` root state and initializes
     /// the gate's sequence counter from the highest valid slot.
     pub fn recover(&self) -> Result<RecoveryReport, StorageError> {
+        self.check_poisoned()?;
         let mut state = self.writer.lock();
+        self.check_poisoned()?;
+
         let observed_txnid = self.store.last_txnid()?;
         let observed_roots = self.store.roots_sha256()?;
 
+        let sidecar_exists = self.vfs.exists(&self.sidecar_path);
         let mut valid_slots = 0u8;
         let mut best: Option<SyncSlot> = None;
 
-        if self.vfs.exists(&self.sidecar_path) {
+        if sidecar_exists {
             let bytes = self.vfs.read_file(&self.sidecar_path)?;
             for slot_idx in 0..2 {
                 let start = slot_idx * SYNC_SLOT_BYTES;
@@ -182,21 +218,37 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
                     }
                 }
             }
-        }
-
-        if let Some(slot) = best {
-            state.next_seq = slot.seq.saturating_add(1);
-            state.last_durable = Some(slot);
+            if valid_slots == 0 {
+                return Err(StorageError::Corrupted(
+                    "durability sidecar exists but neither 4 KiB slot has a valid checksum".into(),
+                ));
+            }
         }
 
         let current_boot = self.vfs.boot_id();
         let status = match best {
-            None => RecoveryStatus::Fresh,
+            None => {
+                if observed_txnid == 0 {
+                    RecoveryStatus::Fresh
+                } else {
+                    RecoveryStatus::UnsyncedAfterReboot
+                }
+            }
             Some(durable) => {
-                let roots_match = durable.txnid == observed_txnid && durable.roots_sha256 == observed_roots;
-                if roots_match {
+                if observed_txnid < durable.txnid {
+                    return Err(StorageError::Corrupted(format!(
+                        "storage rollback detected: observed txnid {observed_txnid} < durable txnid {}",
+                        durable.txnid
+                    )));
+                }
+                if observed_txnid == durable.txnid {
+                    if observed_roots != durable.roots_sha256 {
+                        return Err(StorageError::Corrupted(format!(
+                            "root checksum mismatch at durable txnid {observed_txnid}"
+                        )));
+                    }
                     if durable.boot_id == current_boot { RecoveryStatus::Clean } else { RecoveryStatus::RebootVerified }
-                } else if durable.boot_id == current_boot && observed_txnid > durable.txnid {
+                } else if durable.boot_id == current_boot {
                     RecoveryStatus::SameBootUnsyncedTail
                 } else {
                     RecoveryStatus::UnsyncedAfterReboot
@@ -204,36 +256,61 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             }
         };
 
+        if let Some(slot) = best {
+            state.next_seq = slot.seq.saturating_add(1);
+            state.last_durable = Some(slot);
+        }
+        state.recovered = true;
+
         Ok(RecoveryReport { status, durable: best, observed_txnid, observed_roots_sha256: observed_roots, valid_slots })
     }
 
     /// Opens a read-only MVCC transaction without acquiring `WriterLock`.
+    /// Fails closed if the durability gate is poisoned.
     pub fn begin_read(&self) -> Result<S::RoTxn<'_>, StorageError> {
+        self.check_poisoned()?;
         self.store.begin_read()
     }
 
-    /// Begins a write transaction guarded by `WriterLock` and fail-stop poison checks.
+    /// Begins a write transaction guarded by `WriterLock`, recovery check, and fail-stop poison checks.
     pub fn begin_write(&self) -> Result<GatedWriteTxn<'_, S, V>, StorageError> {
         self.check_poisoned()?;
         let guard = self.writer.lock();
         self.check_poisoned()?;
+        if !guard.recovered {
+            return Err(StorageError::InvalidState(
+                "DurabilityGate::recover() must succeed before beginning a write transaction".into(),
+            ));
+        }
         let txn = self.store.begin_write()?;
         Ok(GatedWriteTxn { gate: self, _writer_guard: guard, txn: Some(txn) })
     }
 
     /// Flushes LMDB to disk and writes + fsyncs the next alternating 4 KiB durability slot.
     ///
-    /// Permanently poisons the gate on any I/O failure so no subsequent write can commit on
+    /// Permanently poisons the gate on any failure so no subsequent read or write can proceed on
     /// an uncertain durability boundary.
     pub fn sync(&self) -> Result<Option<SyncSlot>, StorageError> {
         self.check_poisoned()?;
         let mut guard = self.writer.lock();
         self.check_poisoned()?;
+        if !guard.recovered {
+            return Err(StorageError::InvalidState(
+                "DurabilityGate::recover() must succeed before calling sync()".into(),
+            ));
+        }
         if self.mode == DurabilityMode::Unsafe {
             return Ok(None);
         }
-        let receipt = CommitReceipt { txnid: self.store.last_txnid()?, roots_sha256: self.store.roots_sha256()? };
-        let slot = self.persist_durable_locked(&mut guard, receipt)?;
+        let txnid = match self.store.last_txnid() {
+            Ok(id) => id,
+            Err(err) => return Err(self.poison(format!("reading last_txnid during sync failed: {err}"))),
+        };
+        let roots_sha256 = match self.store.roots_sha256() {
+            Ok(hash) => hash,
+            Err(err) => return Err(self.poison(format!("reading roots_sha256 during sync failed: {err}"))),
+        };
+        let slot = self.persist_durable_locked(&mut guard, CommitReceipt { txnid, roots_sha256 })?;
         Ok(Some(slot))
     }
 
@@ -264,7 +341,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         let slot =
             SyncSlot { seq, txnid: receipt.txnid, boot_id: self.vfs.boot_id(), roots_sha256: receipt.roots_sha256 };
         let encoded = slot.encode();
-        let is_new = !self.vfs.exists(&self.sidecar_path);
+        let need_dir_sync = !state.dir_synced || !self.vfs.exists(&self.sidecar_path);
         let offset = (seq % 2) * (SYNC_SLOT_BYTES as u64);
 
         if let Err(err) = self.vfs.write_at(&self.sidecar_path, offset, &encoded) {
@@ -273,8 +350,11 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if let Err(err) = self.vfs.sync_file(&self.sidecar_path) {
             return Err(self.poison(format!("sidecar sync failed: {err}")));
         }
-        if is_new && let Err(err) = self.vfs.sync_dir(&self.dir) {
-            return Err(self.poison(format!("directory sync failed: {err}")));
+        if need_dir_sync {
+            if let Err(err) = self.vfs.sync_dir(&self.dir) {
+                return Err(self.poison(format!("directory sync failed: {err}")));
+            }
+            state.dir_synced = true;
         }
 
         state.next_seq = seq.saturating_add(1);
@@ -337,7 +417,8 @@ impl<'a, S: KvStore, V: Vfs> GatedWriteTxn<'a, S, V> {
         self.inner().savepoint_depth()
     }
 
-    /// Executes `f` inside a native nested savepoint on this gated write transaction.
+    /// Executes `f` inside a native nested savepoint on this gated write transaction,
+    /// unwinding any nested savepoints opened inside `f` on error.
     pub fn with_savepoint<T, E, F>(&mut self, f: F) -> Result<T, E>
     where
         E: From<StorageError>,
@@ -350,7 +431,10 @@ impl<'a, S: KvStore, V: Vfs> GatedWriteTxn<'a, S, V> {
                 Ok(value)
             }
             Err(err) => {
-                let _ = self.abort_savepoint(depth);
+                while self.savepoint_depth() >= depth {
+                    let d = self.savepoint_depth();
+                    let _ = self.abort_savepoint(d);
+                }
                 Err(err)
             }
         }
@@ -360,7 +444,19 @@ impl<'a, S: KvStore, V: Vfs> GatedWriteTxn<'a, S, V> {
     pub fn commit(mut self) -> Result<CommitReceipt, StorageError> {
         self.gate.check_poisoned()?;
         let txn = self.txn.take().expect("txn present");
-        let receipt = txn.commit_raw()?;
+        let receipt = match txn.commit_raw() {
+            Ok(r) => r,
+            Err(err) => {
+                // If an error occurred in Strict mode on a fatal/IO boundary after commit may have
+                // landed, fail closed by poisoning the gate.
+                if self.gate.mode == DurabilityMode::Strict
+                    && matches!(err, StorageError::Io(_) | StorageError::Corrupted(_))
+                {
+                    return Err(self.gate.poison(format!("commit failed with uncertain durability: {err}")));
+                }
+                return Err(err);
+            }
+        };
         if self.gate.mode == DurabilityMode::Strict {
             self.gate.persist_durable_locked(&mut self._writer_guard, receipt)?;
         }

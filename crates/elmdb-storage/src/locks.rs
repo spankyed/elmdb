@@ -11,6 +11,7 @@
 //! (`domain > max_held_domain`) on the current thread so lock-order inversions
 //! and accidental recursive acquisitions panic immediately.
 
+use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 
 use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -77,18 +78,23 @@ mod tracker {
     pub fn release(_domain: LockDomain) {}
 }
 
-struct DomainToken(LockDomain);
+/// `!Send` token ensuring domain guards are always released on the acquiring thread,
+/// even if `parking_lot/send_guard` is ever enabled in the workspace.
+struct DomainToken {
+    domain: LockDomain,
+    _not_send: PhantomData<*const ()>,
+}
 
 impl DomainToken {
     fn enter(domain: LockDomain) -> Self {
         tracker::acquire(domain);
-        Self(domain)
+        Self { domain, _not_send: PhantomData }
     }
 }
 
 impl Drop for DomainToken {
     fn drop(&mut self) {
-        tracker::release(self.0);
+        tracker::release(self.domain);
     }
 }
 

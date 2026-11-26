@@ -67,7 +67,7 @@ pub trait KvWrite: KvRead + Sized {
     fn put_no_overwrite(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<bool, StorageError>;
     /// Deletes `key`. Returns `true` if the key existed.
     fn del(&mut self, db: SubDbHandle, key: &[u8]) -> Result<bool, StorageError>;
-    /// O(1) empties all entries from `db` without closing its `MDB_dbi` handle (`mdb_drop(..., 0)`).
+    /// Empties all entries from `db` without closing its `MDB_dbi` handle (`mdb_drop(..., 0)`).
     fn truncate(&mut self, db: SubDbHandle) -> Result<(), StorageError>;
 
     /// Opens a native nested savepoint and returns its 1-based depth.
@@ -123,7 +123,10 @@ where
             Ok(value)
         }
         Err(err) => {
-            let _ = txn.abort_savepoint(depth);
+            while txn.savepoint_depth() >= depth {
+                let d = txn.savepoint_depth();
+                let _ = txn.abort_savepoint(d);
+            }
             Err(err)
         }
     }

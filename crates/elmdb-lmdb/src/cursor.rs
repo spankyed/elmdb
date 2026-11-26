@@ -6,6 +6,15 @@ use elmdb_storage::{DbFlags, KvCursor, KvEntry, StorageError};
 use lmdb_master_sys as ffi;
 
 use crate::error::map_mdb_err;
+use crate::txn::validate_key;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorState {
+    Unpositioned,
+    Positioned,
+    Bof,
+    Eof,
+}
 
 /// Zero-copy LMDB cursor tied to the lifetime `'txn` of its parent transaction.
 pub struct LmdbCursor<'txn> {
@@ -13,7 +22,7 @@ pub struct LmdbCursor<'txn> {
     flags: DbFlags,
     map_size: usize,
     max_dbs: u32,
-    positioned: bool,
+    state: CursorState,
     _txn: PhantomData<&'txn ()>,
 }
 
@@ -36,24 +45,18 @@ impl<'txn> LmdbCursor<'txn> {
             return Err(map_mdb_err(rc, map_size, max_dbs));
         }
         let cursor = NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null MDB_cursor".into()))?;
-        Ok(Self { cursor, flags, map_size, max_dbs, positioned: false, _txn: PhantomData })
+        Ok(Self { cursor, flags, map_size, max_dbs, state: CursorState::Unpositioned, _txn: PhantomData })
     }
 
-    fn validate_key(&self, key: &[u8]) -> Result<(), StorageError> {
-        if self.flags.integer_key {
-            if key.len() != 4 && key.len() != 8 {
-                return Err(StorageError::BadValSize { len: key.len() });
-            }
-        } else if key.is_empty() || key.len() > 511 {
-            return Err(StorageError::BadValSize { len: key.len() });
-        }
-        Ok(())
-    }
-
-    fn get_op(&mut self, op: ffi::MDB_cursor_op, key_in: Option<&[u8]>) -> Result<Option<KvEntry<'txn>>, StorageError> {
+    fn get_op(
+        &mut self,
+        op: ffi::MDB_cursor_op,
+        key_in: Option<&[u8]>,
+        not_found_state: CursorState,
+    ) -> Result<Option<KvEntry<'txn>>, StorageError> {
         let mut key_val = match key_in {
             Some(bytes) => {
-                self.validate_key(bytes)?;
+                validate_key(self.flags, bytes)?;
                 ffi::MDB_val { mv_size: bytes.len(), mv_data: bytes.as_ptr() as *mut libc::c_void }
             }
             None => ffi::MDB_val { mv_size: 0, mv_data: ptr::null_mut() },
@@ -66,15 +69,15 @@ impl<'txn> LmdbCursor<'txn> {
         let rc = unsafe { ffi::mdb_cursor_get(self.cursor.as_ptr(), &mut key_val, &mut data_val, op) };
         match rc {
             ffi::MDB_SUCCESS => {
-                self.positioned = true;
+                self.state = CursorState::Positioned;
                 // SAFETY: `mdb_cursor_get` returned `MDB_SUCCESS`; returned pointers remain valid
-                // for the immutable borrow `'txn`. Empty slices use `NonNull::dangling()`.
+                // for the immutable borrow `'txn`.
                 let k = unsafe { mdb_val_to_slice(&key_val) };
                 let v = unsafe { mdb_val_to_slice(&data_val) };
                 Ok(Some((k, v)))
             }
             ffi::MDB_NOTFOUND => {
-                self.positioned = false;
+                self.state = not_found_state;
                 Ok(None)
             }
             other => Err(map_mdb_err(other, self.map_size, self.max_dbs)),
@@ -83,34 +86,36 @@ impl<'txn> LmdbCursor<'txn> {
 }
 
 impl<'txn> KvCursor<'txn> for LmdbCursor<'txn> {
-    fn first(&mut self) -> Result<Option<(&'txn [u8], &'txn [u8])>, StorageError> {
-        self.get_op(ffi::MDB_FIRST, None)
+    fn first(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        self.get_op(ffi::MDB_FIRST, None, CursorState::Eof)
     }
 
-    fn last(&mut self) -> Result<Option<(&'txn [u8], &'txn [u8])>, StorageError> {
-        self.get_op(ffi::MDB_LAST, None)
+    fn last(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        self.get_op(ffi::MDB_LAST, None, CursorState::Bof)
     }
 
-    fn seek_ge(&mut self, key: &[u8]) -> Result<Option<(&'txn [u8], &'txn [u8])>, StorageError> {
-        self.get_op(ffi::MDB_SET_RANGE, Some(key))
+    fn seek_ge(&mut self, key: &[u8]) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        self.get_op(ffi::MDB_SET_RANGE, Some(key), CursorState::Eof)
     }
 
     fn seek_exact(&mut self, key: &[u8]) -> Result<Option<&'txn [u8]>, StorageError> {
-        Ok(self.get_op(ffi::MDB_SET_KEY, Some(key))?.map(|(_, v)| v))
+        Ok(self.get_op(ffi::MDB_SET_KEY, Some(key), CursorState::Unpositioned)?.map(|(_, v)| v))
     }
 
-    fn next(&mut self) -> Result<Option<(&'txn [u8], &'txn [u8])>, StorageError> {
-        if !self.positioned {
-            return self.first();
+    fn next(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        match self.state {
+            CursorState::Unpositioned | CursorState::Bof => self.first(),
+            CursorState::Eof => Ok(None),
+            CursorState::Positioned => self.get_op(ffi::MDB_NEXT, None, CursorState::Eof),
         }
-        self.get_op(ffi::MDB_NEXT, None)
     }
 
-    fn prev(&mut self) -> Result<Option<(&'txn [u8], &'txn [u8])>, StorageError> {
-        if !self.positioned {
-            return self.last();
+    fn prev(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        match self.state {
+            CursorState::Unpositioned | CursorState::Eof => self.last(),
+            CursorState::Bof => Ok(None),
+            CursorState::Positioned => self.get_op(ffi::MDB_PREV, None, CursorState::Bof),
         }
-        self.get_op(ffi::MDB_PREV, None)
     }
 }
 

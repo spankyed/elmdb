@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 
 use elmdb_sim::{SimKvConfig, SimKvStore, SimRng, SimVfs};
 use elmdb_storage::{
     BootId, DbFlags, DurabilityGate, DurabilityMode, KvCursor, KvRead, RecoveryStatus, SYNC_SIDECAR_NAME,
-    SYNC_SLOT_BYTES, StorageError, SubDbPool,
+    SYNC_SLOT_BYTES, StorageError, SubDbPool, Vfs,
 };
 
 #[test]
@@ -14,7 +15,8 @@ fn dst_strict_crash_and_reboot_linearizability_across_64_seeds() {
         let dir = Path::new("/sim/db");
         let store = SimKvStore::new(SimKvConfig::default());
         let vfs = SimVfs::new(BootId([seed as u8; 16]));
-        let gate = DurabilityGate::new(store.clone(), vfs.clone(), dir, DurabilityMode::Strict);
+        let (gate, report) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Strict).unwrap();
+        assert_eq!(report.status, RecoveryStatus::Fresh);
 
         let mut oracle: BTreeMap<Vec<u8>, Vec<u8>> = BTreeMap::new();
         let mut txn = gate.begin_write().unwrap();
@@ -62,12 +64,11 @@ fn dst_strict_crash_and_reboot_linearizability_across_64_seeds() {
                 txn.abort();
             }
 
-            // Periodically inject power-loss + reboot and verify strict linearizability.
             if step % 10 == 9 {
                 store.crash_power_loss();
                 vfs.crash_power_loss(&mut rng, true);
-                let reopened = DurabilityGate::new(store.clone(), vfs.clone(), dir, DurabilityMode::Strict);
-                let report = reopened.recover().unwrap();
+                let (reopened, report) =
+                    DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Strict).unwrap();
                 assert_eq!(
                     report.status,
                     RecoveryStatus::RebootVerified,
@@ -89,12 +90,53 @@ fn dst_strict_crash_and_reboot_linearizability_across_64_seeds() {
 }
 
 #[test]
+fn dst_torn_sidecar_write_between_write_at_and_sync_recovers_via_sibling_slot() {
+    // Exercises SimVfs's actual torn 4 KiB write injection path between write_at() and sync_file().
+    let dir = Path::new("/sim/torn");
+    let store = SimKvStore::default();
+    let vfs = SimVfs::new(BootId([0x44; 16]));
+    let (gate, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
+
+    let mut txn = gate.begin_write().unwrap();
+    let db = txn.open_subdb("meta", DbFlags::DEFAULT).unwrap();
+    txn.put(db, b"a", b"1").unwrap();
+    txn.commit().unwrap();
+    let slot0 = gate.sync().unwrap().unwrap();
+    assert_eq!(slot0.seq, 0);
+
+    // Next sync writes to slot 1, then fails on sync_file leaving dirty bytes in slot 1!
+    let mut txn = gate.begin_write().unwrap();
+    txn.put(db, b"b", b"2").unwrap();
+    txn.commit().unwrap();
+    vfs.faults().fail_next_sync.store(1, Ordering::Release);
+    let err = gate.sync().unwrap_err();
+    assert!(matches!(err, StorageError::DurabilityFailed(_)));
+    assert!(gate.is_poisoned());
+
+    // Now simulate power loss with a seed that triggers torn-page injection into dirty slot 1.
+    let mut saw_torn = false;
+    for seed in 0..32u64 {
+        let mut rng = SimRng::seeded(seed);
+        let torn = vfs.crash_power_loss(&mut rng, true);
+        if torn > 0 {
+            saw_torn = true;
+            break;
+        }
+    }
+    // Even if slot 1 was torn or reverted, reopening MUST recover cleanly via slot 0!
+    let (_reopened, report) = DurabilityGate::open(store, vfs, dir, DurabilityMode::Grouped).unwrap();
+    assert!(report.valid_slots >= 1);
+    assert!(report.durable.is_some());
+    assert!(saw_torn || report.durable.unwrap().seq == 0);
+}
+
+#[test]
 fn dst_grouped_unsynced_tail_reverts_cleanly_on_power_loss_and_survives_torn_slot() {
     let mut rng = SimRng::seeded(0xDEAD_BEEF);
     let dir = Path::new("/sim/grouped");
     let store = SimKvStore::default();
     let vfs = SimVfs::new(BootId([0x22; 16]));
-    let gate = DurabilityGate::new(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped);
+    let (gate, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
 
     let mut txn = gate.begin_write().unwrap();
     let db = txn.open_subdb("meta", DbFlags::DEFAULT).unwrap();
@@ -102,21 +144,20 @@ fn dst_grouped_unsynced_tail_reverts_cleanly_on_power_loss_and_survives_torn_slo
     txn.commit().unwrap();
     gate.sync().unwrap();
 
-    // Write a second synced commit so both slots 0 and 1 are populated.
     let mut txn = gate.begin_write().unwrap();
     txn.put(db, b"b", b"2").unwrap();
     txn.commit().unwrap();
     let slot1 = gate.sync().unwrap().unwrap();
     assert_eq!(slot1.seq, 1);
 
-    // Corrupt slot 1 (simulating a torn 4 KiB write on slot 1) -> slot 0 still decodes cleanly!
+    // Corrupt slot 1 -> slot 0 still decodes cleanly!
     let sidecar = dir.join(SYNC_SIDECAR_NAME);
     vfs.corrupt_byte(&sidecar, SYNC_SLOT_BYTES + 20, 0xFF);
     let report = gate.recover().unwrap();
     assert_eq!(report.valid_slots, 1);
     assert_eq!(report.durable.unwrap().seq, 0);
 
-    // Repair by syncing slot 2 (goes into slot 0) and slot 3 (overwrites torn slot 1).
+    // Repair by syncing twice.
     gate.sync().unwrap();
     gate.sync().unwrap();
     let report = gate.recover().unwrap();
@@ -131,8 +172,7 @@ fn dst_grouped_unsynced_tail_reverts_cleanly_on_power_loss_and_survives_torn_slo
     store.crash_power_loss();
     vfs.crash_power_loss(&mut rng, true);
 
-    let reopened = DurabilityGate::new(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped);
-    let report = reopened.recover().unwrap();
+    let (reopened, report) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
     assert_eq!(report.status, RecoveryStatus::RebootVerified);
     let ro = reopened.begin_read().unwrap();
     assert_eq!(ro.get(db, b"a").unwrap(), Some(b"1".as_slice()));
@@ -141,11 +181,56 @@ fn dst_grouped_unsynced_tail_reverts_cleanly_on_power_loss_and_survives_torn_slo
 }
 
 #[test]
-fn dst_sync_failure_permanently_poisons_durability_gate() {
+fn dst_recover_detects_corrupt_sidecar_missing_sidecar_rollback_and_bitflip() {
+    let dir = Path::new("/sim/corrupt");
+    let store = SimKvStore::default();
+    let vfs = SimVfs::new(BootId([0x77; 16]));
+    let (gate, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Strict).unwrap();
+
+    // Unrecovered gate must refuse writes & syncs.
+    let unrecovered = DurabilityGate::new_unrecovered(store.clone(), vfs.clone(), dir, DurabilityMode::Strict);
+    assert!(matches!(unrecovered.begin_write(), Err(StorageError::InvalidState(_))));
+    assert!(matches!(unrecovered.sync(), Err(StorageError::InvalidState(_))));
+
+    let mut txn = gate.begin_write().unwrap();
+    let db = txn.open_subdb("meta", DbFlags::DEFAULT).unwrap();
+    txn.put(db, b"k", b"v").unwrap();
+    txn.commit().unwrap();
+
+    // 1. Corrupt BOTH slots -> recover MUST fail with Corrupted (never Fresh!).
+    let sidecar = dir.join(SYNC_SIDECAR_NAME);
+    let vfs_corrupt = SimVfs::new(BootId([0x77; 16]));
+    let mut broken = vfs.read_file(&sidecar).unwrap();
+    broken[15] ^= 0xFF;
+    if broken.len() > SYNC_SLOT_BYTES + 15 {
+        broken[SYNC_SLOT_BYTES + 15] ^= 0xFF;
+    }
+    vfs_corrupt.write_all(&sidecar, &broken).unwrap();
+    let res = DurabilityGate::open(store.clone(), vfs_corrupt, dir, DurabilityMode::Strict);
+    assert!(matches!(res, Err(StorageError::Corrupted(_))));
+
+    // 2. Missing sidecar when observed_txnid > 0 -> UnsyncedAfterReboot (NOT Fresh).
+    let vfs_missing = SimVfs::new(BootId([0x77; 16]));
+    let (_, report) = DurabilityGate::open(store.clone(), vfs_missing, dir, DurabilityMode::Strict).unwrap();
+    assert_eq!(report.status, RecoveryStatus::UnsyncedAfterReboot);
+
+    // 3. Same-txnid silent bitflip -> Corrupted.
+    store.simulate_silent_bitflip("meta", b"k");
+    let res = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Strict);
+    assert!(matches!(res, Err(StorageError::Corrupted(_))));
+
+    // 4. Storage rollback (observed_txnid < durable.txnid) -> Corrupted.
+    store.simulate_corrupt_rollback();
+    let res = DurabilityGate::open(store, vfs, dir, DurabilityMode::Strict);
+    assert!(matches!(res, Err(StorageError::Corrupted(_))));
+}
+
+#[test]
+fn dst_sync_failure_permanently_poisons_reads_writes_sync_and_recover() {
     let dir = Path::new("/sim/poison");
     let store = SimKvStore::default();
     let vfs = SimVfs::default();
-    let gate = DurabilityGate::new(store.clone(), vfs.clone(), dir, DurabilityMode::Strict);
+    let (gate, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Strict).unwrap();
 
     let mut txn = gate.begin_write().unwrap();
     let db = txn.open_subdb("meta", DbFlags::DEFAULT).unwrap();
@@ -161,9 +246,11 @@ fn dst_sync_failure_permanently_poisons_durability_gate() {
     assert!(matches!(err, StorageError::DurabilityFailed(_)));
     assert!(gate.is_poisoned());
 
-    // Every subsequent begin_write or sync MUST fail with Poisoned.
+    // Every subsequent operation fails closed with Poisoned!
     assert!(matches!(gate.begin_write(), Err(StorageError::Poisoned(_))));
+    assert!(matches!(gate.begin_read(), Err(StorageError::Poisoned(_))));
     assert!(matches!(gate.sync(), Err(StorageError::Poisoned(_))));
+    assert!(matches!(gate.recover(), Err(StorageError::Poisoned(_))));
 }
 
 #[test]
@@ -171,7 +258,7 @@ fn dst_mvcc_reader_survives_ping_pong_slot_truncate() {
     let dir = Path::new("/sim/pingpong");
     let store = SimKvStore::default();
     let vfs = SimVfs::default();
-    let gate = DurabilityGate::new(store, vfs, dir, DurabilityMode::Unsafe);
+    let (gate, _) = DurabilityGate::open(store, vfs, dir, DurabilityMode::Unsafe).unwrap();
 
     let mut pool = SubDbPool::new(4);
     let slot_a = pool.allocate().unwrap();
@@ -181,11 +268,9 @@ fn dst_mvcc_reader_survives_ping_pong_slot_truncate() {
     txn.put(db_a, b"term", b"old_postings").unwrap();
     txn.commit().unwrap();
 
-    // Pin an active MVCC reader on slot_a.
     let reader = gate.begin_read().unwrap();
     assert_eq!(reader.get(db_a, b"term").unwrap(), Some(b"old_postings".as_slice()));
 
-    // Rebuild into staging slot_b, flip, and O(1) truncate slot_a while `reader` is still alive!
     let slot_b = pool.allocate().unwrap();
     let mut txn = gate.begin_write().unwrap();
     let db_b = txn.open_subdb(&slot_b.name(), DbFlags::DEFAULT).unwrap();
@@ -194,10 +279,8 @@ fn dst_mvcc_reader_survives_ping_pong_slot_truncate() {
     txn.commit().unwrap();
     pool.recycle(slot_a).unwrap();
 
-    // Old reader STILL sees old snapshot intact!
     assert_eq!(reader.get(db_a, b"term").unwrap(), Some(b"old_postings".as_slice()));
 
-    // New reader sees empty slot_a and populated slot_b!
     let reader2 = gate.begin_read().unwrap();
     assert_eq!(reader2.get(db_a, b"term").unwrap(), None);
     assert_eq!(reader2.get(db_b, b"term").unwrap(), Some(b"new_postings".as_slice()));

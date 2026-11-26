@@ -11,6 +11,8 @@ use crate::env::{LmdbEnvInner, LmdbStore};
 use crate::error::map_mdb_err;
 use crate::meta::read_active_meta_page;
 
+const _: () = assert!(std::mem::size_of::<usize>() == 8, "MDB_INTEGERKEY requires 64-bit usize == 8 bytes");
+
 /// Read-only MVCC LMDB transaction with zero-copy borrows.
 pub struct LmdbRoTxn<'env> {
     inner: Arc<LmdbEnvInner>,
@@ -38,7 +40,8 @@ impl<'env> LmdbRoTxn<'env> {
 
 impl Drop for LmdbRoTxn<'_> {
     fn drop(&mut self) {
-        // SAFETY: `self.txn` is owned exclusively by `LmdbRoTxn` and aborted once on drop.
+        // SAFETY: `self.txn` is owned exclusively by `LmdbRoTxn` and never invokes `mdb_dbi_open`,
+        // so `mdb_txn_abort` cleanly releases only the reader slot.
         unsafe {
             ffi::mdb_txn_abort(self.txn.as_ptr());
         }
@@ -139,6 +142,7 @@ impl KvRead for LmdbRwTxn<'_> {
 
 impl KvWrite for LmdbRwTxn<'_> {
     fn open_subdb(&mut self, name: &str, flags: DbFlags) -> Result<SubDbHandle, StorageError> {
+        validate_subdb_name(name)?;
         if let Some((_, dbi, pending_flags)) = self.pending_dbis.iter().find(|(n, _, _)| n == name) {
             if *pending_flags != flags {
                 return Err(StorageError::InvalidState(format!("sub-DB '{name}' reopened with mismatched flags")));
@@ -164,11 +168,27 @@ impl KvWrite for LmdbRwTxn<'_> {
             mdb_flags |= ffi::MDB_INTEGERKEY;
         }
         let mut dbi: ffi::MDB_dbi = 0;
-        // SAFETY: `active_raw()` is the root write `MDB_txn`, `cname` is NUL-terminated.
+        // SAFETY: `active_raw()` is the serialized root write `MDB_txn`, `cname` is NUL-terminated.
         let rc = unsafe { ffi::mdb_dbi_open(self.active_raw(), cname.as_ptr(), mdb_flags, &mut dbi) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
         }
+        // Verify on-disk flags against caller's requested flags so reopening an existing
+        // `MDB_INTEGERKEY` sub-DB with `DbFlags::DEFAULT` (or vice versa) never bypasses key validation.
+        let mut actual_raw_flags: libc::c_uint = 0;
+        // SAFETY: `active_raw()` and `dbi` are live.
+        let rc = unsafe { ffi::mdb_dbi_flags(self.active_raw(), dbi, &mut actual_raw_flags) };
+        if rc != ffi::MDB_SUCCESS {
+            return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
+        }
+        let actual_integer_key = (actual_raw_flags & ffi::MDB_INTEGERKEY) != 0;
+        if actual_integer_key != flags.integer_key {
+            return Err(StorageError::InvalidState(format!(
+                "sub-DB '{name}' on-disk MDB_INTEGERKEY={actual_integer_key} mismatches requested {}",
+                flags.integer_key
+            )));
+        }
+
         self.pending_dbis.push((name.to_owned(), dbi, flags));
         Ok(SubDbHandle::from_raw(dbi))
     }
@@ -178,7 +198,7 @@ impl KvWrite for LmdbRwTxn<'_> {
         validate_key(flags, key)?;
         let mut k = to_mdb_val(key);
         let mut v = to_mdb_val(val);
-        // SAFETY: `active_raw()` is a live write `MDB_txn`; `k` and `v` point to valid read buffers.
+        // SAFETY: `active_raw()` is a live write `MDB_txn`; `k` and `v` have valid non-null pointers.
         let rc = unsafe { ffi::mdb_put(self.active_raw(), db.raw(), &mut k, &mut v, 0) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
@@ -215,7 +235,7 @@ impl KvWrite for LmdbRwTxn<'_> {
 
     fn truncate(&mut self, db: SubDbHandle) -> Result<(), StorageError> {
         let _ = self.lookup_flags(db)?;
-        // SAFETY: `del = 0` empties the sub-DB in O(1) without closing the `MDB_dbi` handle,
+        // SAFETY: `del = 0` empties the sub-DB without closing the `MDB_dbi` handle,
         // preserving MVCC safety for all concurrent read transactions.
         let rc = unsafe { ffi::mdb_drop(self.active_raw(), db.raw(), 0) };
         if rc != ffi::MDB_SUCCESS {
@@ -296,13 +316,20 @@ impl KvWrite for LmdbRwTxn<'_> {
     }
 }
 
-fn lookup_flags(inner: &LmdbEnvInner, db: SubDbHandle) -> Result<DbFlags, StorageError> {
-    inner.dbis.lock().by_id.get(&db.raw()).copied().ok_or(StorageError::InvalidSubDb { handle: db.raw() })
+pub(crate) fn validate_subdb_name(name: &str) -> Result<(), StorageError> {
+    if name.is_empty() || name.len() > 511 {
+        return Err(StorageError::BadValSize { len: name.len() });
+    }
+    if name.as_bytes().contains(&0) {
+        return Err(StorageError::InvalidState("sub-DB name contains interior NUL".into()));
+    }
+    Ok(())
 }
 
-fn validate_key(flags: DbFlags, key: &[u8]) -> Result<(), StorageError> {
+pub(crate) fn validate_key(flags: DbFlags, key: &[u8]) -> Result<(), StorageError> {
     if flags.integer_key {
-        if key.len() != 4 && key.len() != 8 {
+        // Fixed 8-byte native `u64` only: prevents LMDB `mdb_cmp_cint` OOB reads when mixing key widths.
+        if key.len() != 8 {
             return Err(StorageError::BadValSize { len: key.len() });
         }
     } else if key.is_empty() || key.len() > 511 {
@@ -311,11 +338,14 @@ fn validate_key(flags: DbFlags, key: &[u8]) -> Result<(), StorageError> {
     Ok(())
 }
 
+fn lookup_flags(inner: &LmdbEnvInner, db: SubDbHandle) -> Result<DbFlags, StorageError> {
+    inner.dbis.lock().by_id.get(&db.raw()).copied().ok_or(StorageError::InvalidSubDb { handle: db.raw() })
+}
+
 fn to_mdb_val(bytes: &[u8]) -> ffi::MDB_val {
-    ffi::MDB_val {
-        mv_size: bytes.len(),
-        mv_data: if bytes.is_empty() { ptr::null_mut() } else { bytes.as_ptr() as *mut libc::c_void },
-    }
+    // Always pass a non-null pointer (Rust empty slices carry an aligned dangling pointer)
+    // because LMDB invokes `memcpy(dst, mv_data, 0)` on empty values, where NULL is C UB.
+    ffi::MDB_val { mv_size: bytes.len(), mv_data: bytes.as_ptr() as *mut libc::c_void }
 }
 
 fn raw_get<'a>(
@@ -379,6 +409,9 @@ fn raw_entries_unchecked(inner: &LmdbEnvInner, txn: *mut ffi::MDB_txn, db: SubDb
 
 #[cfg(test)]
 mod tests {
+    use std::fs::OpenOptions;
+    use std::io::{Seek, SeekFrom, Write};
+
     use elmdb_storage::KvStore;
     use tempfile::TempDir;
 
@@ -387,7 +420,7 @@ mod tests {
     use crate::meta::read_active_meta_page;
 
     #[test]
-    fn meta_page_offsets_match_live_lmdb_env_info() {
+    fn meta_page_offsets_match_live_lmdb_env_info_and_survive_corrupted_page0() {
         let tmp = TempDir::new().unwrap();
         let store =
             LmdbStore::open(tmp.path(), LmdbConfig { map_size: 4 * 1024 * 1024, ..LmdbConfig::default() }).unwrap();
@@ -402,5 +435,21 @@ mod tests {
         assert_eq!(meta.txnid, receipt.txnid);
         assert_eq!(meta.page_size as usize, store.page_size());
         assert_eq!(meta.roots_sha256, receipt.roots_sha256);
+
+        // Write a second commit so both meta pages 0 and 1 are populated, then corrupt page 0
+        // and verify `read_active_meta_page` still locates page 1 even on 16 KiB Apple Silicon!
+        let mut rw = store.begin_write().unwrap();
+        rw.put(db, b"hello2", b"world2").unwrap();
+        rw.commit_raw().unwrap();
+        let data_path = store.data_mdb_path().to_path_buf();
+        drop(store);
+
+        let mut file = OpenOptions::new().write(true).open(&data_path).unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write_all(&[0xFF; 64]).unwrap();
+        drop(file);
+
+        let recovered = read_active_meta_page(&data_path).unwrap();
+        assert_eq!(recovered.slot, 1);
     }
 }

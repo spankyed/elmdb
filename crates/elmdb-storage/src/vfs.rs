@@ -59,7 +59,16 @@ impl OsVfs {
                 }
             }
             let mut out = [0u8; 16];
-            let _ = getrandom::fill(&mut out);
+            if getrandom::fill(&mut out).is_err() {
+                let pid = std::process::id().to_le_bytes();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .to_le_bytes();
+                out[0..4].copy_from_slice(&pid);
+                out[4..16].copy_from_slice(&now[0..12]);
+            }
             BootId(out)
         })
     }

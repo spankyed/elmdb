@@ -19,15 +19,17 @@ pub struct SimVfsFaults {
 
 #[derive(Debug, Default)]
 struct VfsInner {
-    /// Files committed to durable storage via `sync_file`.
+    /// Files durably linked and synced on disk.
     durable: BTreeMap<PathBuf, Vec<u8>>,
-    /// Files visible in OS page cache (includes unsynced writes).
+    /// Files visible in OS page cache / dcache (includes unsynced writes and unsynced renames/unlinks).
     dirty: BTreeMap<PathBuf, Vec<u8>>,
+    /// Files whose contents were synced (`sync_file`) even if a new directory entry is not yet `sync_dir`'d.
+    synced_contents: BTreeMap<PathBuf, Vec<u8>>,
     boot_id: [u8; 16],
 }
 
-/// Deterministic in-memory VFS modeling OS page cache, fsync boundaries, torn 4 KiB writes,
-/// and OS reboots.
+/// Deterministic in-memory VFS modeling OS page cache, fsync/dir-sync boundaries,
+/// torn 4 KiB writes, and OS reboots.
 #[derive(Debug, Clone)]
 pub struct SimVfs {
     inner: Arc<Mutex<VfsInner>>,
@@ -40,6 +42,7 @@ impl SimVfs {
             inner: Arc::new(Mutex::new(VfsInner {
                 durable: BTreeMap::new(),
                 dirty: BTreeMap::new(),
+                synced_contents: BTreeMap::new(),
                 boot_id: initial_boot.0,
             })),
             faults: Arc::new(SimVfsFaults::default()),
@@ -50,22 +53,22 @@ impl SimVfs {
         &self.faults
     }
 
-    /// Simulates a sudden power loss: unsynced files revert to their durable state or
-    /// receive torn partial-sector bytes; optionally rotates `BootId` to simulate OS reboot.
-    pub fn crash_power_loss(&self, rng: &mut SimRng, reboot: bool) {
+    /// Simulates a sudden power loss: unsynced writes revert to their durable state or
+    /// receive torn partial-page bytes in the first differing 4 KiB page; optionally rotates
+    /// `BootId` to simulate OS reboot. Returns how many files received torn page writes.
+    pub fn crash_power_loss(&self, rng: &mut SimRng, reboot: bool) -> usize {
         let mut inner = self.inner.lock();
         let mut next_dirty = inner.durable.clone();
-
-        // For any file that had unsynced dirty modifications, randomly simulate either clean
-        // reversion to durable bytes OR a torn partial write into the modified region.
         let mut torn_updates = Vec::new();
+
         for (path, dirty_bytes) in &inner.dirty {
             let durable_bytes = inner.durable.get(path);
             if durable_bytes == Some(dirty_bytes) {
                 continue;
             }
+            // Only files already linked durably can take torn overwrites; newly created files
+            // whose directory wasn't synced may either disappear or appear torn.
             if rng.gen_bool(1, 2) {
-                // Inject a torn write into the first differing 4 KiB page.
                 let mut torn = durable_bytes.cloned().unwrap_or_else(|| vec![0u8; dirty_bytes.len()]);
                 if torn.len() < dirty_bytes.len() {
                     torn.resize(dirty_bytes.len(), 0);
@@ -81,17 +84,21 @@ impl SimVfs {
                 torn_updates.push((path.clone(), torn));
             }
         }
+
+        let torn_count = torn_updates.len();
         for (path, torn) in torn_updates {
             inner.durable.insert(path, torn);
         }
 
         inner.dirty = next_dirty;
+        inner.synced_contents = inner.durable.clone();
         if reboot {
             rng.fill_bytes(&mut inner.boot_id);
         }
+        torn_count
     }
 
-    /// Directly corrupts a byte range in a durable file to test torn-slot recovery.
+    /// Directly corrupts a byte range in both dirty and durable buffers to test torn-slot recovery.
     pub fn corrupt_byte(&self, path: &Path, offset: usize, xor_mask: u8) {
         let mut inner = self.inner.lock();
         if let Some(buf) = inner.dirty.get_mut(path)
@@ -100,6 +107,11 @@ impl SimVfs {
             buf[offset] ^= xor_mask;
         }
         if let Some(buf) = inner.durable.get_mut(path)
+            && offset < buf.len()
+        {
+            buf[offset] ^= xor_mask;
+        }
+        if let Some(buf) = inner.synced_contents.get_mut(path)
             && offset < buf.len()
         {
             buf[offset] ^= xor_mask;
@@ -142,10 +154,10 @@ impl Vfs for SimVfs {
         if Self::take_fault(&self.faults.fail_next_write) {
             return Err(StorageError::Io(io::Error::other("injected sim write_at fault")));
         }
+        let start = usize::try_from(offset).map_err(|_| StorageError::BadValSize { len: data.len() })?;
+        let end = start.checked_add(data.len()).ok_or(StorageError::BadValSize { len: data.len() })?;
         let mut inner = self.inner.lock();
         let entry = inner.dirty.entry(path.to_path_buf()).or_default();
-        let start = usize::try_from(offset).map_err(|_| StorageError::BadValSize { len: data.len() })?;
-        let end = start.saturating_add(data.len());
         if entry.len() < end {
             entry.resize(end, 0);
         }
@@ -172,13 +184,37 @@ impl Vfs for SimVfs {
             .get(path)
             .cloned()
             .ok_or_else(|| StorageError::Io(io::Error::new(io::ErrorKind::NotFound, "sim file not found")))?;
-        inner.durable.insert(path.to_path_buf(), bytes);
+        inner.synced_contents.insert(path.to_path_buf(), bytes.clone());
+        // If already durably linked in its directory, update durable bytes immediately.
+        if inner.durable.contains_key(path) {
+            inner.durable.insert(path.to_path_buf(), bytes);
+        }
         Ok(())
     }
 
-    fn sync_dir(&self, _dir: &Path) -> Result<(), StorageError> {
+    fn sync_dir(&self, dir: &Path) -> Result<(), StorageError> {
         if self.faults.fail_dir_sync.swap(false, Ordering::AcqRel) {
             return Err(StorageError::Io(io::Error::other("injected sim sync_dir fault")));
+        }
+        let mut inner = self.inner.lock();
+        // Persist creations/renames/unlinks for files directly inside `dir`.
+        let to_remove: Vec<PathBuf> = inner
+            .durable
+            .keys()
+            .filter(|p| p.parent() == Some(dir) && !inner.dirty.contains_key(*p))
+            .cloned()
+            .collect();
+        for path in to_remove {
+            inner.durable.remove(&path);
+        }
+        let to_link: Vec<(PathBuf, Vec<u8>)> = inner
+            .synced_contents
+            .iter()
+            .filter(|(p, _)| p.parent() == Some(dir) && inner.dirty.contains_key(*p))
+            .map(|(p, b)| (p.clone(), b.clone()))
+            .collect();
+        for (path, bytes) in to_link {
+            inner.durable.insert(path, bytes);
         }
         Ok(())
     }
@@ -201,7 +237,7 @@ impl Vfs for SimVfs {
         if inner.dirty.remove(path).is_none() {
             return Err(StorageError::Io(io::Error::new(io::ErrorKind::NotFound, "sim file not found")));
         }
-        inner.durable.remove(path);
+        inner.synced_contents.remove(path);
         Ok(())
     }
 
@@ -212,8 +248,8 @@ impl Vfs for SimVfs {
             .remove(from)
             .ok_or_else(|| StorageError::Io(io::Error::new(io::ErrorKind::NotFound, "sim file not found")))?;
         inner.dirty.insert(to.to_path_buf(), bytes);
-        if let Some(durable) = inner.durable.remove(from) {
-            inner.durable.insert(to.to_path_buf(), durable);
+        if let Some(synced) = inner.synced_contents.remove(from) {
+            inner.synced_contents.insert(to.to_path_buf(), synced);
         }
         Ok(())
     }
