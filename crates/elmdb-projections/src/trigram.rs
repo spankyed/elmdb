@@ -18,56 +18,74 @@ use crate::state::KvMut;
 const TAG_TRIGRAM: u8 = 0x01;
 const TAG_TRIG_DF: u8 = 0x02;
 const TAG_DOC_TRIGS: u8 = 0x03;
+const TAG_OVERFLOW: u8 = 0x04;
 
 /// Maximum trigrams indexed per single entity to bound worst-case write amplification on huge blobs.
 pub const MAX_TRIGRAMS_PER_DOC: usize = 16_384;
 
-/// Extracts sorted, deduplicated lowercase 3-character Unicode trigrams from `text`
-/// via a streaming 3-char sliding window (zero full-string lowercase or `Vec<char>` allocation).
+/// Extracts sorted, deduplicated lowercase 3-character Unicode trigrams from `text` using
+/// full-string `str::to_lowercase()` so contextual case folding (e.g., Greek final sigma `Σ` -> `ς`)
+/// matches `Contains` substring evaluation identically.
 pub fn extract_trigrams(text: &str) -> Vec<String> {
+    extract_trigrams_with_overflow(text).0
+}
+
+fn extract_trigrams_with_overflow(text: &str) -> (Vec<String>, bool) {
+    let lower = text.to_lowercase();
     let mut set = BTreeSet::new();
-    let mut iter = text.chars().flat_map(char::to_lowercase);
+    let mut iter = lower.chars();
     let (Some(mut c0), Some(mut c1)) = (iter.next(), iter.next()) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
+    let mut overflowed = false;
     for c2 in iter {
         if c0 != '\0' && c1 != '\0' && c2 != '\0' {
             let mut s = String::with_capacity(c0.len_utf8() + c1.len_utf8() + c2.len_utf8());
             s.push(c0);
             s.push(c1);
             s.push(c2);
-            set.insert(s);
-            if set.len() >= MAX_TRIGRAMS_PER_DOC {
+            if set.len() >= MAX_TRIGRAMS_PER_DOC && !set.contains(&s) {
+                overflowed = true;
                 break;
             }
+            set.insert(s);
         }
         c0 = c1;
         c1 = c2;
     }
-    set.into_iter().collect()
+    (set.into_iter().collect(), overflowed)
 }
 
-fn extract_row_trigrams(row: &PackedRow, fields: &[FieldId]) -> Vec<String> {
+fn extract_row_trigrams(row: &PackedRow, fields: &[FieldId]) -> (Vec<String>, bool) {
     let mut set = BTreeSet::new();
+    let mut overflowed = false;
     for &fid in fields {
         let Some(val) = row.fields.get(&fid) else { continue };
         match val {
             CanonicalValue::String(s) => {
-                for t in extract_trigrams(s) {
-                    set.insert(t);
-                    if set.len() >= MAX_TRIGRAMS_PER_DOC {
-                        return set.into_iter().collect();
+                let (trigs, ovf) = extract_trigrams_with_overflow(s);
+                if ovf {
+                    overflowed = true;
+                }
+                for t in trigs {
+                    if set.len() >= MAX_TRIGRAMS_PER_DOC && !set.contains(&t) {
+                        return (set.into_iter().collect(), true);
                     }
+                    set.insert(t);
                 }
             }
             CanonicalValue::Array(items) => {
                 for item in items {
                     if let CanonicalValue::String(s) = item {
-                        for t in extract_trigrams(s) {
-                            set.insert(t);
-                            if set.len() >= MAX_TRIGRAMS_PER_DOC {
-                                return set.into_iter().collect();
+                        let (trigs, ovf) = extract_trigrams_with_overflow(s);
+                        if ovf {
+                            overflowed = true;
+                        }
+                        for t in trigs {
+                            if set.len() >= MAX_TRIGRAMS_PER_DOC && !set.contains(&t) {
+                                return (set.into_iter().collect(), true);
                             }
+                            set.insert(t);
                         }
                     }
                 }
@@ -75,7 +93,14 @@ fn extract_row_trigrams(row: &PackedRow, fields: &[FieldId]) -> Vec<String> {
             _ => {}
         }
     }
-    set.into_iter().collect()
+    (set.into_iter().collect(), overflowed)
+}
+
+fn overflow_key(key: EntityKey) -> [u8; 9] {
+    let mut k = [0u8; 9];
+    k[0] = TAG_OVERFLOW;
+    k[1..9].copy_from_slice(&key.to_be_bytes());
+    k
 }
 
 fn trigram_key(trig: &str, block: u64) -> Vec<u8> {
@@ -212,14 +237,23 @@ pub fn apply_delta<W: KvMut>(
     after: Option<&PackedRow>,
 ) -> Result<()> {
     let dtk = doc_trigs_key(key);
+    let ovk = overflow_key(key);
     let old_trigs = match txn.get(db, &dtk)?.map(ToOwned::to_owned) {
         Some(raw) => decode_doc_trigs(&raw)?,
         None => Vec::new(),
     };
-    let new_trigs = match after {
+    let old_overflowed = txn.get(db, &ovk)?.is_some();
+    let (new_trigs, new_overflowed) = match after {
         Some(r) => extract_row_trigrams(r, fields),
-        None => Vec::new(),
+        None => (Vec::new(), false),
     };
+    if old_overflowed != new_overflowed {
+        if new_overflowed {
+            txn.put(db, &ovk, &[])?;
+        } else {
+            txn.del(db, &ovk)?;
+        }
+    }
     if old_trigs == new_trigs {
         return Ok(());
     }
@@ -273,21 +307,40 @@ pub fn trigram_df<R: KvRead>(txn: &R, db: SubDbHandle, trig: &str) -> Result<u32
     }
 }
 
+/// Scans all entities that exceeded `MAX_TRIGRAMS_PER_DOC` (`TAG_OVERFLOW`) so queries never suffer false negatives.
+pub fn scan_overflow_keys<R: KvRead>(txn: &R, db: SubDbHandle) -> Result<Vec<EntityKey>> {
+    let mut out = Vec::new();
+    let mut cur = txn.cursor(db)?;
+    let mut step = cur.seek_ge(&[TAG_OVERFLOW])?;
+    while let Some((k, _)) = step {
+        if k.first() != Some(&TAG_OVERFLOW) {
+            break;
+        }
+        if k.len() != 9 {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "truncated trigram overflow key"));
+        }
+        out.push(EntityKey::from_be_bytes(k[1..9].try_into().expect("8")));
+        step = cur.next()?;
+    }
+    Ok(out)
+}
+
 /// Rarest-first intersection of required trigrams!
 ///
-/// 1. Looks up `trig_df` for every required trigram in O(1); if any has `df == 0`, returns empty immediately!
+/// 1. Looks up `trig_df` for every required trigram in O(1); if any has `df == 0`, returns only `TAG_OVERFLOW` keys!
 /// 2. Sorts required trigrams ascending by `df`.
 /// 3. Loads blocks of the rarest trigram and intersects with remaining trigrams block-by-block, exiting early
-///    as soon as the surviving candidate set becomes empty.
+///    as soon as the surviving candidate set becomes empty, then unions `TAG_OVERFLOW` keys for zero false negatives.
 pub fn intersect_trigrams<R: KvRead>(txn: &R, db: SubDbHandle, required: &[String]) -> Result<Vec<EntityKey>> {
     if required.is_empty() {
         return Ok(Vec::new());
     }
+    let overflow = scan_overflow_keys(txn, db)?;
     let mut ranked: Vec<(&str, u32)> = Vec::with_capacity(required.len());
     for t in required {
         let df = trigram_df(txn, db, t)?;
         if df == 0 {
-            return Ok(Vec::new());
+            return Ok(overflow);
         }
         ranked.push((t.as_str(), df));
     }
@@ -342,6 +395,11 @@ pub fn intersect_trigrams<R: KvRead>(txn: &R, db: SubDbHandle, required: &[Strin
         for off in bm.iter() {
             out.push(EntityKey(base | (off as u64)));
         }
+    }
+    if !overflow.is_empty() {
+        out.extend(overflow);
+        out.sort_unstable();
+        out.dedup();
     }
     Ok(out)
 }

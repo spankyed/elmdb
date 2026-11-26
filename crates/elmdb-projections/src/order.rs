@@ -318,3 +318,40 @@ pub fn scan_ordered<R: KvRead>(
     }
     Ok(out)
 }
+
+/// Scans entities stored in `TAG_MISSING` (missing, null, or non-string field values) in `EntityKey` order.
+pub fn scan_missing_keys<R: KvRead>(
+    txn: &R,
+    db: SubDbHandle,
+    reverse: bool,
+    limit: Option<usize>,
+) -> Result<Vec<EntityKey>> {
+    let cap = limit.unwrap_or(usize::MAX);
+    if cap == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    let mut cur = txn.cursor(db)?;
+    let mut step = if !reverse {
+        cur.seek_ge(&[TAG_MISSING])?
+    } else {
+        match cur.seek_ge(&[TAG_MISSING + 1])? {
+            Some(_) => cur.prev()?,
+            None => cur.last()?,
+        }
+    };
+    while let Some((k, _)) = step {
+        if k.first() != Some(&TAG_MISSING) {
+            break;
+        }
+        if k.len() != 9 {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "truncated order missing key"));
+        }
+        out.push(EntityKey::from_be_bytes(k[1..9].try_into().expect("8")));
+        if out.len() >= cap {
+            break;
+        }
+        step = if reverse { cur.prev()? } else { cur.next()? };
+    }
+    Ok(out)
+}

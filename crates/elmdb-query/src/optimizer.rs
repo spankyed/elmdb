@@ -4,7 +4,7 @@
 use elmdb_engine::{CompiledSchema, EntityKey, FieldId, IndexDef, IndexId, IndexKind, SystemDbs, TypeId};
 use elmdb_projections::{BuildState, state::read_build_state, trigram};
 use elmdb_storage::KvRead;
-use elmdb_wire::{CanonicalValue, Result};
+use elmdb_wire::Result;
 use regex_syntax::hir::{Hir, HirKind};
 use serde::{Deserialize, Serialize};
 
@@ -347,11 +347,27 @@ pub fn optimize_plan<R: KvRead>(
         }
     }
 
-    let strategy = compute_strategy(txn, dbs, schema, &plan.root)?;
-    if let Some(c) = cache {
+    let (strategy, any_building) = compute_strategy(txn, dbs, schema, &plan.root)?;
+    if let Some(c) = cache
+        && !any_building
+    {
         c.put(shape_key, strategy.clone());
     }
     Ok((strategy, false))
+}
+
+fn any_index_building_for_type<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    schema: &CompiledSchema,
+    type_id: TypeId,
+) -> Result<bool> {
+    for idx in &schema.indexes {
+        if idx.type_id == type_id && matches!(read_build_state(txn, dbs, idx.id)?, Some(BuildState::Building { .. })) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn compute_strategy<R: KvRead>(
@@ -359,25 +375,30 @@ fn compute_strategy<R: KvRead>(
     dbs: &SystemDbs,
     schema: &CompiledSchema,
     root: &LogicalNode,
-) -> Result<CachedStrategy> {
+) -> Result<(CachedStrategy, bool)> {
     // Detect `Terminal(Count)` over `Filter(Eq)` over `Source(Type { include_trashed: false })` -> O(1) count pushdown!
+    // Must verify BOTH `ValueKeyClass::Indexed` AND single-field Value index (`fields.len() == 1`).
     if let LogicalNode::Terminal { input, terminal: TerminalSpec::Count } = root
         && let LogicalNode::Filter { input: src, expr: FilterExpr::Eq(field, val) } = input.as_ref()
-        && !matches!(
-            val,
-            CanonicalValue::Null | CanonicalValue::Object(_) | CanonicalValue::Array(_) | CanonicalValue::Bytes(_)
+        && matches!(
+            elmdb_projections::value::encode_compound_values(&[val]),
+            elmdb_projections::value::ValueKeyClass::Indexed(_)
         )
-        && !matches!(val, CanonicalValue::String(s) if s.len() > elmdb_projections::MAX_INDEXED_STRING)
         && let LogicalNode::Source(SourceSpec::Type { type_id, include_trashed: false }) = src.as_ref()
         && let Some(idx) = find_ready_value_index(txn, dbs, schema, *type_id, *field)?
+        && matches!(&idx.kind, IndexKind::Value { fields, .. } if fields.len() == 1)
     {
-        return Ok(CachedStrategy {
-            access_label: format!("O1CountPushdown({})", idx.name),
-            chosen_index: Some(idx.id),
-            use_count_pushdown: true,
-            use_index_order: None,
-            use_trigram_index: None,
-        });
+        let any_building = any_index_building_for_type(txn, dbs, schema, *type_id)?;
+        return Ok((
+            CachedStrategy {
+                access_label: format!("O1CountPushdown({})", idx.name),
+                chosen_index: Some(idx.id),
+                use_count_pushdown: true,
+                use_index_order: None,
+                use_trigram_index: None,
+            },
+            any_building,
+        ));
     }
 
     // Walk down to find base `(TypeId, include_trashed)`, any Filter, and any OrderSlice!
@@ -416,7 +437,9 @@ fn compute_strategy<R: KvRead>(
                         if let Some(idx) = find_ready_order_index(txn, dbs, schema, tid, *field, loc)? {
                             use_index_order = Some(idx.id);
                         }
-                    } else if let Some(idx) = find_ready_value_index(txn, dbs, schema, tid, *field)? {
+                    } else if let Some(idx) = find_ready_value_index(txn, dbs, schema, tid, *field)?
+                        && matches!(&idx.kind, IndexKind::Value { fields, .. } if fields.len() == 1)
+                    {
                         use_index_order = Some(idx.id);
                     }
                     walk = input.as_ref();
@@ -463,5 +486,12 @@ fn compute_strategy<R: KvRead>(
         }
     }
 
-    Ok(CachedStrategy { access_label, chosen_index, use_count_pushdown: false, use_index_order, use_trigram_index })
+    let any_building = match base_type {
+        Some(tid) => any_index_building_for_type(txn, dbs, schema, tid)?,
+        None => false,
+    };
+    Ok((
+        CachedStrategy { access_label, chosen_index, use_count_pushdown: false, use_index_order, use_trigram_index },
+        any_building,
+    ))
 }

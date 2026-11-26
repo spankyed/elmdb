@@ -1269,3 +1269,533 @@ fn live_lmdb_end_to_end_query_suite() {
     let expected = vec![ks[4], ks[6], ks[8], ks[10], ks[12], ks[14]];
     assert_eq!(out.result, QueryResult::Ids(expected));
 }
+
+// ---------------------------------------------------------------------------
+// 7. Review Regression Tests (P0-1..P0-8, P1-1..P1-10, P2-1..P2-5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn review_regression_compound_value_count_cache_and_cross_type_ranges() {
+    // Schema with ONLY a compound Value index `["tag", "score"]` (no single-field index on `tag`)!
+    let mut s = test_schema();
+    s.types.get_mut("Note").unwrap().indexes.remove("note_tag");
+    s.types.get_mut("Note").unwrap().indexes.insert(
+        "note_tag_score".into(),
+        RawIndex { kind: RawIndexKind::Value { fields: vec!["tag".into(), "score".into()], unique: false } },
+    );
+
+    let store = SimKvStore::new(SimKvConfig::default());
+    let vfs = SimVfs::new(BootId([2; 16]));
+    let clock = SimClock::new(1_700_000_000_000);
+    let reg =
+        Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)));
+    let (engine, _) = Engine::open_with_projections(
+        store,
+        vfs,
+        clock,
+        PathBuf::from("/sim/compound"),
+        DurabilityMode::Strict,
+        Arc::clone(&reg) as _,
+    )
+    .unwrap();
+    engine.set_schema(&s).unwrap();
+    let ids = resolve_ids(&engine.schema());
+    let qe = QueryEngine::default();
+
+    let nul_heavy = "\0".repeat(300); // len == 300 <= 448, but escaped > 502 B -> TAG_LONG!
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("c1".into()),
+                fields: vec![
+                    ("tag".into(), CanonicalValue::String("sys".into())),
+                    ("score".into(), CanonicalValue::Int(5)),
+                ],
+            },
+            // Trailing `score` omitted -> stored in TAG_WITHOUT of compound index!
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("c2".into()),
+                fields: vec![("tag".into(), CanonicalValue::String("sys".into()))],
+            },
+            // Trailing `score` is Array -> stored in TAG_UNORDERED of compound index!
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("c3".into()),
+                fields: vec![
+                    ("tag".into(), CanonicalValue::String("sys".into())),
+                    ("score".into(), CanonicalValue::Array(vec![CanonicalValue::Int(1)])),
+                ],
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("c4".into()),
+                fields: vec![
+                    ("tag".into(), CanonicalValue::String(nul_heavy.clone())),
+                    ("score".into(), CanonicalValue::Int(9)),
+                ],
+            },
+        ])
+        .unwrap();
+    flush_all(&engine, &reg, &ids);
+
+    let src = || LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false });
+
+    // P0-1(1) & P0-2: Count & Eq & In & StartsWith on leading field of compound index must find all 3 ("sys")!
+    let count_sys = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(src()),
+            expr: FilterExpr::Eq(ids.tag, CanonicalValue::String("sys".into())),
+        }),
+        terminal: TerminalSpec::Count,
+    });
+    assert_eq!(qe.execute(&engine, &count_sys, ExecBudgets::default()).unwrap().result, QueryResult::Count(3));
+
+    for expr in [
+        FilterExpr::Eq(ids.tag, CanonicalValue::String("sys".into())),
+        FilterExpr::In(ids.tag, vec![CanonicalValue::String("sys".into())]),
+        FilterExpr::StartsWith(ids.tag, "sy".into()),
+        FilterExpr::Eq(ids.tag, CanonicalValue::String(nul_heavy.clone())),
+        // P0-3(1): cross-type Range bounds on Any field -> MUST be empty!
+        FilterExpr::Range {
+            field: ids.score,
+            low: Some((CanonicalValue::Int(5), true)),
+            high: Some((CanonicalValue::String("z".into()), true)),
+        },
+        // P0-3(2): open Range includes Array row!
+        FilterExpr::Range { field: ids.score, low: None, high: None },
+    ] {
+        let plan = LogicalPlan::new(LogicalNode::Terminal {
+            input: Box::new(LogicalNode::OrderSlice {
+                input: Box::new(LogicalNode::Filter { input: Box::new(src()), expr: expr.clone() }),
+                order: OrderSpec::EntityKey(OrderDir::Asc),
+                after: None,
+                limit: None,
+            }),
+            terminal: TerminalSpec::Ids,
+        });
+        let got = qe.execute(&engine, &plan, ExecBudgets::default()).unwrap().result;
+        let expected = oracle_filter(&engine, ids.note_type, false, &expr);
+        assert_eq!(got, QueryResult::Ids(expected), "compound/range mismatch for {expr:?}");
+    }
+
+    // P0-1(2): Cached O1CountPushdown on `score == Int(5)` must NOT collide with `score == Array([1])`!
+    let cnt_int = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(src()),
+            expr: FilterExpr::Eq(ids.score, CanonicalValue::Int(5)),
+        }),
+        terminal: TerminalSpec::Count,
+    });
+    let cnt_arr = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(src()),
+            expr: FilterExpr::Eq(ids.score, CanonicalValue::Array(vec![CanonicalValue::Int(1)])),
+        }),
+        terminal: TerminalSpec::Count,
+    });
+    let o_int = qe.execute(&engine, &cnt_int, ExecBudgets::default()).unwrap();
+    assert_eq!(o_int.result, QueryResult::Count(1));
+    assert!(o_int.explain.count_pushdown);
+    let o_arr = qe.execute(&engine, &cnt_arr, ExecBudgets::default()).unwrap();
+    assert_eq!(o_arr.result, QueryResult::Count(1));
+    assert!(!o_arr.explain.count_pushdown);
+}
+
+#[test]
+fn review_regression_icu_missing_order_traverse_limit_phrase_and_greek_trigrams() {
+    let (engine, reg, ids) = open_sim(BuildPolicy::EagerInSchemaChange);
+    let qe = QueryEngine::default();
+
+    let mut ops = vec![
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("m_alpha".into()),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("alpha".into())),
+                ("body".into(), CanonicalValue::String("ΛΟΓΟΣ exact zero copy phrase".into())),
+                ("tag".into(), CanonicalValue::String("keep".into())),
+            ],
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("m_null".into()),
+            fields: vec![("tag".into(), CanonicalValue::String("keep".into()))],
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("m_beta".into()),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("beta".into())),
+                ("tag".into(), CanonicalValue::String("keep".into())),
+            ],
+        },
+        WireOp::Create {
+            type_name: "Author".into(),
+            external_id: Some("auth1".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Ada".into()))],
+        },
+    ];
+    // Add 140 high-scoring non-phrase distractors containing "zero" and "copy" non-consecutively!
+    for i in 0..140 {
+        ops.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("dist_{i}")),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("zero x copy zero x copy".into())),
+                ("body".into(), CanonicalValue::String("zero gap copy zero gap copy".into())),
+                ("tag".into(), CanonicalValue::String("dist".into())),
+            ],
+        });
+    }
+    // Chain for Traverse Score(Desc) test: m_alpha -> m_null -> m_beta
+    ops.push(WireOp::Link {
+        source: EntityTarget::ExternalId("m_alpha".into()),
+        rel_kind: "CITES".into(),
+        target: EntityTarget::ExternalId("m_null".into()),
+        weight: Some(1.0f64.to_bits()),
+        info: None,
+    });
+    ops.push(WireOp::Link {
+        source: EntityTarget::ExternalId("m_null".into()),
+        rel_kind: "CITES".into(),
+        target: EntityTarget::ExternalId("m_beta".into()),
+        weight: Some(1.0f64.to_bits()),
+        info: None,
+    });
+    engine.execute_batch(&ops).unwrap();
+    flush_all(&engine, &reg, &ids);
+
+    let k_alpha = engine.get_row("m_alpha").unwrap().unwrap().key;
+    let k_null = engine.get_row("m_null").unwrap().unwrap().key;
+    let k_beta = engine.get_row("m_beta").unwrap().unwrap().key;
+    let author_type = engine.schema().type_by_name("Author").unwrap().id;
+
+    // P0-4: ICU Order fast path includes missing/null rows first in Asc and last in Desc!
+    let src = || LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false });
+    let asc_fast = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::OrderSlice {
+            input: Box::new(src()),
+            order: OrderSpec::Field { field: ids.title, dir: OrderDir::Asc, locale: Some("en-US".into()) },
+            after: None,
+            limit: Some(3),
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    let QueryResult::Ids(asc_ids) = qe.execute(&engine, &asc_fast, ExecBudgets::default()).unwrap().result else {
+        panic!("expected Ids");
+    };
+    assert_eq!(asc_ids, vec![k_null, k_alpha, k_beta], "Asc ICU fast path must place missing/null first");
+
+    let desc_fast = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::OrderSlice {
+            input: Box::new(src()),
+            order: OrderSpec::Field { field: ids.title, dir: OrderDir::Desc, locale: Some("en-US".into()) },
+            after: None,
+            limit: None,
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    let QueryResult::Ids(desc_ids) = qe.execute(&engine, &desc_fast, ExecBudgets::default()).unwrap().result else {
+        panic!("expected Ids");
+    };
+    assert_eq!(desc_ids.last().copied(), Some(k_null), "Desc ICU fast path must place missing/null last");
+
+    // P0-5: OrderSlice(Score(Desc), limit: 1) over Traverse(Hops) must return deepest node (depth 2: k_beta)!
+    let trav_desc = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::OrderSlice {
+            input: Box::new(LogicalNode::Traverse {
+                input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k_alpha]))),
+                spec: TraverseSpec::Hops { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, min_hops: 1, max_hops: 2 },
+            }),
+            order: OrderSpec::Score(OrderDir::Desc),
+            after: None,
+            limit: Some(1),
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    let QueryResult::Hits(td) = qe.execute(&engine, &trav_desc, ExecBudgets::default()).unwrap().result else {
+        panic!("expected Hits");
+    };
+    assert_eq!(td, vec![(k_beta, 2.0)]);
+
+    // P0-6: Cross-type Score guard + mixed-case BM25F phrase search past 140 higher-scoring distractors!
+    let cross_type_score = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: author_type, include_trashed: false })),
+            spec: ScoreSpec::Bm25f {
+                index_id: ids.idx_text,
+                query: "zero copy".into(),
+                require_all: true,
+                phrase: None,
+                top_k: Some(5),
+            },
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    assert_eq!(
+        qe.execute(&engine, &cross_type_score, ExecBudgets::default()).unwrap().result,
+        QueryResult::Hits(Vec::new())
+    );
+
+    let wrong_kind = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(src()),
+            spec: ScoreSpec::Bm25f {
+                index_id: ids.idx_rank, // Rank index passed to Bm25f!
+                query: "zero".into(),
+                require_all: false,
+                phrase: None,
+                top_k: Some(5),
+            },
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    assert_eq!(qe.execute(&engine, &wrong_kind, ExecBudgets::default()).unwrap_err().code, ErrorCode::InvalidArgument);
+
+    let phrase_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(src()),
+            spec: ScoreSpec::Bm25f {
+                index_id: ids.idx_text,
+                query: "zero copy".into(),
+                require_all: true,
+                phrase: Some(vec!["Zero".into(), "Copy".into()]), // mixed-case phrase terms!
+                top_k: Some(5),
+            },
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    let QueryResult::Hits(ph) = qe.execute(&engine, &phrase_plan, ExecBudgets::default()).unwrap().result else {
+        panic!("expected Hits");
+    };
+    assert_eq!(ph.len(), 1);
+    assert_eq!(ph[0].0, k_alpha);
+
+    // P0-7: Greek final sigma (`"ΛΟΓΟΣ"` -> `"λογος"`) matches `Contains(body, "γος")` via trigram index!
+    let greek_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(src()),
+            expr: FilterExpr::Contains(ids.body, "γος".into()),
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(
+        qe.execute(&engine, &greek_plan, ExecBudgets::default()).unwrap().result,
+        QueryResult::Ids(vec![k_alpha])
+    );
+}
+
+#[derive(Default)]
+struct FullAuditRecorder {
+    point_masks: Vec<(EntityKey, FieldMask)>,
+    all_field_keys: Vec<EntityKey>,
+    edge_adjs: Vec<(EntityKey, EdgeDir)>,
+    subdb_ranges: Vec<(u16, Vec<u8>, Vec<u8>)>,
+}
+
+impl QueryReadRecorder for FullAuditRecorder {
+    fn record_point_entity(&mut self, key: EntityKey, fields: &FieldMask) {
+        self.point_masks.push((key, fields.clone()));
+    }
+    fn record_point_entity_all_fields(&mut self, key: EntityKey) {
+        self.all_field_keys.push(key);
+    }
+    fn record_edge_adj(&mut self, entity: EntityKey, _rel_kinds: &[RelKindId], dir: EdgeDir) {
+        self.edge_adjs.push((entity, dir));
+    }
+    fn record_subdb_range(&mut self, slot: u16, low: &[u8], high: &[u8]) {
+        self.subdb_ranges.push((slot, low.to_vec(), high.to_vec()));
+    }
+}
+
+#[test]
+fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
+    let (engine, reg, ids) = open_sim(BuildPolicy::DeferredWatermark);
+    let qe = QueryEngine::default();
+
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("a1".into()),
+                fields: vec![
+                    ("tag".into(), CanonicalValue::String("t".into())),
+                    ("updated_at".into(), CanonicalValue::Int(i64::MIN)),
+                ],
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("a2".into()),
+                fields: vec![("tag".into(), CanonicalValue::String("t".into()))],
+            },
+            WireOp::Link {
+                source: EntityTarget::ExternalId("a1".into()),
+                rel_kind: "CITES".into(),
+                target: EntityTarget::ExternalId("a2".into()),
+                weight: Some(1.0f64.to_bits()),
+                info: None,
+            },
+        ])
+        .unwrap();
+    let k1 = engine.get_row("a1").unwrap().unwrap().key;
+    let k2 = engine.get_row("a2").unwrap().unwrap().key;
+    flush_all(&engine, &reg, &ids);
+
+    // P0-8: Verify read recording across LiteralKeys, Rows(missing field), Rows(None), HasLink, GraphAnalyze, empty Score!
+    let mut fm = FieldMask::empty();
+    fm.insert(ids.title); // missing on `a1`!
+    let mut rec = FullAuditRecorder::default();
+    let rows_missing = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1]))),
+        terminal: TerminalSpec::Rows { fields: Some(fm.clone()) },
+    });
+    qe.execute_tracked(&engine, &rows_missing, ExecBudgets::default(), &mut rec).unwrap();
+    assert!(rec.point_masks.iter().any(|(k, m)| *k == k1 && m.contains(ids.title)));
+
+    let mut rec_all = FullAuditRecorder::default();
+    let rows_all = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1]))),
+        terminal: TerminalSpec::Rows { fields: None },
+    });
+    qe.execute_tracked(&engine, &rows_all, ExecBudgets::default(), &mut rec_all).unwrap();
+    assert!(rec_all.all_field_keys.contains(&k1));
+
+    let mut rec_link = FullAuditRecorder::default();
+    let has_link = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, target: Some(k2) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    qe.execute_tracked(&engine, &has_link, ExecBudgets::default(), &mut rec_link).unwrap();
+    assert!(rec_link.point_masks.iter().any(|(k, _)| *k == k1), "HasLink pushdown must record neighbor liveness");
+
+    let mut rec_graph = FullAuditRecorder::default();
+    let wcc_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1, k2]))),
+        spec: GraphAnalyzeSpec::WeakComponents { rel_kinds: vec![ids.cites] },
+    });
+    qe.execute_tracked(&engine, &wcc_plan, ExecBudgets::default(), &mut rec_graph).unwrap();
+    assert!(rec_graph.edge_adjs.iter().any(|(k, _)| *k == k1));
+
+    // Empty vector index must still record subdb range!
+    let mut rec_vec = FullAuditRecorder::default();
+    let empty_vec = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 5 },
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    qe.execute_tracked(&engine, &empty_vec, ExecBudgets::default(), &mut rec_vec).unwrap();
+    assert!(!rec_vec.subdb_ranges.is_empty());
+
+    // P1-1: Building -> Ready transition must immediately enable O1CountPushdown (not pinned as PrimaryScan!)
+    let mut s2 = test_schema();
+    s2.types.get_mut("Note").unwrap().indexes.insert(
+        "note_updated_val".into(),
+        RawIndex { kind: RawIndexKind::Value { fields: vec!["updated_at".into()], unique: false } },
+    );
+    engine.set_schema(&s2).unwrap();
+    let cnt_upd = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            expr: FilterExpr::Eq(ids.updated_at, CanonicalValue::Int(i64::MIN)),
+        }),
+        terminal: TerminalSpec::Count,
+    });
+    let before_ready = qe.execute(&engine, &cnt_upd, ExecBudgets::default()).unwrap();
+    assert!(!before_ready.explain.count_pushdown);
+    while reg.drive_build_chunk(&engine, 1024).unwrap() {}
+    let after_ready = qe.execute(&engine, &cnt_upd, ExecBudgets::default()).unwrap();
+    assert!(after_ready.explain.count_pushdown, "PlanCache must not pin PrimaryScan across Building -> Ready!");
+    assert_eq!(after_ready.result, QueryResult::Count(1));
+
+    // P1-2: RecencyDecay does not overflow on `now_ms = 0, ms = i64::MIN`!
+    let recency = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1]))),
+            spec: ScoreSpec::RecencyDecay { field: ids.updated_at, now_ms: 0, half_life_ms: 1000.0 },
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    let QueryResult::Hits(rh) = qe.execute(&engine, &recency, ExecBudgets::default()).unwrap().result else {
+        panic!("expected Hits");
+    };
+    assert_eq!(rh.len(), 1);
+    assert!(rh[0].1.is_finite());
+
+    // P1-4: project_graph_terminal handles Count/Exists & rejects unsupported terminals
+    let g_cnt = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::GraphAnalyze {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1, k2]))),
+            spec: GraphAnalyzeSpec::WeakComponents { rel_kinds: vec![ids.cites] },
+        }),
+        terminal: TerminalSpec::Count,
+    });
+    assert_eq!(qe.execute(&engine, &g_cnt, ExecBudgets::default()).unwrap().result, QueryResult::Count(1));
+
+    // P1-5: Mismatched cursor variant returns InvalidArgument
+    let bad_cursor = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::OrderSlice {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1]))),
+            order: OrderSpec::EntityKey(OrderDir::Asc),
+            after: Some(Cursor::Score { score: 1.0, key: k1 }),
+            limit: Some(5),
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &bad_cursor, ExecBudgets::default()).unwrap_err().code, ErrorCode::InvalidArgument);
+
+    // P1-6: PPR huge seed weights `[1e308, 1e308]` normalize without overflowing to 0!
+    let ppr_huge = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1, k2]))),
+        spec: GraphAnalyzeSpec::Ppr {
+            rel_kinds: vec![ids.cites],
+            weighted: false,
+            seeds: vec![(k1, 1e308), (k2, 1e308)],
+            damping: 0.85,
+            iterations: 20,
+            tolerance: 1e-8,
+        },
+    });
+    let QueryResult::GraphPpr(ppr_res) = qe.execute(&engine, &ppr_huge, ExecBudgets::default()).unwrap().result else {
+        panic!("expected GraphPpr");
+    };
+    let ppr_sum: f64 = ppr_res.scores.iter().map(|(_, s)| *s).sum();
+    assert!((ppr_sum - 1.0).abs() < 1e-6, "PPR scores must sum to 1.0 even for 1e308 seed weights");
+
+    // P1-9: Negative Fuse weight returns InvalidArgument
+    let bad_fuse = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1]))),
+            spec: ScoreSpec::Fuse {
+                inputs: vec![(ScoreSpec::RankIndex { index_id: ids.idx_rank }, -1.0)],
+                method: FuseMethod::default(),
+            },
+        }),
+        terminal: TerminalSpec::Hits,
+    });
+    assert_eq!(qe.execute(&engine, &bad_fuse, ExecBudgets::default()).unwrap_err().code, ErrorCode::InvalidArgument);
+
+    // P2-2: Invalid Regex fails immediately even on empty type!
+    let author_type = engine.schema().type_by_name("Author").unwrap().id;
+    let author_name = engine.schema().type_by_name("Author").unwrap().field_by_name("name").unwrap().id;
+    let bad_re = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: author_type, include_trashed: false })),
+            expr: FilterExpr::Regex(author_name, "[unclosed".into()),
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &bad_re, ExecBudgets::default()).unwrap_err().code, ErrorCode::InvalidArgument);
+
+    // P2-3: ExactSum overflow leaves previous value intact (no NaN poisoning)
+    let mut es = ExactSum::default();
+    assert!(es.add(f64::MAX));
+    assert!(!es.add(f64::MAX));
+    assert_eq!(es.total(), f64::MAX);
+}

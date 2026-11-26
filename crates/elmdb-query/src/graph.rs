@@ -7,13 +7,24 @@
 
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrd};
 
-use elmdb_engine::{EntityKey, RelKindId, SystemDbs, scan_adj_in_raw, scan_adj_out_raw};
+use elmdb_engine::{EntityKey, RelKindId, SystemDbs, row::decode_row_header, scan_adj_in_raw, scan_adj_out_raw};
 use elmdb_storage::KvRead;
 use elmdb_wire::{ElmdbError, ErrorCode, Result};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::ir::EdgeDir;
+
+#[inline]
+fn check_cancel(cancel: Option<&AtomicBool>) -> Result<()> {
+    if let Some(flag) = cancel
+        && flag.load(AtomicOrd::Relaxed)
+    {
+        return Err(ElmdbError::new(ErrorCode::Cancelled, "query cancelled"));
+    }
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Shewchuk's Exact Floating-Point Expansion (`ExactSum`)
@@ -26,27 +37,39 @@ pub struct ExactSum {
 }
 
 impl ExactSum {
+    /// Adds `x` to the expansion. Returns `false` (leaving the accumulator unchanged) if `x` is
+    /// non-finite or adding `x` would overflow `f64`.
     pub fn add(&mut self, mut x: f64) -> bool {
         if !x.is_finite() {
             return false;
         }
-        let mut kept = 0usize;
-        for at in 0..self.parts.len() {
-            let mut y = self.parts[at];
+        if x == 0.0 {
+            return true;
+        }
+        let mut next = Vec::with_capacity(self.parts.len() + 1);
+        for &part in &self.parts {
+            let mut y = part;
             if x.abs() < y.abs() {
                 std::mem::swap(&mut x, &mut y);
             }
             let sum = x + y;
+            if !sum.is_finite() {
+                return false;
+            }
             let lost = y - (sum - x);
             if lost != 0.0 {
-                self.parts[kept] = lost;
-                kept += 1;
+                next.push(lost);
             }
             x = sum;
         }
-        self.parts.truncate(kept);
-        self.parts.push(x);
-        x.is_finite()
+        if !x.is_finite() {
+            return false;
+        }
+        if x != 0.0 {
+            next.push(x);
+        }
+        self.parts = next;
+        true
     }
 
     pub fn total(&self) -> f64 {
@@ -87,22 +110,57 @@ pub struct CsrGraph {
     pub weights: Option<Vec<f64>>,
 }
 
+/// Budgets and read-tracking callbacks for CSR builds and neighborhood similarity queries.
+pub struct GraphBuildOpts<'a> {
+    pub max_heap_bytes: usize,
+    pub cancel: Option<&'a AtomicBool>,
+    pub include_trashed: bool,
+}
+
+impl Default for GraphBuildOpts<'_> {
+    fn default() -> Self {
+        Self { max_heap_bytes: 16 * 1024 * 1024, cancel: None, include_trashed: false }
+    }
+}
+
 impl CsrGraph {
     /// Builds a deterministic CSR subgraph induced by `nodes` (sorted ascending by `EntityKey`)
-    /// directly from `adj_out` with zero string allocations!
+    /// directly from `adj_out` with zero string allocations, respecting `max_heap_bytes` and `cancel`.
     pub fn build<R: KvRead>(
+        txn: &R,
+        dbs: &SystemDbs,
+        nodes: Vec<EntityKey>,
+        rel_kinds: &[RelKindId],
+        weighted: bool,
+        max_heap_bytes: usize,
+    ) -> Result<Self> {
+        Self::build_tracked(
+            txn,
+            dbs,
+            nodes,
+            rel_kinds,
+            weighted,
+            &GraphBuildOpts { max_heap_bytes, cancel: None, include_trashed: true },
+            &mut |_| {},
+        )
+    }
+
+    /// Tracked CSR subgraph builder invoking `on_adj_read(u)` for every node whose adjacency list is scanned.
+    pub fn build_tracked<R: KvRead>(
         txn: &R,
         dbs: &SystemDbs,
         mut nodes: Vec<EntityKey>,
         rel_kinds: &[RelKindId],
         weighted: bool,
-        max_heap_bytes: usize,
+        opts: &GraphBuildOpts<'_>,
+        on_adj_read: &mut dyn FnMut(EntityKey),
     ) -> Result<Self> {
+        check_cancel(opts.cancel)?;
         nodes.sort_unstable();
         nodes.dedup();
         let n = nodes.len();
         let mut approx_bytes = n.saturating_mul(32);
-        if approx_bytes > max_heap_bytes {
+        if approx_bytes > opts.max_heap_bytes {
             return Err(ElmdbError::new(ErrorCode::ResourceLimit, "graph projection exceeds memory budget"));
         }
         let mut key_to_idx = FxHashMap::default();
@@ -116,7 +174,11 @@ impl CsrGraph {
         let mut targets = Vec::new();
         let mut weights = weighted.then(Vec::new);
 
-        for &u_key in &nodes {
+        for (step_idx, &u_key) in nodes.iter().enumerate() {
+            if step_idx & 63 == 0 {
+                check_cancel(opts.cancel)?;
+            }
+            on_adj_read(u_key);
             let mut edges = scan_adj_out_raw(txn, dbs, u_key, rel_kinds)?;
             // Deterministic edge ordering by target EntityKey ascending.
             edges.sort_by_key(|(dst, _, _)| *dst);
@@ -131,7 +193,7 @@ impl CsrGraph {
                         ws.push(ew);
                     }
                     approx_bytes = approx_bytes.saturating_add(if weighted { 12 } else { 4 });
-                    if approx_bytes > max_heap_bytes {
+                    if approx_bytes > opts.max_heap_bytes {
                         return Err(ElmdbError::new(
                             ErrorCode::ResourceLimit,
                             "graph projection edges exceed memory budget",
@@ -352,27 +414,55 @@ pub fn ppr(
     iterations: u32,
     tolerance: f64,
 ) -> Result<PprResult> {
+    ppr_cancellable(graph, seeds, damping, iterations, tolerance, None)
+}
+
+pub fn ppr_cancellable(
+    graph: &CsrGraph,
+    seeds: &[(EntityKey, f64)],
+    damping: f64,
+    iterations: u32,
+    tolerance: f64,
+    cancel: Option<&AtomicBool>,
+) -> Result<PprResult> {
     if !damping.is_finite() || !(0.0..1.0).contains(&damping) {
         return Err(ElmdbError::new(ErrorCode::InvalidArgument, "PPR damping must be in [0, 1)"));
+    }
+    if !tolerance.is_finite() || tolerance < 0.0 {
+        return Err(ElmdbError::new(ErrorCode::InvalidArgument, "PPR tolerance must be finite and >= 0"));
+    }
+    for &(_, w) in seeds {
+        if !w.is_finite() || w < 0.0 {
+            return Err(ElmdbError::new(ErrorCode::InvalidArgument, "PPR seed weight must be finite and >= 0"));
+        }
     }
     let n = graph.node_count();
     if n == 0 {
         return Ok(PprResult { scores: Vec::new(), converged: true, iterations: 0 });
     }
     let mut teleport = vec![0.0f64; n];
-    let mut seed_sum = 0.0f64;
     if seeds.is_empty() {
         let uniform = 1.0 / (n as f64);
         teleport.fill(uniform);
-        seed_sum = 1.0;
     } else {
+        // Max-weight normalization prevents `seed_sum` overflow (e.g. `[1e308, 1e308]`)!
+        let mut max_seed_w = 0.0f64;
         for &(sk, w) in seeds {
-            if w.is_finite()
-                && w > 0.0
+            if w > 0.0 && graph.key_to_idx.contains_key(&sk) {
+                max_seed_w = max_seed_w.max(w);
+            }
+        }
+        if max_seed_w <= 0.0 {
+            return Ok(PprResult { scores: Vec::new(), converged: true, iterations: 0 });
+        }
+        let mut seed_sum = 0.0f64;
+        for &(sk, w) in seeds {
+            if w > 0.0
                 && let Some(&idx) = graph.key_to_idx.get(&sk)
             {
-                teleport[idx as usize] += w;
-                seed_sum += w;
+                let nw = w / max_seed_w;
+                teleport[idx as usize] += nw;
+                seed_sum += nw;
             }
         }
         if seed_sum <= 0.0 {
@@ -382,7 +472,6 @@ pub fn ppr(
             *t /= seed_sum;
         }
     }
-    let _ = seed_sum;
 
     // Precompute max-weight normalized out-weights per node to avoid overflow/underflow.
     let norm_out: Vec<(f64, f64)> = (0..n)
@@ -406,6 +495,7 @@ pub fn ppr(
     let mut ran = 0u32;
 
     for round in 1..=iterations.max(1) {
+        check_cancel(cancel)?;
         ran = round;
         next.fill(0.0);
         let mut dangling = 0.0f64;
@@ -463,8 +553,10 @@ pub fn leiden_communities(
         for (idx, &v) in graph.out(u).iter().enumerate() {
             let w = ws.map_or(1.0, |weights| weights[idx]);
             if w > 0.0 && w.is_finite() {
+                // Canonicalize `(a <= b)` so mutual directed edges `u->v` & `v->u` merge cleanly in undirected CSR.
+                let (a, b) = if u <= v as usize { (u, v as usize) } else { (v as usize, u) };
                 builder
-                    .add_edge(u, v as usize, w)
+                    .add_edge(a, b, w)
                     .map_err(|e| ElmdbError::new(ErrorCode::Internal, format!("leiden graph error: {e}")))?;
             }
         }
@@ -483,22 +575,50 @@ pub fn leiden_communities(
     Ok(canonical_groups(&graph.keys, &labels))
 }
 
-fn neighbors_set<R: KvRead>(
+fn is_entity_live<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    key: EntityKey,
+    include_trashed: bool,
+    on_entity_read: &mut dyn FnMut(EntityKey),
+) -> Result<bool> {
+    if include_trashed {
+        return Ok(true);
+    }
+    on_entity_read(key);
+    let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
+        return Ok(false);
+    };
+    let (hdr, _) = decode_row_header(raw)?;
+    Ok(!hdr.is_trashed())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn neighbors_set_tracked<R: KvRead>(
     txn: &R,
     dbs: &SystemDbs,
     node: EntityKey,
     rel_kinds: &[RelKindId],
     dir: EdgeDir,
+    opts: &GraphBuildOpts<'_>,
+    on_adj_read: &mut dyn FnMut(EntityKey, EdgeDir),
+    on_entity_read: &mut dyn FnMut(EntityKey),
 ) -> Result<FxHashSet<EntityKey>> {
+    check_cancel(opts.cancel)?;
+    on_adj_read(node, dir);
     let mut set = FxHashSet::default();
     if matches!(dir, EdgeDir::Out | EdgeDir::Both) {
         for (dst, _, _) in scan_adj_out_raw(txn, dbs, node, rel_kinds)? {
-            set.insert(dst);
+            if is_entity_live(txn, dbs, dst, opts.include_trashed, on_entity_read)? {
+                set.insert(dst);
+            }
         }
     }
     if matches!(dir, EdgeDir::In | EdgeDir::Both) {
         for (src, _, _) in scan_adj_in_raw(txn, dbs, node, rel_kinds)? {
-            set.insert(src);
+            if is_entity_live(txn, dbs, src, opts.include_trashed, on_entity_read)? {
+                set.insert(src);
+            }
         }
     }
     Ok(set)
@@ -514,10 +634,40 @@ pub fn jaccard_similar<R: KvRead>(
     seed: EntityKey,
     top_k: usize,
 ) -> Result<Vec<(EntityKey, f64)>> {
+    jaccard_similar_tracked(
+        txn,
+        dbs,
+        candidates,
+        rel_kinds,
+        dir,
+        seed,
+        top_k,
+        &GraphBuildOpts::default(),
+        &mut |_, _| {},
+        &mut |_| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn jaccard_similar_tracked<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    candidates: Option<&FxHashSet<EntityKey>>,
+    rel_kinds: &[RelKindId],
+    dir: EdgeDir,
+    seed: EntityKey,
+    top_k: usize,
+    opts: &GraphBuildOpts<'_>,
+    on_adj_read: &mut dyn FnMut(EntityKey, EdgeDir),
+    on_entity_read: &mut dyn FnMut(EntityKey),
+) -> Result<Vec<(EntityKey, f64)>> {
     if top_k == 0 {
         return Ok(Vec::new());
     }
-    let seed_nbrs = neighbors_set(txn, dbs, seed, rel_kinds, dir)?;
+    if !is_entity_live(txn, dbs, seed, opts.include_trashed, on_entity_read)? {
+        return Ok(Vec::new());
+    }
+    let seed_nbrs = neighbors_set_tracked(txn, dbs, seed, rel_kinds, dir, opts, on_adj_read, on_entity_read)?;
     if seed_nbrs.is_empty() {
         return Ok(Vec::new());
     }
@@ -526,23 +676,34 @@ pub fn jaccard_similar<R: KvRead>(
         EdgeDir::In => EdgeDir::Out,
         EdgeDir::Both => EdgeDir::Both,
     };
+    let mut approx_bytes = seed_nbrs.len().saturating_mul(16);
+    if approx_bytes > opts.max_heap_bytes {
+        return Err(ElmdbError::new(ErrorCode::ResourceLimit, "jaccard neighborhood exceeds memory budget"));
+    }
     let mut shared_counts: FxHashMap<EntityKey, usize> = FxHashMap::default();
     for &mid in &seed_nbrs {
-        for other in neighbors_set(txn, dbs, mid, rel_kinds, rev_dir)? {
+        for other in neighbors_set_tracked(txn, dbs, mid, rel_kinds, rev_dir, opts, on_adj_read, on_entity_read)? {
             if other == seed {
                 continue;
             }
             if candidates.is_some_and(|c| !c.contains(&other)) {
                 continue;
             }
+            let prev_len = shared_counts.len();
             *shared_counts.entry(other).or_insert(0) += 1;
+            if shared_counts.len() > prev_len {
+                approx_bytes = approx_bytes.saturating_add(32);
+                if approx_bytes > opts.max_heap_bytes {
+                    return Err(ElmdbError::new(ErrorCode::ResourceLimit, "jaccard candidates exceed memory budget"));
+                }
+            }
         }
     }
     let mut out = Vec::with_capacity(shared_counts.len());
     let a = seed_nbrs.len();
     for (other, shared) in shared_counts {
-        let b = neighbors_set(txn, dbs, other, rel_kinds, dir)?.len();
-        let union = a + b - shared;
+        let b = neighbors_set_tracked(txn, dbs, other, rel_kinds, dir, opts, on_adj_read, on_entity_read)?.len();
+        let union = a.saturating_add(b).saturating_sub(shared);
         if union > 0 {
             out.push((other, (shared as f64) / (union as f64)));
         }
@@ -552,7 +713,7 @@ pub fn jaccard_similar<R: KvRead>(
     Ok(out)
 }
 
-/// #7 Adamic-Adar similarity using cross-platform deterministic `libm::log(degree)`.
+/// #7 Adamic-Adar similarity using cross-platform deterministic `libm::log(degree)` and `ExactSum`.
 pub fn adamic_adar_similar<R: KvRead>(
     txn: &R,
     dbs: &SystemDbs,
@@ -562,21 +723,58 @@ pub fn adamic_adar_similar<R: KvRead>(
     seed: EntityKey,
     top_k: usize,
 ) -> Result<Vec<(EntityKey, f64)>> {
+    adamic_adar_similar_tracked(
+        txn,
+        dbs,
+        candidates,
+        rel_kinds,
+        dir,
+        seed,
+        top_k,
+        &GraphBuildOpts::default(),
+        &mut |_, _| {},
+        &mut |_| {},
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn adamic_adar_similar_tracked<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    candidates: Option<&FxHashSet<EntityKey>>,
+    rel_kinds: &[RelKindId],
+    dir: EdgeDir,
+    seed: EntityKey,
+    top_k: usize,
+    opts: &GraphBuildOpts<'_>,
+    on_adj_read: &mut dyn FnMut(EntityKey, EdgeDir),
+    on_entity_read: &mut dyn FnMut(EntityKey),
+) -> Result<Vec<(EntityKey, f64)>> {
     if top_k == 0 {
         return Ok(Vec::new());
     }
-    let seed_nbrs = neighbors_set(txn, dbs, seed, rel_kinds, dir)?;
+    if !is_entity_live(txn, dbs, seed, opts.include_trashed, on_entity_read)? {
+        return Ok(Vec::new());
+    }
+    let seed_nbrs = neighbors_set_tracked(txn, dbs, seed, rel_kinds, dir, opts, on_adj_read, on_entity_read)?;
     if seed_nbrs.is_empty() {
         return Ok(Vec::new());
     }
+    // Sort `seed_nbrs` ascending by EntityKey so floating-point accumulation order is 100% deterministic!
+    let mut sorted_mids: Vec<EntityKey> = seed_nbrs.into_iter().collect();
+    sorted_mids.sort_unstable();
     let rev_dir = match dir {
         EdgeDir::Out => EdgeDir::In,
         EdgeDir::In => EdgeDir::Out,
         EdgeDir::Both => EdgeDir::Both,
     };
-    let mut scores: FxHashMap<EntityKey, f64> = FxHashMap::default();
-    for &mid in &seed_nbrs {
-        let peers = neighbors_set(txn, dbs, mid, rel_kinds, rev_dir)?;
+    let mut approx_bytes = sorted_mids.len().saturating_mul(16);
+    if approx_bytes > opts.max_heap_bytes {
+        return Err(ElmdbError::new(ErrorCode::ResourceLimit, "adamic-adar neighborhood exceeds memory budget"));
+    }
+    let mut scores: FxHashMap<EntityKey, ExactSum> = FxHashMap::default();
+    for mid in sorted_mids {
+        let peers = neighbors_set_tracked(txn, dbs, mid, rel_kinds, rev_dir, opts, on_adj_read, on_entity_read)?;
         let deg = peers.len();
         if deg < 2 {
             continue;
@@ -589,10 +787,20 @@ pub fn adamic_adar_similar<R: KvRead>(
             if candidates.is_some_and(|c| !c.contains(&other)) {
                 continue;
             }
-            *scores.entry(other).or_insert(0.0) += contrib;
+            let prev_len = scores.len();
+            scores.entry(other).or_default().add(contrib);
+            if scores.len() > prev_len {
+                approx_bytes = approx_bytes.saturating_add(48);
+                if approx_bytes > opts.max_heap_bytes {
+                    return Err(ElmdbError::new(
+                        ErrorCode::ResourceLimit,
+                        "adamic-adar candidates exceed memory budget",
+                    ));
+                }
+            }
         }
     }
-    let mut out: Vec<(EntityKey, f64)> = scores.into_iter().collect();
+    let mut out: Vec<(EntityKey, f64)> = scores.into_iter().map(|(k, sum)| (k, sum.total())).collect();
     out.sort_by(|x, y| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
     out.truncate(top_k);
     Ok(out)

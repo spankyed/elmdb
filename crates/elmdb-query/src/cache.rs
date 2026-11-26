@@ -38,7 +38,7 @@ pub enum SourceShape {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FilterShape {
-    Eq { field: FieldId, is_null: bool, is_long_str: bool },
+    Eq { field: FieldId, is_null: bool, is_indexable: bool },
     Ne { field: FieldId, is_null: bool },
     In { field: FieldId, bucket: InBucket },
     Range { field: FieldId, has_low: bool, low_inc: bool, has_high: bool, high_inc: bool },
@@ -139,7 +139,10 @@ fn shape_filter(expr: &FilterExpr) -> FilterShape {
         FilterExpr::Eq(field, val) => FilterShape::Eq {
             field: *field,
             is_null: matches!(val, CanonicalValue::Null),
-            is_long_str: matches!(val, CanonicalValue::String(s) if s.len() > elmdb_projections::MAX_INDEXED_STRING),
+            is_indexable: matches!(
+                elmdb_projections::value::encode_compound_values(&[val]),
+                elmdb_projections::value::ValueKeyClass::Indexed(_)
+            ),
         },
         FilterExpr::Ne(field, val) => FilterShape::Ne { field: *field, is_null: matches!(val, CanonicalValue::Null) },
         FilterExpr::In(field, vals) => FilterShape::In { field: *field, bucket: bucket_len(vals.len()) },
@@ -262,16 +265,7 @@ fn shape_node(node: &LogicalNode) -> NodeShape {
             terminal: match terminal {
                 TerminalSpec::Ids => TerminalShape::Ids,
                 TerminalSpec::Rows { fields } => {
-                    let projected = fields.as_ref().map(|m| {
-                        // Extract sorted field IDs for structural equality.
-                        let mut ids = Vec::new();
-                        for fid in 0..256u16 {
-                            if m.contains(FieldId(fid)) {
-                                ids.push(fid);
-                            }
-                        }
-                        ids
-                    });
+                    let projected = fields.as_ref().map(|m| m.iter().into_iter().map(|fid| fid.0).collect());
                     TerminalShape::Rows { projected_fields: projected }
                 }
                 TerminalSpec::Hits => TerminalShape::Hits,

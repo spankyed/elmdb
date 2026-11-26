@@ -158,4 +158,16 @@ impl FieldMask {
     pub fn is_empty(&self) -> bool {
         self.low == 0 && self.high.is_empty()
     }
+
+    pub fn iter(&self) -> Vec<FieldId> {
+        let mut out = Vec::new();
+        let mut bits = self.low;
+        while bits != 0 {
+            let tz = bits.trailing_zeros() as u16;
+            out.push(FieldId(tz));
+            bits &= bits - 1;
+        }
+        out.extend(self.high.iter().copied().map(FieldId));
+        out
+    }
 }

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrd};
 
 use elmdb_engine::{
     CompiledSchema, Engine, EntityKey, FieldId, FieldMask, IndexId, IndexKind, PackedRow, RelKindId, SystemDbs, TypeId,
-    read_packed_row, scan_adj_in_raw, scan_adj_out_raw, scan_type_keys,
+    read_packed_row, scan_adj_in_raw, scan_adj_out_raw, scan_type_keys_in_range,
 };
 use elmdb_projections::{
     CollatorCache, order, rank, text, trigram,
@@ -22,8 +22,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cache::{PlanCache, PlanCacheStats};
 use crate::graph::{
-    CsrGraph, ExactSum, PprResult, TopoResult, adamic_adar_similar, jaccard_similar, leiden_communities, ppr, scc,
-    topo_sort, weak_components,
+    CsrGraph, ExactSum, GraphBuildOpts, PprResult, TopoResult, adamic_adar_similar_tracked, jaccard_similar_tracked,
+    leiden_communities, ppr_cancellable, scc, topo_sort, weak_components,
 };
 use crate::ir::{
     Cursor, EdgeDir, FilterExpr, FuseMethod, GraphAnalyzeSpec, LogicalNode, LogicalPlan, OrderDir, OrderSpec,
@@ -100,6 +100,8 @@ impl Default for ExecBudgets<'_> {
 /// Read-dependency recording seam implemented by `elmdb-invalidation` in Phase 3b!
 pub trait QueryReadRecorder {
     fn record_point_entity(&mut self, _key: EntityKey, _fields: &FieldMask) {}
+    /// Records a point-entity read covering ALL current and future fields (e.g. `Rows { fields: None }`).
+    fn record_point_entity_all_fields(&mut self, _key: EntityKey) {}
     fn record_indexed_eq(&mut self, _index_id: IndexId, _value_hash: u64) {}
     fn record_edge_adj(&mut self, _entity: EntityKey, _rel_kinds: &[RelKindId], _dir: EdgeDir) {}
     fn record_type_scan(&mut self, _type_id: TypeId) {}
@@ -204,6 +206,7 @@ struct ExecCtx<'a, 't, S: KvStore + 't, V: Vfs, C: Clock> {
     explain: ExplainPlan,
     heap_used: usize,
     row_cache: FxHashMap<EntityKey, PackedRow>,
+    regex_cache: FxHashMap<String, Regex>,
 }
 
 impl<'a, 't, S: KvStore + 't, V: Vfs, C: Clock> ExecCtx<'a, 't, S, V, C> {
@@ -229,6 +232,11 @@ impl<'a, 't, S: KvStore + 't, V: Vfs, C: Clock> ExecCtx<'a, 't, S, V, C> {
         Ok(())
     }
 
+    #[inline]
+    fn remaining_heap(&self) -> usize {
+        self.budgets.max_heap_bytes.saturating_sub(self.heap_used)
+    }
+
     fn open_index_ro(&self, index_id: IndexId) -> Result<Option<SubDbHandle>> {
         let def = self
             .schema
@@ -246,11 +254,71 @@ impl<'a, 't, S: KvStore + 't, V: Vfs, C: Clock> ExecCtx<'a, 't, S, V, C> {
             return Ok(None);
         };
         self.explain.rows_scanned += 1;
-        // Keep bounded row cache so repeated filter/order/project probes don't re-decode blobs.
-        if self.row_cache.len() < 4096 {
+        // Keep bounded row cache only when the cached row fits comfortably within remaining heap budget.
+        let approx = estimate_row_bytes(&row);
+        if self.row_cache.len() < 4096
+            && approx <= 16_384
+            && self.heap_used.saturating_add(approx) <= self.budgets.max_heap_bytes
+        {
+            self.heap_used = self.heap_used.saturating_add(approx);
             self.row_cache.insert(key, row.clone());
         }
         Ok(Some(row))
+    }
+}
+
+fn estimate_value_bytes(v: &CanonicalValue) -> usize {
+    match v {
+        CanonicalValue::Null | CanonicalValue::Bool(_) | CanonicalValue::Int(_) | CanonicalValue::Float(_) => 16,
+        CanonicalValue::Timestamp { .. } | CanonicalValue::EntityRef(_) => 24,
+        CanonicalValue::String(s) | CanonicalValue::DanglingRef(s) => 24 + s.len(),
+        CanonicalValue::Bytes(b) => 24 + b.len(),
+        CanonicalValue::Array(xs) => 24 + xs.iter().map(estimate_value_bytes).sum::<usize>(),
+        CanonicalValue::Object(map) => {
+            24 + map.iter().map(|(k, val)| 24 + k.len() + estimate_value_bytes(val)).sum::<usize>()
+        }
+    }
+}
+
+fn estimate_row_bytes(row: &PackedRow) -> usize {
+    64 + row.header.ext_id.len() + row.fields.values().map(|v| 16 + estimate_value_bytes(v)).sum::<usize>()
+}
+
+fn precompile_plan_regexes(node: &LogicalNode, cache: &mut FxHashMap<String, Regex>) -> Result<()> {
+    match node {
+        LogicalNode::Filter { input, expr } => {
+            precompile_filter_regexes(expr, cache)?;
+            precompile_plan_regexes(input, cache)
+        }
+        LogicalNode::Score { input, .. }
+        | LogicalNode::Traverse { input, .. }
+        | LogicalNode::GraphAnalyze { input, .. }
+        | LogicalNode::Distinct { input }
+        | LogicalNode::OrderSlice { input, .. }
+        | LogicalNode::Terminal { input, .. } => precompile_plan_regexes(input, cache),
+        LogicalNode::Source(_) => Ok(()),
+    }
+}
+
+fn precompile_filter_regexes(expr: &FilterExpr, cache: &mut FxHashMap<String, Regex>) -> Result<()> {
+    match expr {
+        FilterExpr::Regex(_, pattern) => {
+            if !cache.contains_key(pattern) {
+                let re = Regex::new(pattern).map_err(|e| {
+                    ElmdbError::new(ErrorCode::InvalidArgument, format!("invalid regex '{pattern}': {e}"))
+                })?;
+                cache.insert(pattern.clone(), re);
+            }
+            Ok(())
+        }
+        FilterExpr::And(parts) | FilterExpr::Or(parts) => {
+            for p in parts {
+                precompile_filter_regexes(p, cache)?;
+            }
+            Ok(())
+        }
+        FilterExpr::Not(inner) => precompile_filter_regexes(inner, cache),
+        _ => Ok(()),
     }
 }
 
@@ -331,6 +399,9 @@ impl QueryEngine {
             explain.order_pushdown = Some(def.name.clone());
         }
 
+        let mut regex_cache = FxHashMap::default();
+        precompile_plan_regexes(&plan.root, &mut regex_cache)?;
+
         let mut ctx = ExecCtx {
             engine,
             txn,
@@ -342,13 +413,18 @@ impl QueryEngine {
             explain,
             heap_used: 0,
             row_cache: FxHashMap::default(),
+            regex_cache,
         };
 
         // Fast path: O(1) exact Count pushdown without reading a single row!
+        // Defense in depth: verify single-field Value index AND `ValueKeyClass::Indexed`.
         if strategy.use_count_pushdown
             && let LogicalNode::Terminal { input, terminal: TerminalSpec::Count } = &plan.root
             && let LogicalNode::Filter { expr: FilterExpr::Eq(_, val), .. } = input.as_ref()
+            && matches!(value::encode_compound_values(&[val]), ValueKeyClass::Indexed(_))
             && let Some(idx_id) = strategy.chosen_index
+            && let Some(def) = schema.index_by_id(idx_id)
+            && matches!(&def.kind, IndexKind::Value { fields, .. } if fields.len() == 1)
             && let Some(db) = ctx.open_index_ro(idx_id)?
         {
             let h = hash_canonical_value(val);
@@ -398,9 +474,37 @@ fn project_graph_terminal(gres: QueryResult, terminal: &TerminalSpec) -> Result<
         (QueryResult::GraphPpr(ppr), TerminalSpec::Ids) => {
             Ok(QueryResult::Ids(ppr.scores.into_iter().map(|(k, _)| k).collect()))
         }
+        (QueryResult::GraphPpr(ppr), TerminalSpec::Count) => Ok(QueryResult::Count(ppr.scores.len() as u64)),
+        (QueryResult::GraphPpr(ppr), TerminalSpec::Exists) => Ok(QueryResult::Exists(!ppr.scores.is_empty())),
         (QueryResult::GraphTopo(topo), TerminalSpec::Ids) => Ok(QueryResult::Ids(topo.order)),
+        (QueryResult::GraphTopo(topo), TerminalSpec::Count) => Ok(QueryResult::Count(topo.order.len() as u64)),
+        (QueryResult::GraphTopo(topo), TerminalSpec::Exists) => Ok(QueryResult::Exists(!topo.order.is_empty())),
+        (QueryResult::GraphGroups(groups), TerminalSpec::Count) => Ok(QueryResult::Count(groups.len() as u64)),
+        (QueryResult::GraphGroups(groups), TerminalSpec::Exists) => Ok(QueryResult::Exists(!groups.is_empty())),
+        (QueryResult::Hits(h), TerminalSpec::Hits) => Ok(QueryResult::Hits(h)),
         (QueryResult::Hits(h), TerminalSpec::Ids) => Ok(QueryResult::Ids(h.into_iter().map(|(k, _)| k).collect())),
-        (other, _) => Ok(other),
+        (QueryResult::Hits(h), TerminalSpec::Count) => Ok(QueryResult::Count(h.len() as u64)),
+        (QueryResult::Hits(h), TerminalSpec::Exists) => Ok(QueryResult::Exists(!h.is_empty())),
+        (_, term) => Err(ElmdbError::new(
+            ErrorCode::InvalidArgument,
+            format!("terminal {term:?} is not supported directly over GraphAnalyze"),
+        )),
+    }
+}
+
+fn source_includes_trashed(node: &LogicalNode) -> bool {
+    match node {
+        LogicalNode::Source(SourceSpec::Type { include_trashed, .. })
+        | LogicalNode::Source(SourceSpec::Types { include_trashed, .. })
+        | LogicalNode::Source(SourceSpec::AllEntities { include_trashed }) => *include_trashed,
+        LogicalNode::Source(SourceSpec::LiteralKeys(_)) => true,
+        LogicalNode::Filter { input, .. }
+        | LogicalNode::Score { input, .. }
+        | LogicalNode::Traverse { input, .. }
+        | LogicalNode::GraphAnalyze { input, .. }
+        | LogicalNode::Distinct { input }
+        | LogicalNode::OrderSlice { input, .. }
+        | LogicalNode::Terminal { input, .. } => source_includes_trashed(input),
     }
 }
 
@@ -412,47 +516,106 @@ fn eval_graph_analyze<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     let stream = eval_stream(ctx, input, None)?;
     let pairs = collect_all_pairs(ctx, stream, BATCH_SIZE as u16)?;
     let nodes: Vec<EntityKey> = pairs.into_iter().map(|(k, _)| k).collect();
+    let opts = GraphBuildOpts {
+        max_heap_bytes: ctx.remaining_heap(),
+        cancel: ctx.budgets.cancel,
+        include_trashed: source_includes_trashed(input),
+    };
 
     match spec {
         GraphAnalyzeSpec::WeakComponents { rel_kinds } => {
-            let g = CsrGraph::build(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, ctx.budgets.max_heap_bytes)?;
+            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, &opts, &mut |u| {
+                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
+            })?;
+            ctx.check_cancel()?;
             let comps = weak_components(&g);
             ctx.explain.rows_returned = comps.len() as u64;
             Ok(QueryResult::GraphGroups(comps))
         }
         GraphAnalyzeSpec::Scc { rel_kinds } => {
-            let g = CsrGraph::build(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, ctx.budgets.max_heap_bytes)?;
+            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, &opts, &mut |u| {
+                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
+            })?;
+            ctx.check_cancel()?;
             let comps = scc(&g);
             ctx.explain.rows_returned = comps.len() as u64;
             Ok(QueryResult::GraphGroups(comps))
         }
         GraphAnalyzeSpec::TopoSort { rel_kinds } => {
-            let g = CsrGraph::build(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, ctx.budgets.max_heap_bytes)?;
+            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, &opts, &mut |u| {
+                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
+            })?;
+            ctx.check_cancel()?;
             let res = topo_sort(&g);
             ctx.explain.rows_returned = res.order.len() as u64;
             Ok(QueryResult::GraphTopo(res))
         }
         GraphAnalyzeSpec::Ppr { rel_kinds, weighted, seeds, damping, iterations, tolerance } => {
-            let g = CsrGraph::build(ctx.txn, &ctx.dbs, nodes, rel_kinds, *weighted, ctx.budgets.max_heap_bytes)?;
-            let res = ppr(&g, seeds, *damping, *iterations, *tolerance)?;
+            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, *weighted, &opts, &mut |u| {
+                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
+            })?;
+            let res = ppr_cancellable(&g, seeds, *damping, *iterations, *tolerance, ctx.budgets.cancel)?;
             ctx.explain.rows_returned = res.scores.len() as u64;
             Ok(QueryResult::GraphPpr(res))
         }
         GraphAnalyzeSpec::Leiden { rel_kinds, weighted, resolution, seed, iterations } => {
-            let g = CsrGraph::build(ctx.txn, &ctx.dbs, nodes, rel_kinds, *weighted, ctx.budgets.max_heap_bytes)?;
+            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, *weighted, &opts, &mut |u| {
+                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
+            })?;
+            ctx.check_cancel()?;
             let groups = leiden_communities(&g, *resolution, *seed, *iterations)?;
             ctx.explain.rows_returned = groups.len() as u64;
             Ok(QueryResult::GraphGroups(groups))
         }
         GraphAnalyzeSpec::Jaccard { rel_kinds, dir, seed, top_k } => {
             let cand: FxHashSet<EntityKey> = nodes.into_iter().collect();
-            let hits = jaccard_similar(ctx.txn, &ctx.dbs, Some(&cand), rel_kinds, *dir, *seed, *top_k)?;
+            let empty_mask = FieldMask::empty();
+            let mut adj_rec: Vec<(EntityKey, EdgeDir)> = Vec::new();
+            let mut ent_rec: Vec<EntityKey> = Vec::new();
+            let hits = jaccard_similar_tracked(
+                ctx.txn,
+                &ctx.dbs,
+                Some(&cand),
+                rel_kinds,
+                *dir,
+                *seed,
+                *top_k,
+                &opts,
+                &mut |u, d| adj_rec.push((u, d)),
+                &mut |ek| ent_rec.push(ek),
+            )?;
+            for (u, d) in adj_rec {
+                ctx.recorder.record_edge_adj(u, rel_kinds, d);
+            }
+            for ek in ent_rec {
+                ctx.recorder.record_point_entity(ek, &empty_mask);
+            }
             ctx.explain.rows_returned = hits.len() as u64;
             Ok(QueryResult::Hits(hits))
         }
         GraphAnalyzeSpec::AdamicAdar { rel_kinds, dir, seed, top_k } => {
             let cand: FxHashSet<EntityKey> = nodes.into_iter().collect();
-            let hits = adamic_adar_similar(ctx.txn, &ctx.dbs, Some(&cand), rel_kinds, *dir, *seed, *top_k)?;
+            let empty_mask = FieldMask::empty();
+            let mut adj_rec: Vec<(EntityKey, EdgeDir)> = Vec::new();
+            let mut ent_rec: Vec<EntityKey> = Vec::new();
+            let hits = adamic_adar_similar_tracked(
+                ctx.txn,
+                &ctx.dbs,
+                Some(&cand),
+                rel_kinds,
+                *dir,
+                *seed,
+                *top_k,
+                &opts,
+                &mut |u, d| adj_rec.push((u, d)),
+                &mut |ek| ent_rec.push(ek),
+            )?;
+            for (u, d) in adj_rec {
+                ctx.recorder.record_edge_adj(u, rel_kinds, d);
+            }
+            for ek in ent_rec {
+                ctx.recorder.record_point_entity(ek, &empty_mask);
+            }
             ctx.explain.rows_returned = hits.len() as u64;
             Ok(QueryResult::Hits(hits))
         }
@@ -505,25 +668,29 @@ fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                     let ek = batch.keys[i];
                     if let Some(row) = ctx.load_row(ek)? {
                         let mut proj_fields = BTreeMap::new();
-                        let mut mask = FieldMask::empty();
                         match fields {
                             Some(fm) => {
+                                // Record the FULL requested FieldMask (even for fields currently absent!) so setting
+                                // a previously missing field invalidates live queries with zero false negatives.
+                                ctx.recorder.record_point_entity(ek, fm);
                                 for (&fid, val) in &row.fields {
                                     if fm.contains(fid) {
                                         proj_fields.insert(fid, val.clone());
-                                        mask.insert(fid);
                                     }
                                 }
                             }
                             None => {
+                                // Unprojected row depends on ALL current and future fields of `ek`!
+                                ctx.recorder.record_point_entity_all_fields(ek);
                                 for (&fid, val) in &row.fields {
                                     proj_fields.insert(fid, val.clone());
-                                    mask.insert(fid);
                                 }
                             }
                         }
-                        ctx.recorder.record_point_entity(ek, &mask);
-                        ctx.charge_heap(64 + proj_fields.len() * 32)?;
+                        let row_bytes = 64
+                            + row.header.ext_id.len()
+                            + proj_fields.values().map(|v| 16 + estimate_value_bytes(v)).sum::<usize>();
+                        ctx.charge_heap(row_bytes)?;
                         let trashed = row.header.is_trashed();
                         rows.push(ProjectedRow {
                             key: ek,
@@ -532,6 +699,11 @@ fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                             trashed,
                             fields: proj_fields,
                         });
+                    } else {
+                        match fields {
+                            Some(fm) => ctx.recorder.record_point_entity(ek, fm),
+                            None => ctx.recorder.record_point_entity_all_fields(ek),
+                        }
                     }
                 }
             }
@@ -582,10 +754,10 @@ fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                         && let Some(val) = row.fields.get(field)
                         && !matches!(val, CanonicalValue::Null)
                     {
-                        if min_v.as_ref().is_none_or(|cur| compare_values(val, cur) == Some(Ordering::Less)) {
+                        if min_v.as_ref().is_none_or(|cur| compare_values_total(val, cur) == Ordering::Less) {
                             min_v = Some(val.clone());
                         }
-                        if max_v.as_ref().is_none_or(|cur| compare_values(val, cur) == Some(Ordering::Greater)) {
+                        if max_v.as_ref().is_none_or(|cur| compare_values_total(val, cur) == Ordering::Greater) {
                             max_v = Some(val.clone());
                         }
                     }
@@ -600,7 +772,7 @@ fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             let mut fmask = FieldMask::empty();
             fmask.insert(*field);
             if *counts_only {
-                let mut counts: Vec<(CanonicalValue, u64)> = Vec::new();
+                let mut counts_map: FxHashMap<Vec<u8>, (CanonicalValue, u64)> = FxHashMap::default();
                 while stream.next_batch(ctx, BATCH_SIZE as u16, &mut batch)? {
                     for i in 0..batch.len as usize {
                         let ek = batch.keys[i];
@@ -609,19 +781,21 @@ fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                             .load_row(ek)?
                             .and_then(|r| r.fields.get(field).cloned())
                             .unwrap_or(CanonicalValue::Null);
-                        if let Some((_, c)) = counts.iter_mut().find(|(k, _)| values_equal(k, &key_val)) {
+                        let gkey = canonical_group_key(&key_val);
+                        if let Some((_, c)) = counts_map.get_mut(&gkey) {
                             *c += 1;
                         } else {
-                            ctx.charge_heap(48)?;
-                            counts.push((key_val, 1));
+                            ctx.charge_heap(48 + gkey.len() + estimate_value_bytes(&key_val))?;
+                            counts_map.insert(gkey, (key_val, 1));
                         }
                     }
                 }
+                let mut counts: Vec<(CanonicalValue, u64)> = counts_map.into_values().collect();
                 counts.sort_by(|a, b| compare_values_total(&a.0, &b.0));
                 ctx.explain.rows_returned = counts.len() as u64;
                 Ok(QueryResult::GroupCounts(counts))
             } else {
-                let mut groups: Vec<(CanonicalValue, Vec<EntityKey>)> = Vec::new();
+                let mut groups_map: FxHashMap<Vec<u8>, (CanonicalValue, Vec<EntityKey>)> = FxHashMap::default();
                 while stream.next_batch(ctx, BATCH_SIZE as u16, &mut batch)? {
                     for i in 0..batch.len as usize {
                         let ek = batch.keys[i];
@@ -630,15 +804,17 @@ fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                             .load_row(ek)?
                             .and_then(|r| r.fields.get(field).cloned())
                             .unwrap_or(CanonicalValue::Null);
-                        if let Some((_, members)) = groups.iter_mut().find(|(k, _)| values_equal(k, &key_val)) {
+                        let gkey = canonical_group_key(&key_val);
+                        if let Some((_, members)) = groups_map.get_mut(&gkey) {
                             ctx.charge_heap(8)?;
                             members.push(ek);
                         } else {
-                            ctx.charge_heap(64)?;
-                            groups.push((key_val, vec![ek]));
+                            ctx.charge_heap(64 + gkey.len() + estimate_value_bytes(&key_val))?;
+                            groups_map.insert(gkey, (key_val, vec![ek]));
                         }
                     }
                 }
+                let mut groups: Vec<(CanonicalValue, Vec<EntityKey>)> = groups_map.into_values().collect();
                 groups.sort_by(|a, b| compare_values_total(&a.0, &b.0));
                 ctx.explain.rows_returned = groups.len() as u64;
                 Ok(QueryResult::Groups(groups))
@@ -734,30 +910,23 @@ fn eval_source<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     limit_hint: Option<u64>,
 ) -> Result<VecStreamOp> {
     let cap = limit_hint.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
+    if cap == 0 {
+        return Ok(VecStreamOp::new(Vec::new()));
+    }
     let mut out = Vec::new();
     match src {
         SourceSpec::Type { type_id, include_trashed } => {
             ctx.recorder.record_type_scan(*type_id);
-            let keys = scan_type_keys(ctx.txn, &ctx.dbs, *type_id)?;
-            for ek in keys {
+            let mut after: Option<EntityKey> = None;
+            loop {
                 ctx.check_cancel()?;
-                if !*include_trashed {
-                    let Some(row) = ctx.load_row(ek)? else { continue };
-                    if row.header.is_trashed() {
-                        continue;
-                    }
-                }
-                ctx.charge_heap(16)?;
-                out.push((ek, 0.0));
-                if out.len() >= cap {
+                let chunk_cap = if *include_trashed { (cap - out.len()).min(BATCH_SIZE) } else { BATCH_SIZE };
+                let keys = scan_type_keys_in_range(ctx.txn, &ctx.dbs, *type_id, after, None, chunk_cap)?;
+                if keys.is_empty() {
                     break;
                 }
-            }
-        }
-        SourceSpec::Types { type_ids, include_trashed } => {
-            for &tid in type_ids {
-                ctx.recorder.record_type_scan(tid);
-                let keys = scan_type_keys(ctx.txn, &ctx.dbs, tid)?;
+                let full_chunk = keys.len() == chunk_cap;
+                after = keys.last().copied();
                 for ek in keys {
                     ctx.check_cancel()?;
                     if !*include_trashed {
@@ -772,9 +941,46 @@ fn eval_source<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                         return Ok(VecStreamOp::new(out));
                     }
                 }
+                if !full_chunk {
+                    break;
+                }
+            }
+        }
+        SourceSpec::Types { type_ids, include_trashed } => {
+            // Deduplicate `type_ids` first and never early-truncate before sorting across multiple types!
+            let mut uniq_types: Vec<TypeId> = type_ids.clone();
+            uniq_types.sort_unstable();
+            uniq_types.dedup();
+            for tid in uniq_types {
+                ctx.recorder.record_type_scan(tid);
+                let mut after: Option<EntityKey> = None;
+                loop {
+                    ctx.check_cancel()?;
+                    let keys = scan_type_keys_in_range(ctx.txn, &ctx.dbs, tid, after, None, BATCH_SIZE)?;
+                    if keys.is_empty() {
+                        break;
+                    }
+                    let full_chunk = keys.len() == BATCH_SIZE;
+                    after = keys.last().copied();
+                    for ek in keys {
+                        ctx.check_cancel()?;
+                        if !*include_trashed {
+                            let Some(row) = ctx.load_row(ek)? else { continue };
+                            if row.header.is_trashed() {
+                                continue;
+                            }
+                        }
+                        ctx.charge_heap(16)?;
+                        out.push((ek, 0.0));
+                    }
+                    if !full_chunk {
+                        break;
+                    }
+                }
             }
             out.sort_by_key(|(k, _)| *k);
             out.dedup_by_key(|(k, _)| *k);
+            out.truncate(cap);
         }
         SourceSpec::AllEntities { include_trashed } => {
             ctx.recorder.record_all_entities();
@@ -803,8 +1009,11 @@ fn eval_source<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             }
         }
         SourceSpec::LiteralKeys(keys) => {
+            let empty_mask = FieldMask::empty();
             for &ek in keys {
                 ctx.check_cancel()?;
+                // Record existence dependency even when absent so creating/destroying `ek` invalidates watches!
+                ctx.recorder.record_point_entity(ek, &empty_mask);
                 if ctx.txn.get(ctx.dbs.entities, &ek.to_ne_bytes())?.is_some() {
                     ctx.charge_heap(16)?;
                     out.push((ek, 0.0));
@@ -833,7 +1042,9 @@ fn eval_filter<'t, S: KvStore + 't, V: Vfs, C: Clock>(
         let mut residual: Vec<FilterExpr> = Vec::new();
 
         for c in conjuncts {
+            ctx.check_cancel()?;
             if let Some((keys, needs_residual, label)) = try_pushdown_conjunct(ctx, *type_id, &c)? {
+                ctx.charge_heap(keys.len().saturating_mul(8))?;
                 ctx.explain.pushed_filters.push(label);
                 index_lists.push(keys);
                 if needs_residual {
@@ -845,11 +1056,17 @@ fn eval_filter<'t, S: KvStore + 't, V: Vfs, C: Clock>(
         }
 
         if !index_lists.is_empty() {
+            ctx.check_cancel()?;
             let candidates = leapfrog_intersect(index_lists);
             ctx.explain.residual_filters += residual.len();
             if residual.is_empty() {
                 let cap = limit_hint.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
-                let pairs: Vec<(EntityKey, f64)> = candidates.into_iter().take(cap).map(|k| (k, 0.0)).collect();
+                let mut pairs = Vec::with_capacity(candidates.len().min(cap));
+                for k in candidates.into_iter().take(cap) {
+                    ctx.check_cancel()?;
+                    ctx.charge_heap(16)?;
+                    pairs.push((k, 0.0));
+                }
                 return Ok(VecStreamOp::new(pairs));
             }
             let res_expr = if residual.len() == 1 { residual.pop().unwrap() } else { FilterExpr::And(residual) };
@@ -869,7 +1086,7 @@ fn eval_filter<'t, S: KvStore + 't, V: Vfs, C: Clock>(
         }
     }
 
-    // Also push trigram narrowing when Filter(Contains/Regex) sits above an arbitrary input on a known type!
+    // Fallback: pull from input stream and apply predicate.
     let mut input_stream = eval_stream(ctx, input, None)?;
     ctx.explain.residual_filters += 1;
     let cap = limit_hint.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
@@ -908,26 +1125,42 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             let Some(db) = ctx.open_index_ro(idx.id)? else {
                 return Ok(None);
             };
-            ctx.recorder.record_indexed_eq(idx.id, hash_canonical_value(val));
+            let is_single = matches!(&idx.kind, IndexKind::Value { fields, .. } if fields.len() == 1);
             match value::encode_compound_values(&[val]) {
                 ValueKeyClass::Indexed(_) => {
-                    // For single-field index: exact lookup_eq; for compound leading-field index: prefix scan_range!
-                    let is_single = matches!(&idx.kind, IndexKind::Value { fields, .. } if fields.len() == 1);
                     let mut keys = if is_single {
+                        ctx.recorder.record_indexed_eq(idx.id, hash_canonical_value(val));
                         value::lookup_eq(ctx.txn, db, &[val])?
                     } else {
+                        // Compound index: prefix scan covers TAG_MAIN + aux partitions (TAG_WITHOUT/TAG_UNORDERED/TAG_LONG)
+                        // because rows with missing/unordered trailing fields live in TAG_WITHOUT/TAG_UNORDERED!
+                        ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x05]);
                         value::scan_range(ctx.txn, db, Some((&[val], true)), Some((&[val], true)), false, None)?
                     };
-                    // If `val` is a string, also check `TAG_LONG` (only non-empty when > 448 B strings exist, or compound > 502 B)!
+                    ctx.recorder.record_subdb_range(idx.slot, &[0x04], &[0x05]);
                     let long_keys = value::scan_long_keys(ctx.txn, db)?;
-                    let needs_residual = !long_keys.is_empty();
+                    let mut needs_residual = !long_keys.is_empty();
                     keys.extend(long_keys);
+                    if !is_single {
+                        let without_keys = value::scan_without_keys(ctx.txn, db)?;
+                        let unordered_keys = value::scan_unordered_keys(ctx.txn, db)?;
+                        if !without_keys.is_empty() || !unordered_keys.is_empty() {
+                            needs_residual = true;
+                            keys.extend(without_keys);
+                            keys.extend(unordered_keys);
+                        }
+                    }
                     Ok(Some((keys, needs_residual, format!("ValueEq({})", idx.name))))
                 }
                 ValueKeyClass::Long => {
-                    // Long string > 448 B lives exclusively in `TAG_LONG`!
-                    let long_keys = value::scan_long_keys(ctx.txn, db)?;
-                    Ok(Some((long_keys, true, format!("ValueLongEq({})", idx.name))))
+                    // Long string > 448 B lives in `TAG_LONG` (and for compound indexes, possibly TAG_WITHOUT/TAG_UNORDERED).
+                    ctx.recorder.record_subdb_range(idx.slot, &[0x02], &[0x05]);
+                    let mut keys = value::scan_long_keys(ctx.txn, db)?;
+                    if !is_single {
+                        keys.extend(value::scan_without_keys(ctx.txn, db)?);
+                        keys.extend(value::scan_unordered_keys(ctx.txn, db)?);
+                    }
+                    Ok(Some((keys, true, format!("ValueLongEq({})", idx.name))))
                 }
                 _ => Ok(None),
             }
@@ -957,12 +1190,13 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             let mut keys = Vec::new();
             let mut has_long = false;
             for v in vals {
-                ctx.recorder.record_indexed_eq(idx.id, hash_canonical_value(v));
                 match value::encode_compound_values(&[v]) {
                     ValueKeyClass::Indexed(_) => {
                         if is_single {
+                            ctx.recorder.record_indexed_eq(idx.id, hash_canonical_value(v));
                             keys.extend(value::lookup_eq(ctx.txn, db, &[v])?);
                         } else {
+                            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x05]);
                             keys.extend(value::scan_range(
                                 ctx.txn,
                                 db,
@@ -977,19 +1211,40 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                     _ => return Ok(None),
                 }
             }
+            ctx.recorder.record_subdb_range(idx.slot, &[0x04], &[0x05]);
             let long_keys = value::scan_long_keys(ctx.txn, db)?;
-            let needs_residual = has_long || !long_keys.is_empty();
+            let mut needs_residual = has_long || !long_keys.is_empty();
             keys.extend(long_keys);
+            if !is_single {
+                ctx.recorder.record_subdb_range(idx.slot, &[0x02], &[0x05]);
+                let without_keys = value::scan_without_keys(ctx.txn, db)?;
+                let unordered_keys = value::scan_unordered_keys(ctx.txn, db)?;
+                if !without_keys.is_empty() || !unordered_keys.is_empty() {
+                    needs_residual = true;
+                    keys.extend(without_keys);
+                    keys.extend(unordered_keys);
+                }
+            }
             Ok(Some((keys, needs_residual, format!("ValueIn({})", idx.name))))
         }
         FilterExpr::Range { field, low, high } => {
+            // Fully open range matches TAG_UNORDERED too; fall back to primary scan for soundness.
+            if low.is_none() && high.is_none() {
+                return Ok(None);
+            }
+            // Cross-type bounds (e.g. Int(5) .. String("z") on an Any field) can never satisfy both bounds!
+            if let (Some((lv, _)), Some((hv, _))) = (low, high)
+                && compare_values(lv, hv).is_none()
+            {
+                return Ok(Some((Vec::new(), false, "EmptyRange".into())));
+            }
             let Some(idx) = find_ready_value_index(ctx.txn, &ctx.dbs, ctx.schema, type_id, *field)? else {
                 return Ok(None);
             };
             let Some(db) = ctx.open_index_ro(idx.id)? else {
                 return Ok(None);
             };
-            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x02]);
+            let is_single = matches!(&idx.kind, IndexKind::Value { fields, .. } if fields.len() == 1);
             let l_arr;
             let h_arr;
             let lo = match low {
@@ -1012,10 +1267,22 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                 }
                 None => None,
             };
+            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x02]);
+            ctx.recorder.record_subdb_range(idx.slot, &[0x04], &[0x05]);
             let mut keys = value::scan_range(ctx.txn, db, lo, hi, false, None)?;
             let long_keys = value::scan_long_keys(ctx.txn, db)?;
-            let needs_residual = !long_keys.is_empty();
+            let mut needs_residual = !long_keys.is_empty();
             keys.extend(long_keys);
+            if !is_single {
+                ctx.recorder.record_subdb_range(idx.slot, &[0x02], &[0x04]);
+                let without_keys = value::scan_without_keys(ctx.txn, db)?;
+                let unordered_keys = value::scan_unordered_keys(ctx.txn, db)?;
+                if !without_keys.is_empty() || !unordered_keys.is_empty() {
+                    needs_residual = true;
+                    keys.extend(without_keys);
+                    keys.extend(unordered_keys);
+                }
+            }
             Ok(Some((keys, needs_residual, format!("ValueRange({})", idx.name))))
         }
         FilterExpr::StartsWith(field, prefix) => {
@@ -1025,11 +1292,23 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             let Some(db) = ctx.open_index_ro(idx.id)? else {
                 return Ok(None);
             };
+            let is_single = matches!(&idx.kind, IndexKind::Value { fields, .. } if fields.len() == 1);
             ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x02]);
+            ctx.recorder.record_subdb_range(idx.slot, &[0x04], &[0x05]);
             let mut keys = value::scan_prefix_string(ctx.txn, db, prefix, None)?;
             let long_keys = value::scan_long_keys(ctx.txn, db)?;
-            let needs_residual = !long_keys.is_empty();
+            let mut needs_residual = !long_keys.is_empty();
             keys.extend(long_keys);
+            if !is_single {
+                ctx.recorder.record_subdb_range(idx.slot, &[0x02], &[0x04]);
+                let without_keys = value::scan_without_keys(ctx.txn, db)?;
+                let unordered_keys = value::scan_unordered_keys(ctx.txn, db)?;
+                if !without_keys.is_empty() || !unordered_keys.is_empty() {
+                    needs_residual = true;
+                    keys.extend(without_keys);
+                    keys.extend(unordered_keys);
+                }
+            }
             Ok(Some((keys, needs_residual, format!("ValuePrefix({})", idx.name))))
         }
         FilterExpr::Contains(field, needle) => {
@@ -1043,7 +1322,8 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             let Some(db) = ctx.open_index_ro(idx.id)? else {
                 return Ok(None);
             };
-            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x02]);
+            // Cover TAG_TRIGRAM (0x01), TAG_TRIG_DF (0x02), TAG_DOC_TRIGS (0x03), TAG_OVERFLOW (0x04).
+            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x05]);
             let keys = trigram::intersect_trigrams(ctx.txn, db, &trigs)?;
             Ok(Some((keys, true, format!("TrigramContains({})", idx.name))))
         }
@@ -1058,7 +1338,7 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             let Some(db) = ctx.open_index_ro(idx.id)? else {
                 return Ok(None);
             };
-            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x02]);
+            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x05]);
             let keys = trigram::intersect_trigrams(ctx.txn, db, &trigs)?;
             Ok(Some((keys, true, format!("TrigramRegex({})", idx.name))))
         }
@@ -1070,9 +1350,12 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                 EdgeDir::Both => EdgeDir::Both,
             };
             ctx.recorder.record_edge_adj(*target_key, rel_kinds, rev_dir);
+            let empty_mask = FieldMask::empty();
             let mut linked = Vec::new();
             if matches!(rev_dir, EdgeDir::In | EdgeDir::Both) {
                 for (src, _, _) in scan_adj_in_raw(ctx.txn, &ctx.dbs, *target_key, rel_kinds)? {
+                    // Record liveness/trash dependency for EVERY adjacent neighbor inspected!
+                    ctx.recorder.record_point_entity(src, &empty_mask);
                     if let Some(row) = ctx.load_row(src)?
                         && row.header.type_id == type_id
                         && !row.header.is_trashed()
@@ -1083,6 +1366,7 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             }
             if matches!(rev_dir, EdgeDir::Out | EdgeDir::Both) {
                 for (dst, _, _) in scan_adj_out_raw(ctx.txn, &ctx.dbs, *target_key, rel_kinds)? {
+                    ctx.recorder.record_point_entity(dst, &empty_mask);
                     if let Some(row) = ctx.load_row(dst)?
                         && row.header.type_id == type_id
                         && !row.header.is_trashed()
@@ -1171,12 +1455,13 @@ fn eval_predicate<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             }
         }
         FilterExpr::Regex(field, pattern) => {
-            let re = Regex::new(pattern)
-                .map_err(|e| ElmdbError::new(ErrorCode::InvalidArgument, format!("invalid regex '{pattern}': {e}")))?;
             let mut m = FieldMask::empty();
             m.insert(*field);
             ctx.recorder.record_point_entity(key, &m);
             let Some(row) = ctx.load_row(key)? else { return Ok(false) };
+            let re = ctx.regex_cache.get(pattern).ok_or_else(|| {
+                ElmdbError::new(ErrorCode::Internal, format!("missing precompiled regex '{pattern}'"))
+            })?;
             match row.fields.get(field) {
                 Some(CanonicalValue::String(s)) => Ok(re.is_match(s)),
                 Some(CanonicalValue::Array(items)) => {
@@ -1229,29 +1514,40 @@ fn eval_predicate<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     }
 }
 
+fn score_index_id(spec: &ScoreSpec) -> Option<IndexId> {
+    match spec {
+        ScoreSpec::Bm25f { index_id, .. }
+        | ScoreSpec::VectorNear { index_id, .. }
+        | ScoreSpec::VectorLike { index_id, .. }
+        | ScoreSpec::RankIndex { index_id } => Some(*index_id),
+        ScoreSpec::FuzzyLabel { .. } | ScoreSpec::RecencyDecay { .. } | ScoreSpec::Fuse { .. } => None,
+    }
+}
+
 fn eval_score<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     ctx: &mut ExecCtx<'_, 't, S, V, C>,
     input: &LogicalNode,
     spec: &ScoreSpec,
     limit_hint: Option<u64>,
 ) -> Result<VecStreamOp> {
-    // Determine whether input is an unfiltered single-type source (allowing direct index-driven BMW/HNSW/Rank)
-    // or a filtered candidate set to push down into BMW/HNSW!
+    // Allow direct index-driven BMW/HNSW/Rank ONLY when `input` is an unfiltered live single-type Source
+    // AND the target index belongs to that exact `type_id` (preventing cross-type leaks!).
     let cand_set: Option<FxHashSet<EntityKey>> = match input {
-        LogicalNode::Source(SourceSpec::Type { include_trashed: false, .. })
-            if matches!(
-                spec,
-                ScoreSpec::Bm25f { .. }
-                    | ScoreSpec::VectorNear { .. }
-                    | ScoreSpec::VectorLike { .. }
-                    | ScoreSpec::RankIndex { .. }
-            ) =>
-        {
+        LogicalNode::Source(SourceSpec::Type { type_id, include_trashed: false }) if score_index_id(spec).is_some() => {
+            let idx_id = score_index_id(spec).expect("checked");
+            let def = ctx
+                .schema
+                .index_by_id(idx_id)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index {}", idx_id.0)))?;
+            if def.type_id != *type_id {
+                return Ok(VecStreamOp::new(Vec::new()));
+            }
             None
         }
         _ => {
             let stream = eval_stream(ctx, input, None)?;
             let pairs = collect_all_pairs(ctx, stream, BATCH_SIZE as u16)?;
+            ctx.charge_heap(pairs.len().saturating_mul(16))?;
             Some(pairs.into_iter().map(|(k, _)| k).collect())
         }
     };
@@ -1267,45 +1563,94 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     candidates: Option<&FxHashSet<EntityKey>>,
     limit_hint: Option<u64>,
 ) -> Result<Vec<(EntityKey, f64)>> {
+    ctx.check_cancel()?;
     match spec {
         ScoreSpec::Bm25f { index_id, query, require_all, phrase, top_k } => {
+            let def = ctx
+                .schema
+                .index_by_id(*index_id)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index {}", index_id.0)))?;
+            if !matches!(&def.kind, IndexKind::Text { .. }) {
+                return Err(ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("index '{}' is not a Text index", def.name),
+                ));
+            }
+            // Record dependency BEFORE checking empty/uninitialized sub-DB so watches fire when first docs arrive!
+            ctx.recorder.record_subdb_range(def.slot, &[0x00], &[0x06]);
             if !is_index_ready(ctx.txn, &ctx.dbs, *index_id)? {
                 return Err(ElmdbError::new(ErrorCode::IndexNotReady, "text index is not ready"));
             }
             let Some(db) = ctx.open_index_ro(*index_id)? else {
                 return Ok(Vec::new());
             };
-            let def = ctx.schema.index_by_id(*index_id).unwrap();
-            ctx.recorder.record_subdb_range(def.slot, &[0x01], &[0x05]);
-            let k = top_k.or_else(|| limit_hint.map(|l| l.min(usize::MAX as u64) as usize)).unwrap_or(10_000);
-            let fetch_k = if phrase.is_some() { k.saturating_mul(4).max(128) } else { k };
-            let (mut hits, _) = text::search_bmw(ctx.txn, db, query, None, fetch_k, *require_all, candidates)?;
-            if let Some(phrase_terms) = phrase {
-                let mut verified = Vec::with_capacity(hits.len());
-                for h in hits {
-                    if text::matches_phrase(ctx.txn, db, h.key, phrase_terms)? {
-                        verified.push(h);
-                        if verified.len() >= k {
-                            break;
+            let k = top_k.or_else(|| limit_hint.map(|l| l.min(usize::MAX as u64) as usize)).unwrap_or(usize::MAX);
+            if k == 0 {
+                return Ok(Vec::new());
+            }
+            let normalized_phrase: Option<Vec<String>> = phrase.as_ref().map(|terms| {
+                let mut analyzed = Vec::new();
+                for t in terms {
+                    let toks = text::analyze_text(t, None);
+                    if toks.is_empty() {
+                        analyzed.push(t.to_lowercase());
+                    } else {
+                        for tok in toks {
+                            analyzed.push(tok.term);
                         }
                     }
                 }
-                hits = verified;
+                analyzed
+            });
+
+            if let Some(phrase_terms) = normalized_phrase {
+                // Exponential widening ensures zero phrase false negatives even when > 128 higher-scoring
+                // non-phrase distractors exist, while staying fast for normal queries!
+                let mut fetch_k = k.saturating_mul(4).clamp(128, 1_048_576);
+                loop {
+                    ctx.check_cancel()?;
+                    let (hits, _) = text::search_bmw(ctx.txn, db, query, None, fetch_k, *require_all, candidates)?;
+                    let exhausted = hits.len() < fetch_k;
+                    let mut verified = Vec::new();
+                    for h in hits {
+                        ctx.check_cancel()?;
+                        if text::matches_phrase(ctx.txn, db, h.key, &phrase_terms)? {
+                            ctx.charge_heap(16)?;
+                            verified.push((h.key, h.score));
+                            if verified.len() >= k {
+                                return Ok(verified);
+                            }
+                        }
+                    }
+                    if exhausted || fetch_k == usize::MAX {
+                        return Ok(verified);
+                    }
+                    fetch_k = fetch_k.saturating_mul(4);
+                }
+            } else {
+                let (hits, _) = text::search_bmw(ctx.txn, db, query, None, k, *require_all, candidates)?;
+                ctx.charge_heap(hits.len().saturating_mul(16))?;
+                Ok(hits.into_iter().map(|h| (h.key, h.score)).collect())
             }
-            Ok(hits.into_iter().map(|h| (h.key, h.score)).collect())
         }
         ScoreSpec::VectorNear { index_id, vector, top_k } => {
-            if !is_index_ready(ctx.txn, &ctx.dbs, *index_id)? {
-                return Err(ElmdbError::new(ErrorCode::IndexNotReady, "vector index is not ready"));
-            }
             let def = ctx
                 .schema
                 .index_by_id(*index_id)
                 .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index {}", index_id.0)))?;
+            if !matches!(&def.kind, IndexKind::Vector { .. }) {
+                return Err(ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("index '{}' is not a Vector index", def.name),
+                ));
+            }
+            ctx.recorder.record_subdb_range(def.slot, &[0x00], &[0x05]);
+            if !is_index_ready(ctx.txn, &ctx.dbs, *index_id)? {
+                return Err(ElmdbError::new(ErrorCode::IndexNotReady, "vector index is not ready"));
+            }
             let Some(db) = ctx.open_index_ro(*index_id)? else {
                 return Ok(Vec::new());
             };
-            ctx.recorder.record_subdb_range(def.slot, &[0x01], &[0x04]);
             let k = (*top_k).min(limit_hint.map_or(usize::MAX, |l| l.min(usize::MAX as u64) as usize));
             let hits = search_near(
                 ctx.txn,
@@ -1315,44 +1660,62 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                 vector,
                 SearchNearOpts { top_k: k, candidates, best_chunk_per_entity: true },
             )?;
+            ctx.charge_heap(hits.len().saturating_mul(16))?;
             Ok(hits.into_iter().map(|h| (h.key, h.score as f64)).collect())
         }
         ScoreSpec::VectorLike { index_id, seed, top_k } => {
+            let def = ctx
+                .schema
+                .index_by_id(*index_id)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index {}", index_id.0)))?;
+            if !matches!(&def.kind, IndexKind::Vector { .. }) {
+                return Err(ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("index '{}' is not a Vector index", def.name),
+                ));
+            }
+            ctx.recorder.record_subdb_range(def.slot, &[0x00], &[0x05]);
             if !is_index_ready(ctx.txn, &ctx.dbs, *index_id)? {
                 return Err(ElmdbError::new(ErrorCode::IndexNotReady, "vector index is not ready"));
             }
-            let def = ctx
-                .schema
-                .index_by_id(*index_id)
-                .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index {}", index_id.0)))?;
             let Some(db) = ctx.open_index_ro(*index_id)? else {
                 return Ok(Vec::new());
             };
-            ctx.recorder.record_subdb_range(def.slot, &[0x01], &[0x04]);
             let hits = search_like(ctx.txn, &ctx.dbs, def, db, *seed, *top_k, candidates)?;
+            ctx.charge_heap(hits.len().saturating_mul(16))?;
             Ok(hits.into_iter().map(|h| (h.key, h.score as f64)).collect())
         }
         ScoreSpec::RankIndex { index_id } => {
-            if !is_index_ready(ctx.txn, &ctx.dbs, *index_id)? {
-                return Err(ElmdbError::new(ErrorCode::IndexNotReady, "rank index is not ready"));
-            }
             let def = ctx
                 .schema
                 .index_by_id(*index_id)
                 .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index {}", index_id.0)))?;
+            if !matches!(&def.kind, IndexKind::Rank { .. }) {
+                return Err(ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("index '{}' is not a Rank index", def.name),
+                ));
+            }
+            ctx.recorder.record_subdb_range(def.slot, &[0x00], &[0x05]);
+            if !is_index_ready(ctx.txn, &ctx.dbs, *index_id)? {
+                return Err(ElmdbError::new(ErrorCode::IndexNotReady, "rank index is not ready"));
+            }
             let Some(db) = ctx.open_index_ro(*index_id)? else {
                 return Ok(Vec::new());
             };
-            ctx.recorder.record_subdb_range(def.slot, &[0x01], &[0x03]);
             match candidates {
                 None => {
                     let lim = limit_hint.map(|l| l.min(usize::MAX as u64) as usize);
-                    rank::scan_ranked(ctx.txn, db, false, lim)
+                    let out = rank::scan_ranked(ctx.txn, db, false, lim)?;
+                    ctx.charge_heap(out.len().saturating_mul(16))?;
+                    Ok(out)
                 }
                 Some(allowed) => {
                     let mut out = Vec::with_capacity(allowed.len());
                     for &ek in allowed {
+                        ctx.check_cancel()?;
                         if let Some(score) = rank::rank_of(ctx.txn, db, ek)? {
+                            ctx.charge_heap(16)?;
                             out.push((ek, score));
                         }
                     }
@@ -1388,6 +1751,7 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                     let cand_low = s.to_lowercase();
                     match dfa.eval(&cand_low) {
                         Distance::Exact(d) => {
+                            ctx.charge_heap(16)?;
                             let score = 1.0 / (1.0 + (d as f64));
                             out.push((ek, score));
                         }
@@ -1424,7 +1788,8 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                         _ => None,
                     };
                     if let Some(ms) = ts_ms {
-                        let age = (*now_ms - ms).max(0) as f64;
+                        ctx.charge_heap(16)?;
+                        let age = now_ms.saturating_sub(ms).max(0) as f64;
                         let score = 0.5f64.powf(age / *half_life_ms);
                         out.push((ek, score));
                     }
@@ -1437,6 +1802,11 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             if inputs.is_empty() {
                 return Ok(Vec::new());
             }
+            for (_, weight) in inputs {
+                if !weight.is_finite() || *weight < 0.0 {
+                    return Err(ElmdbError::new(ErrorCode::InvalidArgument, "Fuse weight must be finite and >= 0"));
+                }
+            }
             let mut fused: FxHashMap<EntityKey, f64> = FxHashMap::default();
             match *method {
                 FuseMethod::Rrf { k } => {
@@ -1444,20 +1814,29 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                         return Err(ElmdbError::new(ErrorCode::InvalidArgument, "RRF k must be > 0"));
                     }
                     for (sub_spec, weight) in inputs {
-                        if !weight.is_finite() || *weight <= 0.0 {
+                        ctx.check_cancel()?;
+                        if *weight == 0.0 {
                             continue;
                         }
                         let mut sub_hits = eval_score_signal(ctx, input, sub_spec, candidates, None)?;
                         sub_hits.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
                         for (rank_0, (ek, _)) in sub_hits.into_iter().enumerate() {
+                            if rank_0 & 255 == 0 {
+                                ctx.check_cancel()?;
+                            }
                             let contrib = *weight / (k + (rank_0 as f64) + 1.0);
+                            let prev_len = fused.len();
                             *fused.entry(ek).or_insert(0.0) += contrib;
+                            if fused.len() > prev_len {
+                                ctx.charge_heap(24)?;
+                            }
                         }
                     }
                 }
                 FuseMethod::LinearNormalized => {
                     for (sub_spec, weight) in inputs {
-                        if !weight.is_finite() || *weight <= 0.0 {
+                        ctx.check_cancel()?;
+                        if *weight == 0.0 {
                             continue;
                         }
                         let sub_hits = eval_score_signal(ctx, input, sub_spec, candidates, None)?;
@@ -1467,18 +1846,38 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                         let mut min_s = f64::INFINITY;
                         let mut max_s = f64::NEG_INFINITY;
                         for &(_, s) in &sub_hits {
-                            min_s = min_s.min(s);
-                            max_s = max_s.max(s);
+                            if s.is_finite() {
+                                min_s = min_s.min(s);
+                                max_s = max_s.max(s);
+                            }
+                        }
+                        if !min_s.is_finite() || !max_s.is_finite() {
+                            continue;
                         }
                         let span = max_s - min_s;
-                        for (ek, s) in sub_hits {
-                            // Guard `max == min`: constant positive pool normalizes to 1.0 (never divides by zero!).
-                            let norm = if span.abs() <= f64::EPSILON {
+                        let overflow_span = !span.is_finite();
+                        let half_min = min_s * 0.5;
+                        let half_span = (max_s * 0.5) - half_min;
+                        for (idx, (ek, s)) in sub_hits.into_iter().enumerate() {
+                            if idx & 255 == 0 {
+                                ctx.check_cancel()?;
+                            }
+                            if !s.is_finite() {
+                                continue;
+                            }
+                            // Guard `max == min` (never divides by zero!) AND `max - min == Inf` overflow!
+                            let norm = if min_s == max_s {
                                 if s > 0.0 { 1.0 } else { 0.0 }
+                            } else if overflow_span {
+                                (((s * 0.5) - half_min) / half_span).clamp(0.0, 1.0)
                             } else {
                                 ((s - min_s) / span).clamp(0.0, 1.0)
                             };
+                            let prev_len = fused.len();
                             *fused.entry(ek).or_insert(0.0) += *weight * norm;
+                            if fused.len() > prev_len {
+                                ctx.charge_heap(24)?;
+                            }
                         }
                     }
                 }
@@ -1508,7 +1907,16 @@ fn eval_traverse<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             let mut queue: VecDeque<(EntityKey, u32)> = VecDeque::new();
             let mut results = Vec::new();
             for s in seeds {
-                if visited.insert(s, 0).is_none() {
+                ctx.check_cancel()?;
+                if !visited.contains_key(&s) {
+                    if visited.len() >= ctx.budgets.max_traversal_visited {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ResourceLimit,
+                            "traversal exceeded max_traversal_visited budget",
+                        ));
+                    }
+                    visited.insert(s, 0);
+                    ctx.charge_heap(32)?;
                     queue.push_back((s, 0));
                     if *min_hops == 0 {
                         results.push((s, 0.0));
@@ -1560,10 +1968,19 @@ fn eval_traverse<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             let mut parent: FxHashMap<EntityKey, Option<EntityKey>> = FxHashMap::default();
             let mut queue: VecDeque<(EntityKey, u32)> = VecDeque::new();
             for s in seeds {
+                ctx.check_cancel()?;
                 if s == *target {
                     return Ok(VecStreamOp::new(vec![(s, 0.0)]));
                 }
-                if parent.insert(s, None).is_none() {
+                if !parent.contains_key(&s) {
+                    if parent.len() >= ctx.budgets.max_traversal_visited {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ResourceLimit,
+                            "shortest-path exceeded max_traversal_visited budget",
+                        ));
+                    }
+                    parent.insert(s, None);
+                    ctx.charge_heap(32)?;
                     queue.push_back((s, 0));
                 }
             }
@@ -1624,6 +2041,22 @@ fn eval_traverse<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     }
 }
 
+fn validate_cursor_matches_order(order: &OrderSpec, after: Option<&Cursor>) -> Result<()> {
+    let Some(cursor) = after else {
+        return Ok(());
+    };
+    let ok = matches!(
+        (order, cursor),
+        (OrderSpec::EntityKey(_), Cursor::EntityKey(_))
+            | (OrderSpec::Score(_), Cursor::Score { .. })
+            | (OrderSpec::Field { .. }, Cursor::Field { .. })
+    );
+    if !ok {
+        return Err(ElmdbError::new(ErrorCode::InvalidArgument, "pagination cursor variant does not match OrderSpec"));
+    }
+    Ok(())
+}
+
 fn eval_order_slice<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     ctx: &mut ExecCtx<'_, 't, S, V, C>,
     input: &LogicalNode,
@@ -1631,6 +2064,7 @@ fn eval_order_slice<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     after: Option<&Cursor>,
     limit: Option<u64>,
 ) -> Result<VecStreamOp> {
+    validate_cursor_matches_order(order, after)?;
     let cap = limit.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
     if cap == 0 {
         return Ok(VecStreamOp::new(Vec::new()));
@@ -1646,26 +2080,58 @@ fn eval_order_slice<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             if let Some(idx) = find_ready_order_index(ctx.txn, &ctx.dbs, ctx.schema, *type_id, *field, loc)?
                 && let Some(db) = ctx.open_index_ro(idx.id)?
             {
-                ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x02]);
+                ctx.check_cancel()?;
+                // Record BOTH TAG_ORDER (0x01) and TAG_MISSING (0x02)!
+                ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x03]);
                 let cached = ctx.collators.get_or_build(loc)?;
-                let keys = order::scan_ordered(ctx.txn, &ctx.dbs, db, &cached, *field, reverse, Some(cap))?;
+                // Missing/Null sorts first in Asc (`type_rank(Null) == 0`) and last in Desc!
+                let mut keys = Vec::new();
+                if !reverse {
+                    let missing = order::scan_missing_keys(ctx.txn, db, false, Some(cap))?;
+                    keys.extend(missing);
+                    let rem = cap.saturating_sub(keys.len());
+                    if rem > 0 {
+                        keys.extend(order::scan_ordered(ctx.txn, &ctx.dbs, db, &cached, *field, false, Some(rem))?);
+                    }
+                } else {
+                    let ordered = order::scan_ordered(ctx.txn, &ctx.dbs, db, &cached, *field, true, Some(cap))?;
+                    keys.extend(ordered);
+                    let rem = cap.saturating_sub(keys.len());
+                    if rem > 0 {
+                        keys.extend(order::scan_missing_keys(ctx.txn, db, true, Some(rem))?);
+                    }
+                }
+                ctx.charge_heap(keys.len().saturating_mul(16))?;
                 return Ok(VecStreamOp::new(keys.into_iter().map(|k| (k, 0.0)).collect()));
             }
         } else if let Some(idx) = find_ready_value_index(ctx.txn, &ctx.dbs, ctx.schema, *type_id, *field)?
             && matches!(&idx.kind, IndexKind::Value { fields, .. } if fields.len() == 1)
             && let Some(db) = ctx.open_index_ro(idx.id)?
-            && value::scan_long_keys(ctx.txn, db)?.is_empty()
-            && value::scan_without_keys(ctx.txn, db)?.is_empty()
-            && value::scan_unordered_keys(ctx.txn, db)?.is_empty()
         {
-            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x02]);
-            let keys = value::scan_range(ctx.txn, db, None, None, reverse, Some(cap))?;
-            return Ok(VecStreamOp::new(keys.into_iter().map(|k| (k, 0.0)).collect()));
+            ctx.check_cancel()?;
+            // Record ALL 4 partitions (`0x01..0x05`) so inserting a long/null/unordered value invalidates!
+            ctx.recorder.record_subdb_range(idx.slot, &[0x01], &[0x05]);
+            if value::scan_long_keys(ctx.txn, db)?.is_empty()
+                && value::scan_without_keys(ctx.txn, db)?.is_empty()
+                && value::scan_unordered_keys(ctx.txn, db)?.is_empty()
+            {
+                let keys = value::scan_range(ctx.txn, db, None, None, reverse, Some(cap))?;
+                ctx.charge_heap(keys.len().saturating_mul(16))?;
+                return Ok(VecStreamOp::new(keys.into_iter().map(|k| (k, 0.0)).collect()));
+            }
         }
     }
 
-    // Fast path #2: Push `limit` directly into `Score` when ordering by `Score(Desc)` with no cursor!
-    let score_hint = if after.is_none() && matches!(order, OrderSpec::Score(OrderDir::Desc)) { limit } else { None };
+    // Fast path #2: Push `limit` directly into `Score` ONLY when `input` is a `Score` node
+    // (which produces descending-score output) and ordering by `Score(Desc)` with no cursor!
+    let score_hint = if after.is_none()
+        && matches!(order, OrderSpec::Score(OrderDir::Desc))
+        && matches!(input, LogicalNode::Score { .. })
+    {
+        limit
+    } else {
+        None
+    };
 
     let stream = eval_stream(ctx, input, score_hint)?;
     let mut pairs = collect_all_pairs(ctx, stream, BATCH_SIZE as u16)?;
@@ -1708,8 +2174,10 @@ fn eval_order_slice<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             fmask.insert(*field);
             let mut keyed: Vec<(EntityKey, f64, CanonicalValue)> = Vec::with_capacity(pairs.len());
             for (ek, sc) in pairs {
+                ctx.check_cancel()?;
                 ctx.recorder.record_point_entity(ek, &fmask);
                 let val = ctx.load_row(ek)?.and_then(|r| r.fields.get(field).cloned()).unwrap_or(CanonicalValue::Null);
+                ctx.charge_heap(24 + estimate_value_bytes(&val))?;
                 keyed.push((ek, sc, val));
             }
             keyed.sort_by(|a, b| {
@@ -1780,9 +2248,57 @@ fn compare_values_total(a: &CanonicalValue, b: &CanonicalValue) -> Ordering {
         return ord;
     }
     type_rank(a).cmp(&type_rank(b)).then_with(|| match (a, b) {
+        (CanonicalValue::Float(x), CanonicalValue::Float(y)) => x.total_cmp(y),
+        (CanonicalValue::Int(_), CanonicalValue::Float(y)) => {
+            if y.is_nan() {
+                Ordering::Less
+            } else {
+                Ordering::Equal
+            }
+        }
+        (CanonicalValue::Float(x), CanonicalValue::Int(_)) => {
+            if x.is_nan() {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
         (CanonicalValue::Bytes(x), CanonicalValue::Bytes(y)) => x.cmp(y),
+        (CanonicalValue::Array(xs), CanonicalValue::Array(ys)) => {
+            for (x, y) in xs.iter().zip(ys.iter()) {
+                let ord = compare_values_total(x, y);
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            xs.len().cmp(&ys.len())
+        }
+        (CanonicalValue::Object(xs), CanonicalValue::Object(ys)) => {
+            for ((kx, vx), (ky, vy)) in xs.iter().zip(ys.iter()) {
+                let ord = kx.cmp(ky).then_with(|| compare_values_total(vx, vy));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            xs.len().cmp(&ys.len())
+        }
         _ => Ordering::Equal,
     })
+}
+
+fn canonical_group_key(val: &CanonicalValue) -> Vec<u8> {
+    let mut out = Vec::new();
+    match value::encode_compound_values(&[val]) {
+        ValueKeyClass::Indexed(bytes) => {
+            out.push(1);
+            out.extend_from_slice(&bytes);
+        }
+        _ => {
+            out.push(2);
+            elmdb_wire::encode_value(val, &mut out);
+        }
+    }
+    out
 }
 
 fn compare_with_collator(
