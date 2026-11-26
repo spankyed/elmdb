@@ -316,6 +316,10 @@ pub struct TxnCtx<'a, S: KvStore, V: Vfs, C: Clock> {
     now_ms: i64,
     /// Accumulated deltas for the whole transaction (used for summary + `commit_log`).
     total_deltas: DeltaBatch,
+    /// Deltas produced in the current round (delivered to `beforeCommit` hooks on the next round).
+    round_deltas: DeltaBatch,
+    /// Snapshot of deltas visible to the currently executing `beforeCommit` hook round.
+    active_hook_deltas: Option<DeltaBatch>,
     /// Types touched in the current round (triggers `beforeCommit` cascade).
     round_touched_types: TypeMask,
     /// Pending un-flushed deltas (flushed to `ProjectionSink` after every statement / batch).
@@ -346,6 +350,19 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         mode: DurabilityMode,
         projections: Arc<dyn ProjectionSink<S, V>>,
     ) -> Result<(Self, RecoveryReport)> {
+        Self::open_with_options(store, vfs, clock, dir, mode, projections, false)
+    }
+
+    /// Opens an engine with explicit `read_only` enforcement (never opens a write transaction when `read_only == true`).
+    pub fn open_with_options(
+        store: S,
+        vfs: V,
+        clock: C,
+        dir: impl AsRef<Path>,
+        mode: DurabilityMode,
+        projections: Arc<dyn ProjectionSink<S, V>>,
+        read_only: bool,
+    ) -> Result<(Self, RecoveryReport)> {
         let (gate, report) = DurabilityGate::open(store, vfs, dir, mode)?;
 
         // Try read-only fast path first so reopening an existing DB never performs an
@@ -368,6 +385,12 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         let (dbs, schema, pool) = match existing {
             Some(loaded) => loaded,
             None => {
+                if read_only {
+                    return Err(ElmdbError::new(
+                        ErrorCode::NoDatabase,
+                        "database directory is not initialized and cannot be initialized in read-only mode",
+                    ));
+                }
                 let mut txn = gate.begin_write()?;
                 let dbs = SystemDbs::open_or_create(&mut txn)?;
                 let schema = match txn.get(dbs.meta, META_SCHEMA_KEY)? {
@@ -748,6 +771,8 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             commit_seq,
             now_ms,
             total_deltas: DeltaBatch::new(),
+            round_deltas: DeltaBatch::new(),
+            active_hook_deltas: None,
             round_touched_types: TypeMask::empty(),
             pending_deltas: DeltaBatch::new(),
         };
@@ -782,6 +807,8 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             commit_seq,
             now_ms,
             total_deltas: DeltaBatch::new(),
+            round_deltas: DeltaBatch::new(),
+            active_hook_deltas: None,
             round_touched_types: TypeMask::empty(),
             pending_deltas: DeltaBatch::new(),
         };
@@ -912,14 +939,14 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         &self.schema
     }
 
-    /// Returns all coalesced entity deltas accumulated in this transaction so far.
+    /// Returns coalesced entity deltas for the current `beforeCommit` hook round (or the whole txn outside hooks).
     pub fn entity_deltas(&self) -> Vec<&EntityDelta> {
-        self.total_deltas.entities.values().collect()
+        self.active_hook_deltas.as_ref().unwrap_or(&self.total_deltas).entities.values().collect()
     }
 
-    /// Returns all coalesced edge deltas accumulated in this transaction so far.
+    /// Returns coalesced edge deltas for the current `beforeCommit` hook round (or the whole txn outside hooks).
     pub fn edge_deltas(&self) -> Vec<&EdgeDelta> {
-        self.total_deltas.edges.values().collect()
+        self.active_hook_deltas.as_ref().unwrap_or(&self.total_deltas).edges.values().collect()
     }
 
     /// Resolves an internal `EntityKey` to its external string ID within this transaction.
@@ -1028,9 +1055,18 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         self.round_touched_types.union_with(&batch.touched_types);
         self.total_deltas.touched_types.union_with(&batch.touched_types);
         for d in entity_vec {
+            self.round_deltas.record_entity(
+                d.key,
+                d.type_id,
+                d.before.clone(),
+                d.after.clone(),
+                d.changed_fields.clone(),
+                d.liveness_changed,
+            );
             self.total_deltas.record_entity(d.key, d.type_id, d.before, d.after, d.changed_fields, d.liveness_changed);
         }
         for e in edge_vec {
+            self.round_deltas.record_edge(e.key, e.kind, e.before.clone(), e.after.clone());
             self.total_deltas.record_edge(e.key, e.kind, e.before, e.after);
         }
         self.total_deltas.tombstones.extend(batch.tombstones);
@@ -1040,6 +1076,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
     fn run_before_commit_cascade(&mut self) -> Result<()> {
         for round in 0..=MAX_HOOK_ROUNDS {
             if self.round_touched_types.is_empty() {
+                self.active_hook_deltas = None;
                 return Ok(());
             }
             let matching: Vec<BeforeCommitFn<S, V, C>> = {
@@ -1051,18 +1088,22 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     .collect()
             };
             if matching.is_empty() {
+                self.active_hook_deltas = None;
                 return Ok(());
             }
             if round == MAX_HOOK_ROUNDS {
+                self.active_hook_deltas = None;
                 return Err(ElmdbError::new(
                     ErrorCode::HookCycleLimit,
                     format!("beforeCommit hook cascade exceeded {MAX_HOOK_ROUNDS} rounds"),
                 ));
             }
             self.round_touched_types = TypeMask::empty();
+            self.active_hook_deltas = Some(std::mem::replace(&mut self.round_deltas, DeltaBatch::new()));
             let depth = self.txn.begin_savepoint()?;
             for cb in matching {
                 if let Err(err) = cb(self) {
+                    self.active_hook_deltas = None;
                     while self.txn.savepoint_depth() >= depth {
                         let d = self.txn.savepoint_depth();
                         let _ = self.txn.abort_savepoint(d);
@@ -1070,6 +1111,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     return Err(err);
                 }
             }
+            self.active_hook_deltas = None;
             self.flush_projections()?;
             self.txn.commit_savepoint(depth)?;
         }
@@ -1190,6 +1232,12 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 let mut changed_fields = FieldMask::empty();
 
                 for (fname, raw_val) in fields {
+                    if fname == "__proto__" {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ValidationFailed,
+                            "reserved field name '__proto__' is not permitted",
+                        ));
+                    }
                     raw_val.validate_canonical()?;
                     if let Some(fdef) = tdef.field_by_name(fname) {
                         let resolved = self.validate_and_resolve_field(fdef, raw_val, slots)?;
@@ -1258,6 +1306,12 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 let mut next = old_row.clone();
                 let mut changed_fields = FieldMask::empty();
                 for (fname, raw_val) in fields {
+                    if fname == "__proto__" {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ValidationFailed,
+                            "reserved field name '__proto__' is not permitted",
+                        ));
+                    }
                     raw_val.validate_canonical()?;
                     if let Some(fdef) = tdef.field_by_name(fname) {
                         let resolved = self.validate_and_resolve_field(fdef, raw_val, slots)?;
@@ -2204,6 +2258,17 @@ pub fn read_relations_out_in_txn<R: KvRead>(
     rel_kind: Option<&str>,
 ) -> Result<Vec<StoredEdge>> {
     read_relations_for_ext_id(txn, schema, dbs, TAG_ADJ_OUT, ext_id, rel_kind)
+}
+
+/// Lists incoming relations for `ext_id` within an active read/write transaction.
+pub fn read_relations_in_in_txn<R: KvRead>(
+    txn: &R,
+    schema: &CompiledSchema,
+    dbs: &SystemDbs,
+    ext_id: &str,
+    rel_kind: Option<&str>,
+) -> Result<Vec<StoredEdge>> {
+    read_relations_for_ext_id(txn, schema, dbs, TAG_ADJ_IN, ext_id, rel_kind)
 }
 
 fn read_relations_for_ext_id<R: KvRead>(

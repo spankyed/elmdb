@@ -9,9 +9,19 @@ const TEXT_ENCODER = new TextEncoder();
 class BatchSlot {
   /** @param {number} index */
   constructor(index) {
+    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index > 0xffffffff) {
+      throw new RangeError(`BatchSlot index must be an integer in [0, 4294967295], got ${String(index)}`);
+    }
     /** @readonly */
     this.slot = index;
   }
+}
+
+/** @param {unknown} v */
+function isPlainObject(v) {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
 }
 
 class WireWriter {
@@ -68,6 +78,9 @@ class WireWriter {
 
   /** @param {string} s */
   str(s) {
+    if (typeof s !== 'string') {
+      throw new TypeError(`Expected string, got ${typeof s}`);
+    }
     const bytes = TEXT_ENCODER.encode(s);
     this.u32(bytes.length);
     this.raw(bytes);
@@ -111,12 +124,13 @@ class WireWriter {
       if (!Number.isFinite(value)) {
         throw new RangeError('Non-finite numbers (NaN, Infinity) are not permitted');
       }
-      if (Number.isInteger(value) && Number.isSafeInteger(value) && !Object.is(value, -0)) {
+      const norm = value === 0 ? 0 : value;
+      if (Number.isInteger(norm) && Number.isSafeInteger(norm)) {
         this.u8(3); // Int
-        this.i64(BigInt(value));
+        this.i64(BigInt(norm));
       } else {
         this.u8(4); // Float
-        this.f64(value === 0 ? 0 : value);
+        this.f64(norm);
       }
       return;
     }
@@ -124,6 +138,9 @@ class WireWriter {
       this.u8(8); // String
       this.str(value);
       return;
+    }
+    if (value instanceof BatchSlot) {
+      throw new TypeError('BatchSlot cannot be passed as a field value; use link() or an explicit externalId');
     }
     if (value instanceof Date) {
       const ms = value.getTime();
@@ -153,14 +170,18 @@ class WireWriter {
       this.view.setUint32(lenPos, (this.len - start + 4) >>> 0, true);
       return;
     }
-    if (typeof value === 'object') {
+    if (isPlainObject(value)) {
       this.u8(11); // Object
       const lenPos = this.len;
       this.u32(0);
       /** @type {Array<[Uint8Array, unknown]>} */
       const entries = [];
-      for (const key of Object.keys(value)) {
-        const v = /** @type {Record<string, unknown>} */ (value)[key];
+      const obj = /** @type {Record<string, unknown>} */ (value);
+      for (const key of Object.keys(obj)) {
+        if (key === '__proto__') {
+          throw new TypeError("Reserved key '__proto__' is not permitted");
+        }
+        const v = obj[key];
         if (v !== undefined) {
           entries.push([TEXT_ENCODER.encode(key), v]);
         }
@@ -178,14 +199,20 @@ class WireWriter {
       this.view.setUint32(lenPos, (this.len - start + 4) >>> 0, true);
       return;
     }
-    throw new TypeError(`Unsupported value type: ${typeof value}`);
+    throw new TypeError(`Unsupported value type: ${Object.prototype.toString.call(value)}`);
   }
 
   /** @param {Record<string, unknown>} fields */
   fieldPairs(fields) {
+    if (!isPlainObject(fields)) {
+      throw new TypeError('Fields must be a plain object');
+    }
     /** @type {Array<[string, unknown]>} */
     const pairs = [];
     for (const key of Object.keys(fields)) {
+      if (key === '__proto__') {
+        throw new TypeError("Reserved field name '__proto__' is not permitted");
+      }
       const val = fields[key];
       if (val !== undefined) pairs.push([key, val]);
     }
@@ -234,7 +261,7 @@ class WireBatchBuilder {
    */
   create(typeName, fields, externalId) {
     const slot = new BatchSlot(this._nextSlot++);
-    this._ops.push({ tag: 1, typeName, externalId, fields: fields || {} });
+    this._ops.push({ tag: 1, typeName, externalId, fields: fields === undefined ? {} : fields });
     return slot;
   }
 
@@ -243,7 +270,7 @@ class WireBatchBuilder {
    * @param {Record<string, unknown>} fields
    */
   patch(target, fields) {
-    this._ops.push({ tag: 2, target, fields: fields || {} });
+    this._ops.push({ tag: 2, target, fields: fields === undefined ? {} : fields });
     return this;
   }
 
@@ -252,6 +279,9 @@ class WireBatchBuilder {
    * @param {string[]} fields
    */
   unset(target, fields) {
+    if (!Array.isArray(fields)) {
+      throw new TypeError('unset fields must be an array of field names');
+    }
     this._ops.push({ tag: 3, target, fields });
     return this;
   }
@@ -306,13 +336,16 @@ class WireBatchBuilder {
    * @returns {Uint8Array}
    */
   encode(returnFlags = 0) {
+    if (typeof returnFlags !== 'number' || !Number.isInteger(returnFlags) || returnFlags < 0 || returnFlags > 0x07) {
+      throw new RangeError(`returnFlags must be an integer in [0, 7], got ${String(returnFlags)}`);
+    }
     const w = new WireWriter(64 + this._ops.length * 32);
     // Magic "EWB2"
     w.u8(0x45);
     w.u8(0x57);
     w.u8(0x42);
     w.u8(0x32);
-    w.u8(returnFlags & 0x07);
+    w.u8(returnFlags);
     w.u32(this._ops.length);
 
     for (let i = 0; i < this._ops.length; i++) {
@@ -348,7 +381,7 @@ class WireBatchBuilder {
           w.str(op.relKind);
           w.target(op.target);
           if (op.weight !== undefined && op.weight !== null) {
-            if (!Number.isFinite(op.weight)) {
+            if (typeof op.weight !== 'number' || !Number.isFinite(op.weight)) {
               throw new RangeError('Link weight must be a finite number');
             }
             w.u8(1);

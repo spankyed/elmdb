@@ -438,6 +438,132 @@ pub fn compiled_to_raw_schema(schema: &CompiledSchema) -> RawSchema {
     RawSchema { types, relations }
 }
 
+/// Converts a `CompiledSchema` into the canonical external `protocol::Schema` (camelCase JSON & TS contract).
+/// When `include_archived` is `true`, archived types/fields/relations are included as well (used by lossless `dump`).
+pub fn compiled_to_protocol_schema(schema: &CompiledSchema, include_archived: bool) -> Schema {
+    let mut types = BTreeMap::new();
+    for td in &schema.types {
+        if td.archived && !include_archived {
+            continue;
+        }
+        let mut fields = BTreeMap::new();
+        for fd in &td.fields {
+            if fd.archived && !include_archived {
+                continue;
+            }
+            fields.insert(
+                fd.name.clone(),
+                FieldDefinition {
+                    kind: field_kind_to_spec(schema, &fd.kind),
+                    optional: fd.optional,
+                    nullable: fd.nullable,
+                },
+            );
+        }
+        let mut indexes = BTreeMap::new();
+        for idx in schema.indexes.iter().filter(|i| i.type_id == td.id) {
+            let kind = match &idx.kind {
+                IndexKind::Value { fields: fids, unique } => IndexDefinition::Value {
+                    fields: fids.iter().filter_map(|fid| td.field_by_id(*fid).map(|f| f.name.clone())).collect(),
+                    unique: *unique,
+                },
+                IndexKind::Order { field, locale } => IndexDefinition::Order {
+                    field: td.field_by_id(*field).map(|f| f.name.clone()).unwrap_or_default(),
+                    locale: locale.clone(),
+                },
+                IndexKind::Text { fields: fids } => IndexDefinition::Text {
+                    fields: fids
+                        .iter()
+                        .filter_map(|(fid, w)| td.field_by_id(*fid).map(|f| (f.name.clone(), *w)))
+                        .collect(),
+                },
+                IndexKind::Trigram { fields: fids } => IndexDefinition::Trigram {
+                    fields: fids.iter().filter_map(|fid| td.field_by_id(*fid).map(|f| f.name.clone())).collect(),
+                },
+                IndexKind::Vector { fields: fids, dims, quantization } => IndexDefinition::Vector {
+                    fields: fids.iter().filter_map(|fid| td.field_by_id(*fid).map(|f| f.name.clone())).collect(),
+                    dims: *dims,
+                    quantization: quantization.clone(),
+                },
+                IndexKind::Rank { relations: rids, weighted } => IndexDefinition::Rank {
+                    relations: rids
+                        .iter()
+                        .filter_map(|rid| schema.relation_by_id(*rid).map(|r| r.name.clone()))
+                        .collect(),
+                    weighted: *weighted,
+                },
+            };
+            indexes.insert(idx.name.clone(), kind);
+        }
+        types.insert(
+            td.name.clone(),
+            TypeDefinition {
+                fields,
+                indexes,
+                additional_fields: td.additional_fields,
+                short_code: td.short_code.clone(),
+                change_order: td.change_order,
+                declared_by: td.declared_by.clone(),
+            },
+        );
+    }
+
+    let mut relations = BTreeMap::new();
+    for rd in &schema.relations {
+        if rd.archived && !include_archived {
+            continue;
+        }
+        let endpoints = rd
+            .endpoints
+            .iter()
+            .filter_map(|(s, t)| {
+                Some(RelationEndpoint {
+                    source: schema.type_by_id(*s)?.name.clone(),
+                    target: schema.type_by_id(*t)?.name.clone(),
+                })
+            })
+            .collect();
+        let cardinality = match rd.cardinality {
+            Cardinality::ManyToMany => ProtocolCardinality::ManyToMany,
+            Cardinality::ManyToOne => ProtocolCardinality::ManyToOne,
+            Cardinality::OneToMany => ProtocolCardinality::OneToMany,
+            Cardinality::OneToOne => ProtocolCardinality::OneToOne,
+        };
+        relations.insert(
+            rd.name.clone(),
+            RelationDefinition {
+                cardinality,
+                acyclic: rd.acyclic,
+                weighted: rd.weighted,
+                endpoints,
+                declared_by: rd.declared_by.clone(),
+            },
+        );
+    }
+
+    Schema { dollar_schema: Some(SCHEMA_LANGUAGE.to_owned()), types, relations }
+}
+
+fn field_kind_to_spec(schema: &CompiledSchema, kind: &FieldKind) -> FieldSpec {
+    match kind {
+        FieldKind::String => FieldSpec::String,
+        FieldKind::Number => FieldSpec::Number,
+        FieldKind::Integer => FieldSpec::Integer,
+        FieldKind::Int64 => FieldSpec::Int64,
+        FieldKind::Boolean => FieldSpec::Boolean,
+        FieldKind::Bytes => FieldSpec::Bytes,
+        FieldKind::Timestamp => FieldSpec::Timestamp,
+        FieldKind::Enum(values) => FieldSpec::Enum { values: values.clone() },
+        FieldKind::Ref { to, on_delete } => FieldSpec::Ref {
+            to: to.iter().filter_map(|tid| schema.type_by_id(*tid).map(|t| t.name.clone())).collect(),
+            on_delete: (*on_delete).into(),
+        },
+        FieldKind::List(of) => FieldSpec::List { of: Box::new(field_kind_to_spec(schema, of)) },
+        FieldKind::Object => FieldSpec::Object,
+        FieldKind::Any => FieldSpec::Any,
+    }
+}
+
 fn field_kind_to_raw(schema: &CompiledSchema, kind: &FieldKind) -> RawFieldKind {
     match kind {
         FieldKind::String => RawFieldKind::String,
@@ -600,6 +726,18 @@ impl Row {
     pub fn from_stored(r: &StoredRow) -> Self {
         let fields = r.fields.iter().map(|(k, v)| (k.clone(), canonical_to_json(v))).collect();
         Self { id: r.id.clone(), type_name: r.type_name.clone(), trashed: r.trashed, fields }
+    }
+
+    /// Materializes a `StoredRow` into an external `Row`, resolving all `EntityRef`s via `resolve_key`.
+    pub fn from_stored_resolved<F>(r: &StoredRow, resolve_key: &mut F) -> Result<Self>
+    where
+        F: FnMut(EntityKey) -> Result<String>,
+    {
+        let mut fields = BTreeMap::new();
+        for (k, v) in &r.fields {
+            fields.insert(k.clone(), canonical_to_json_resolved(v, resolve_key)?);
+        }
+        Ok(Self { id: r.id.clone(), type_name: r.type_name.clone(), trashed: r.trashed, fields })
     }
 }
 
@@ -1102,35 +1240,118 @@ fn resolve_rel_kinds(schema: &CompiledSchema, names: &[String]) -> Result<Vec<Re
     Ok(out)
 }
 
+fn resolve_field_def<'a>(
+    schema: &'a CompiledSchema,
+    active_type: Option<elmdb_engine::TypeId>,
+    field: &str,
+) -> Result<(FieldId, &'a FieldKind)> {
+    if let Some(tid) = active_type {
+        let tdef = schema
+            .type_by_id(tid)
+            .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownType, format!("unknown type id {}", tid.0)))?;
+        let fdef = tdef.field_by_name(field).ok_or_else(|| {
+            ElmdbError::new(ErrorCode::UnknownField, format!("unknown field '{field}' on type '{}'", tdef.name))
+        })?;
+        return Ok((fdef.id, &fdef.kind));
+    }
+    let mut found: Option<(FieldId, &'a FieldKind)> = None;
+    for tdef in schema.types.iter().filter(|t| !t.archived) {
+        if let Some(fdef) = tdef.field_by_name(field) {
+            match found {
+                None => found = Some((fdef.id, &fdef.kind)),
+                Some((prev_id, prev_kind)) => {
+                    if prev_id != fdef.id || prev_kind != &fdef.kind {
+                        return Err(ElmdbError::new(
+                            ErrorCode::InvalidArgument,
+                            format!(
+                                "field '{field}' is ambiguous across types (different field IDs or kinds); scope the query to a single type"
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    found.ok_or_else(|| ElmdbError::new(ErrorCode::UnknownField, format!("unknown field '{field}'")))
+}
+
 fn resolve_field_id(
     schema: &CompiledSchema,
     active_type: Option<elmdb_engine::TypeId>,
     field: &str,
 ) -> Result<FieldId> {
-    if let Some(tid) = active_type
-        && let Some(tdef) = schema.type_by_id(tid)
-        && let Some(fdef) = tdef.field_by_name(field)
-    {
-        return Ok(fdef.id);
-    }
-    for tdef in &schema.types {
-        if let Some(fdef) = tdef.field_by_name(field) {
-            return Ok(fdef.id);
-        }
-    }
-    Err(ElmdbError::new(ErrorCode::UnknownField, format!("unknown field '{field}'")))
+    Ok(resolve_field_def(schema, active_type, field)?.0)
 }
 
 fn resolve_index_id(schema: &CompiledSchema, active_type: Option<elmdb_engine::TypeId>, name: &str) -> Result<IndexId> {
-    if let Some(tid) = active_type
-        && let Some(idx) = schema.indexes.iter().find(|i| i.type_id == tid && i.name == name)
-    {
-        return Ok(idx.id);
+    if let Some(tid) = active_type {
+        return schema
+            .indexes
+            .iter()
+            .find(|i| i.type_id == tid && i.name == name)
+            .map(|i| i.id)
+            .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'")));
     }
-    if let Some(idx) = schema.indexes.iter().find(|i| i.name == name) {
-        return Ok(idx.id);
+    let matches: Vec<IndexId> = schema.indexes.iter().filter(|i| i.name == name).map(|i| i.id).collect();
+    match matches.as_slice() {
+        [id] => Ok(*id),
+        [] => Err(ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'"))),
+        _ => Err(ElmdbError::new(
+            ErrorCode::InvalidArgument,
+            format!("index '{name}' is ambiguous across types; scope the query to a single type"),
+        )),
     }
-    Err(ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'")))
+}
+
+/// Coerces a JSON filter/cursor literal according to the target field's `FieldKind`
+/// so queries on `Timestamp`, `Ref`, and `Bytes` fields match stored `CanonicalValue`s cleanly.
+fn coerce_json_for_field<F>(v: &serde_json::Value, kind: &FieldKind, resolve_ext_id: &mut F) -> Result<CanonicalValue>
+where
+    F: FnMut(&str) -> Result<Option<EntityKey>>,
+{
+    if v.is_null() {
+        return Ok(CanonicalValue::Null);
+    }
+    match kind {
+        FieldKind::Timestamp => {
+            if let Some(ms) = v.as_i64() {
+                return Ok(CanonicalValue::Timestamp { ms, ns: 0 });
+            }
+            if let Some(obj) = v.as_object()
+                && let Some(ms) = obj.get("ms").and_then(serde_json::Value::as_i64)
+            {
+                let ns = obj.get("ns").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                if ns >= 1_000_000_000 {
+                    return Err(ElmdbError::new(ErrorCode::ValidationFailed, "timestamp ns must be < 1e9"));
+                }
+                return Ok(CanonicalValue::Timestamp { ms, ns: ns as u32 });
+            }
+            json_to_canonical(v)
+        }
+        FieldKind::Ref { .. } => {
+            if let Some(ext_id) = v.as_str() {
+                return match resolve_ext_id(ext_id)? {
+                    Some(k) => Ok(CanonicalValue::EntityRef(k.0)),
+                    None => Ok(CanonicalValue::DanglingRef(ext_id.to_owned())),
+                };
+            }
+            json_to_canonical(v)
+        }
+        FieldKind::Bytes => {
+            if let Some(arr) = v.as_array() {
+                let mut bytes = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let b = item.as_u64().and_then(|n| u8::try_from(n).ok()).ok_or_else(|| {
+                        ElmdbError::new(ErrorCode::ValidationFailed, "bytes filter elements must be 0..=255")
+                    })?;
+                    bytes.push(b);
+                }
+                return Ok(CanonicalValue::Bytes(bytes));
+            }
+            json_to_canonical(v)
+        }
+        _ => json_to_canonical(v),
+    }
 }
 
 /// Parses a string-named `QuerySpec` into a typed integer-ID `LogicalPlan` once at the boundary!
@@ -1204,6 +1425,7 @@ where
             }
             QueryStep::OrderSlice { by, field, dir, locale, after_id, after_score, after_value, limit } => {
                 let odir = parse_order_dir(dir)?;
+                let mut order_field_kind: Option<&FieldKind> = None;
                 let order = match by.as_str() {
                     "id" | "entityKey" => OrderSpec::EntityKey(odir),
                     "score" => OrderSpec::Score(odir),
@@ -1211,7 +1433,8 @@ where
                         let fname = field.as_deref().ok_or_else(|| {
                             ElmdbError::new(ErrorCode::InvalidArgument, "OrderSlice by='field' requires field")
                         })?;
-                        let fid = resolve_field_id(schema, active_type, fname)?;
+                        let (fid, fkind) = resolve_field_def(schema, active_type, fname)?;
+                        order_field_kind = Some(fkind);
                         OrderSpec::Field { field: fid, dir: odir, locale: locale.clone() }
                     }
                     other => {
@@ -1219,7 +1442,9 @@ where
                     }
                 };
                 let after = if let Some(aid) = after_id {
-                    let key = resolve_ext_id(aid)?.unwrap_or(EntityKey(0));
+                    let key = resolve_ext_id(aid)?.ok_or_else(|| {
+                        ElmdbError::new(ErrorCode::EntityNotFound, format!("cursor entity '{aid}' not found"))
+                    })?;
                     match &order {
                         OrderSpec::EntityKey(_) => Some(Cursor::EntityKey(key)),
                         OrderSpec::Score(_) => Some(Cursor::Score {
@@ -1229,11 +1454,11 @@ where
                             key,
                         }),
                         OrderSpec::Field { .. } => {
-                            let val = after_value
-                                .as_ref()
-                                .map(json_to_canonical)
-                                .transpose()?
-                                .unwrap_or(CanonicalValue::Null);
+                            let val = match (after_value.as_ref(), order_field_kind) {
+                                (Some(v), Some(k)) => coerce_json_for_field(v, k, &mut resolve_ext_id)?,
+                                (Some(v), None) => json_to_canonical(v)?,
+                                (None, _) => CanonicalValue::Null,
+                            };
                             Some(Cursor::Field { value: val, key })
                         }
                     }
@@ -1361,30 +1586,35 @@ where
 {
     Ok(match expr {
         QueryFilter::Eq { field, value } => {
-            FilterExpr::Eq(resolve_field_id(schema, active_type, field)?, json_to_canonical(value)?)
+            let (fid, fkind) = resolve_field_def(schema, active_type, field)?;
+            FilterExpr::Eq(fid, coerce_json_for_field(value, fkind, resolve_ext_id)?)
         }
         QueryFilter::Ne { field, value } => {
-            FilterExpr::Ne(resolve_field_id(schema, active_type, field)?, json_to_canonical(value)?)
+            let (fid, fkind) = resolve_field_def(schema, active_type, field)?;
+            FilterExpr::Ne(fid, coerce_json_for_field(value, fkind, resolve_ext_id)?)
         }
         QueryFilter::In { field, values } => {
-            let fid = resolve_field_id(schema, active_type, field)?;
+            let (fid, fkind) = resolve_field_def(schema, active_type, field)?;
             let mut vs = Vec::with_capacity(values.len());
             for v in values {
-                vs.push(json_to_canonical(v)?);
+                vs.push(coerce_json_for_field(v, fkind, resolve_ext_id)?);
             }
             FilterExpr::In(fid, vs)
         }
-        QueryFilter::Range { field, low, high } => FilterExpr::Range {
-            field: resolve_field_id(schema, active_type, field)?,
-            low: match low {
-                Some((v, inc)) => Some((json_to_canonical(v)?, *inc)),
-                None => None,
-            },
-            high: match high {
-                Some((v, inc)) => Some((json_to_canonical(v)?, *inc)),
-                None => None,
-            },
-        },
+        QueryFilter::Range { field, low, high } => {
+            let (fid, fkind) = resolve_field_def(schema, active_type, field)?;
+            FilterExpr::Range {
+                field: fid,
+                low: match low {
+                    Some((v, inc)) => Some((coerce_json_for_field(v, fkind, resolve_ext_id)?, *inc)),
+                    None => None,
+                },
+                high: match high {
+                    Some((v, inc)) => Some((coerce_json_for_field(v, fkind, resolve_ext_id)?, *inc)),
+                    None => None,
+                },
+            }
+        }
         QueryFilter::StartsWith { field, prefix } => {
             FilterExpr::StartsWith(resolve_field_id(schema, active_type, field)?, prefix.clone())
         }

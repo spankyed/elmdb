@@ -30,9 +30,16 @@ const schema = {
 
 test('live watches invalidate selectively, dedup unchanged results, and catch up cross-handle commits', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-v2-watch-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const db1 = Database.open(dir, { schema, durability: 'strict', buildPolicy: 'eager' });
-  t.after(() => db1.close());
+  let db1 = null;
+  let db2 = null;
+  t.after(() => {
+    try { db2?.close(); } finally {
+      try { db1?.close(); } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  });
+  db1 = Database.open(dir, { schema, durability: 'strict', buildPolicy: 'eager' });
 
   const openTasksSpec = {
     source: { kind: 'type', typeName: 'Task' },
@@ -61,8 +68,7 @@ test('live watches invalidate selectively, dedup unchanged results, and catch up
   assert.equal(db1.watchesSettled(), true);
 
   // Cross-handle (simulating cross-process) write caught up selectively via persisted commit_log!
-  const db2 = Database.open(dir, { durability: 'strict' });
-  t.after(() => db2.close());
+  db2 = Database.open(dir, { durability: 'strict' });
   db2.executeWireBatch(buildWireBatch((b) => { b.create('Task', { title: 'Cross-proc', done: false }, 't2'); }));
 
   const future2 = future1 + 60_000;
@@ -77,5 +83,20 @@ test('live watches invalidate selectively, dedup unchanged results, and catch up
   assert.equal(db1.watchesSettled(), true);
 
   assert.equal(db1.unregisterWatch(reg.watchId), true);
+
+  // P0-7: Failing rerunWatch aborts running=false instead of wedging watchesSettled() forever!
+  const reg2 = db1.registerWatch(openTasksSpec, { mode: 'declarative', minGapMs: 0 }, 1000);
+  db1.executeWireBatch(buildWireBatch((b) => { b.create('Task', { title: 'Trigger', done: false }, 't3'); }));
+  const nd2 = db1.nextDueWatch(future2 + 2000, 0);
+  assert.equal(nd2.watchId, reg2.watchId);
+  assert.throws(
+    () => db1.rerunWatch(reg2.watchId, { source: { kind: 'type', typeName: 'MissingType' }, steps: [], terminal: { kind: 'ids' } }, future2 + 2000, 1),
+    (err) => err.code === 'UNKNOWN_TYPE',
+  );
+  // Watch was cleanly aborted & requeued (not wedged in running=true), so a valid rerun settles it!
+  const recovered = db1.rerunWatch(reg2.watchId, openTasksSpec, future2 + 3000, 1);
+  assert.equal(recovered.answer.ids.length, 3);
+  assert.equal(db1.watchesSettled(), true);
+
   db1.stopWatches();
 });

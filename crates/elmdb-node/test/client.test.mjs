@@ -85,7 +85,7 @@ test('WireBatchBuilder encodes all value types, BatchSlot refs, and executes in 
   assert.equal(edges[0].weight, 2.5);
 });
 
-test('buildWireBatch rejects async/thenable callbacks and non-finite numbers synchronously', () => {
+test('buildWireBatch rejects async/thenable callbacks, __proto__, non-plain objects, BatchSlot values, and bad flags', () => {
   assert.throws(
     () => buildWireBatch(/** @type {any} */ (async () => {})),
     /synchronous/,
@@ -93,4 +93,27 @@ test('buildWireBatch rejects async/thenable callbacks and non-finite numbers syn
   const b = new WireBatchBuilder();
   b.create('Item', { title: 'bad', score: Number.NaN });
   assert.throws(() => b.encode(), /Non-finite/);
+
+  // __proto__ rejected in both top-level fields and nested objects
+  const protoField = Object.create(null);
+  protoField['__proto__'] = { x: 1 };
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', protoField); }), /__proto__/);
+  const nestedProto = Object.create(null);
+  nestedProto['__proto__'] = 1;
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'ok', meta: nestedProto }); }), /__proto__/);
+
+  // BatchSlot rejected inside field value
+  assert.throws(() => buildWireBatch((x) => {
+    const s = x.create('Item', { title: 'a' });
+    x.create('Item', { title: 'b', meta: s });
+  }), /BatchSlot/);
+
+  // Non-plain objects (Map, Float32Array) rejected
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'm', meta: new Map() }); }), /Unsupported/);
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'f', raw: /** @type {any} */ (new Float32Array(2)) }); }), /Unsupported/);
+
+  // Invalid BatchSlot index and invalid returnFlags rejected
+  assert.throws(() => new BatchSlot(-1), RangeError);
+  const b2 = new WireBatchBuilder();
+  assert.throws(() => b2.encode(0xff), RangeError);
 });

@@ -296,3 +296,230 @@ fn full_v2_e2e_lifecycle_queries_watches_hooks_backup_dump_load() {
     db.close().unwrap();
     assert_eq!(db.stats().unwrap_err().code, ErrorCode::Closed);
 }
+
+#[test]
+fn review_regressions_lossless_dump_load_backup_sidecar_readonly_and_typed_queries() {
+    let tmp = tempdir().unwrap();
+    let db_dir = tmp.path().join("main");
+    let db = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let mut fields = BTreeMap::new();
+    fields.insert("slug".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    fields.insert("raw".into(), FieldDefinition { kind: FieldSpec::Bytes, optional: true, nullable: false });
+    fields.insert("ts".into(), FieldDefinition { kind: FieldSpec::Timestamp, optional: true, nullable: false });
+    fields.insert("big".into(), FieldDefinition { kind: FieldSpec::Int64, optional: true, nullable: false });
+    fields.insert(
+        "peer".into(),
+        FieldDefinition {
+            kind: FieldSpec::Ref {
+                to: vec!["Item".into()],
+                on_delete: elmdb::protocol::ProtocolOnDelete::AllowDangling,
+            },
+            optional: true,
+            nullable: false,
+        },
+    );
+
+    let mut indexes = BTreeMap::new();
+    indexes.insert("uniq_slug".into(), IndexDefinition::Value { fields: vec!["slug".into()], unique: true });
+    indexes.insert("by_ts".into(), IndexDefinition::Value { fields: vec!["ts".into()], unique: false });
+    indexes.insert("by_peer".into(), IndexDefinition::Value { fields: vec!["peer".into()], unique: false });
+    indexes.insert(
+        "vec".into(),
+        IndexDefinition::Vector { fields: vec!["slug".into()], dims: 2, quantization: "sq8".into() },
+    );
+
+    let mut types = BTreeMap::new();
+    types.insert("Item".into(), TypeDefinition { fields, indexes, ..Default::default() });
+    let mut legacy_fields = BTreeMap::new();
+    legacy_fields.insert("k".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    types.insert("Legacy".into(), TypeDefinition { fields: legacy_fields, ..Default::default() });
+
+    let mut relations = BTreeMap::new();
+    relations.insert(
+        "rel".into(),
+        RelationDefinition {
+            cardinality: elmdb::protocol::ProtocolCardinality::ManyToOne,
+            endpoints: vec![RelationEndpoint { source: "Item".into(), target: "Item".into() }],
+            ..Default::default()
+        },
+    );
+
+    let full_schema = Schema { dollar_schema: None, types: types.clone(), relations: relations.clone() };
+    db.set_schema(&full_schema).unwrap();
+
+    // P0-1: compiled_to_protocol_schema roundtrips relations & Ref onDelete cleanly!
+    let roundtrip = elmdb::protocol::compiled_to_protocol_schema(&db.schema().unwrap(), false);
+    db.set_schema(&roundtrip).unwrap();
+
+    // Create cyclic refs + Bytes + Timestamp(ns) + Int64(>2^53) + DanglingRef + trashed unique collision w/ embeddings!
+    let big_i64: i64 = (1i64 << 58) + 12345;
+    db.execute_batch(&[
+        WireOp::Create {
+            type_name: "Item".into(),
+            external_id: Some("i-trashed".into()),
+            fields: vec![("slug".into(), CanonicalValue::String("shared-slug".into()))],
+        },
+        WireOp::Create {
+            type_name: "Item".into(),
+            external_id: Some("i-a".into()),
+            fields: vec![
+                ("slug".into(), CanonicalValue::String("a".into())),
+                ("raw".into(), CanonicalValue::Bytes(vec![0, 1, 2, 255])),
+                ("ts".into(), CanonicalValue::Timestamp { ms: 1_700_000_000_000, ns: 987_654 }),
+                ("big".into(), CanonicalValue::Int(big_i64)),
+            ],
+        },
+        WireOp::Create {
+            type_name: "Item".into(),
+            external_id: Some("i-b".into()),
+            fields: vec![
+                ("slug".into(), CanonicalValue::String("b".into())),
+                ("peer".into(), CanonicalValue::String("i-a".into())),
+            ],
+        },
+        WireOp::Create {
+            type_name: "Legacy".into(),
+            external_id: Some("leg-1".into()),
+            fields: vec![("k".into(), CanonicalValue::String("archived-row".into()))],
+        },
+    ])
+    .unwrap();
+    db.set_embeddings("vec", "i-trashed", &[vec![1.0, 0.0]]).unwrap();
+    db.set_embeddings("vec", "i-a", &[vec![0.0, 1.0]]).unwrap();
+    db.execute_batch(&[
+        // Trash i-trashed so i-live can reuse unique slug "shared-slug"!
+        WireOp::Trash { target: EntityTarget::ExternalId("i-trashed".into()) },
+        WireOp::Create {
+            type_name: "Item".into(),
+            external_id: Some("i-live".into()),
+            fields: vec![("slug".into(), CanonicalValue::String("shared-slug".into()))],
+        },
+        // Cyclic ref i-a -> i-b & dangling ref on i-live
+        WireOp::Patch {
+            target: EntityTarget::ExternalId("i-a".into()),
+            fields: vec![("peer".into(), CanonicalValue::String("i-b".into()))],
+        },
+        WireOp::Patch {
+            target: EntityTarget::ExternalId("i-live".into()),
+            fields: vec![("peer".into(), CanonicalValue::DanglingRef("gone-entity".into()))],
+        },
+    ])
+    .unwrap();
+
+    // Archive `Legacy` type (leaving `leg-1` archived in DB)
+    types.remove("Legacy");
+    db.set_schema(&Schema { dollar_schema: None, types, relations }).unwrap();
+    db.flush().unwrap();
+
+    // P0-9: Query filtering on Timestamp & Ref fields!
+    let q_ts = QuerySpec {
+        source: QuerySource::Type { type_name: "Item".into(), include_trashed: false },
+        steps: vec![QueryStep::Filter {
+            expr: QueryFilter::Range {
+                field: "ts".into(),
+                low: Some((serde_json::json!(1_700_000_000_000i64), true)),
+                high: None,
+            },
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    match db.execute_query_spec(&q_ts, ExecBudgets::default()).unwrap().body {
+        QueryAnswerBody::Ids { ids } => assert_eq!(ids, vec!["i-a".to_owned()]),
+        other => panic!("expected Ids, got {other:?}"),
+    }
+
+    let q_ref = QuerySpec {
+        source: QuerySource::Type { type_name: "Item".into(), include_trashed: false },
+        steps: vec![QueryStep::Filter {
+            expr: QueryFilter::Eq { field: "peer".into(), value: serde_json::json!("i-b") },
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    match db.execute_query_spec(&q_ref, ExecBudgets::default()).unwrap().body {
+        QueryAnswerBody::Ids { ids } => assert_eq!(ids, vec!["i-a".to_owned()]),
+        other => panic!("expected Ids, got {other:?}"),
+    }
+
+    // P1-4: Deleted/missing cursor afterId returns EntityNotFound instead of restarting at EntityKey(0)
+    let q_bad_cursor = QuerySpec {
+        source: QuerySource::Type { type_name: "Item".into(), include_trashed: false },
+        steps: vec![QueryStep::OrderSlice {
+            by: "id".into(),
+            field: None,
+            dir: "asc".into(),
+            locale: None,
+            after_id: Some("does-not-exist".into()),
+            after_score: None,
+            after_value: None,
+            limit: Some(10),
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    assert_eq!(
+        db.execute_query_spec(&q_bad_cursor, ExecBudgets::default()).unwrap_err().code,
+        ErrorCode::EntityNotFound
+    );
+
+    // P1-5: get_row_resolved resolves EntityRef to external ID (not "__entity_key:N")
+    let resolved_a = db.get_row_resolved("i-a").unwrap().unwrap();
+    assert_eq!(resolved_a.fields.get("peer"), Some(&serde_json::json!("i-b")));
+
+    // P0-2: Lossless dump & load preserving Bytes, Timestamp(ns), Int64(>2^53), cyclic Refs, DanglingRef, trashed+unique+emb, archived type!
+    let dump_file = tmp.path().join("full.json");
+    let d_rep = elmdb::dump::dump(&db, &dump_file).unwrap();
+    assert_eq!(d_rep.entities, 5);
+    assert_eq!(d_rep.embeddings, 2);
+
+    let loaded_dir = tmp.path().join("loaded");
+    let l_rep = elmdb::dump::load(&dump_file, &loaded_dir).unwrap();
+    assert_eq!(l_rep.entities, 5);
+
+    let loaded = Database::open(&loaded_dir, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    assert_eq!(loaded.open_report().status, "clean");
+    assert!(loaded.check(None).unwrap().is_clean());
+    let row_a = loaded.get_row("i-a").unwrap().unwrap();
+    assert_eq!(row_a.fields.get("raw"), Some(&CanonicalValue::Bytes(vec![0, 1, 2, 255])));
+    assert_eq!(row_a.fields.get("ts"), Some(&CanonicalValue::Timestamp { ms: 1_700_000_000_000, ns: 987_654 }));
+    assert_eq!(row_a.fields.get("big"), Some(&CanonicalValue::Int(big_i64)));
+    assert_eq!(loaded.get_row_resolved("i-a").unwrap().unwrap().fields.get("peer"), Some(&serde_json::json!("i-b")));
+    assert_eq!(
+        loaded.get_row("i-live").unwrap().unwrap().fields.get("peer"),
+        Some(&CanonicalValue::String("gone-entity".into()))
+    );
+    assert!(loaded.get_row("i-trashed").unwrap().unwrap().trashed);
+    assert!(loaded.get_row("leg-1").unwrap().is_some());
+    loaded.close().unwrap();
+
+    // P0-5: Compacted backup includes verified synced.v2 -> opens with status == "clean" (never unsyncedAfterReboot!)
+    let bak_dir = tmp.path().join("bak");
+    db.backup_into(&bak_dir, BackupInto::New).unwrap();
+    let bak = Database::open(&bak_dir, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    assert_eq!(bak.open_report().status, "clean");
+    bak.close().unwrap();
+
+    // P0-6: Read-only open works on a 0555/0444 directory!
+    #[cfg(unix)]
+    {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(bak_dir.join("data.mdb"), fs::Permissions::from_mode(0o444)).unwrap();
+        let ro_db = Database::open(&bak_dir, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+        assert!(ro_db.get_row("i-a").unwrap().is_some());
+        ro_db.close().unwrap();
+        fs::set_permissions(bak_dir.join("data.mdb"), fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    db.close().unwrap();
+}

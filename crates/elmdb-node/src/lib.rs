@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::ThreadId;
 
-use elmdb::protocol::{QuerySpec, Row, Schema};
+use elmdb::protocol::{QuerySpec, Schema};
 use elmdb::{
     BackupInto, BeforeCommitHook, BuildPolicy, DurabilityMode, EdgeDir, ExecBudgets, TypeMask, WatchId, WatchMode,
     WatchPolicy,
@@ -49,11 +49,17 @@ fn bad_arg(msg: impl Into<String>) -> napi::Error<Code> {
     napi::Error::new(Code(ErrorCode::InvalidArgument.as_str()), msg.into())
 }
 
+const MAX_SAFE_JS_INT: f64 = 9_007_199_254_740_991.0;
+
 fn whole(name: &str, value: Option<f64>, least: f64) -> Result<Option<u64>, Code> {
+    whole_bounded(name, value, least, MAX_SAFE_JS_INT)
+}
+
+fn whole_bounded(name: &str, value: Option<f64>, least: f64, most: f64) -> Result<Option<u64>, Code> {
     match value {
         None => Ok(None),
-        Some(n) if n.is_finite() && n.fract() == 0.0 && n >= least && n <= 2f64.powi(53) => Ok(Some(n as u64)),
-        Some(n) => Err(bad_arg(format!("{name} must be a whole number >= {least}, got {n}"))),
+        Some(n) if n.is_finite() && n.fract() == 0.0 && n >= least && n <= most => Ok(Some(n as u64)),
+        Some(n) => Err(bad_arg(format!("{name} must be a whole number in [{least}, {most}], got {n}"))),
     }
 }
 
@@ -105,6 +111,31 @@ static NEXT_JS_HOOK_KEY: AtomicU64 = AtomicU64::new(1);
 
 thread_local! {
     static JS_HOOKS: RefCell<HashMap<u64, JsHookEntry>> = RefCell::new(HashMap::new());
+    /// Tracks which `napi_env` pointers already have an env cleanup hook registered to drain `JS_HOOKS`
+    /// BEFORE Node destroys `napi_env` (preventing `FunctionRef::drop` UAF at worker/process teardown).
+    static CLEANUP_REGISTERED: RefCell<std::collections::HashSet<usize>> = RefCell::new(std::collections::HashSet::new());
+}
+
+fn ensure_js_hook_env_cleanup(env: &Env) -> Result<(), Code> {
+    let raw_key = env.raw() as usize;
+    let already = CLEANUP_REGISTERED.with(|s| s.borrow().contains(&raw_key));
+    if already {
+        return Ok(());
+    }
+    env.add_env_cleanup_hook(raw_key, |env_addr| {
+        let _ = panics::caught("draining JS beforeCommit hooks at env teardown", || {
+            let _ = JS_HOOKS.try_with(|m| {
+                let mut map = m.borrow_mut();
+                map.retain(|_, (hook_env, _)| (*hook_env as usize) != env_addr);
+            });
+            let _ = CLEANUP_REGISTERED.try_with(|s| {
+                s.borrow_mut().remove(&env_addr);
+            });
+        });
+    })
+    .map_err(|e| napi::Error::new(Code("GenericFailure"), e.reason.clone()))?;
+    CLEANUP_REGISTERED.with(|s| s.borrow_mut().insert(raw_key));
+    Ok(())
 }
 
 /// Options for `Database.open` / `Database.openAsync`.
@@ -166,22 +197,25 @@ fn parse_open_options(opts: Option<OpenOptions>) -> Result<(elmdb::OpenOptions, 
         }
         out.durability = parse_durability(o.durability.as_deref())?;
         out.build_policy = parse_build_policy(o.build_policy.as_deref())?;
-        if let Some(ms) = whole("mapSizeBytes", o.map_size_bytes, 4096.0)? {
+        if let Some(ms) = whole_bounded("mapSizeBytes", o.map_size_bytes, 4096.0, usize::MAX as f64)? {
             out.map_size = Some(ms as usize);
         }
-        if let Some(md) = whole("maxDbs", o.max_dbs, 16.0)? {
+        if let Some(md) = whole_bounded("maxDbs", o.max_dbs, 16.0, u32::MAX as f64)? {
             out.max_dbs = Some(md as u32);
         }
-        if let Some(mr) = whole("maxReaders", o.max_readers, 16.0)? {
+        if let Some(mr) = whole_bounded("maxReaders", o.max_readers, 16.0, u32::MAX as f64)? {
             out.max_readers = Some(mr as u32);
         }
-        if let Some(pc) = whole("planCacheCapacity", o.plan_cache_capacity, 1.0)? {
+        if let Some(pc) = whole_bounded("planCacheCapacity", o.plan_cache_capacity, 1.0, usize::MAX as f64)? {
             out.plan_cache_capacity = pc as usize;
         }
         if let Some(ts) = whole("watchTurnSliceMs", o.watch_turn_slice_ms, 1.0)? {
             out.watch_turn_slice_ms = ts;
         }
         if let Some(s) = o.schema {
+            if out.read_only {
+                return Err(to_js(ElmdbError::new(ErrorCode::ReadOnly, "cannot apply schema when opening read-only")));
+            }
             let parsed: Schema = serde_json::from_value(s).map_err(|e| bad_arg(format!("invalid schema JSON: {e}")))?;
             schema = Some(parsed);
         }
@@ -354,8 +388,8 @@ impl Database {
     pub fn get_schema(&self, env: Env) -> Result<Unknown<'static>, Code> {
         self.health.guarded("Database.getSchema", || {
             let schema = self.inner.schema().map_err(to_js)?;
-            let raw = elmdb::protocol::compiled_to_raw_schema(&schema);
-            to_js_json(&env, &raw)
+            let proto = elmdb::protocol::compiled_to_protocol_schema(&schema, false);
+            to_js_json(&env, &proto)
         })
     }
 
@@ -434,19 +468,10 @@ impl Database {
         callback: Function<serde_json::Value, Unknown<'static>>,
     ) -> Result<f64, Code> {
         self.health.guarded("Database.registerBeforeCommit", || {
+            ensure_js_hook_env_cleanup(&env)?;
             let schema = self.inner.schema().map_err(to_js)?;
             let wants = match type_names {
-                None => {
-                    let mut m = TypeMask::empty();
-                    for td in &schema.types {
-                        m.insert(td.id);
-                    }
-                    // Also include future type IDs up to 127 so `null` watches all types cleanly.
-                    for id in 1u16..128 {
-                        m.insert(elmdb::TypeId(id));
-                    }
-                    m
-                }
+                None => TypeMask::all(),
                 Some(names) => {
                     let mut m = TypeMask::empty();
                     for name in names {
@@ -465,97 +490,131 @@ impl Database {
             JS_HOOKS.with(|m| m.borrow_mut().insert(js_key, (env.raw(), func_ref)));
             let expected_thread: ThreadId = std::thread::current().id();
 
-            let engine_hook_id = self
-                .inner
-                .register_before_commit(BeforeCommitHook {
-                    wants,
-                    callback: Arc::new(move |ctx| {
-                        if std::thread::current().id() != expected_thread {
-                            return Err(ElmdbError::new(
-                                ErrorCode::HookAborted,
-                                "JS beforeCommit hook cannot run from an off-thread write",
-                            ));
-                        }
-                        let sc = ctx.schema();
-                        let entities: Vec<serde_json::Value> = ctx
-                            .entity_deltas()
-                            .into_iter()
-                            .map(|d| {
-                                let type_name = sc.type_by_id(d.type_id).map(|t| t.name.as_str()).unwrap_or("");
-                                let ext_id = d
-                                    .after
-                                    .as_ref()
-                                    .or(d.before.as_ref())
-                                    .map(|r| r.header.ext_id.as_str())
-                                    .unwrap_or("");
-                                let op = match (&d.before, &d.after) {
-                                    (None, Some(_)) => "create",
-                                    (Some(_), None) => "destroy",
-                                    (Some(b), Some(a)) if b.header.is_trashed() != a.header.is_trashed() => {
-                                        if a.header.is_trashed() { "trash" } else { "restore" }
-                                    }
-                                    _ => "update",
-                                };
-                                serde_json::json!({
-                                    "id": ext_id,
-                                    "typeName": type_name,
-                                    "op": op,
-                                })
-                            })
-                            .collect();
-                        let edges: Vec<serde_json::Value> = ctx
-                            .edge_deltas()
-                            .into_iter()
-                            .map(|e| {
-                                let rel_kind = sc.relation_by_id(e.kind).map(|r| r.name.as_str()).unwrap_or("");
-                                let op = match (&e.before, &e.after) {
-                                    (None, Some(_)) => "link",
-                                    (Some(_), None) => "unlink",
-                                    _ => "update",
-                                };
-                                serde_json::json!({
-                                    "relKind": rel_kind,
-                                    "op": op,
-                                })
-                            })
-                            .collect();
-                        let payload = serde_json::json!({ "entities": entities, "edges": edges });
-
-                        let maybe_frame: elmdb::Result<Option<Vec<u8>>> = JS_HOOKS.with(|m| {
-                            let map = m.borrow();
-                            let Some((raw_env, fref)) = map.get(&js_key) else {
-                                return Ok(None);
+            let register_res = self.inner.register_before_commit(BeforeCommitHook {
+                wants,
+                callback: Arc::new(move |ctx| {
+                    if std::thread::current().id() != expected_thread {
+                        return Err(ElmdbError::new(
+                            ErrorCode::HookAborted,
+                            "JS beforeCommit hook cannot run from an off-thread write",
+                        ));
+                    }
+                    let sc = ctx.schema().clone();
+                    let entities: Vec<serde_json::Value> = ctx
+                        .entity_deltas()
+                        .into_iter()
+                        .map(|d| {
+                            let type_name = sc.type_by_id(d.type_id).map(|t| t.name.as_str()).unwrap_or("");
+                            let ext_id =
+                                d.after.as_ref().or(d.before.as_ref()).map(|r| r.header.ext_id.as_str()).unwrap_or("");
+                            let op = match (&d.before, &d.after) {
+                                (None, Some(_)) => "create",
+                                (Some(_), None) => "destroy",
+                                (Some(b), Some(a)) if b.header.is_trashed() != a.header.is_trashed() => {
+                                    if a.header.is_trashed() { "trash" } else { "restore" }
+                                }
+                                _ => "update",
                             };
-                            let js_env = Env::from_raw(*raw_env);
-                            let func = fref
-                                .borrow_back(&js_env)
-                                .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
-                            let ret = func
-                                .call(payload)
-                                .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
-                            let vtype = ret
-                                .get_type()
-                                .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
-                            if matches!(vtype, ValueType::Undefined | ValueType::Null) {
-                                return Ok(None);
-                            }
-                            let bytes = Uint8Array::from_unknown(ret).map_err(|e| {
-                                ElmdbError::new(
-                                    ErrorCode::HookAborted,
-                                    format!("beforeCommit hook must return void/null or Uint8Array wire batch: {e}"),
-                                )
-                            })?;
-                            Ok(Some(bytes.as_ref().to_vec()))
-                        });
+                            serde_json::json!({
+                                "id": ext_id,
+                                "typeName": type_name,
+                                "op": op,
+                            })
+                        })
+                        .collect();
+                    let raw_edges: Vec<_> = ctx
+                        .edge_deltas()
+                        .into_iter()
+                        .map(|e| {
+                            let rel_kind = sc.relation_by_id(e.kind).map(|r| r.name.clone()).unwrap_or_default();
+                            let op = match (&e.before, &e.after) {
+                                (None, Some(_)) => "link",
+                                (Some(_), None) => "unlink",
+                                _ => "update",
+                            };
+                            let endpoints = e.after.as_ref().or(e.before.as_ref()).map(|pe| (pe.src, pe.dst));
+                            (rel_kind, op, endpoints)
+                        })
+                        .collect();
+                    let mut edges = Vec::with_capacity(raw_edges.len());
+                    for (rel_kind, op, endpoints) in raw_edges {
+                        let (source_id, target_id) = match endpoints {
+                            Some((src_key, dst_key)) => (
+                                ctx.resolve_ext_id(src_key)?.unwrap_or_else(|| format!("__deleted:{}", src_key.0)),
+                                ctx.resolve_ext_id(dst_key)?.unwrap_or_else(|| format!("__deleted:{}", dst_key.0)),
+                            ),
+                            None => (String::new(), String::new()),
+                        };
+                        edges.push(serde_json::json!({
+                            "relKind": rel_kind,
+                            "op": op,
+                            "sourceId": source_id,
+                            "targetId": target_id,
+                        }));
+                    }
+                    let payload = serde_json::json!({ "entities": entities, "edges": edges });
 
-                        if let Some(frame) = maybe_frame? {
-                            let decoded = decode_batch(&frame)?;
-                            ctx.exec_batch(&decoded.ops)?;
+                    // Extract `raw_env`, then borrow the local `Function` and DROP the `RefCell` borrow BEFORE
+                    // calling into JS so re-entrant `registerBeforeCommit` / `unregisterBeforeCommit` / `close` never panics!
+                    let maybe_raw_env: Option<napi::sys::napi_env> =
+                        JS_HOOKS.with(|m| m.borrow().get(&js_key).map(|(e, _)| *e));
+                    let maybe_frame: elmdb::Result<Option<Vec<u8>>> = match maybe_raw_env {
+                        None => Ok(None),
+                        Some(raw_env) => {
+                            let js_env = Env::from_raw(raw_env);
+                            let maybe_func: elmdb::Result<Option<Function<'_, serde_json::Value, Unknown<'static>>>> =
+                                JS_HOOKS.with(|m| {
+                                    let map = m.borrow();
+                                    let Some((_, fref)) = map.get(&js_key) else {
+                                        return Ok(None);
+                                    };
+                                    let func = fref
+                                        .borrow_back(&js_env)
+                                        .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                    Ok(Some(func))
+                                });
+                            match maybe_func? {
+                                None => Ok(None),
+                                Some(func) => {
+                                    let ret = func
+                                        .call(payload)
+                                        .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                    let vtype = ret
+                                        .get_type()
+                                        .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                    if matches!(vtype, ValueType::Undefined | ValueType::Null) {
+                                        Ok(None)
+                                    } else {
+                                        let bytes = Uint8Array::from_unknown(ret).map_err(|e| {
+                                            ElmdbError::new(
+                                                ErrorCode::HookAborted,
+                                                format!(
+                                                    "beforeCommit hook must return void/null or Uint8Array wire batch: {e}"
+                                                ),
+                                            )
+                                        })?;
+                                        Ok(Some(bytes.as_ref().to_vec()))
+                                    }
+                                }
+                            }
                         }
-                        Ok(())
-                    }),
-                })
-                .map_err(to_js)?;
+                    };
+
+                    if let Some(frame) = maybe_frame? {
+                        let decoded = decode_batch(&frame)?;
+                        ctx.exec_batch(&decoded.ops)?;
+                    }
+                    Ok(())
+                }),
+            });
+
+            let engine_hook_id = match register_res {
+                Ok(id) => id,
+                Err(err) => {
+                    let _ = JS_HOOKS.try_with(|m| m.borrow_mut().remove(&js_key));
+                    return Err(to_js(err));
+                }
+            };
 
             self.js_hooks.borrow_mut().push((engine_hook_id, js_key));
             Ok(engine_hook_id as f64)
@@ -576,11 +635,11 @@ impl Database {
         })
     }
 
-    /// Reads one entity row by external ID.
+    /// Reads one entity row by external ID with all `EntityRef`s resolved in a single pinned MVCC snapshot.
     #[napi(ts_return_type = "Row | null")]
     pub fn get(&self, env: Env, ext_id: String) -> Result<Unknown<'static>, Code> {
         self.health.guarded("Database.get", || {
-            let row = self.inner.get_row(&ext_id).map_err(to_js)?.map(|r| Row::from_stored(&r));
+            let row = self.inner.get_row_resolved(&ext_id).map_err(to_js)?;
             to_js_json(&env, &row)
         })
     }
@@ -766,7 +825,7 @@ impl Database {
         self.health.guarded("Database.flush", || self.inner.flush().map_err(to_js))
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<void>")]
     pub fn flush_async(&self) -> Result<AsyncTask<Job<(), ()>>, Code> {
         self.health.guarded("Database.flushAsync", || {
             Ok(AsyncTask::new(Job::new(
@@ -812,7 +871,7 @@ impl Database {
         self.health.guarded("Database.rebuild", || self.inner.rebuild(index_name.as_deref()).map_err(to_js))
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<void>")]
     pub fn rebuild_async(&self, index_name: Option<String>) -> Result<AsyncTask<Job<(), ()>>, Code> {
         self.health.guarded("Database.rebuildAsync", || {
             Ok(AsyncTask::new(Job::new(
@@ -849,7 +908,7 @@ impl Database {
         })
     }
 
-    #[napi]
+    #[napi(ts_return_type = "Promise<void>")]
     pub fn backup_async(
         &self,
         target_dir: String,

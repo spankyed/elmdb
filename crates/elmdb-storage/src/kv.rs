@@ -105,8 +105,8 @@ pub trait KvStore: Send + Sync {
     fn roots_sha256(&self) -> Result<[u8; 32], StorageError>;
     fn map_size(&self) -> usize;
     fn page_size(&self) -> usize;
-    /// Writes a consistent compacted copy of the store into `target_dir` (which must not yet exist or be empty).
-    fn copy_compacted(&self, _target_dir: &std::path::Path) -> Result<(), StorageError> {
+    /// Writes a consistent compacted copy of the store into `target_dir` and returns the copied file's receipt.
+    fn copy_compacted(&self, _target_dir: &std::path::Path) -> Result<CommitReceipt, StorageError> {
         Err(StorageError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "copy_compacted is not supported by this storage backend",

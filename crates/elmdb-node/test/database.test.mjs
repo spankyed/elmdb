@@ -115,10 +115,50 @@ test('open, schema evolution, O(1) rename, archive & purge, backup, dump/load, a
   assert.equal(loaded.check().clean, true);
   loaded.close();
 
+  // P0-1: db.setSchema(db.getSchema()) roundtrips cleanly (including relations & Ref onDelete)!
+  const currentSchema = db.getSchema();
+  db.setSchema(currentSchema);
+
   // Archive Audit type and purgeArchived
-  db.setSchema({ types: { Note: db.getSchema().types.Note }, relations: baseSchema.relations });
+  db.setSchema({ types: { Note: currentSchema.types.Note }, relations: currentSchema.relations });
   assert.equal(db.purgeArchived('Audit'), 1);
   assert.equal(db.get('audit-n-good'), null);
+
+  // P0-3 & P1-6: Re-entrant beforeCommit hook + per-round deltas + edge sourceId/targetId + readOnly rejection
+  let reentrantRan = false;
+  let seenEdge = null;
+  const h2 = db.registerBeforeCommit(null, (ev) => {
+    if (ev.edges.length > 0) seenEdge = ev.edges[0];
+    // Re-entrant unregister/register inside callback must NOT panic with BorrowMutError!
+    if (!reentrantRan) {
+      reentrantRan = true;
+      db.unregisterBeforeCommit(h2);
+    }
+    return null;
+  });
+  db.executeWireBatch(buildWireBatch((b) => {
+    const x = b.create('Note', { title: 'EdgeSrc' }, 'n-src');
+    const y = b.create('Note', { title: 'EdgeDst' }, 'n-dst');
+    b.link(x, 'refs', y);
+  }));
+  assert.equal(reentrantRan, true);
+  assert.equal(seenEdge.sourceId, 'n-src');
+  assert.equal(seenEdge.targetId, 'n-dst');
+
+  // P0-5: Backup opens with clean openReport status (verified synced.v2 sidecar)
+  const bakCheck = Database.open(backupDir, { readOnly: true });
+  assert.equal(bakCheck.openReport().status, 'clean');
+  bakCheck.close();
+
+  // P1-8: Reject readOnly + schema and out-of-range u32 maxDbs before touching disk
+  assert.throws(
+    () => Database.open(dir, { readOnly: true, schema: baseSchema }),
+    (err) => err.code === 'READ_ONLY',
+  );
+  assert.throws(
+    () => Database.open(dir, { maxDbs: 2 ** 32 }),
+    (err) => err.code === 'INVALID_ARGUMENT',
+  );
 
   db.close();
   assert.throws(() => db.stats(), (err) => err.code === 'CLOSED');

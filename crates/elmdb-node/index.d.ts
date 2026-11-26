@@ -55,7 +55,7 @@ export declare class Database {
    */
   registerBeforeCommit(typeNames: Array<string> | undefined | null, callback: (arg: any) => unknown): number
   unregisterBeforeCommit(hookId: number): boolean
-  /** Reads one entity row by external ID. */
+  /** Reads one entity row by external ID with all `EntityRef`s resolved in a single pinned MVCC snapshot. */
   get(extId: string): Row | null
   /** Lists outgoing, incoming, or both-direction relations for `extId`. */
   getEdges(extId: string, relKind?: string | undefined | null, dir?: string | undefined | null): Array<RelationRow>
@@ -74,15 +74,15 @@ export declare class Database {
   stopWatches(): void
   driveBackgroundWork(maxEntities?: number | undefined | null): boolean
   flush(): void
-  flushAsync(): Promise<unknown>
+  flushAsync(): Promise<void>
   check(indexName?: string | undefined | null): CheckReport
   checkAsync(indexName?: string | undefined | null): Promise<CheckReport>
   rebuild(indexName?: string | undefined | null): void
-  rebuildAsync(indexName?: string | undefined | null): Promise<unknown>
+  rebuildAsync(indexName?: string | undefined | null): Promise<void>
   stats(): DatabaseStats
   indexStatus(): Array<IndexStatus>
   backup(targetDir: string, overwriteBackup?: boolean | undefined | null): void
-  backupAsync(targetDir: string, overwriteBackup?: boolean | undefined | null): Promise<unknown>
+  backupAsync(targetDir: string, overwriteBackup?: boolean | undefined | null): Promise<void>
   dump(targetFile: string): DumpReport
   close(): void
 }

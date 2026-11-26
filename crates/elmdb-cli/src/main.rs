@@ -67,12 +67,16 @@ fn told(db: Database) -> elmdb::Result<Database> {
 fn run(command: Command) -> elmdb::Result<bool> {
     match command {
         Command::Inspect { dir } => {
-            let stats = read_only(&dir)?.stats()?;
+            let db = read_only(&dir)?;
+            let stats = db.stats()?;
+            db.close()?;
             println!("{}", serde_json::to_string_pretty(&stats).expect("stats serialize"));
             Ok(true)
         }
         Command::Check { dir, index } => {
-            let report = read_only(&dir)?.check(index.as_deref())?;
+            let db = read_only(&dir)?;
+            let report = db.check(index.as_deref())?;
+            db.close()?;
             println!("{}", serde_json::to_string_pretty(&report).expect("report serializes"));
             Ok(report.is_clean())
         }
@@ -84,12 +88,16 @@ fn run(command: Command) -> elmdb::Result<bool> {
             Ok(true)
         }
         Command::Backup { dir, target } => {
-            read_only(&dir)?.backup_into(&target, elmdb::BackupInto::Backups)?;
+            let db = read_only(&dir)?;
+            db.backup_into(&target, elmdb::BackupInto::Backups)?;
+            db.close()?;
             println!("{} copied to {}", dir.display(), target.display());
             Ok(true)
         }
         Command::Dump { dir, target } => {
-            let report = elmdb::dump::dump(&read_only(&dir)?, &target)?;
+            let db = read_only(&dir)?;
+            let report = elmdb::dump::dump(&db, &target)?;
+            db.close()?;
             println!("{}", serde_json::to_string_pretty(&report).expect("report serializes"));
             Ok(true)
         }
