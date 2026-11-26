@@ -186,6 +186,8 @@ export interface Watches {
   diagnostics(): WatchDiagnostics;
   /** Advances watches when background index builds committed ahead of async builder notifications */
   syncBuilder(): void;
+  /** Stops every open watch, cancels any queued flush or timer, and settles pending waiters synchronously */
+  stopAll(): void;
 }
 
 export interface WatchScope {
@@ -472,14 +474,12 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     }
   };
 
-  /**
-   * Whether the database was closed under the watches: its owner closes it, never the engine, so the scheduler learns
-   * of it the next time it would run one. It then stops them all, as each one's `stop` would, delivering nothing
-   */
-  function closed(): boolean {
-    if (connection.database.isOpen) return false;
+  /** Stops every open watch, cancels any queued flush or timer, and settles waiters synchronously */
+  function stopAll() {
+    const stillOpen = connection.database.isOpen;
     for (const watch of open.values()) {
       watch.stopped = true;
+      if (stillOpen) connection.untrack(watch.token);
       answer(watch.waiters.splice(0));
     }
     open.clear();
@@ -494,6 +494,15 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
     queued?.cancel?.();
     queued = undefined;
     settleWaiting();
+  }
+
+  /**
+   * Whether the database was closed under the watches: its owner closes it, never the engine, so the scheduler learns
+   * of it the next time it would run one unless `stopAll()` was called first. It then stops them all, delivering nothing
+   */
+  function closed(): boolean {
+    if (connection.database.isOpen) return false;
+    stopAll();
     return true;
   }
 
@@ -783,6 +792,7 @@ export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, s
       builderSyncedThrough = current;
       onCommit({ sequence: current, touched: 'all', source: 'builder' });
     },
+    stopAll,
   };
 }
 

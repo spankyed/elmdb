@@ -246,7 +246,9 @@ Held by the types and the specs, which say more than a rule over names could:
   times its last run's cost and not the frame (a millisecond at least, a timer's grain), ahead of the others in its
   flush, and the run after it has its whole gap again. It lifts nothing for a watch that is owed no run, nor for any
   other watch. `admin.watchesSettled()` resolves once no watch at all is waiting to run, a moment such a stream may not
-  leave, so it is for a spec or a tool that has stopped writing. `admin.watchStats()` counts the watches and what the
+  leave, so it is for a spec or a tool that has stopped writing. `admin.stopWatches()` stops every open watch
+  synchronously, untracking their read sets while the database is open, cancelling any pending flush or gap timers, and
+  resolving pending waiters — safe to call before or after closing the database. `admin.watchStats()` counts the watches and what the
   database has filed, and `admin.watchDiagnostics()` returns a payload-free snapshot of the scheduler's queue/timers
   and every open watch's label, owed/soon/running flags, cost, due time, waiter count and last delivered commit. With
   `recordCauses`, each run's `WatchReadContext` carries bounded invalidating commit `sequences` (`dropped` past the

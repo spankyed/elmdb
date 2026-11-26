@@ -247,6 +247,7 @@ export interface EarsAdmin {
     replaceWith(source: string): void;
     setCheckpoint(name: string, value: unknown): void;
     setSchema(schema: EngineSchema): SchemaChange[];
+    stopWatches(): void;
     transactWithoutHook<T>(fn: () => T, options?: UnitOptions): T;
     updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
     waitForIndexBuilds(): void;

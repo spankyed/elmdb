@@ -315,3 +315,73 @@ fn a_value_past_the_most_a_field_holds_stored_before_the_cap_refuses_the_loads_n
     assert_eq!(error.code, crate::ErrorCode::ValueTooLarge);
     assert!(error.message.contains("`blob` of Message-old"), "{error}");
 }
+
+/// A `rename_type` whose rewrite of a `ref` list takes the field past the most a field holds is refused with
+/// `VALUE_TOO_LARGE`, naming the field and the entity, and moves nothing
+#[test]
+fn a_rename_type_whose_rewritten_ref_list_passes_the_most_a_field_holds_is_refused_and_moves_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = Schema::from_json(&json!({
+        "$schema": crate::schema::SCHEMA_LANGUAGE,
+        "types": {
+            "A": { "fields": {} },
+            "LongRenamedType": { "fields": {} },
+            "Holder": {
+                "fields": {
+                    "links": {
+                        "type": "list",
+                        "of": { "type": "ref", "to": ["A", "LongRenamedType"] },
+                        "optional": true
+                    }
+                }
+            }
+        }
+    }))
+    .unwrap();
+    let db =
+        Database::open(dir.path(), OpenOptions { schema: Some(schema), syncs: false, ..Default::default() }).unwrap();
+    // 102-byte id (`A-` + 100 chars): 104 bytes per element in msgpack; renaming `A` -> `LongRenamedType`
+    // grows each element by 14 bytes (118 bytes), pushing a just-under-64-MiB list past `MAX_VALUE_BYTES`
+    let short_id = format!("A-{}", "a".repeat(100));
+    let long_id = format!("LongRenamedType-{}", "a".repeat(100));
+    let count = (values::MAX_VALUE_BYTES - 1024) / 104;
+    let list = rmpv::Value::Array(vec![rmpv::Value::from(short_id.as_str()); count]);
+    assert!(values::encode(&list).len() <= values::MAX_VALUE_BYTES);
+    assert!(
+        values::encode(&rmpv::Value::Array(vec![rmpv::Value::from(long_id.as_str()); count])).len()
+            > values::MAX_VALUE_BYTES
+    );
+
+    db.bulk_load(&[
+        crate::engine::maintenance::Load::Entity { id: short_id.clone(), fields: Default::default(), trashed: false },
+        crate::engine::maintenance::Load::Entity {
+            id: "Holder-1".into(),
+            fields: [("links".into(), list)].into_iter().collect(),
+            trashed: false,
+        },
+    ])
+    .unwrap();
+
+    let links_before = db
+        .snapshot(|r| crate::engine::unit::Read::get(r, &keys::value("Holder-1", "links")))
+        .unwrap()
+        .expect("Holder-1 links stored before rename");
+
+    let error = db.rename_type("A", "LongRenamedType").unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::ValueTooLarge, "{error}");
+    assert!(error.message.contains("`links` of Holder-1"), "refusal must name the field and entity: {error}");
+
+    // Atomicity: neither the entity nor the ref list moved
+    let (old_exists, new_exists, links_after) = db
+        .snapshot(|r| {
+            Ok((
+                crate::engine::unit::Read::get(r, &keys::entity(&short_id))?.is_some(),
+                crate::engine::unit::Read::get(r, &keys::entity(&long_id))?.is_some(),
+                crate::engine::unit::Read::get(r, &keys::value("Holder-1", "links"))?,
+            ))
+        })
+        .unwrap();
+    assert!(old_exists, "failed rename_type must keep original entity");
+    assert!(!new_exists, "failed rename_type must not leave renamed entity");
+    assert_eq!(links_after.as_deref(), Some(links_before.as_slice()), "failed rename_type must keep Holder-1 links");
+}
