@@ -36,9 +36,10 @@ const schema = {
 
 test('queries cover filters, ICU order, BM25F, trigram, vector, PPR, Leiden, aggregates, and queryAsync', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-v2-q-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = Database.open(dir, { schema, durability: 'unsafe', buildPolicy: 'eager' });
-  t.after(() => db.close());
+  t.after(() => {
+    try { db.close(); } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 
   db.executeWireBatch(buildWireBatch((b) => {
     const a = b.create('Doc', { title: 'Rust Storage', body: 'LMDB copy on write trees', group: 'sys', score: 10 }, 'd1');

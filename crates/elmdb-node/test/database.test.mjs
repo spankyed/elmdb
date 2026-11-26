@@ -36,11 +36,11 @@ const baseSchema = {
 
 test('open, schema evolution, O(1) rename, archive & purge, backup, dump/load, and async ops', async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'elmdb-v2-db-'));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
   const dir = join(tmp, 'main');
-
   const db = await Database.openAsync(dir, { schema: baseSchema, durability: 'strict', buildPolicy: 'eager' });
-  t.after(() => db.close());
+  t.after(() => {
+    try { db.close(); } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
 
   assert.equal(db.readOnly, false);
   assert.equal(db.path, dir);
