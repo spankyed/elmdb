@@ -273,11 +273,12 @@ fn dst_zero_false_negatives_across_120_randomized_mutations_and_10_watch_types()
                         index_id: ids.idx_text,
                         query: "rust".into(),
                         require_all: false,
+                        prefix: false,
                         phrase: None,
                         top_k: Some(5),
                     },
                 }),
-                terminal: TerminalSpec::Hits,
+                terminal: TerminalSpec::Hits { fields: None, highlights: false },
             }),
         ),
         (
@@ -304,7 +305,7 @@ fn dst_zero_false_negatives_across_120_randomized_mutations_and_10_watch_types()
                     input: Box::new(src_note()),
                     spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 3 },
                 }),
-                terminal: TerminalSpec::Hits,
+                terminal: TerminalSpec::Hits { fields: None, highlights: false },
             }),
         ),
     ];
@@ -926,7 +927,7 @@ fn review_regression_subdb_same_seq_seq_gap_resurrection_abort_and_imperative_se
             input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
             spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 5 },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let (snap_seq, snap_epoch, _o, vec_rs) =
         run_tracked_snapshot(&engine, &qe, &vec_plan, ExecBudgets::default()).unwrap();
@@ -1042,7 +1043,7 @@ fn review_regression_cross_process_maintenance_write_and_4096_overflow() {
             input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
             spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 5 },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let author_plan = LogicalPlan::new(LogicalNode::Terminal {
         input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.author_type, include_trashed: false })),

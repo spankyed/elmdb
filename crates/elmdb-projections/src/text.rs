@@ -925,6 +925,8 @@ impl Ord for HeapHit {
 }
 
 const MAX_VALID_BUCKET: u64 = 1u64 << (64 - BLOCK_SHIFT);
+/// Maximum number of dictionary terms expanded per query token when `prefix: true`.
+pub const MAX_PREFIX_EXPANSIONS: usize = 64;
 
 /// Block-Max WAND cursor over a single term's posting blocks.
 struct BmwTermCursor {
@@ -1087,6 +1089,184 @@ impl BmwTermCursor {
     }
 }
 
+/// Disjunction-max BMW cursor for a single prefix-expanded query term (up to `MAX_PREFIX_EXPANSIONS` dict terms).
+///
+/// Preserves exact Block-Max WAND upper-bound soundness:
+/// - `term_ub = max_i child_i.term_ub`
+/// - `block_ub_at(target) = max_i child_i.block_ub_at(target)`
+/// - `block_end_covering(target) = min_i child_i.block_end_covering(target)`
+/// - `score_at(doc) = max_{child_i at doc} bm25_term_score(child_i)`
+struct PrefixGroupCursor {
+    children: Vec<BmwTermCursor>,
+    term_ub: f64,
+    cur_doc: Option<EntityKey>,
+    blocks_pruned: usize,
+}
+
+impl PrefixGroupCursor {
+    fn open<R: KvRead>(txn: &R, db: SubDbHandle, prefix: &str, stats: &TextStats) -> Result<Option<Self>> {
+        let mut expanded = prefix_terms(txn, db, prefix, MAX_PREFIX_EXPANSIONS)?;
+        // Guarantee the exact term itself is never dropped by top-N truncation.
+        if !expanded.iter().any(|(t, _)| t == prefix)
+            && let Some(raw) = txn.get(db, &dict_key(prefix))?
+        {
+            let entry = TermDictEntry::decode(raw)?;
+            if entry.doc_freq > 0 {
+                expanded.push((prefix.to_owned(), entry));
+            }
+        }
+        if expanded.is_empty() {
+            return Ok(None);
+        }
+        let mut children = Vec::with_capacity(expanded.len());
+        let mut term_ub = 0.0f64;
+        for (term, _) in expanded {
+            if let Some(c) = BmwTermCursor::open(txn, db, &term, stats)? {
+                term_ub = term_ub.max(c.term_ub);
+                children.push(c);
+            }
+        }
+        if children.is_empty() {
+            return Ok(None);
+        }
+        let cur_doc = children.iter().filter_map(|c| c.cur_doc).min();
+        Ok(Some(Self { children, term_ub, cur_doc, blocks_pruned: 0 }))
+    }
+
+    fn exhaust(&mut self) {
+        for c in &mut self.children {
+            c.exhaust();
+            self.blocks_pruned += c.blocks_pruned;
+            c.blocks_pruned = 0;
+        }
+        self.children.clear();
+        self.cur_doc = None;
+    }
+
+    fn block_ub_at(&self, target: EntityKey, avgdl: f64) -> f64 {
+        self.children.iter().map(|c| c.block_ub_at(target, avgdl)).fold(0.0f64, f64::max)
+    }
+
+    fn block_end_covering(&self, target: EntityKey) -> u64 {
+        self.children.iter().map(|c| c.block_end_covering(target)).min().unwrap_or(u64::MAX)
+    }
+
+    fn score_at(&self, doc: EntityKey, avgdl: f64) -> f64 {
+        let mut best = 0.0f64;
+        for c in &self.children {
+            if c.cur_doc == Some(doc)
+                && let Some(p) = c.cur_posting
+            {
+                best = best.max(bm25_term_score(c.idf, p.weighted_tf, p.weighted_doc_len, avgdl));
+            }
+        }
+        best
+    }
+
+    fn advance_to<R: KvRead>(&mut self, txn: &R, db: SubDbHandle, target: EntityKey) -> Result<()> {
+        if let Some(cur) = self.cur_doc
+            && cur >= target
+        {
+            return Ok(());
+        }
+        let mut i = 0;
+        let mut min_doc: Option<EntityKey> = None;
+        while i < self.children.len() {
+            if self.children[i].cur_doc.is_some_and(|d| d < target) {
+                self.children[i].advance_to(txn, db, target)?;
+            }
+            if let Some(d) = self.children[i].cur_doc {
+                min_doc = Some(match min_doc {
+                    Some(prev) => prev.min(d),
+                    None => d,
+                });
+                i += 1;
+            } else {
+                self.blocks_pruned += self.children[i].blocks_pruned;
+                self.children.swap_remove(i);
+            }
+        }
+        self.cur_doc = min_doc;
+        Ok(())
+    }
+
+    fn total_blocks_pruned(&self) -> usize {
+        self.blocks_pruned + self.children.iter().map(|c| c.blocks_pruned).sum::<usize>()
+    }
+}
+
+/// Unified Block-Max WAND query term cursor (either exact single term or prefix-expanded disjunction-max group).
+enum QueryTermCursor {
+    Single(BmwTermCursor),
+    Prefix(PrefixGroupCursor),
+}
+
+impl QueryTermCursor {
+    fn cur_doc(&self) -> Option<EntityKey> {
+        match self {
+            Self::Single(c) => c.cur_doc,
+            Self::Prefix(g) => g.cur_doc,
+        }
+    }
+
+    fn term_ub(&self) -> f64 {
+        match self {
+            Self::Single(c) => c.term_ub,
+            Self::Prefix(g) => g.term_ub,
+        }
+    }
+
+    fn exhaust(&mut self) {
+        match self {
+            Self::Single(c) => c.exhaust(),
+            Self::Prefix(g) => g.exhaust(),
+        }
+    }
+
+    fn block_ub_at(&self, target: EntityKey, avgdl: f64) -> f64 {
+        match self {
+            Self::Single(c) => c.block_ub_at(target, avgdl),
+            Self::Prefix(g) => g.block_ub_at(target, avgdl),
+        }
+    }
+
+    fn block_end_covering(&self, target: EntityKey) -> u64 {
+        match self {
+            Self::Single(c) => c.block_end_covering(target),
+            Self::Prefix(g) => g.block_end_covering(target),
+        }
+    }
+
+    fn score_at(&self, doc: EntityKey, avgdl: f64) -> f64 {
+        match self {
+            Self::Single(c) => {
+                if c.cur_doc == Some(doc)
+                    && let Some(p) = c.cur_posting
+                {
+                    bm25_term_score(c.idf, p.weighted_tf, p.weighted_doc_len, avgdl)
+                } else {
+                    0.0
+                }
+            }
+            Self::Prefix(g) => g.score_at(doc, avgdl),
+        }
+    }
+
+    fn advance_to<R: KvRead>(&mut self, txn: &R, db: SubDbHandle, target: EntityKey) -> Result<()> {
+        match self {
+            Self::Single(c) => c.advance_to(txn, db, target),
+            Self::Prefix(g) => g.advance_to(txn, db, target),
+        }
+    }
+
+    fn total_blocks_pruned(&self) -> usize {
+        match self {
+            Self::Single(c) => c.blocks_pruned,
+            Self::Prefix(g) => g.total_blocks_pruned(),
+        }
+    }
+}
+
 /// Statistics returned alongside `search_bmw` hits (useful for `EXPLAIN` and verifying BMW pruning).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BmwSearchStats {
@@ -1106,6 +1286,21 @@ pub fn search_bmw<R: KvRead>(
     stem_lang: Option<&str>,
     top_k: usize,
     require_all: bool,
+    candidates: Option<&FxHashSet<EntityKey>>,
+) -> Result<(Vec<TextHit>, BmwSearchStats)> {
+    search_bmw_with_prefix(txn, db, query, stem_lang, top_k, require_all, false, candidates)
+}
+
+/// Executes top-`k` BM25F search using Block-Max WAND with optional dictionary prefix expansion (`prefix: true`).
+#[allow(clippy::too_many_arguments)]
+pub fn search_bmw_with_prefix<R: KvRead>(
+    txn: &R,
+    db: SubDbHandle,
+    query: &str,
+    stem_lang: Option<&str>,
+    top_k: usize,
+    require_all: bool,
+    prefix: bool,
     candidates: Option<&FxHashSet<EntityKey>>,
 ) -> Result<(Vec<TextHit>, BmwSearchStats)> {
     if top_k == 0 {
@@ -1131,9 +1326,20 @@ pub fn search_bmw<R: KvRead>(
         return Ok((Vec::new(), BmwSearchStats::default()));
     }
 
-    let mut cursors: Vec<BmwTermCursor> = Vec::with_capacity(terms.len());
+    let mut cursors: Vec<QueryTermCursor> = Vec::with_capacity(terms.len());
     for t in &terms {
-        match BmwTermCursor::open(txn, db, t, &stats)? {
+        let opened = if prefix {
+            PrefixGroupCursor::open(txn, db, t, &stats)?.map(|mut g| {
+                if g.children.len() == 1 {
+                    QueryTermCursor::Single(g.children.pop().expect("len 1"))
+                } else {
+                    QueryTermCursor::Prefix(g)
+                }
+            })
+        } else {
+            BmwTermCursor::open(txn, db, t, &stats)?.map(QueryTermCursor::Single)
+        };
+        match opened {
             Some(c) => cursors.push(c),
             None => {
                 if require_all {
@@ -1151,13 +1357,13 @@ pub fn search_bmw<R: KvRead>(
 
     loop {
         // Drop exhausted cursors (accounting for their pruned blocks before dropping!).
-        if require_all && cursors.iter().any(|c| c.cur_doc.is_none()) {
+        if require_all && cursors.iter().any(|c| c.cur_doc().is_none()) {
             break;
         }
         let mut i = 0;
         while i < cursors.len() {
-            if cursors[i].cur_doc.is_none() {
-                search_stats.blocks_pruned += cursors[i].blocks_pruned;
+            if cursors[i].cur_doc().is_none() {
+                search_stats.blocks_pruned += cursors[i].total_blocks_pruned();
                 cursors.swap_remove(i);
             } else {
                 i += 1;
@@ -1168,14 +1374,14 @@ pub fn search_bmw<R: KvRead>(
         }
 
         // Sort active cursors by current doc ID ascending.
-        cursors.sort_by_key(|c| c.cur_doc.unwrap());
+        cursors.sort_by_key(|c| c.cur_doc().unwrap());
 
         let threshold = if heap.len() == top_k { heap.peek().unwrap().score } else { 0.0 };
         let eps = 1e-12 * threshold.abs().max(1.0);
 
         // Pick pivot term.
         let mut pivot_idx = if require_all {
-            let total_ub: f64 = cursors.iter().map(|c| c.term_ub).sum();
+            let total_ub: f64 = cursors.iter().map(QueryTermCursor::term_ub).sum();
             if heap.len() == top_k && total_ub + eps < threshold {
                 break;
             }
@@ -1184,7 +1390,7 @@ pub fn search_bmw<R: KvRead>(
             let mut acc = 0.0;
             let mut found = None;
             for (idx, c) in cursors.iter().enumerate() {
-                acc += c.term_ub;
+                acc += c.term_ub();
                 if heap.len() < top_k || acc + eps >= threshold {
                     found = Some(idx);
                     break;
@@ -1196,10 +1402,10 @@ pub fn search_bmw<R: KvRead>(
             }
         };
 
-        let pivot_doc = cursors[pivot_idx].cur_doc.unwrap();
+        let pivot_doc = cursors[pivot_idx].cur_doc().unwrap();
         // Extend `pivot_idx` past any additional cursors tied at `pivot_doc` so `cursors[pivot_idx + 1]`
         // (if present) is strictly greater than `pivot_doc`.
-        while pivot_idx + 1 < cursors.len() && cursors[pivot_idx + 1].cur_doc == Some(pivot_doc) {
+        while pivot_idx + 1 < cursors.len() && cursors[pivot_idx + 1].cur_doc() == Some(pivot_doc) {
             pivot_idx += 1;
         }
 
@@ -1225,7 +1431,7 @@ pub fn search_bmw<R: KvRead>(
                     (_, None) => None,       // pivot_doc == u64::MAX -> exhaust!
                 };
                 if !require_all && let Some(next_c) = cursors.get(pivot_idx + 1) {
-                    let next_c_doc = next_c.cur_doc.unwrap().0;
+                    let next_c_doc = next_c.cur_doc().unwrap().0;
                     jump_opt = Some(match jump_opt {
                         Some(j) => j.min(next_c_doc),
                         None => next_c_doc,
@@ -1249,7 +1455,7 @@ pub fn search_bmw<R: KvRead>(
                     let target_cursor = cursors[..=pivot_idx]
                         .iter()
                         .enumerate()
-                        .max_by(|(_, a), (_, b)| a.term_ub.total_cmp(&b.term_ub))
+                        .max_by(|(_, a), (_, b)| a.term_ub().total_cmp(&b.term_ub()))
                         .map_or(0, |(idx, _)| idx);
                     match jump_opt {
                         Some(j) => cursors[target_cursor].advance_to(txn, db, EntityKey(j))?,
@@ -1260,15 +1466,13 @@ pub fn search_bmw<R: KvRead>(
             }
         }
 
-        if cursors[0].cur_doc == Some(pivot_doc) {
+        if cursors[0].cur_doc() == Some(pivot_doc) {
             // All cursors in `0..=pivot_idx` are aligned on `pivot_doc`!
             let allowed = candidates.is_none_or(|set| set.contains(&pivot_doc));
             if allowed {
                 let mut score = 0.0;
                 for c in &cursors[..=pivot_idx] {
-                    if let Some(p) = c.cur_posting {
-                        score += bm25_term_score(c.idf, p.weighted_tf, p.weighted_doc_len, avgdl);
-                    }
+                    score += c.score_at(pivot_doc, avgdl);
                 }
                 search_stats.docs_scored += 1;
                 let candidate = HeapHit { score, key: pivot_doc };
@@ -1295,7 +1499,7 @@ pub fn search_bmw<R: KvRead>(
         } else {
             // Align preceding cursors up to `pivot_doc`.
             for c in &mut cursors[..pivot_idx] {
-                if c.cur_doc.unwrap() < pivot_doc {
+                if c.cur_doc().unwrap() < pivot_doc {
                     c.advance_to(txn, db, pivot_doc)?;
                 }
             }
@@ -1303,12 +1507,151 @@ pub fn search_bmw<R: KvRead>(
     }
 
     for c in &cursors {
-        search_stats.blocks_pruned += c.blocks_pruned;
+        search_stats.blocks_pruned += c.total_blocks_pruned();
     }
 
     let mut results: Vec<TextHit> = heap.into_iter().map(|h| TextHit { key: h.key, score: h.score }).collect();
     results.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| a.key.cmp(&b.key)));
     Ok((results, search_stats))
+}
+
+/// Computes lazy UTF-16 code-unit highlight spans `(element_index, utf16_start, utf16_end)`
+/// per indexed text field for a single returned search hit.
+///
+/// Called ONLY on the final top-K hits — zero index storage overhead!
+pub fn compute_highlights(
+    row: &PackedRow,
+    field_defs: &[(FieldId, &str)],
+    stem_lang: Option<&str>,
+    query: &str,
+    phrase: Option<&[String]>,
+    prefix: bool,
+) -> BTreeMap<String, Vec<(u32, usize, usize)>> {
+    let mut query_terms: Vec<String> = Vec::new();
+    let mut seen: FxHashSet<String> = FxHashSet::default();
+    for tok in analyze_text(query, stem_lang) {
+        if seen.insert(tok.term.clone()) {
+            query_terms.push(tok.term);
+        }
+    }
+
+    let phrase_terms: Vec<String> = phrase
+        .map(|terms| {
+            let mut out = Vec::new();
+            for t in terms {
+                let toks = analyze_text(t, stem_lang);
+                if toks.is_empty() {
+                    let lower = t.to_lowercase();
+                    if !lower.is_empty() {
+                        out.push(lower);
+                    }
+                } else {
+                    for tok in toks {
+                        out.push(tok.term);
+                    }
+                }
+            }
+            out
+        })
+        .unwrap_or_default();
+
+    if query_terms.is_empty() && phrase_terms.is_empty() {
+        return BTreeMap::new();
+    }
+
+    let mut result: BTreeMap<String, Vec<(u32, usize, usize)>> = BTreeMap::new();
+
+    for &(fid, fname) in field_defs {
+        let Some(val) = row.fields.get(&fid) else { continue };
+        let mut elements: Vec<(u32, &str)> = Vec::new();
+        match val {
+            CanonicalValue::String(s) => elements.push((0, s.as_str())),
+            CanonicalValue::Array(items) => {
+                for (idx, item) in items.iter().enumerate() {
+                    if let CanonicalValue::String(s) = item {
+                        elements.push((idx as u32, s.as_str()));
+                    }
+                }
+            }
+            _ => continue,
+        }
+
+        let mut field_spans: Vec<(u32, usize, usize)> = Vec::new();
+        for (elem_idx, text) in elements {
+            let tokens = analyze_text(text, stem_lang);
+            if tokens.is_empty() {
+                continue;
+            }
+            let mut byte_spans: Vec<(usize, usize)> = Vec::new();
+
+            // 1. Term matches (exact or prefix).
+            for tok in &tokens {
+                let matched = if prefix {
+                    query_terms.iter().any(|qt| tok.term.starts_with(qt.as_str()))
+                } else {
+                    query_terms.contains(&tok.term)
+                };
+                if matched && tok.byte_start < tok.byte_end {
+                    byte_spans.push((tok.byte_start, tok.byte_end));
+                }
+            }
+
+            // 2. Phrase matches (consecutive positions within this string element).
+            if !phrase_terms.is_empty() {
+                let mut by_pos: BTreeMap<u32, Vec<&AnalyzedToken>> = BTreeMap::new();
+                for tok in &tokens {
+                    by_pos.entry(tok.position).or_default().push(tok);
+                }
+                for (&start_pos, first_toks) in &by_pos {
+                    let Some(first_tok) = first_toks.iter().find(|t| t.term == phrase_terms[0]) else {
+                        continue;
+                    };
+                    let mut last_end = first_tok.byte_end;
+                    let mut matched = true;
+                    for (delta, pt) in phrase_terms.iter().enumerate().skip(1) {
+                        let target_pos = start_pos.saturating_add(delta as u32);
+                        if let Some(toks) = by_pos.get(&target_pos)
+                            && let Some(t) = toks.iter().find(|t| t.term == *pt)
+                        {
+                            last_end = last_end.max(t.byte_end);
+                        } else {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if matched && first_tok.byte_start < last_end {
+                        byte_spans.push((first_tok.byte_start, last_end));
+                    }
+                }
+            }
+
+            if byte_spans.is_empty() {
+                continue;
+            }
+            byte_spans.sort_unstable();
+            let mut merged: Vec<(usize, usize)> = Vec::with_capacity(byte_spans.len());
+            for (s, e) in byte_spans {
+                if let Some(last) = merged.last_mut()
+                    && s <= last.1
+                {
+                    last.1 = last.1.max(e);
+                } else {
+                    merged.push((s, e));
+                }
+            }
+            for (s16, e16) in map_utf8_spans_to_utf16(text, &merged) {
+                if s16 < e16 {
+                    field_spans.push((elem_idx, s16, e16));
+                }
+            }
+        }
+
+        if !field_spans.is_empty() {
+            result.insert(fname.to_owned(), field_spans);
+        }
+    }
+
+    result
 }
 
 /// Exhaustive brute-force BM25F reference scorer over `TAG_DOCS` (used in tests to verify BMW exactness).

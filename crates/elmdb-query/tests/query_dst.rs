@@ -507,17 +507,18 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
                 index_id: ids.idx_text,
                 query: "zero copy".into(),
                 require_all: true,
+                prefix: false,
                 phrase: Some(vec!["zero".into(), "copy".into()]),
                 top_k: Some(5),
             },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(hits) = qe.execute(&engine, &bm25_plan, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
     assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].0, k_rust);
+    assert_eq!(hits[0].key, k_rust);
 
     // VectorNear
     let vec_plan = LogicalPlan::new(LogicalNode::Terminal {
@@ -525,13 +526,13 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
             input: Box::new(src()),
             spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 2 },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(vhits) = qe.execute(&engine, &vec_plan, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
-    assert_eq!(vhits[0].0, k_rust);
-    assert_eq!(vhits[1].0, k_hybrid);
+    assert_eq!(vhits[0].key, k_rust);
+    assert_eq!(vhits[1].key, k_hybrid);
 
     // VectorLike (excludes seed itself)
     let vlike_plan = LogicalPlan::new(LogicalNode::Terminal {
@@ -539,13 +540,13 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
             input: Box::new(src()),
             spec: ScoreSpec::VectorLike { index_id: ids.idx_vec, seed: k_rust, top_k: 2 },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(vlhits) = qe.execute(&engine, &vlike_plan, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
-    assert!(vlhits.iter().all(|(k, _)| *k != k_rust));
-    assert_eq!(vlhits[0].0, k_hybrid);
+    assert!(vlhits.iter().all(|h| h.key != k_rust));
+    assert_eq!(vlhits[0].key, k_hybrid);
 
     // RankIndex (doc_hybrid cited by both others -> highest PageRank!)
     let rank_plan = LogicalPlan::new(LogicalNode::Terminal {
@@ -558,12 +559,12 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
             after: None,
             limit: Some(3),
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(rhits) = qe.execute(&engine, &rank_plan, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
-    assert_eq!(rhits[0].0, k_hybrid);
+    assert_eq!(rhits[0].key, k_hybrid);
 
     // FuzzyLabel (Levenshtein distance <= 2 against title)
     let fuzzy_plan = LogicalPlan::new(LogicalNode::Terminal {
@@ -571,13 +572,13 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
             input: Box::new(src()),
             spec: ScoreSpec::FuzzyLabel { field: ids.title, query: "Graph Analytiks".into(), max_distance: 2 },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(fhits) = qe.execute(&engine, &fuzzy_plan, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
     assert_eq!(fhits.len(), 1);
-    assert_eq!(fhits[0].0, k_graph);
+    assert_eq!(fhits[0].key, k_graph);
 
     // RecencyDecay (newer timestamp gets higher score)
     let rec_plan = LogicalPlan::new(LogicalNode::Terminal {
@@ -594,12 +595,12 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
             after: None,
             limit: None,
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(rechits) = qe.execute(&engine, &rec_plan, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
-    assert_eq!(rechits.last().unwrap().0, k_graph);
+    assert_eq!(rechits.last().unwrap().key, k_graph);
 
     // Hybrid Fuse: RRF default
     let fuse_rrf = LogicalPlan::new(LogicalNode::Terminal {
@@ -612,6 +613,7 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
                             index_id: ids.idx_text,
                             query: "rust search".into(),
                             require_all: false,
+                            prefix: false,
                             phrase: None,
                             top_k: Some(10),
                         },
@@ -622,12 +624,12 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
                 method: FuseMethod::default(),
             },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(rrf_hits) = qe.execute(&engine, &fuse_rrf, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
-    assert_eq!(rrf_hits[0].0, k_hybrid, "doc_hybrid should win RRF fusion");
+    assert_eq!(rrf_hits[0].key, k_hybrid, "doc_hybrid should win RRF fusion");
 
     // Hybrid Fuse: LinearNormalized with constant-signal guard (max == min -> no NaN!)
     let fuse_lin = LogicalPlan::new(LogicalNode::Terminal {
@@ -648,14 +650,14 @@ fn scoring_bm25f_vector_rank_fuzzy_recency_and_hybrid_fusion() {
                 method: FuseMethod::LinearNormalized,
             },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(lin_hits) = qe.execute(&engine, &fuse_lin, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
     assert_eq!(lin_hits.len(), 2);
-    assert!(lin_hits.iter().all(|(_, s)| s.is_finite()), "LinearNormalized must never emit NaN on constant signals");
-    assert_eq!(lin_hits[0].0, k_hybrid);
+    assert!(lin_hits.iter().all(|h| h.score.is_finite()), "LinearNormalized must never emit NaN on constant signals");
+    assert_eq!(lin_hits[0].key, k_hybrid);
 }
 
 // ---------------------------------------------------------------------------
@@ -809,8 +811,8 @@ fn traversals_and_all_seven_graph_analytics() {
         panic!("expected Hits");
     };
     assert_eq!(jac.len(), 1);
-    assert_eq!(jac[0].0, ks[1]);
-    assert!((jac[0].1 - (1.0 / 3.0)).abs() < 1e-9);
+    assert_eq!(jac[0].key, ks[1]);
+    assert!((jac[0].score - (1.0 / 3.0)).abs() < 1e-9);
 
     // 7. AdamicAdar similarity from ks[0] -> ks[1] via shared neighbor ks[3]
     let aa_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
@@ -821,8 +823,8 @@ fn traversals_and_all_seven_graph_analytics() {
         panic!("expected Hits");
     };
     assert_eq!(aa.len(), 1);
-    assert_eq!(aa[0].0, ks[1]);
-    assert!(aa[0].1 > 0.0 && aa[0].1.is_finite());
+    assert_eq!(aa[0].key, ks[1]);
+    assert!(aa[0].score > 0.0 && aa[0].score.is_finite());
 }
 
 // ---------------------------------------------------------------------------
@@ -1513,12 +1515,12 @@ fn review_regression_icu_missing_order_traverse_limit_phrase_and_greek_trigrams(
             after: None,
             limit: Some(1),
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(td) = qe.execute(&engine, &trav_desc, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
-    assert_eq!(td, vec![(k_beta, 2.0)]);
+    assert_eq!(td.iter().map(|h| (h.key, h.score)).collect::<Vec<_>>(), vec![(k_beta, 2.0)]);
 
     // P0-6: Cross-type Score guard + mixed-case BM25F phrase search past 140 higher-scoring distractors!
     let cross_type_score = LogicalPlan::new(LogicalNode::Terminal {
@@ -1528,11 +1530,12 @@ fn review_regression_icu_missing_order_traverse_limit_phrase_and_greek_trigrams(
                 index_id: ids.idx_text,
                 query: "zero copy".into(),
                 require_all: true,
+                prefix: false,
                 phrase: None,
                 top_k: Some(5),
             },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     assert_eq!(
         qe.execute(&engine, &cross_type_score, ExecBudgets::default()).unwrap().result,
@@ -1546,11 +1549,12 @@ fn review_regression_icu_missing_order_traverse_limit_phrase_and_greek_trigrams(
                 index_id: ids.idx_rank, // Rank index passed to Bm25f!
                 query: "zero".into(),
                 require_all: false,
+                prefix: false,
                 phrase: None,
                 top_k: Some(5),
             },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     assert_eq!(qe.execute(&engine, &wrong_kind, ExecBudgets::default()).unwrap_err().code, ErrorCode::InvalidArgument);
 
@@ -1561,17 +1565,18 @@ fn review_regression_icu_missing_order_traverse_limit_phrase_and_greek_trigrams(
                 index_id: ids.idx_text,
                 query: "zero copy".into(),
                 require_all: true,
+                prefix: false,
                 phrase: Some(vec!["Zero".into(), "Copy".into()]), // mixed-case phrase terms!
                 top_k: Some(5),
             },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(ph) = qe.execute(&engine, &phrase_plan, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
     assert_eq!(ph.len(), 1);
-    assert_eq!(ph[0].0, k_alpha);
+    assert_eq!(ph[0].key, k_alpha);
 
     // P0-7: Greek final sigma (`"ΛΟΓΟΣ"` -> `"λογος"`) matches `Contains(body, "γος")` via trigram index!
     let greek_plan = LogicalPlan::new(LogicalNode::Terminal {
@@ -1688,7 +1693,7 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
             input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
             spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 5 },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     qe.execute_tracked(&engine, &empty_vec, ExecBudgets::default(), &mut rec_vec).unwrap();
     assert!(!rec_vec.subdb_ranges.is_empty());
@@ -1720,13 +1725,13 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
             input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1]))),
             spec: ScoreSpec::RecencyDecay { field: ids.updated_at, now_ms: 0, half_life_ms: 1000.0 },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     let QueryResult::Hits(rh) = qe.execute(&engine, &recency, ExecBudgets::default()).unwrap().result else {
         panic!("expected Hits");
     };
     assert_eq!(rh.len(), 1);
-    assert!(rh[0].1.is_finite());
+    assert!(rh[0].score.is_finite());
 
     // P1-4: project_graph_terminal handles Count/Exists & rejects unsupported terminals
     let g_cnt = LogicalPlan::new(LogicalNode::Terminal {
@@ -1777,7 +1782,7 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
                 method: FuseMethod::default(),
             },
         }),
-        terminal: TerminalSpec::Hits,
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
     assert_eq!(qe.execute(&engine, &bad_fuse, ExecBudgets::default()).unwrap_err().code, ErrorCode::InvalidArgument);
 

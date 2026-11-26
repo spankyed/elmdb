@@ -26,6 +26,7 @@ import { RelationRow } from 'elmdb';
 import { Row } from 'elmdb';
 import { Schema } from 'elmdb';
 import { SchemaChange } from 'elmdb';
+import { TransactOptions } from 'elmdb';
 import { WatchPolicyOptions } from 'elmdb';
 import { WatchRegistration } from 'elmdb';
 import { WatchRerun } from 'elmdb';
@@ -69,6 +70,8 @@ export { CheckReport }
 
 // @public
 export interface CommitDelta {
+    // (undocumented)
+    readonly commitSeq: number;
     // (undocumented)
     readonly edges: readonly EdgeDeltaEvent[];
     // (undocumented)
@@ -206,17 +209,23 @@ export interface EarsDatabase {
     // (undocumented)
     get(extId: string): Row | null;
     // (undocumented)
+    getCounter(name: string): number;
+    // (undocumented)
     getEdges(extId: string, relKind?: string | undefined | null, dir?: string | undefined | null): Array<RelationRow>;
     // (undocumented)
     getSchema(): Schema;
     // (undocumented)
     indexStatus(): Array<IndexStatus>;
     // (undocumented)
+    nextCounter(name: string): number;
+    // (undocumented)
     nextDueWatch(nowMs?: number | undefined | null, elapsedTurnMs?: number | undefined | null): NextDueWatch;
     // (undocumented)
     openReport(): OpenReport;
     // (undocumented)
     readonly path: string;
+    // (undocumented)
+    pendingCommitSeq(): number | null;
     // (undocumented)
     purgeArchived(typeName: string): number;
     // (undocumented)
@@ -242,6 +251,8 @@ export interface EarsDatabase {
     // (undocumented)
     rerunWatch(watchId: number, spec: QuerySpec, nowMs?: number | undefined | null, costMs?: number | undefined | null): WatchRerun;
     // (undocumented)
+    setCounter(name: string, value: number): void;
+    // (undocumented)
     setEmbeddings(indexName: string, extId: string, vectors: Array<Array<number>>): void;
     // (undocumented)
     setSchema(schema: Schema): SchemaChange;
@@ -251,6 +262,8 @@ export interface EarsDatabase {
     stopWatches(): void;
     // (undocumented)
     tickWatches(nowMs?: number | undefined | null): WatchTick;
+    // (undocumented)
+    transact(callback: () => unknown, options?: TransactOptions | undefined | null): unknown;
     // (undocumented)
     unregisterBeforeCommit(hookId: number): boolean;
     // (undocumented)
@@ -272,18 +285,23 @@ export interface EarsEngine {
     executeWireBatch(payload: Uint8Array): BatchResult;
     // (undocumented)
     get(id: string): EntityRow | null;
+    getCounter(name: string): number;
     // (undocumented)
     getEdges(id: string, opts?: GetEdgesOptions): RelationRow[];
     // (undocumented)
     link(sourceId: string, relKind: string, targetId: string, opts?: LinkOptions): BatchResult;
+    nextCounter(name: string): number;
     // (undocumented)
     patch(id: string, fields: Record<string, unknown>): BatchResult;
+    pendingCommitSeq(): number | null;
     // (undocumented)
     readonly query: QueryRoot;
     // (undocumented)
     restore(id: string): BatchResult;
+    setCounter(name: string, value: number): void;
     // (undocumented)
     setEmbeddings(indexName: string, id: string, vectors: ReadonlyArray<ReadonlyArray<number>>): void;
+    transact<T>(fn: () => T, opts?: TransactOptions): T;
     // (undocumented)
     trash(id: string): BatchResult;
     // (undocumented)
@@ -305,6 +323,43 @@ export class EarsError extends Error {
 
 // @public
 export type EarsErrorCode = ErrorCode;
+
+// @public
+export interface EarsOperation {
+    // (undocumented)
+    readonly inUnit: boolean;
+    // (undocumented)
+    readonly kind: EarsOperationKind;
+    // (undocumented)
+    readonly ops: number;
+    // (undocumented)
+    readonly sequence?: number;
+    // (undocumented)
+    readonly watch: boolean;
+}
+
+// @public
+export type EarsOperationKind = 'read' | 'write' | 'unit' | 'load';
+
+// @public
+export interface EarsOperationObserver {
+    // (undocumented)
+    start(operation: EarsOperation): (result: EarsOperationResult) => void;
+}
+
+// @public
+export interface EarsOperationResult {
+    // (undocumented)
+    readonly errorCode?: EarsErrorCode;
+    // (undocumented)
+    readonly outcome: 'ok' | 'error' | 'aborted';
+    // (undocumented)
+    readonly requestBytes: number;
+    // (undocumented)
+    readonly responseBytes: number;
+    // (undocumented)
+    readonly sequence?: number;
+}
 
 // @public
 export interface EdgeDeltaEvent {
@@ -421,6 +476,14 @@ export interface HasLinkOptions {
 export { Hit }
 
 // @public
+export interface HitsOptions {
+    // (undocumented)
+    readonly fields?: readonly string[];
+    // (undocumented)
+    readonly highlights?: boolean;
+}
+
+// @public
 export interface HopsOptions {
     // (undocumented)
     readonly dir?: EdgeDirection;
@@ -490,6 +553,8 @@ export interface OpenEngineOptions extends DatabaseOptions {
     // (undocumented)
     readonly clock?: EarsClock;
     // (undocumented)
+    readonly observer?: EarsOperationObserver;
+    // (undocumented)
     readonly onWatchError?: (error: EarsError) => void;
 }
 
@@ -547,8 +612,8 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
     groupCounts(field: string): Array<[unknown, number]>;
     groupCountsAsync(field: string): Promise<Array<[unknown, number]>>;
     hasLink(opts?: HasLinkOptions): QueryBuilder<TResult>;
-    hits(): Hit[];
-    hitsAsync(): Promise<Hit[]>;
+    hits(opts?: HitsOptions): Hit[];
+    hitsAsync(opts?: HitsOptions): Promise<Hit[]>;
     hops(opts: HopsOptions): QueryBuilder<EntityRow>;
     ids(): string[];
     idsAsync(): Promise<string[]>;
@@ -575,7 +640,7 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
     toSpec(terminal?: QueryTerminal, explain?: boolean): QuerySpec;
     watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle;
     watchCount(callback: (count: number) => void, opts?: WatchOptions): WatchHandle;
-    watchHits(callback: (hits: Hit[]) => void, opts?: WatchOptions): WatchHandle;
+    watchHits(callback: (hits: Hit[]) => void, opts?: WatchHitsOptions): WatchHandle;
     watchIds(callback: (ids: string[]) => void, opts?: WatchOptions): WatchHandle;
     weakComponents(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
     where(filter: QueryFilter): QueryBuilder<TResult>;
@@ -633,6 +698,8 @@ export interface SearchOptions {
     // (undocumented)
     readonly phrase?: readonly string[];
     // (undocumented)
+    readonly prefix?: boolean;
+    // (undocumented)
     readonly requireAll?: boolean;
     // (undocumented)
     readonly topK?: number;
@@ -683,6 +750,8 @@ export interface TemporaryDatabases {
     open(options?: Omit<DatabaseOptions, 'path'>): TemporaryDatabaseHandle;
 }
 
+export { TransactOptions }
+
 // @public
 export interface WatchController {
     readonly activeCount: number;
@@ -701,6 +770,10 @@ export interface WatchHandle {
     readonly id: number;
     // (undocumented)
     stop(): void;
+}
+
+// @public
+export interface WatchHitsOptions extends WatchOptions, HitsOptions {
 }
 
 // @public

@@ -8,6 +8,9 @@ import {
   createEarsEngine,
   encodeBatch,
   isEarsError,
+  type EarsOperation,
+  type EarsOperationObserver,
+  type EarsOperationResult,
   type Schema,
 } from '../src/index.ts';
 import {
@@ -264,5 +267,124 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     } finally {
       fs.rmSync(dumpFile, { force: true });
     }
+  });
+
+  it('supports nested transact(), RYOW, counters, runBeforeCommit: false, and EarsOperationObserver', () => {
+    const events: Array<{ op: EarsOperation; res: EarsOperationResult }> = [];
+    const observer: EarsOperationObserver = {
+      start(op) {
+        return (res) => {
+          events.push({ op, res });
+        };
+      },
+    };
+
+    const handle = temps.open({ schema: baseSchema });
+    const engine = createEarsEngine({ database: handle.database, observer });
+
+    const watchSnapshots: number[] = [];
+    const watch = engine.query.of('Task').watchCount((n) => watchSnapshots.push(n), { minGapMs: 0 });
+    expect(watchSnapshots).toEqual([0]);
+
+    let hookCount = 0;
+    let hookSeq: number | undefined;
+    const unsub = engine.beforeCommit(['Task'], (delta) => {
+      hookCount++;
+      hookSeq = delta.commitSeq;
+      expect(engine.pendingCommitSeq()).toBe(delta.commitSeq);
+      // RYOW inside beforeCommit sees outer + committed inner writes, NOT rolled-back inner writes
+      expect(engine.get('t-outer')).not.toBeNull();
+      expect(engine.get('t-inner-ok')).not.toBeNull();
+      expect(engine.get('t-inner-abort')).toBeNull();
+      engine.nextCounter('HOOK');
+    });
+
+    class DomainAbortError extends Error {
+      readonly tag = 'domain';
+    }
+
+    const result = engine.transact(() => {
+      const seq = engine.pendingCommitSeq();
+      expect(typeof seq).toBe('number');
+      expect(engine.nextCounter('TASK')).toBe(1);
+      engine.create('Task', { title: 'Outer', done: false }, 't-outer');
+
+      engine.transact(() => {
+        expect(engine.nextCounter('TASK')).toBe(2);
+        engine.create('Task', { title: 'Inner OK', done: false }, 't-inner-ok');
+      });
+
+      // Inner abort rolls back ONLY inner savepoint and preserves DomainAbortError verbatim!
+      let caughtInner: unknown;
+      try {
+        engine.transact(() => {
+          expect(engine.nextCounter('TASK')).toBe(3);
+          engine.create('Task', { title: 'Inner Abort', done: false }, 't-inner-abort');
+          expect(engine.get('t-inner-abort')).not.toBeNull();
+          throw new DomainAbortError('inner rollback');
+        });
+      } catch (err) {
+        caughtInner = err;
+      }
+      expect(caughtInner).toBeInstanceOf(DomainAbortError);
+      expect((caughtInner as DomainAbortError).tag).toBe('domain');
+      expect(engine.get('t-inner-abort')).toBeNull();
+      expect(engine.getCounter('TASK')).toBe(2);
+      expect(engine.query.of('Task').count()).toBe(2);
+      expect(hookCount).toBe(0);
+      return seq;
+    });
+
+    expect(engine.pendingCommitSeq()).toBeNull();
+    expect(hookCount).toBe(1);
+    expect(hookSeq).toBe(result);
+    expect(engine.getCounter('TASK')).toBe(2);
+    expect(engine.getCounter('HOOK')).toBe(1);
+
+    // WatchPump is notified once outermost transact commits
+    expect(engine.watches.settled()).toBe(false);
+    engine.watches.flushSync(Date.now() + 100);
+    expect(watchSnapshots).toEqual([0, 2]);
+    expect(engine.watches.settled()).toBe(true);
+
+    // Returning a Promise from transact aborts immediately with ASYNC_CALLBACK_FORBIDDEN
+    let asyncErr: unknown;
+    try {
+      engine.transact((async () => {
+        engine.nextCounter('TASK');
+        engine.create('Task', { title: 'Should rollback', done: false }, 't-async');
+      }) as unknown as () => void);
+    } catch (err) {
+      asyncErr = err;
+    }
+    expect(isEarsError(asyncErr)).toBe(true);
+    expect((asyncErr as EarsError).code).toBe('ASYNC_CALLBACK_FORBIDDEN');
+    expect(engine.get('t-async')).toBeNull();
+    expect(engine.getCounter('TASK')).toBe(2);
+
+    // { runBeforeCommit: false } skips hooks (for projection catch-up chunks)
+    engine.transact(
+      () => {
+        engine.setCounter('IMPORT', 77);
+        engine.create('Task', { title: 'No hook', done: true }, 't-no-hook');
+      },
+      { runBeforeCommit: false },
+    );
+    expect(hookCount).toBe(1);
+    expect(engine.getCounter('IMPORT')).toBe(77);
+
+    // Observer telemetry checks: unit spans, inUnit reads/writes, watch reads, aborted unit
+    const unitSpans = events.filter((e) => e.op.kind === 'unit');
+    expect(unitSpans.length).toBe(3); // outer ok, async aborted, runBeforeCommit:false ok
+    expect(unitSpans[0]?.res.outcome).toBe('ok');
+    expect(unitSpans[0]?.res.sequence).toBe(result);
+    expect(unitSpans[1]?.res.outcome).toBe('aborted');
+    expect(unitSpans[1]?.res.errorCode).toBe('ASYNC_CALLBACK_FORBIDDEN');
+    expect(events.some((e) => e.op.kind === 'read' && e.op.inUnit)).toBe(true);
+    expect(events.some((e) => e.op.kind === 'write' && e.op.inUnit)).toBe(true);
+    expect(events.some((e) => e.op.kind === 'read' && e.op.watch)).toBe(true);
+
+    unsub();
+    watch.stop();
   });
 });

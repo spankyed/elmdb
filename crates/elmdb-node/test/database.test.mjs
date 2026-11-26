@@ -163,3 +163,108 @@ test('open, schema evolution, O(1) rename, archive & purge, backup, dump/load, a
   db.close();
   assert.throws(() => db.stats(), (err) => err.code === 'CLOSED');
 });
+
+test('transact nested savepoints, RYOW, counters, runBeforeCommit: false, and Promise rejection', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'elmdb-v2-txn-'));
+  const dir = join(tmp, 'main');
+  const db = Database.open(dir, { schema: baseSchema, durability: 'strict', buildPolicy: 'eager' });
+  t.after(() => {
+    try { db.close(); } catch { /* already closed */ }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  assert.equal(db.pendingCommitSeq(), null);
+  assert.equal(db.getCounter('NOTE'), 0);
+
+  let hookRuns = 0;
+  let hookSawSeq = null;
+  let hookSawOuter = false;
+  const hid = db.registerBeforeCommit(['Note'], (delta) => {
+    hookRuns++;
+    hookSawSeq = delta.commitSeq;
+    assert.equal(db.pendingCommitSeq(), delta.commitSeq);
+    hookSawOuter = db.get('n-outer') !== null && db.get('n-inner-abort') === null;
+    db.nextCounter('HOOK');
+    return null;
+  });
+
+  // Outer + nested savepoints + RYOW + custom Error preservation!
+  class CustomRollbackError extends Error {
+    constructor(msg) {
+      super(msg);
+      this.customTag = 'keep-me';
+    }
+  }
+
+  const ret = db.transact(() => {
+    const seq = db.pendingCommitSeq();
+    assert.equal(typeof seq, 'number');
+    assert.equal(db.nextCounter('NOTE'), 1);
+    db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Outer' }, 'n-outer'); }));
+
+    // Inner savepoint commits
+    const innerVal = db.transact(() => {
+      assert.equal(db.nextCounter('NOTE'), 2);
+      db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Inner-OK' }, 'n-inner-ok'); }));
+      return 'ok-inner';
+    });
+    assert.equal(innerVal, 'ok-inner');
+    assert.equal(hookRuns, 0, 'beforeCommit must not run on inner savepoint release');
+
+    // Inner savepoint throws custom Error -> rolled back without losing outer writes!
+    assert.throws(
+      () => db.transact(() => {
+        assert.equal(db.nextCounter('NOTE'), 3);
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Inner-Abort' }, 'n-inner-abort'); }));
+        assert.notEqual(db.get('n-inner-abort'), null);
+        throw new CustomRollbackError('abort inner');
+      }),
+      (err) => err instanceof CustomRollbackError && err.customTag === 'keep-me',
+    );
+
+    assert.equal(db.get('n-inner-abort'), null);
+    assert.equal(db.getCounter('NOTE'), 2);
+    assert.notEqual(db.get('n-outer'), null);
+    assert.notEqual(db.get('n-inner-ok'), null);
+    return { seq, count: db.query({ source: { kind: 'type', typeName: 'Note' }, terminal: { kind: 'count' } }).count };
+  });
+
+  assert.equal(ret.count, 2);
+  assert.equal(db.pendingCommitSeq(), null);
+  assert.equal(hookRuns, 1);
+  assert.equal(hookSawSeq, ret.seq);
+  assert.equal(hookSawOuter, true);
+  assert.equal(db.getCounter('NOTE'), 2);
+  assert.equal(db.getCounter('HOOK'), 1);
+
+  // Async/Promise callback aborts immediately with ASYNC_CALLBACK_FORBIDDEN!
+  assert.throws(
+    () => db.transact(async () => {
+      db.nextCounter('NOTE');
+      db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'AsyncBad' }, 'n-async'); }));
+    }),
+    (err) => err.code === 'ASYNC_CALLBACK_FORBIDDEN',
+  );
+  assert.equal(db.get('n-async'), null);
+  assert.equal(db.getCounter('NOTE'), 2);
+
+  // { runBeforeCommit: false } skips hooks cleanly
+  db.transact(() => {
+    db.setCounter('IMPORT', 99);
+    db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Catchup' }, 'n-catchup'); }));
+  }, { runBeforeCommit: false });
+  assert.equal(hookRuns, 1);
+  assert.equal(db.getCounter('IMPORT'), 99);
+  assert.equal(db.unregisterBeforeCommit(hid), true);
+
+  // Dump & load preserves counters
+  const dumpFile = join(tmp, 'counters.json');
+  db.dump(dumpFile);
+  const loadedDir = join(tmp, 'loaded');
+  Database.load(dumpFile, loadedDir);
+  const loaded = Database.open(loadedDir, { readOnly: true });
+  assert.equal(loaded.getCounter('NOTE'), 2);
+  assert.equal(loaded.getCounter('HOOK'), 1);
+  assert.equal(loaded.getCounter('IMPORT'), 99);
+  loaded.close();
+});

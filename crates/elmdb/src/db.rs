@@ -1,6 +1,7 @@
 //! Unified clean-room elmdb v2 `Database` facade composing:
 //! `elmdb-lmdb` + `elmdb-engine` + `elmdb-projections` + `elmdb-vec` + `elmdb-query` + `elmdb-invalidation`.
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::ops::Deref;
@@ -10,9 +11,9 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use elmdb_engine::{
-    BatchOutcome, BeforeCommitHook, CompiledSchema, Engine, EntityKey, IndexKind, RawSchema, StoredEdge, StoredRow,
-    TxnCtx, lookup_ext_id_in_txn, read_commit_seq, read_relations_in_in_txn, read_relations_out_in_txn,
-    read_stored_row, row::decode_row_header, scan_type_keys,
+    BatchOutcome, BeforeCommitHook, CompiledSchema, Engine, EntityKey, HookRoundSnapshot, IndexKind, MAX_HOOK_ROUNDS,
+    RawSchema, StoredEdge, StoredRow, TxnCtx, TypeMask, list_counters_in_txn, lookup_ext_id_in_txn, read_commit_seq,
+    read_relations_in_in_txn, read_relations_out_in_txn, read_stored_row, row::decode_row_header, scan_type_keys,
 };
 use elmdb_invalidation::{LiveQueryHub, NextDue, TickResult, WatchId, WatchPolicy, hash_result_128};
 use elmdb_lmdb::{LmdbConfig, LmdbStore};
@@ -35,6 +36,68 @@ type EngineHandle = Engine<LmdbStore, OsVfs, SystemClock>;
 const BACKUP_MARKER: &str = ".elmdb-backup";
 
 static NEXT_STAGING_NONCE: AtomicU64 = AtomicU64::new(1);
+static NEXT_DB_ID: AtomicU64 = AtomicU64::new(1);
+/// High bit tag distinguishing host `beforeCommit` hook IDs from engine Rust hook IDs.
+/// Kept at bit 48 so every hook ID stays exact within IEEE-754 JS safe integers (`< 2^53`).
+const HOST_HOOK_ID_FLAG: u64 = 1u64 << 48;
+
+/// Options controlling `Database::transact_scoped`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactOptions {
+    /// Whether `beforeCommit` hooks fire on the outermost commit (default `true`).
+    /// Pass `false` for projection catch-up chunks that must bypass hooks.
+    pub run_before_commit: bool,
+}
+
+impl Default for TransactOptions {
+    fn default() -> Self {
+        Self { run_before_commit: true }
+    }
+}
+
+/// Entity delta record delivered to host/JS `beforeCommit` hooks.
+#[derive(Debug, Clone)]
+pub struct HostEntityDelta {
+    pub id: String,
+    pub type_name: String,
+    pub op: &'static str,
+}
+
+/// Edge delta record delivered to host/JS `beforeCommit` hooks.
+#[derive(Debug, Clone)]
+pub struct HostEdgeDelta {
+    pub rel_kind: String,
+    pub op: &'static str,
+    pub source_id: String,
+    pub target_id: String,
+}
+
+/// Per-round delta payload delivered to host/JS `beforeCommit` hooks (with pending `commit_seq`).
+#[derive(Debug, Clone)]
+pub struct HostHookDelta {
+    pub commit_seq: u64,
+    pub entities: Vec<HostEntityDelta>,
+    pub edges: Vec<HostEdgeDelta>,
+}
+
+/// Host/JS synchronous `beforeCommit` callback invoked while the active transaction savepoint is parked
+/// on the calling thread, allowing full RYOW `get`, `query`, `next_counter`, and `pending_commit_seq`.
+pub type HostBeforeCommitFn = Arc<dyn Fn(&HostHookDelta) -> Result<Option<Vec<u8>>> + Send + Sync>;
+
+struct RegisteredHostHook {
+    id: u64,
+    wants: TypeMask,
+    callback: HostBeforeCommitFn,
+}
+
+struct ActiveTxnSlot {
+    ctx: TxnCtx<'static, LmdbStore, OsVfs, SystemClock>,
+    depth: usize,
+}
+
+thread_local! {
+    static ACTIVE_TXNS: RefCell<HashMap<u64, ActiveTxnSlot>> = RefCell::new(HashMap::new());
+}
 
 fn now_unix_ms() -> u64 {
     u64::try_from(SystemClock::default().now_ms()).unwrap_or(0)
@@ -88,10 +151,13 @@ struct CloseSync {
 /// `Condvar` drain guarantees `close()` / `close_at_exit()` drops `LmdbStore` (`mdb_env_close`)
 /// deterministically once active operations drain, releasing macOS LMDB named POSIX semaphores.
 pub struct Database {
+    id: u64,
     engine: RwLock<Option<Arc<EngineHandle>>>,
     registry: Arc<ProjectionRegistry<LmdbStore, OsVfs>>,
     query_engine: QueryEngine,
     hub: LiveQueryHub,
+    host_hooks: Mutex<Vec<RegisteredHostHook>>,
+    next_host_hook_id: AtomicU64,
     dir: PathBuf,
     read_only: bool,
     open_report: OpenReport,
@@ -179,10 +245,13 @@ impl Database {
         let hub = LiveQueryHub::from_engine(&engine, opts.watch_turn_slice_ms)?;
 
         Ok(Self {
+            id: NEXT_DB_ID.fetch_add(1, Ordering::Relaxed),
             engine: RwLock::new(Some(Arc::new(engine))),
             registry,
             query_engine: QueryEngine::new(opts.plan_cache_capacity),
             hub,
+            host_hooks: Mutex::new(Vec::new()),
+            next_host_hook_id: AtomicU64::new(1),
             dir,
             read_only: opts.read_only,
             open_report: OpenReport::from(&report),
@@ -223,6 +292,54 @@ impl Database {
         Ok(())
     }
 
+    #[inline]
+    fn has_active_txn(&self) -> bool {
+        ACTIVE_TXNS.with(|m| m.borrow().contains_key(&self.id))
+    }
+
+    #[inline]
+    fn forbid_inside_txn(&self, op_name: &str) -> Result<()> {
+        if self.has_active_txn() {
+            return Err(ElmdbError::new(
+                ErrorCode::InvalidArgument,
+                format!("'{op_name}' cannot be called inside an active transact() or beforeCommit hook"),
+            ));
+        }
+        Ok(())
+    }
+
+    fn with_active_ctx<R>(
+        &self,
+        f: impl FnOnce(&TxnCtx<'static, LmdbStore, OsVfs, SystemClock>) -> Result<R>,
+    ) -> Result<R> {
+        ACTIVE_TXNS.with(|m| {
+            let map = m.borrow();
+            let slot = map
+                .get(&self.id)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "expected active transaction on calling thread"))?;
+            f(&slot.ctx)
+        })
+    }
+
+    fn with_active_ctx_mut<R>(
+        &self,
+        f: impl FnOnce(&mut TxnCtx<'static, LmdbStore, OsVfs, SystemClock>) -> Result<R>,
+    ) -> Result<R> {
+        ACTIVE_TXNS.with(|m| {
+            let mut map = m.borrow_mut();
+            let slot = map
+                .get_mut(&self.id)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "expected active transaction on calling thread"))?;
+            f(&mut slot.ctx)
+        })
+    }
+
+    /// Returns the pending monotonic commit sequence number if currently inside `transact()` or `beforeCommit`,
+    /// or `None` outside an active write transaction.
+    pub fn pending_commit_seq(&self) -> Option<u64> {
+        ACTIVE_TXNS.with(|m| m.borrow().get(&self.id).map(|slot| slot.ctx.commit_seq()))
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -252,6 +369,9 @@ impl Database {
 
     pub fn schema(&self) -> Result<Arc<CompiledSchema>> {
         let eng = self.enter_op()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx(|ctx| Ok(Arc::clone(ctx.schema())));
+        }
         Ok(eng.schema())
     }
 
@@ -264,6 +384,7 @@ impl Database {
     pub fn set_raw_schema(&self, raw: &RawSchema) -> Result<SchemaChange> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("setSchema")?;
         let (compiled, diff) = eng.set_schema(raw)?;
         let (ro, _) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
@@ -277,6 +398,7 @@ impl Database {
     pub fn rename_type(&self, old_type: &str, new_type: &str, rewrite_ids: bool) -> Result<u64> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("renameType")?;
         let compiled = eng.rename_type(old_type, new_type, rewrite_ids)?;
         let (ro, _) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
@@ -290,6 +412,7 @@ impl Database {
     pub fn rename_field(&self, type_name: &str, old_field: &str, new_field: &str) -> Result<u64> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("renameField")?;
         let compiled = eng.rename_field(type_name, old_field, new_field)?;
         let (ro, _) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
@@ -303,6 +426,7 @@ impl Database {
     pub fn rename_relation(&self, old_rel: &str, new_rel: &str) -> Result<u64> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("renameRelation")?;
         let compiled = eng.rename_relation(old_rel, new_rel)?;
         let (ro, _) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
@@ -313,15 +437,220 @@ impl Database {
         Ok(compiled.epoch)
     }
 
-    /// Executes an atomic batch of `WireOp` mutations, automatically notifying live watches on commit.
+    /// Runs a strictly-synchronous callback inside an atomic LMDB write transaction with native nested savepoints.
+    ///
+    /// - Outer `transact_scoped`: opens an LMDB `RwTxn`, runs `f()`, runs `beforeCommit` hooks ONCE on commit
+    ///   (unless `opts.run_before_commit == false`), commits atomically, and notifies `LiveQueryHub` once.
+    /// - Nested `transact_scoped` (called re-entrantly on the same thread & database): opens a native LMDB
+    ///   savepoint; returning `Err` rolls back ONLY the inner savepoint while outer writes stay visible via RYOW.
+    ///   `beforeCommit` never fires on inner savepoint release.
+    pub fn transact_scoped<R>(&self, opts: TransactOptions, f: impl FnOnce() -> Result<R>) -> Result<R> {
+        let eng = self.enter_op()?;
+        self.require_writable()?;
+
+        if self.has_active_txn() {
+            let sp_depth = ACTIVE_TXNS.with(|m| -> Result<u32> {
+                let mut map = m.borrow_mut();
+                let slot = map.get_mut(&self.id).expect("active txn");
+                let depth = slot.ctx.push_savepoint()?;
+                slot.depth += 1;
+                Ok(depth)
+            })?;
+
+            struct NestedGuard {
+                db_id: u64,
+                sp_depth: u32,
+                armed: bool,
+            }
+            impl Drop for NestedGuard {
+                fn drop(&mut self) {
+                    if self.armed {
+                        let _ = ACTIVE_TXNS.try_with(|m| {
+                            if let Ok(mut map) = m.try_borrow_mut()
+                                && let Some(slot) = map.get_mut(&self.db_id)
+                            {
+                                slot.ctx.abort_savepoint(self.sp_depth);
+                                slot.depth = slot.depth.saturating_sub(1);
+                            }
+                        });
+                    }
+                }
+            }
+
+            let mut guard = NestedGuard { db_id: self.id, sp_depth, armed: true };
+            let res = f();
+            guard.armed = false;
+            return match res {
+                Ok(val) => {
+                    ACTIVE_TXNS.with(|m| -> Result<()> {
+                        let mut map = m.borrow_mut();
+                        let slot = map.get_mut(&self.id).expect("active txn");
+                        let commit_res = slot.ctx.commit_savepoint(sp_depth);
+                        slot.depth = slot.depth.saturating_sub(1);
+                        commit_res
+                    })?;
+                    Ok(val)
+                }
+                Err(err) => {
+                    ACTIVE_TXNS.with(|m| {
+                        let mut map = m.borrow_mut();
+                        if let Some(slot) = map.get_mut(&self.id) {
+                            slot.ctx.abort_savepoint(sp_depth);
+                            slot.depth = slot.depth.saturating_sub(1);
+                        }
+                    });
+                    Err(err)
+                }
+            };
+        }
+
+        // Outermost transaction on this thread: open owned RwTxn and install RAII guard.
+        let ctx = eng.engine.begin_owned_txn()?;
+        ACTIVE_TXNS.with(|m| {
+            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx, depth: 1 });
+        });
+
+        struct OuterGuard {
+            db_id: u64,
+            armed: bool,
+        }
+        impl Drop for OuterGuard {
+            fn drop(&mut self) {
+                if self.armed {
+                    let _ = ACTIVE_TXNS.try_with(|m| {
+                        if let Ok(mut map) = m.try_borrow_mut() {
+                            // Dropping `ActiveTxnSlot` aborts the root LMDB RwTxn and releases WriterLock.
+                            let _ = map.remove(&self.db_id);
+                        }
+                    });
+                }
+            }
+        }
+
+        let mut guard = OuterGuard { db_id: self.id, armed: true };
+        let value = f()?;
+        if opts.run_before_commit {
+            self.run_combined_hook_cascade(&eng.engine)?;
+        }
+        guard.armed = false;
+        let slot = ACTIVE_TXNS
+            .with(|m| m.borrow_mut().remove(&self.id))
+            .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
+        let committed = slot.ctx.finish_and_commit(true)?;
+        if let Some((_seq, _receipt, Some(ref sum))) = committed {
+            self.hub.notify_commit(&eng.schema(), sum, now_unix_ms());
+        }
+        Ok(value)
+    }
+
+    fn run_combined_hook_cascade(&self, eng: &EngineHandle) -> Result<()> {
+        for round in 0..=MAX_HOOK_ROUNDS {
+            let round_snap = self.with_active_ctx_mut(|ctx| ctx.take_hook_round())?;
+            let Some(snap) = round_snap else {
+                return Ok(());
+            };
+            let matching_host: Vec<HostBeforeCommitFn> = {
+                let guard = self.host_hooks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard
+                    .iter()
+                    .filter(|h| h.wants.intersects(&snap.touched_types))
+                    .map(|h| Arc::clone(&h.callback))
+                    .collect()
+            };
+            let has_rust = eng.has_matching_hooks(&snap.touched_types);
+            if matching_host.is_empty() && !has_rust {
+                self.with_active_ctx_mut(|ctx| ctx.finish_hook_round())?;
+                return Ok(());
+            }
+            if round == MAX_HOOK_ROUNDS {
+                return Err(ElmdbError::new(
+                    ErrorCode::HookCycleLimit,
+                    format!("beforeCommit hook cascade exceeded {MAX_HOOK_ROUNDS} rounds"),
+                ));
+            }
+            let sp = self.with_active_ctx_mut(|ctx| ctx.push_savepoint())?;
+            let host_delta = if !matching_host.is_empty() {
+                Some(self.with_active_ctx(|ctx| build_host_hook_delta(ctx, &snap))?)
+            } else {
+                None
+            };
+            if has_rust
+                && let Err(err) = self.with_active_ctx_mut(|ctx| ctx.run_rust_hooks_for_round(&snap.touched_types))
+            {
+                let _ = self.with_active_ctx_mut(|ctx| {
+                    ctx.abort_savepoint(sp);
+                    Ok(())
+                });
+                return Err(err);
+            }
+            if let Some(ref delta) = host_delta {
+                for cb in matching_host {
+                    // No RefCell borrow is held while calling `cb`, so JS hooks can freely call
+                    // `get`, `query`, `nextCounter`, `pendingCommitSeq`, `executeWireBatch`, and nested `transact`!
+                    match cb(delta) {
+                        Ok(Some(wire_bytes)) => {
+                            let apply_res = decode_batch(&wire_bytes).and_then(|dec| {
+                                self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(&dec.ops).map(|_| ()))
+                            });
+                            if let Err(err) = apply_res {
+                                let _ = self.with_active_ctx_mut(|ctx| {
+                                    ctx.abort_savepoint(sp);
+                                    Ok(())
+                                });
+                                return Err(err);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(err) => {
+                            let _ = self.with_active_ctx_mut(|ctx| {
+                                ctx.abort_savepoint(sp);
+                                Ok(())
+                            });
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+            self.with_active_ctx_mut(|ctx| {
+                ctx.finish_hook_round()?;
+                ctx.commit_savepoint(sp)
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Executes an atomic batch of `WireOp` mutations, automatically joining an active `transact_scoped`
+    /// (with instant RYOW projection flushing) or running as its own atomic transaction.
     pub fn execute_batch(&self, ops: &[WireOp]) -> Result<BatchOutcome> {
         let eng = self.enter_op()?;
         self.require_writable()?;
-        let outcome = eng.execute_batch(ops)?;
-        if let Some(ref sum) = outcome.summary {
-            self.hub.notify_commit(&eng.schema(), sum, now_unix_ms());
+        if self.has_active_txn() {
+            return self.with_active_ctx_mut(|ctx| {
+                let created_ids = ctx.exec_batch_and_flush(ops)?;
+                Ok(BatchOutcome {
+                    commit_seq: ctx.commit_seq(),
+                    receipt: elmdb_storage::CommitReceipt { txnid: 0, roots_sha256: [0u8; 32] },
+                    created_ids,
+                    summary: None,
+                })
+            });
         }
-        Ok(outcome)
+        // Single choke point: standalone batches also route through `transact_scoped` so host/JS
+        // `beforeCommit` hooks enjoy identical RYOW `get`/`query`/`nextCounter`/`pendingCommitSeq`!
+        let mut out_seq = 0u64;
+        let created_ids = self.transact_scoped(TransactOptions::default(), || {
+            self.with_active_ctx_mut(|ctx| {
+                out_seq = ctx.commit_seq();
+                ctx.exec_batch_and_flush(ops)
+            })
+        })?;
+        let txnid = eng.gate().last_txnid()?;
+        Ok(BatchOutcome {
+            commit_seq: out_seq,
+            receipt: elmdb_storage::CommitReceipt { txnid, roots_sha256: [0u8; 32] },
+            created_ids,
+            summary: None,
+        })
     }
 
     /// Decodes a binary `elmdb-wire` batch buffer, executes it atomically, and returns `BatchResult`.
@@ -335,13 +664,44 @@ impl Database {
         })
     }
 
-    /// Runs an atomic read-write closure inside a single LMDB write transaction.
+    /// Atomically increments generic transactional counter `name` (`1, 2, ...`).
+    /// Joins active `transact_scoped` / `beforeCommit` savepoints and rolls back cleanly on abort.
+    pub fn next_counter(&self, name: &str) -> Result<u64> {
+        let eng = self.enter_op()?;
+        self.require_writable()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx_mut(|ctx| ctx.next_counter(name));
+        }
+        eng.next_counter(name)
+    }
+
+    /// Reads generic transactional counter `name` (`0` if unset), seeing uncommitted writes inside `transact`.
+    pub fn get_counter(&self, name: &str) -> Result<u64> {
+        let eng = self.enter_op()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx(|ctx| ctx.get_counter(name));
+        }
+        eng.get_counter(name)
+    }
+
+    /// Sets generic transactional counter `name` to `value` (rolls back on savepoint/txn abort).
+    pub fn set_counter(&self, name: &str, value: u64) -> Result<()> {
+        let eng = self.enter_op()?;
+        self.require_writable()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx_mut(|ctx| ctx.set_counter(name, value));
+        }
+        eng.set_counter(name, value)
+    }
+
+    /// Runs an atomic read-write closure inside a single LMDB write transaction (Rust `&mut TxnCtx` API).
     pub fn transact<R>(
         &self,
         f: impl FnOnce(&mut TxnCtx<'_, LmdbStore, OsVfs, SystemClock>) -> Result<R>,
     ) -> Result<R> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("transact")?;
         let (res, _receipt) = eng.transact(f)?;
         self.hub.catch_up_cross_process(&eng, now_unix_ms())?;
         Ok(res)
@@ -353,7 +713,24 @@ impl Database {
         Ok(eng.register_before_commit(hook))
     }
 
+    /// Registers a host/JS `beforeCommit` hook that runs with the active transaction parked on the thread,
+    /// enabling full RYOW `get`, `query`, `next_counter`, and `pending_commit_seq` inside the callback.
+    pub fn register_host_before_commit(&self, wants: TypeMask, callback: HostBeforeCommitFn) -> Result<u64> {
+        let _eng = self.enter_op()?;
+        self.require_writable()?;
+        let id = HOST_HOOK_ID_FLAG | self.next_host_hook_id.fetch_add(1, Ordering::Relaxed);
+        let mut guard = self.host_hooks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.push(RegisteredHostHook { id, wants, callback });
+        Ok(id)
+    }
+
     pub fn unregister_before_commit(&self, id: u64) -> bool {
+        if (id & HOST_HOOK_ID_FLAG) != 0 {
+            let mut guard = self.host_hooks.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let before = guard.len();
+            guard.retain(|h| h.id != id);
+            return guard.len() != before;
+        }
         let Ok(eng) = self.enter_op() else {
             return false;
         };
@@ -362,35 +739,38 @@ impl Database {
 
     pub fn get_row(&self, ext_id: &str) -> Result<Option<StoredRow>> {
         let eng = self.enter_op()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx(|ctx| ctx.get_row(ext_id));
+        }
         eng.get_row(ext_id)
     }
 
-    /// Reads one entity row and resolves all `EntityRef` fields inside ONE single pinned MVCC snapshot.
+    /// Reads one entity row and resolves all `EntityRef` fields inside ONE single pinned snapshot (or active txn).
     pub fn get_row_resolved(&self, ext_id: &str) -> Result<Option<Row>> {
         let eng = self.enter_op()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx(|ctx| read_row_resolved_in_txn(ctx.txn(), ctx.schema(), &ctx.dbs(), ext_id));
+        }
         let (ro, schema) = eng.begin_read_pinned()?;
-        let dbs = eng.dbs();
-        let Some(ek) = lookup_ext_id_in_txn(&ro, &dbs, ext_id)? else {
-            return Ok(None);
-        };
-        let Some(stored) = read_stored_row(&ro, &schema, &dbs, ek)? else {
-            return Ok(None);
-        };
-        let mut cache: HashMap<EntityKey, String> = HashMap::new();
-        let mut resolve_key = |k: EntityKey| -> Result<String> {
-            if let Some(cached) = cache.get(&k) {
-                return Ok(cached.clone());
-            }
-            let resolved = lookup_key_ext_id_in_txn(&ro, &dbs, k)?.unwrap_or_else(|| format!("__deleted:{}", k.0));
-            cache.insert(k, resolved.clone());
-            Ok(resolved)
-        };
-        Ok(Some(Row::from_stored_resolved(&stored, &mut resolve_key)?))
+        read_row_resolved_in_txn(&ro, &schema, &eng.dbs(), ext_id)
     }
 
-    /// Reads edges for `ext_id` inside ONE single pinned MVCC snapshot.
+    /// Reads edges for `ext_id` inside ONE single pinned snapshot (or active txn).
     pub fn get_edges(&self, ext_id: &str, rel_kind: Option<&str>, dir: EdgeDir) -> Result<Vec<StoredEdge>> {
         let eng = self.enter_op()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx(|ctx| {
+                let dbs = ctx.dbs();
+                let mut out = Vec::new();
+                if matches!(dir, EdgeDir::Out | EdgeDir::Both) {
+                    out.extend(read_relations_out_in_txn(ctx.txn(), ctx.schema(), &dbs, ext_id, rel_kind)?);
+                }
+                if matches!(dir, EdgeDir::In | EdgeDir::Both) {
+                    out.extend(read_relations_in_in_txn(ctx.txn(), ctx.schema(), &dbs, ext_id, rel_kind)?);
+                }
+                Ok(out)
+            });
+        }
         let (ro, schema) = eng.begin_read_pinned()?;
         let dbs = eng.dbs();
         let mut out = Vec::new();
@@ -403,38 +783,16 @@ impl Database {
         Ok(out)
     }
 
-    /// Reads edges for `ext_id` and resolves all endpoint `EntityKey -> ext_id` inside ONE single pinned MVCC snapshot.
+    /// Reads edges for `ext_id` and resolves all endpoint `EntityKey -> ext_id` inside ONE single pinned snapshot (or active txn).
     pub fn get_edges_resolved(&self, ext_id: &str, rel_kind: Option<&str>, dir: EdgeDir) -> Result<Vec<RelationRow>> {
         let eng = self.enter_op()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx(|ctx| {
+                read_edges_resolved_in_txn(ctx.txn(), ctx.schema(), &ctx.dbs(), ext_id, rel_kind, dir)
+            });
+        }
         let (ro, schema) = eng.begin_read_pinned()?;
-        let dbs = eng.dbs();
-        let mut raw = Vec::new();
-        if matches!(dir, EdgeDir::Out | EdgeDir::Both) {
-            raw.extend(read_relations_out_in_txn(&ro, &schema, &dbs, ext_id, rel_kind)?);
-        }
-        if matches!(dir, EdgeDir::In | EdgeDir::Both) {
-            raw.extend(read_relations_in_in_txn(&ro, &schema, &dbs, ext_id, rel_kind)?);
-        }
-        let mut cache: HashMap<EntityKey, String> = HashMap::new();
-        let mut out = Vec::with_capacity(raw.len());
-        for e in &raw {
-            let src_id = if let Some(s) = cache.get(&e.src) {
-                s.clone()
-            } else {
-                let s = lookup_key_ext_id_in_txn(&ro, &dbs, e.src)?.unwrap_or_else(|| format!("__deleted:{}", e.src.0));
-                cache.insert(e.src, s.clone());
-                s
-            };
-            let dst_id = if let Some(s) = cache.get(&e.dst) {
-                s.clone()
-            } else {
-                let s = lookup_key_ext_id_in_txn(&ro, &dbs, e.dst)?.unwrap_or_else(|| format!("__deleted:{}", e.dst.0));
-                cache.insert(e.dst, s.clone());
-                s
-            };
-            out.push(RelationRow::from_stored(e, src_id, dst_id));
-        }
-        Ok(out)
+        read_edges_resolved_in_txn(&ro, &schema, &eng.dbs(), ext_id, rel_kind, dir)
     }
 
     /// Sets primary vector embeddings for `ext_id` on `index_name` (O(1) commit into `embeddings` + `vec_pending`),
@@ -442,6 +800,7 @@ impl Database {
     pub fn set_embeddings(&self, index_name: &str, ext_id: &str, vectors: &[Vec<f32>]) -> Result<()> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("setEmbeddings")?;
         let schema = eng.schema();
         let def = schema
             .indexes
@@ -474,9 +833,21 @@ impl Database {
     }
 
     /// Parses a string-named `QuerySpec` once at the boundary, executes it inside a single pinned MVCC
-    /// snapshot, and materializes the external string-ID `QueryAnswer` with cached `EntityKey -> ext_id` lookups.
+    /// snapshot (or active `transact()` for full RYOW), and materializes the external string-ID `QueryAnswer`.
     pub fn execute_query_spec(&self, spec: &QuerySpec, budgets: ExecBudgets<'_>) -> Result<QueryAnswer> {
         let eng = self.enter_op()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx(|ctx| {
+                let dbs = ctx.dbs();
+                let schema = ctx.schema();
+                let txn = ctx.txn();
+                let plan = compile_query_spec(schema, spec, |ext_id| lookup_ext_id_in_txn(txn, &dbs, ext_id))?;
+                let mut noop = elmdb_query::NoopReadRecorder;
+                let out = self.query_engine.execute_in_txn(&eng, txn, schema, &plan, budgets, &mut noop)?;
+                let explain = spec.explain.then_some(&out.explain);
+                materialize_query_answer(schema, out.result, explain, |ek| lookup_key_ext_id_in_txn(txn, &dbs, ek))
+            });
+        }
         let (ro, schema) = eng.begin_read_pinned()?;
         let dbs = eng.dbs();
         let plan = compile_query_spec(&schema, spec, |ext_id| lookup_ext_id_in_txn(&ro, &dbs, ext_id))?;
@@ -595,6 +966,7 @@ impl Database {
     pub fn drive_background_work(&self, max_entities: usize) -> Result<bool> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("driveBackgroundWork")?;
         let mut more = false;
         let mut rebuilt_any = false;
         let mut touched_slots: Vec<u16> = Vec::new();
@@ -648,6 +1020,7 @@ impl Database {
     /// and fsyncs cleanly.
     pub fn flush(&self) -> Result<()> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("flush")?;
         self.require_writable()?;
         let mut built_any = false;
         while self.registry.drive_build_chunk(&eng, 2048)? {
@@ -722,6 +1095,7 @@ impl Database {
     pub fn rebuild(&self, index_name: Option<&str>) -> Result<()> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("rebuild")?;
         let schema = eng.schema();
         let idx_id = match index_name {
             Some(name) => {
@@ -747,6 +1121,7 @@ impl Database {
     pub fn purge_archived(&self, type_name: &str) -> Result<u64> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("purgeArchived")?;
         let (purged, _receipt) =
             eng.transact(|tx| {
                 let td =
@@ -805,6 +1180,7 @@ impl Database {
     /// swapping atomically when replacing an existing backup so crashes never destroy the previous backup.
     pub fn backup_into(&self, target: impl AsRef<Path>, into: BackupInto) -> Result<()> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("backup")?;
         let target = target.as_ref();
         let target_existed = target.exists();
         if target_existed {
@@ -884,6 +1260,9 @@ impl Database {
     /// syncs if drained & writable, and immediately drops the underlying `Engine<LmdbStore>` (`mdb_env_close`).
     /// Concurrent `close()` callers wait until closing finishes instead of returning prematurely.
     fn close_inner(&self, timeout: Option<Duration>, propagate_sync_err: bool) -> Result<()> {
+        if propagate_sync_err {
+            self.forbid_inside_txn("close")?;
+        }
         if self.closed.swap(true, Ordering::SeqCst) {
             let mut st = self.close_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             while !st.done {
@@ -985,7 +1364,8 @@ impl Database {
                 }
             }
         }
-        Ok(DumpSnapshot { schema, rows, edges, embeddings })
+        let counters = list_counters_in_txn(&ro, &dbs)?;
+        Ok(DumpSnapshot { schema, rows, edges, embeddings, counters })
     }
 }
 
@@ -994,6 +1374,112 @@ pub(crate) struct DumpSnapshot {
     pub rows: Vec<StoredRow>,
     pub edges: Vec<StoredEdge>,
     pub embeddings: Vec<(String, String, Vec<Vec<f32>>)>,
+    pub counters: BTreeMap<String, u64>,
+}
+
+fn read_row_resolved_in_txn<R: KvRead>(
+    ro: &R,
+    schema: &CompiledSchema,
+    dbs: &elmdb_engine::SystemDbs,
+    ext_id: &str,
+) -> Result<Option<Row>> {
+    let Some(ek) = lookup_ext_id_in_txn(ro, dbs, ext_id)? else {
+        return Ok(None);
+    };
+    let Some(stored) = read_stored_row(ro, schema, dbs, ek)? else {
+        return Ok(None);
+    };
+    let mut cache: HashMap<EntityKey, String> = HashMap::new();
+    let mut resolve_key = |k: EntityKey| -> Result<String> {
+        if let Some(cached) = cache.get(&k) {
+            return Ok(cached.clone());
+        }
+        let resolved = lookup_key_ext_id_in_txn(ro, dbs, k)?.unwrap_or_else(|| format!("__deleted:{}", k.0));
+        cache.insert(k, resolved.clone());
+        Ok(resolved)
+    };
+    Ok(Some(Row::from_stored_resolved(&stored, &mut resolve_key)?))
+}
+
+fn read_edges_resolved_in_txn<R: KvRead>(
+    ro: &R,
+    schema: &CompiledSchema,
+    dbs: &elmdb_engine::SystemDbs,
+    ext_id: &str,
+    rel_kind: Option<&str>,
+    dir: EdgeDir,
+) -> Result<Vec<RelationRow>> {
+    let mut raw = Vec::new();
+    if matches!(dir, EdgeDir::Out | EdgeDir::Both) {
+        raw.extend(read_relations_out_in_txn(ro, schema, dbs, ext_id, rel_kind)?);
+    }
+    if matches!(dir, EdgeDir::In | EdgeDir::Both) {
+        raw.extend(read_relations_in_in_txn(ro, schema, dbs, ext_id, rel_kind)?);
+    }
+    let mut cache: HashMap<EntityKey, String> = HashMap::new();
+    let mut out = Vec::with_capacity(raw.len());
+    for e in &raw {
+        let src_id = if let Some(s) = cache.get(&e.src) {
+            s.clone()
+        } else {
+            let s = lookup_key_ext_id_in_txn(ro, dbs, e.src)?.unwrap_or_else(|| format!("__deleted:{}", e.src.0));
+            cache.insert(e.src, s.clone());
+            s
+        };
+        let dst_id = if let Some(s) = cache.get(&e.dst) {
+            s.clone()
+        } else {
+            let s = lookup_key_ext_id_in_txn(ro, dbs, e.dst)?.unwrap_or_else(|| format!("__deleted:{}", e.dst.0));
+            cache.insert(e.dst, s.clone());
+            s
+        };
+        out.push(RelationRow::from_stored(e, src_id, dst_id));
+    }
+    Ok(out)
+}
+
+fn build_host_hook_delta(
+    ctx: &TxnCtx<'static, LmdbStore, OsVfs, SystemClock>,
+    snap: &HookRoundSnapshot,
+) -> Result<HostHookDelta> {
+    let sc = ctx.schema();
+    let entities =
+        snap.entity_deltas
+            .iter()
+            .map(|d| {
+                let type_name = sc.type_by_id(d.type_id).map(|t| t.name.clone()).unwrap_or_default();
+                let id = d.after.as_ref().or(d.before.as_ref()).map(|r| r.header.ext_id.clone()).unwrap_or_default();
+                let op =
+                    match (&d.before, &d.after) {
+                        (None, Some(_)) => "create",
+                        (Some(_), None) => "destroy",
+                        (Some(b), Some(a)) if b.header.is_trashed() != a.header.is_trashed() => {
+                            if a.header.is_trashed() { "trash" } else { "restore" }
+                        }
+                        _ => "update",
+                    };
+                HostEntityDelta { id, type_name, op }
+            })
+            .collect();
+    let mut edges = Vec::with_capacity(snap.edge_deltas.len());
+    for e in &snap.edge_deltas {
+        let rel_kind = sc.relation_by_id(e.kind).map(|r| r.name.clone()).unwrap_or_default();
+        let op = match (&e.before, &e.after) {
+            (None, Some(_)) => "link",
+            (Some(_), None) => "unlink",
+            _ => "update",
+        };
+        let endpoints = e.after.as_ref().or(e.before.as_ref()).map(|pe| (pe.src, pe.dst));
+        let (source_id, target_id) = match endpoints {
+            Some((src_key, dst_key)) => (
+                ctx.resolve_ext_id(src_key)?.unwrap_or_else(|| format!("__deleted:{}", src_key.0)),
+                ctx.resolve_ext_id(dst_key)?.unwrap_or_else(|| format!("__deleted:{}", dst_key.0)),
+            ),
+            None => (String::new(), String::new()),
+        };
+        edges.push(HostEdgeDelta { rel_kind, op, source_id, target_id });
+    }
+    Ok(HostHookDelta { commit_seq: snap.commit_seq, entities, edges })
 }
 
 fn lookup_key_ext_id_in_txn<R: KvRead>(

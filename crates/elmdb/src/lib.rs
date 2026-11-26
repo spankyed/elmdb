@@ -11,7 +11,10 @@ pub mod diagnostics;
 pub mod dump;
 pub mod protocol;
 
-pub use db::{BackupInto, Database, OpenOptions};
+pub use db::{
+    BackupInto, Database, HostBeforeCommitFn, HostEdgeDelta, HostEntityDelta, HostHookDelta, OpenOptions,
+    TransactOptions,
+};
 pub use elmdb_engine::{
     BatchOutcome, BeforeCommitHook, Cardinality, CompiledSchema, EntityKey, FieldId, FieldMask, HookCtx, IndexId,
     IndexKind, OnDeletePolicy, RawEndpoint, RawField, RawFieldKind, RawIndex, RawIndexKind, RawRelation, RawSchema,

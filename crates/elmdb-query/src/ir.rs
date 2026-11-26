@@ -66,13 +66,41 @@ impl Default for FuseMethod {
 /// Scoring / ranking signal (Operator #3).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScoreSpec {
-    Bm25f { index_id: IndexId, query: String, require_all: bool, phrase: Option<Vec<String>>, top_k: Option<usize> },
-    VectorNear { index_id: IndexId, vector: Vec<f32>, top_k: usize },
-    VectorLike { index_id: IndexId, seed: EntityKey, top_k: usize },
-    RankIndex { index_id: IndexId },
-    FuzzyLabel { field: FieldId, query: String, max_distance: u8 },
-    RecencyDecay { field: FieldId, now_ms: i64, half_life_ms: f64 },
-    Fuse { inputs: Vec<(ScoreSpec, f64)>, method: FuseMethod },
+    Bm25f {
+        index_id: IndexId,
+        query: String,
+        require_all: bool,
+        prefix: bool,
+        phrase: Option<Vec<String>>,
+        top_k: Option<usize>,
+    },
+    VectorNear {
+        index_id: IndexId,
+        vector: Vec<f32>,
+        top_k: usize,
+    },
+    VectorLike {
+        index_id: IndexId,
+        seed: EntityKey,
+        top_k: usize,
+    },
+    RankIndex {
+        index_id: IndexId,
+    },
+    FuzzyLabel {
+        field: FieldId,
+        query: String,
+        max_distance: u8,
+    },
+    RecencyDecay {
+        field: FieldId,
+        now_ms: i64,
+        half_life_ms: f64,
+    },
+    Fuse {
+        inputs: Vec<(ScoreSpec, f64)>,
+        method: FuseMethod,
+    },
 }
 
 /// Graph traversal step (Operator #4).
@@ -144,7 +172,7 @@ pub enum Cursor {
 pub enum TerminalSpec {
     Ids,
     Rows { fields: Option<FieldMask> },
-    Hits,
+    Hits { fields: Option<FieldMask>, highlights: bool },
     Count,
     Exists,
     Sum(FieldId),

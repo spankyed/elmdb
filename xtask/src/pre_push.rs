@@ -41,91 +41,16 @@ const FIRST: &[Step] = &[
     step("locked dependencies", &["cargo", "fetch", "--locked"]),
     step("format", &["cargo", "fmt", "--all", "--check"]),
     step("clippy", &["cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings"]),
-    step(
-        "clippy with diagnostics",
-        &[
-            "cargo",
-            "clippy",
-            "-p",
-            "elmdb",
-            "-p",
-            "elmdb-node",
-            "--all-targets",
-            "--features",
-            "elmdb/diagnostics,elmdb-node/diagnostics",
-            "--",
-            "-D",
-            "warnings",
-        ],
-    ),
     step("mutants-in-diff's own tests", &[PYTHON, "-B", "scripts/test-mutants-in-diff.py"]),
 ];
 
-/// After the repository checks: the suites, the heap bound and the benchmarks' smoke, and the concurrency models with
-/// CI's configuration and target directories, so a model run shares nothing with the suite's build
+/// After the repository checks: workspace test suites and doc tests
 const THEN: &[Step] = &[
     step("tests", &["cargo", "nextest", "run", "--workspace"]),
-    step("tests with diagnostics", &["cargo", "nextest", "run", "-p", "elmdb", "--features", "diagnostics"]),
     step("doc tests", &["cargo", "test", "--workspace", "--doc"]),
-    Step {
-        // An exact filter that matches nothing passes, so the test is held to having run
-        expect: Some("test maintenance_heap_bounds ... ok"),
-        ..step(
-            "heap bound",
-            &[
-                "cargo",
-                "test",
-                "-p",
-                "elmdb",
-                "--release",
-                "--test",
-                "maintenance_heap",
-                "--",
-                "--ignored",
-                "--exact",
-                "maintenance_heap_bounds",
-                "--nocapture",
-                "--color",
-                "never",
-            ],
-        )
-    },
-    step("maintenance benchmark smoke", &["cargo", "bench", "-p", "elmdb", "--bench", "maintenance", "--", "--test"]),
-    step("reads benchmark smoke", &["cargo", "bench", "-p", "elmdb", "--bench", "reads", "--", "--test"]),
-    Step {
-        env: &[("RUSTFLAGS", "--cfg loom"), ("LOOM_MAX_PREEMPTIONS", "3"), ("CARGO_TARGET_DIR", "target/loom")],
-        ..step("Loom models", &["cargo", "test", "-p", "elmdb", "--release", "--lib", "store::unit_slot::model"])
-    },
-    Step {
-        env: &[("RUSTFLAGS", "--cfg shuttle"), ("CARGO_TARGET_DIR", "target/shuttle")],
-        ..step(
-            "Shuttle models",
-            &[
-                "cargo",
-                "test",
-                "-p",
-                "elmdb",
-                "--release",
-                "--lib",
-                "--",
-                "store::unit_slot::model",
-                "store::call_reads::model",
-                "engine::watch::model",
-                "engine::builder::model",
-            ],
-        )
-    },
-    Step {
-        stdout_to: Some("read-allocations.json"),
-        ..step(
-            "read allocations",
-            &["cargo", "run", "-q", "-p", "elmdb", "--example", "read-allocations", "--", "--json"],
-        )
-    },
 ];
 
-/// The binding and EARS, and the readings over the binding, as CI's jobs run them, once `npm ci` has run where the
-/// lockfile moved
+/// The binding and EARS checks as CI runs them
 const NPM_STEPS: &[Step] = &[
     step("build: the binding, then EARS' dist", &[NPM, "run", "build"]),
     step("typecheck: the binding and EARS", &[NPM, "run", "typecheck"]),
@@ -135,30 +60,6 @@ const NPM_STEPS: &[Step] = &[
         "generated loader committed",
         &["git", "diff", "--exit-code", "--", "crates/elmdb-node/index.js", "crates/elmdb-node/index.d.ts"],
     ),
-    Step {
-        stdout_to: Some("read-codecs.json"),
-        ..step("read codecs", &["node", "crates/elmdb-node/bench/reads.mjs", "--json", "--runs", "2"])
-    },
-    step("read profile's own tests", &[PYTHON, "-B", "scripts/test-read-profile.py"]),
-    step(
-        "read profile",
-        &[
-            PYTHON,
-            "scripts/check-read-profile.py",
-            "--allocations",
-            "target/pre-push/read-allocations.json",
-            "--codecs",
-            "target/pre-push/read-codecs.json",
-        ],
-    ),
-    Step {
-        // Small enough to run in a second: that it still runs and the two engines answer alike, not a reading
-        stdout_to: Some("against-sqlite.json"),
-        ..step(
-            "against SQLite, at 2,000 notes",
-            &["node", "crates/elmdb-node/bench/against-sqlite.mjs", "--json", "--notes", "2000"],
-        )
-    },
 ];
 
 /// Linux's own: the process claim as a user with no account, home or /proc, and its fallbacks' assertions

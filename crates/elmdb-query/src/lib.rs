@@ -11,8 +11,8 @@ pub mod optimizer;
 
 pub use cache::{CachedStrategy, DEFAULT_PLAN_CACHE_CAP, PlanCache, PlanCacheStats, PlanShapeKey};
 pub use exec::{
-    BATCH_SIZE, DEFAULT_MAX_HEAP_BYTES, DEFAULT_MAX_TRAVERSAL_VISITED, ExecBudgets, KeyBatch, NoopReadRecorder,
-    ProjectedRow, QueryEngine, QueryOutput, QueryReadRecorder, QueryResult, hash_canonical_value,
+    BATCH_SIZE, DEFAULT_MAX_HEAP_BYTES, DEFAULT_MAX_TRAVERSAL_VISITED, ExecBudgets, HitOutput, KeyBatch,
+    NoopReadRecorder, ProjectedRow, QueryEngine, QueryOutput, QueryReadRecorder, QueryResult, hash_canonical_value,
 };
 pub use graph::{
     CsrGraph, ExactSum, PprResult, TopoResult, adamic_adar_similar, jaccard_similar, leiden_communities, ppr, scc,

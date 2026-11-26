@@ -873,6 +873,9 @@ pub enum QueryScore {
         #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
         require_all: bool,
         #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+        prefix: bool,
+        #[serde(default)]
         #[cfg_attr(feature = "codegen", ts(optional))]
         phrase: Option<Vec<String>>,
         #[serde(default)]
@@ -1028,7 +1031,14 @@ pub enum QueryTerminal {
         #[cfg_attr(feature = "codegen", ts(optional))]
         fields: Option<Vec<String>>,
     },
-    Hits,
+    Hits {
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(optional))]
+        fields: Option<Vec<String>>,
+        #[serde(default)]
+        #[cfg_attr(feature = "codegen", ts(as = "Option<bool>", optional))]
+        highlights: bool,
+    },
     Count,
     Exists,
     Sum {
@@ -1069,12 +1079,23 @@ pub struct QuerySpec {
     pub explain: bool,
 }
 
+/// Single UTF-16 code-unit highlight span `(element_index, utf16_start, utf16_end)`.
+pub type HighlightSpan = (u32, usize, usize);
+/// Per-field UTF-16 search highlight spans map.
+pub type SearchHighlights = BTreeMap<String, Vec<HighlightSpan>>;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "codegen", derive(TS))]
 #[serde(rename_all = "camelCase")]
 pub struct Hit {
     pub id: String,
     pub score: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "codegen", ts(optional))]
+    pub row: Option<Row>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "codegen", ts(optional, type = "Record<string, Array<[number, number, number]>>"))]
+    pub highlights: Option<SearchHighlights>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1570,7 +1591,19 @@ where
                 };
                 TerminalSpec::Rows { fields: mask }
             }
-            QueryTerminal::Hits => TerminalSpec::Hits,
+            QueryTerminal::Hits { fields, highlights } => {
+                let mask = match fields {
+                    Some(names) => {
+                        let mut fm = FieldMask::empty();
+                        for n in names {
+                            fm.insert(resolve_field_id(schema, active_type, n)?);
+                        }
+                        Some(fm)
+                    }
+                    None => None,
+                };
+                TerminalSpec::Hits { fields: mask, highlights: *highlights }
+            }
             QueryTerminal::Count => TerminalSpec::Count,
             QueryTerminal::Exists => TerminalSpec::Exists,
             QueryTerminal::Sum { field } => TerminalSpec::Sum(resolve_field_id(schema, active_type, field)?),
@@ -1677,10 +1710,11 @@ where
     F: FnMut(&str) -> Result<Option<EntityKey>>,
 {
     Ok(match spec {
-        QueryScore::Bm25f { index, query, require_all, phrase, top_k } => ScoreSpec::Bm25f {
+        QueryScore::Bm25f { index, query, require_all, prefix, phrase, top_k } => ScoreSpec::Bm25f {
             index_id: resolve_index_id(schema, active_type, index)?,
             query: query.clone(),
             require_all: *require_all,
+            prefix: *prefix,
             phrase: phrase.clone(),
             top_k: *top_k,
         },
@@ -1756,24 +1790,15 @@ where
         QueryResult::Rows(rows) => {
             let mut out = Vec::with_capacity(rows.len());
             for r in rows {
-                let tdef = schema.type_by_id(r.type_id);
-                let type_name = tdef.map(|t| t.name.clone()).unwrap_or_default();
-                let mut fields = BTreeMap::new();
-                for (fid, val) in &r.fields {
-                    let fname = tdef
-                        .and_then(|t| t.field_by_id(*fid))
-                        .map(|f| f.name.clone())
-                        .unwrap_or_else(|| format!("f{}", fid.0));
-                    fields.insert(fname, canonical_to_json_resolved(val, &mut lookup)?);
-                }
-                out.push(Row { id: r.id, type_name, trashed: r.trashed, fields });
+                out.push(materialize_projected_row(schema, r, &mut lookup)?);
             }
             QueryAnswerBody::Rows { rows: out }
         }
         QueryResult::Hits(hs) => {
             let mut hits = Vec::with_capacity(hs.len());
-            for (k, score) in hs {
-                hits.push(Hit { id: lookup(k)?, score });
+            for h in hs {
+                let row = h.row.map(|r| materialize_projected_row(schema, r, &mut lookup)).transpose()?;
+                hits.push(Hit { id: lookup(h.key)?, score: h.score, row, highlights: h.highlights });
             }
             QueryAnswerBody::Hits { hits }
         }
@@ -1830,7 +1855,7 @@ where
         QueryResult::GraphPpr(p) => {
             let mut scores = Vec::with_capacity(p.scores.len());
             for (k, score) in p.scores {
-                scores.push(Hit { id: lookup(k)?, score });
+                scores.push(Hit { id: lookup(k)?, score, row: None, highlights: None });
             }
             QueryAnswerBody::GraphPpr { scores, converged: p.converged, iterations: p.iterations }
         }
@@ -1842,6 +1867,21 @@ where
         .map_err(|e| ElmdbError::new(ErrorCode::Internal, e.to_string()))?;
 
     Ok(QueryAnswer { body, explain: explain_json })
+}
+
+fn materialize_projected_row<F>(schema: &CompiledSchema, r: elmdb_query::ProjectedRow, lookup: &mut F) -> Result<Row>
+where
+    F: FnMut(EntityKey) -> Result<String>,
+{
+    let tdef = schema.type_by_id(r.type_id);
+    let type_name = tdef.map(|t| t.name.clone()).unwrap_or_default();
+    let mut fields = BTreeMap::new();
+    for (fid, val) in &r.fields {
+        let fname =
+            tdef.and_then(|t| t.field_by_id(*fid)).map(|f| f.name.clone()).unwrap_or_else(|| format!("f{}", fid.0));
+        fields.insert(fname, canonical_to_json_resolved(val, lookup)?);
+    }
+    Ok(Row { id: r.id, type_name, trashed: r.trashed, fields })
 }
 
 fn canonical_to_json_resolved<F>(v: &CanonicalValue, lookup: &mut F) -> Result<serde_json::Value>

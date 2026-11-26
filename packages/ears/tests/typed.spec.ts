@@ -104,6 +104,19 @@ describe('@elmdb/ears defineEars typed facade', () => {
     expect(typed.admin().stats().typeCounts['Issue']).toBe(2);
     expect(typed.watches().settled()).toBe(true);
 
+    // Typed transact + counters + pendingCommitSeq
+    expect(typed.pendingCommitSeq()).toBeNull();
+    const seqNum = typed.transact(() => {
+      const pending = typed.pendingCommitSeq();
+      expect(typeof pending).toBe('number');
+      expect(typed.nextCounter('ISS')).toBe(1);
+      typed.setCounter('ISS', 10);
+      expect(typed.getCounter('ISS')).toBe(10);
+      return typed.nextCounter('ISS');
+    });
+    expect(seqNum).toBe(11);
+    expect(typed.getCounter('ISS')).toBe(11);
+
     // Compile-time negative checks (verified by tsc during `npm run typecheck:ears`):
     const _typeChecks = (): void => {
       // @ts-expect-error raw unbranded string is rejected where EARS.EntityId is required

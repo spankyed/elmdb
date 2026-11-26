@@ -35,6 +35,8 @@ const META_SCHEMA_EPOCH_KEY: &[u8] = b"schema_epoch";
 // `sequences` sub-DB keys
 const SEQ_ENTITY_KEY: &[u8] = b"\x01entity";
 const SEQ_REL_KEY: &[u8] = b"\x01rel";
+const SEQ_COUNTER_PREFIX: u8 = 0x02;
+const MAX_COUNTER_NAME_BYTES: usize = 128;
 
 // `adj` sub-DB 1-byte table tags
 const TAG_ADJ_OUT: u8 = 0x01;
@@ -222,7 +224,7 @@ struct RegisteredHook<S: KvStore, V: Vfs, C: Clock> {
 
 /// Core v2 database engine parameterized over `KvStore`, `Vfs`, and `Clock`.
 pub struct Engine<S: KvStore, V: Vfs, C: Clock> {
-    gate: DurabilityGate<S, V>,
+    gate: Arc<DurabilityGate<S, V>>,
     clock: C,
     dbs: SystemDbs,
     /// L1 lock guarding live `CompiledSchema` + `SubDbPool` snapshot.
@@ -307,13 +309,50 @@ impl DeltaBatch {
     }
 }
 
+enum EngineRef<'a, S: KvStore, V: Vfs, C: Clock> {
+    Borrowed(&'a Engine<S, V, C>),
+    Owned(Arc<Engine<S, V, C>>),
+}
+
+impl<S: KvStore, V: Vfs, C: Clock> std::ops::Deref for EngineRef<'_, S, V, C> {
+    type Target = Engine<S, V, C>;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(e) => e,
+            Self::Owned(e) => e,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SavedDeltaFrame {
+    depth: u32,
+    total_deltas: DeltaBatch,
+    round_deltas: DeltaBatch,
+    round_touched_types: TypeMask,
+    pending_deltas: DeltaBatch,
+    dirty: bool,
+}
+
+/// Snapshot of one `beforeCommit` round's deltas (used by host/JS hook runners).
+#[derive(Debug, Clone)]
+pub struct HookRoundSnapshot {
+    pub commit_seq: u64,
+    pub touched_types: TypeMask,
+    pub entity_deltas: Vec<EntityDelta>,
+    pub edge_deltas: Vec<EdgeDelta>,
+}
+
 /// Active write-transaction context exposed to `transact()` and `beforeCommit` hooks.
 pub struct TxnCtx<'a, S: KvStore, V: Vfs, C: Clock> {
-    engine: &'a Engine<S, V, C>,
+    engine: EngineRef<'a, S, V, C>,
     txn: GatedWriteTxn<'a, S, V>,
     schema: Arc<CompiledSchema>,
     commit_seq: u64,
     now_ms: i64,
+    /// True once any entity, edge, counter, or external mutation was applied inside this transaction.
+    dirty: bool,
     /// Accumulated deltas for the whole transaction (used for summary + `commit_log`).
     total_deltas: DeltaBatch,
     /// Deltas produced in the current round (delivered to `beforeCommit` hooks on the next round).
@@ -324,6 +363,8 @@ pub struct TxnCtx<'a, S: KvStore, V: Vfs, C: Clock> {
     round_touched_types: TypeMask,
     /// Pending un-flushed deltas (flushed to `ProjectionSink` after every statement / batch).
     pending_deltas: DeltaBatch,
+    /// Stack of saved delta frames for explicit nested savepoints (`push_savepoint` / `abort_savepoint`).
+    saved_frames: Vec<SavedDeltaFrame>,
 }
 
 /// Alias exposed to `beforeCommit` callbacks (same capabilities, inside a nested savepoint).
@@ -422,7 +463,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         };
 
         let engine = Self {
-            gate,
+            gate: Arc::new(gate),
             clock,
             dbs,
             schema_state: SchemaEpochLock::new(SchemaState { schema: Arc::new(schema), pool }),
@@ -463,6 +504,11 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         let before = reg.hooks.len();
         reg.hooks.retain(|h| h.id != id);
         reg.hooks.len() != before
+    }
+
+    pub fn has_matching_hooks(&self, touched: &TypeMask) -> bool {
+        let reg = self.hooks.lock();
+        reg.hooks.iter().any(|h| h.hook.wants.intersects(touched))
     }
 
     /// Flushes LMDB and writes the verified 4 KiB durability sidecar slot.
@@ -765,16 +811,18 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         let now_ms = self.clock.now_ms();
 
         let mut ctx = TxnCtx {
-            engine: self,
+            engine: EngineRef::Borrowed(self),
             txn,
             schema,
             commit_seq,
             now_ms,
+            dirty: false,
             total_deltas: DeltaBatch::new(),
             round_deltas: DeltaBatch::new(),
             active_hook_deltas: None,
             round_touched_types: TypeMask::empty(),
             pending_deltas: DeltaBatch::new(),
+            saved_frames: Vec::new(),
         };
 
         let mut batch_slots: Vec<(EntityKey, String)> = Vec::new();
@@ -790,6 +838,61 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         Ok(BatchOutcome { commit_seq, receipt, created_ids, summary: summary_out })
     }
 
+    /// Begins an owned `'static` (but `!Send`) write `TxnCtx` for callback-scoped synchronous
+    /// `Database::transact(fn)` with native nested savepoints and full read-your-own-writes.
+    pub fn begin_owned_txn(self: &Arc<Self>) -> Result<TxnCtx<'static, S, V, C>>
+    where
+        S: 'static,
+        V: 'static,
+        C: 'static,
+    {
+        let (txn, schema) = self.begin_write_owned_with_fresh_schema()?;
+        let commit_seq = self.next_commit_seq(&txn)?;
+        let now_ms = self.clock.now_ms();
+        Ok(TxnCtx {
+            engine: EngineRef::Owned(Arc::clone(self)),
+            txn,
+            schema,
+            commit_seq,
+            now_ms,
+            dirty: false,
+            total_deltas: DeltaBatch::new(),
+            round_deltas: DeltaBatch::new(),
+            active_hook_deltas: None,
+            round_touched_types: TypeMask::empty(),
+            pending_deltas: DeltaBatch::new(),
+            saved_frames: Vec::new(),
+        })
+    }
+
+    fn begin_write_owned_with_fresh_schema(&self) -> Result<(GatedWriteTxn<'static, S, V>, Arc<CompiledSchema>)>
+    where
+        S: 'static,
+        V: 'static,
+    {
+        {
+            let guard = self.schema_state.read();
+            let txn = self.gate.begin_write_owned()?;
+            let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
+            if guard.schema.epoch == disk_epoch {
+                let schema = Arc::clone(&guard.schema);
+                drop(guard);
+                return Ok((txn, schema));
+            }
+        }
+        let mut state = self.schema_state.write();
+        let txn = self.gate.begin_write_owned()?;
+        let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
+        if disk_epoch > state.schema.epoch {
+            let (schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
+            state.schema = Arc::new(schema);
+            state.pool = pool;
+        }
+        let schema = Arc::clone(&state.schema);
+        drop(state);
+        Ok((txn, schema))
+    }
+
     /// Executes a synchronous read-modify-write transaction with native LMDB nested savepoints
     /// and a final bounded `beforeCommit` cascade.
     pub fn transact<T, F>(&self, f: F) -> Result<(T, CommitReceipt)>
@@ -801,16 +904,18 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         let now_ms = self.clock.now_ms();
 
         let mut ctx = TxnCtx {
-            engine: self,
+            engine: EngineRef::Borrowed(self),
             txn,
             schema,
             commit_seq,
             now_ms,
+            dirty: false,
             total_deltas: DeltaBatch::new(),
             round_deltas: DeltaBatch::new(),
             active_hook_deltas: None,
             round_touched_types: TypeMask::empty(),
             pending_deltas: DeltaBatch::new(),
+            saved_frames: Vec::new(),
         };
 
         let value = f(&mut ctx)?;
@@ -819,6 +924,34 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         ctx.finalize_commit_log()?;
         let (receipt, _) = ctx.commit_with_summary(false)?;
         Ok((value, receipt))
+    }
+
+    /// Atomically increments named transactional counter `name` by 1 and returns the new value (`1, 2, ...`).
+    pub fn next_counter(&self, name: &str) -> Result<u64> {
+        let mut txn = self.gate.begin_write()?;
+        let next = next_counter_in_txn(&mut txn, &self.dbs, name)?;
+        txn.commit()?;
+        Ok(next)
+    }
+
+    /// Reads the current value of named counter `name` (`0` if never incremented).
+    pub fn get_counter(&self, name: &str) -> Result<u64> {
+        let ro = self.gate.begin_read()?;
+        get_counter_in_txn(&ro, &self.dbs, name)
+    }
+
+    /// Sets named transactional counter `name` to `value`.
+    pub fn set_counter(&self, name: &str, value: u64) -> Result<()> {
+        let mut txn = self.gate.begin_write()?;
+        set_counter_in_txn(&mut txn, &self.dbs, name, value)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Lists all named counters (for lossless `dump()`).
+    pub fn list_counters(&self) -> Result<BTreeMap<String, u64>> {
+        let ro = self.gate.begin_read()?;
+        list_counters_in_txn(&ro, &self.dbs)
     }
 
     /// Reads a complete entity row by external ID using a single pinned MVCC snapshot.
@@ -957,6 +1090,159 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         Ok(Some(decode_row_header(raw)?.0.ext_id))
     }
 
+    /// Pending monotonic commit sequence number assigned to this write transaction.
+    pub fn commit_seq(&self) -> u64 {
+        self.commit_seq
+    }
+
+    /// Returns `true` if any write (entity, edge, counter, or external mutation) occurred in this transaction.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty || !self.pending_deltas.is_empty() || !self.total_deltas.is_empty()
+    }
+
+    /// Marks this transaction dirty (e.g. after an out-of-band embedding write on `txn_mut()`).
+    pub fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Returns a read/write reference to the underlying `GatedWriteTxn` for RYOW queries and projections.
+    pub fn txn(&self) -> &GatedWriteTxn<'a, S, V> {
+        &self.txn
+    }
+
+    pub fn txn_mut(&mut self) -> &mut GatedWriteTxn<'a, S, V> {
+        &mut self.txn
+    }
+
+    pub fn dbs(&self) -> SystemDbs {
+        self.engine.dbs
+    }
+
+    /// Atomically increments named counter `name` inside this transaction (rolls back on savepoint/txn abort).
+    pub fn next_counter(&mut self, name: &str) -> Result<u64> {
+        let next = next_counter_in_txn(&mut self.txn, &self.engine.dbs, name)?;
+        self.dirty = true;
+        Ok(next)
+    }
+
+    /// Reads named counter `name` inside this transaction (full read-your-own-writes).
+    pub fn get_counter(&self, name: &str) -> Result<u64> {
+        get_counter_in_txn(&self.txn, &self.engine.dbs, name)
+    }
+
+    /// Sets named counter `name` inside this transaction (rolls back on savepoint/txn abort).
+    pub fn set_counter(&mut self, name: &str, value: u64) -> Result<()> {
+        set_counter_in_txn(&mut self.txn, &self.engine.dbs, name, value)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Executes a batch of wire ops inside this active transaction, supporting intra-batch `BatchSlot` refs,
+    /// and immediately flushes projections so subsequent reads/queries in the same transaction see fresh indexes.
+    pub fn exec_batch_and_flush(&mut self, ops: &[WireOp]) -> Result<Vec<String>> {
+        let mut slots = Vec::new();
+        for op in ops {
+            self.apply_op(op, &mut slots)?;
+        }
+        self.flush_projections()?;
+        Ok(slots.into_iter().map(|(_, ext_id)| ext_id).collect())
+    }
+
+    /// Opens an explicit native LMDB nested savepoint and snapshots in-memory delta state.
+    pub fn push_savepoint(&mut self) -> Result<u32> {
+        let depth = self.txn.begin_savepoint()?;
+        self.saved_frames.push(SavedDeltaFrame {
+            depth,
+            total_deltas: self.total_deltas.clone(),
+            round_deltas: self.round_deltas.clone(),
+            round_touched_types: self.round_touched_types.clone(),
+            pending_deltas: self.pending_deltas.clone(),
+            dirty: self.dirty,
+        });
+        Ok(depth)
+    }
+
+    /// Commits (merges into parent) the top-most explicit nested savepoint without firing `beforeCommit`.
+    pub fn commit_savepoint(&mut self, depth: u32) -> Result<()> {
+        self.flush_projections()?;
+        self.txn.commit_savepoint(depth)?;
+        if let Some(pos) = self.saved_frames.iter().rposition(|f| f.depth == depth) {
+            self.saved_frames.truncate(pos);
+        }
+        Ok(())
+    }
+
+    /// Aborts (rolls back) the top-most explicit nested savepoint and restores delta/dirty state cleanly.
+    pub fn abort_savepoint(&mut self, depth: u32) {
+        while self.txn.savepoint_depth() >= depth {
+            let d = self.txn.savepoint_depth();
+            let _ = self.txn.abort_savepoint(d);
+        }
+        if let Some(pos) = self.saved_frames.iter().rposition(|f| f.depth == depth) {
+            let frame = self.saved_frames[pos].clone();
+            self.saved_frames.truncate(pos);
+            self.total_deltas = frame.total_deltas;
+            self.round_deltas = frame.round_deltas;
+            self.round_touched_types = frame.round_touched_types;
+            self.pending_deltas = frame.pending_deltas;
+            self.dirty = frame.dirty;
+        }
+    }
+
+    /// Takes the current round's pending deltas for a host-driven `beforeCommit` hook round.
+    /// Returns `Ok(None)` when no types were touched in the latest round.
+    pub fn take_hook_round(&mut self) -> Result<Option<HookRoundSnapshot>> {
+        self.flush_projections()?;
+        if self.round_touched_types.is_empty() {
+            return Ok(None);
+        }
+        let touched_types = std::mem::replace(&mut self.round_touched_types, TypeMask::empty());
+        let deltas = std::mem::replace(&mut self.round_deltas, DeltaBatch::new());
+        let entity_deltas: Vec<EntityDelta> = deltas.entities.values().cloned().collect();
+        let edge_deltas: Vec<EdgeDelta> = deltas.edges.values().cloned().collect();
+        self.active_hook_deltas = Some(deltas);
+        Ok(Some(HookRoundSnapshot { commit_seq: self.commit_seq, touched_types, entity_deltas, edge_deltas }))
+    }
+
+    /// Runs registered Rust `Engine` `beforeCommit` hooks matching `touched_types` for the current round.
+    pub fn run_rust_hooks_for_round(&mut self, touched_types: &TypeMask) -> Result<()> {
+        let matching: Vec<BeforeCommitFn<S, V, C>> = {
+            let reg = self.engine.hooks.lock();
+            reg.hooks
+                .iter()
+                .filter(|h| h.hook.wants.intersects(touched_types))
+                .map(|h| Arc::clone(&h.hook.callback))
+                .collect()
+        };
+        for cb in matching {
+            cb(self)?;
+        }
+        Ok(())
+    }
+
+    /// Clears `active_hook_deltas` at the end of a host-driven hook round.
+    pub fn finish_hook_round(&mut self) -> Result<()> {
+        self.active_hook_deltas = None;
+        self.flush_projections()
+    }
+
+    /// Finalizes `commit_log` and commits the root transaction, returning `(commit_seq, receipt, summary)`.
+    /// If `is_dirty()` is false, aborts without bumping `commit_seq` or `txnid` and returns `Ok(None)`.
+    pub fn finish_and_commit(
+        mut self,
+        want_summary: bool,
+    ) -> Result<Option<(u64, CommitReceipt, Option<CommitDeltaSummary>)>> {
+        self.flush_projections()?;
+        if !self.is_dirty() {
+            self.txn.abort();
+            return Ok(None);
+        }
+        self.finalize_commit_log()?;
+        let seq = self.commit_seq;
+        let (receipt, summary) = self.commit_with_summary(want_summary)?;
+        Ok(Some((seq, receipt, summary)))
+    }
+
     /// Executes a batch of wire ops inside this active transaction, supporting intra-batch `BatchSlot` refs.
     pub fn exec_batch(&mut self, ops: &[WireOp]) -> Result<Vec<String>> {
         let mut slots = Vec::new();
@@ -1020,23 +1306,14 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
-        let saved_total = self.total_deltas.clone();
-        let saved_round = self.round_touched_types.clone();
-        let saved_pending = self.pending_deltas.clone();
-        let depth = self.txn.begin_savepoint()?;
+        let depth = self.push_savepoint()?;
         match f(self) {
             Ok(v) => {
-                self.txn.commit_savepoint(depth)?;
+                self.commit_savepoint(depth)?;
                 Ok(v)
             }
             Err(err) => {
-                while self.txn.savepoint_depth() >= depth {
-                    let d = self.txn.savepoint_depth();
-                    let _ = self.txn.abort_savepoint(d);
-                }
-                self.total_deltas = saved_total;
-                self.round_touched_types = saved_round;
-                self.pending_deltas = saved_pending;
+                self.abort_savepoint(depth);
                 Err(err)
             }
         }
@@ -1046,6 +1323,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         if self.pending_deltas.is_empty() {
             return Ok(());
         }
+        self.dirty = true;
         let batch = std::mem::replace(&mut self.pending_deltas, DeltaBatch::new());
         let entity_vec: Vec<EntityDelta> = batch.entities.values().cloned().collect();
         let edge_vec: Vec<EdgeDelta> = batch.edges.values().cloned().collect();
@@ -2067,6 +2345,86 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 // ---------------------------------------------------------------------------
 // Key builders & read helpers
 // ---------------------------------------------------------------------------
+
+fn validate_counter_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > MAX_COUNTER_NAME_BYTES {
+        return Err(ElmdbError::new(
+            ErrorCode::InvalidArgument,
+            format!("counter name length {} out of 1..={MAX_COUNTER_NAME_BYTES}", name.len()),
+        ));
+    }
+    if name.as_bytes().contains(&0) {
+        return Err(ElmdbError::new(ErrorCode::InvalidArgument, "counter name must not contain NUL bytes"));
+    }
+    Ok(())
+}
+
+fn counter_key(name: &str) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + name.len());
+    key.push(SEQ_COUNTER_PREFIX);
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+/// Atomically increments named transactional counter `name` inside `txn` and returns the new value (`1, 2, ...`).
+pub fn next_counter_in_txn<S: KvStore, V: Vfs>(
+    txn: &mut GatedWriteTxn<'_, S, V>,
+    dbs: &SystemDbs,
+    name: &str,
+) -> Result<u64> {
+    validate_counter_name(name)?;
+    let key = counter_key(name);
+    let next = match txn.get(dbs.sequences, &key)? {
+        Some(bytes) => decode_u64_le(bytes, "counter")?
+            .checked_add(1)
+            .ok_or_else(|| ElmdbError::new(ErrorCode::ResourceLimit, format!("counter '{name}' u64 exhausted")))?,
+        None => 1,
+    };
+    txn.put(dbs.sequences, &key, &next.to_le_bytes())?;
+    Ok(next)
+}
+
+/// Reads the current value of named transactional counter `name` (`0` if unset).
+pub fn get_counter_in_txn<R: KvRead>(txn: &R, dbs: &SystemDbs, name: &str) -> Result<u64> {
+    validate_counter_name(name)?;
+    let key = counter_key(name);
+    match txn.get(dbs.sequences, &key)? {
+        Some(bytes) => decode_u64_le(bytes, "counter"),
+        None => Ok(0),
+    }
+}
+
+/// Sets named transactional counter `name` to `value` inside `txn`.
+pub fn set_counter_in_txn<S: KvStore, V: Vfs>(
+    txn: &mut GatedWriteTxn<'_, S, V>,
+    dbs: &SystemDbs,
+    name: &str,
+    value: u64,
+) -> Result<()> {
+    validate_counter_name(name)?;
+    let key = counter_key(name);
+    txn.put(dbs.sequences, &key, &value.to_le_bytes())?;
+    Ok(())
+}
+
+/// Lists all persisted named transactional counters (used by lossless `dump()`).
+pub fn list_counters_in_txn<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<BTreeMap<String, u64>> {
+    let mut out = BTreeMap::new();
+    let mut cur = txn.cursor(dbs.sequences)?;
+    let prefix = [SEQ_COUNTER_PREFIX];
+    let mut entry = cur.seek_ge(&prefix)?;
+    while let Some((k, v)) = entry {
+        if k.first() != Some(&SEQ_COUNTER_PREFIX) {
+            break;
+        }
+        let name = std::str::from_utf8(&k[1..])
+            .map_err(|_| ElmdbError::new(ErrorCode::Corrupted, "non-UTF-8 counter name in sequences"))?;
+        let val = decode_u64_le(v, "counter")?;
+        out.insert(name.to_owned(), val);
+        entry = cur.next()?;
+    }
+    Ok(out)
+}
 
 fn type_list_key(type_id: TypeId, entity: EntityKey) -> [u8; 11] {
     let mut k = [0u8; 11];

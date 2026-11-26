@@ -162,6 +162,19 @@ impl Health {
         }
     }
 
+    /// `caught`, for an export returning `napi::Result<T>` so thrown JS errors pass through verbatim
+    pub fn guarded_raw<T>(
+        &self,
+        env: &napi::Env,
+        export: &'static str,
+        work: impl FnOnce() -> napi::Result<T>,
+    ) -> napi::Result<T> {
+        match self.caught(export, work) {
+            Ok(answered) => answered,
+            Err(panicked) => Err(napi::Error::from(napi::JsError::from(to_js(panicked)).into_unknown(*env))),
+        }
+    }
+
     /// `always`, for an export that answers JavaScript itself
     pub fn unrefused<T>(
         &self,

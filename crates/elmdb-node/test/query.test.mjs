@@ -102,4 +102,21 @@ test('queries cover filters, ICU order, BM25F, trigram, vector, PPR, Leiden, agg
     terminal: { kind: 'hits' },
   });
   assert.ok(ppr.hits.some((h) => h.id === 'd2'));
+
+  // Prefix BM25F + lazy UTF-16 SearchHighlights + projected fields on Hits
+  const emojiBody = 'Hi 👋 café authentication 🚀 tokenized';
+  db.executeWireBatch(buildWireBatch((b) => {
+    b.create('Doc', { title: 'Auth Guide', body: emojiBody, group: 'sec', score: 40 }, 'd4');
+  }));
+  const hlAns = db.query({
+    source: { kind: 'type', typeName: 'Doc' },
+    steps: [{ kind: 'score', spec: { kind: 'bm25f', index: 'fts', query: 'auth tok', prefix: true, requireAll: true, topK: 5 } }],
+    terminal: { kind: 'hits', fields: ['title', 'body'], highlights: true },
+  });
+  assert.equal(hlAns.hits.length, 1);
+  assert.equal(hlAns.hits[0].id, 'd4');
+  assert.equal(hlAns.hits[0].row.fields.title, 'Auth Guide');
+  assert.equal(hlAns.hits[0].row.fields.group, undefined);
+  const bodyMarks = hlAns.hits[0].highlights.body.map(([el, s, e]) => [el, emojiBody.slice(s, e)]);
+  assert.deepEqual(bodyMarks, [[0, 'authentication'], [0, 'tokenized']]);
 });

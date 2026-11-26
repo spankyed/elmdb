@@ -55,7 +55,7 @@ pub enum FilterShape {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ScoreShape {
-    Bm25f { index_id: IndexId, require_all: bool, has_phrase: bool, has_top_k: bool },
+    Bm25f { index_id: IndexId, require_all: bool, prefix: bool, has_phrase: bool, has_top_k: bool },
     VectorNear { index_id: IndexId },
     VectorLike { index_id: IndexId },
     RankIndex { index_id: IndexId },
@@ -92,7 +92,7 @@ pub enum OrderShape {
 pub enum TerminalShape {
     Ids,
     Rows { projected_fields: Option<Vec<u16>> },
-    Hits,
+    Hits { projected_fields: Option<Vec<u16>>, highlights: bool },
     Count,
     Exists,
     Sum(FieldId),
@@ -169,9 +169,10 @@ fn shape_filter(expr: &FilterExpr) -> FilterShape {
 
 fn shape_score(spec: &ScoreSpec) -> ScoreShape {
     match spec {
-        ScoreSpec::Bm25f { index_id, require_all, phrase, top_k, .. } => ScoreShape::Bm25f {
+        ScoreSpec::Bm25f { index_id, require_all, prefix, phrase, top_k, .. } => ScoreShape::Bm25f {
             index_id: *index_id,
             require_all: *require_all,
+            prefix: *prefix,
             has_phrase: phrase.is_some(),
             has_top_k: top_k.is_some(),
         },
@@ -268,7 +269,10 @@ fn shape_node(node: &LogicalNode) -> NodeShape {
                     let projected = fields.as_ref().map(|m| m.iter().into_iter().map(|fid| fid.0).collect());
                     TerminalShape::Rows { projected_fields: projected }
                 }
-                TerminalSpec::Hits => TerminalShape::Hits,
+                TerminalSpec::Hits { fields, highlights } => {
+                    let projected = fields.as_ref().map(|m| m.iter().into_iter().map(|fid| fid.0).collect());
+                    TerminalShape::Hits { projected_fields: projected, highlights: *highlights }
+                }
                 TerminalSpec::Count => TerminalShape::Count,
                 TerminalSpec::Exists => TerminalShape::Exists,
                 TerminalSpec::Sum(f) => TerminalShape::Sum(*f),

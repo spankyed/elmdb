@@ -329,6 +329,14 @@ impl<'a, R: KvRead> KvRead for MemCheckTxn<'a, R> {
     fn entries(&self, db: SubDbHandle) -> std::result::Result<u64, StorageError> {
         if db == self.target_db { Ok(self.map.len() as u64) } else { self.backing.entries(db) }
     }
+
+    fn open_subdb_existing(
+        &self,
+        name: &str,
+        flags: DbFlags,
+    ) -> std::result::Result<Option<SubDbHandle>, StorageError> {
+        self.backing.open_subdb_existing(name, flags)
+    }
 }
 
 impl<'a, R: KvRead> KvMut for MemCheckTxn<'a, R> {

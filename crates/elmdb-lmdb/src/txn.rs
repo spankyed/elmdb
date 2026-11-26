@@ -32,10 +32,6 @@ impl<'env> LmdbRoTxn<'env> {
         let txn = NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null read MDB_txn".into()))?;
         Ok(Self { inner, txn, _env: PhantomData })
     }
-
-    pub(crate) fn raw(&self) -> *mut ffi::MDB_txn {
-        self.txn.as_ptr()
-    }
 }
 
 impl Drop for LmdbRoTxn<'_> {
@@ -65,6 +61,10 @@ impl KvRead for LmdbRoTxn<'_> {
     fn entries(&self, db: SubDbHandle) -> Result<u64, StorageError> {
         raw_entries(&self.inner, self.txn.as_ptr(), db)
     }
+
+    fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError> {
+        open_subdb_existing_raw(&self.inner, self.txn.as_ptr(), &[], name, flags)
+    }
 }
 
 /// Exclusive read-write LMDB transaction supporting native LIFO nested savepoints
@@ -82,7 +82,14 @@ pub struct LmdbRwTxn<'env> {
 
 impl<'env> LmdbRwTxn<'env> {
     pub(crate) fn begin(store: &'env LmdbStore) -> Result<Self, StorageError> {
-        let inner = Arc::clone(store.inner());
+        Self::begin_from_inner(Arc::clone(store.inner()))
+    }
+
+    pub(crate) fn begin_owned(store: &LmdbStore) -> Result<LmdbRwTxn<'static>, StorageError> {
+        LmdbRwTxn::<'static>::begin_from_inner(Arc::clone(store.inner()))
+    }
+
+    fn begin_from_inner(inner: Arc<LmdbEnvInner>) -> Result<Self, StorageError> {
         let mut raw: *mut ffi::MDB_txn = ptr::null_mut();
         // SAFETY: `inner.env` is open; `parent = null` opens a root read-write transaction.
         let rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), 0, &mut raw) };
@@ -138,6 +145,82 @@ impl KvRead for LmdbRwTxn<'_> {
         let _ = self.lookup_flags(db)?;
         raw_entries_unchecked(&self.inner, self.active_raw(), db)
     }
+
+    fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError> {
+        open_subdb_existing_raw(&self.inner, self.active_raw(), &self.pending_dbis, name, flags)
+    }
+}
+
+pub(crate) fn open_subdb_existing_raw(
+    inner: &LmdbEnvInner,
+    raw_txn: *mut ffi::MDB_txn,
+    pending_dbis: &[(String, ffi::MDB_dbi, DbFlags)],
+    name: &str,
+    flags: DbFlags,
+) -> Result<Option<SubDbHandle>, StorageError> {
+    validate_subdb_name(name)?;
+    if let Some((_, dbi, pending_flags)) = pending_dbis.iter().find(|(n, _, _)| n == name) {
+        if *pending_flags != flags {
+            return Err(StorageError::InvalidState(format!("sub-DB '{name}' opened read-only with mismatched flags")));
+        }
+        return Ok(Some(SubDbHandle::from_raw(*dbi)));
+    }
+
+    // Check exact MVCC visibility in `raw_txn`'s snapshot via `MAIN_DBI` before touching DBI handles.
+    let mut k = ffi::MDB_val { mv_size: name.len(), mv_data: name.as_ptr() as *mut libc::c_void };
+    let mut v = ffi::MDB_val { mv_size: 0, mv_data: ptr::null_mut() };
+    // SAFETY: `raw_txn` and `inner.main_dbi` are live; `k` points to readable UTF-8 bytes.
+    let rc = unsafe { ffi::mdb_get(raw_txn, inner.main_dbi, &mut k, &mut v) };
+    match rc {
+        ffi::MDB_SUCCESS => {}
+        ffi::MDB_NOTFOUND => return Ok(None),
+        other => return Err(map_mdb_err(other, inner.map_size, inner.max_dbs)),
+    }
+
+    let mut cache = inner.dbis.lock();
+    if let Some(&(dbi, cached_flags)) = cache.by_name.get(name) {
+        if cached_flags != flags {
+            return Err(StorageError::InvalidState(format!("sub-DB '{name}' opened read-only with mismatched flags")));
+        }
+        return Ok(Some(SubDbHandle::from_raw(dbi)));
+    }
+
+    // Cross-process catch-up: open the committed sub-DB permanently in a short dedicated RO txn.
+    let c_name = CString::new(name).map_err(|_| StorageError::InvalidState("sub-DB name contains NUL".into()))?;
+    let mut open_txn: *mut ffi::MDB_txn = ptr::null_mut();
+    // SAFETY: `inner.env` is open; `MDB_NOTLS` allows a dedicated RO txn even on a thread holding another txn.
+    let rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut open_txn) };
+    if rc != ffi::MDB_SUCCESS {
+        return Err(map_mdb_err(rc, inner.map_size, inner.max_dbs));
+    }
+    let mut dbi: ffi::MDB_dbi = 0;
+    // SAFETY: `open_txn` is live and `c_name` is a valid NUL-terminated C string.
+    let rc = unsafe { ffi::mdb_dbi_open(open_txn, c_name.as_ptr(), 0, &mut dbi) };
+    if rc != ffi::MDB_SUCCESS {
+        // SAFETY: `open_txn` is live; abort on error.
+        unsafe { ffi::mdb_txn_abort(open_txn) };
+        return Err(map_mdb_err(rc, inner.map_size, inner.max_dbs));
+    }
+    let mut raw_flags: libc::c_uint = 0;
+    // SAFETY: `open_txn` and `dbi` are valid.
+    let rc = unsafe { ffi::mdb_dbi_flags(open_txn, dbi, &mut raw_flags) };
+    if rc != ffi::MDB_SUCCESS {
+        // SAFETY: `open_txn` is live.
+        unsafe { ffi::mdb_txn_abort(open_txn) };
+        return Err(map_mdb_err(rc, inner.map_size, inner.max_dbs));
+    }
+    // SAFETY: committing an `MDB_RDONLY` txn publishes `dbi` permanently across `MDB_env`!
+    let rc = unsafe { ffi::mdb_txn_commit(open_txn) };
+    if rc != ffi::MDB_SUCCESS {
+        return Err(map_mdb_err(rc, inner.map_size, inner.max_dbs));
+    }
+    let actual_flags = DbFlags { integer_key: (raw_flags & ffi::MDB_INTEGERKEY) != 0 };
+    cache.by_name.insert(name.to_owned(), (dbi, actual_flags));
+    cache.by_id.insert(dbi, actual_flags);
+    if actual_flags != flags {
+        return Err(StorageError::InvalidState(format!("sub-DB '{name}' opened read-only with mismatched flags")));
+    }
+    Ok(Some(SubDbHandle::from_raw(dbi)))
 }
 
 impl KvWrite for LmdbRwTxn<'_> {

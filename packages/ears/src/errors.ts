@@ -94,6 +94,24 @@ export function isEarsError(error: unknown): error is EarsError {
 }
 
 /**
+ * Returns true if `error` is an `EarsError` or carries a canonical elmdb / N-API error code.
+ * Used by `transact()` to wrap engine errors into `EarsError` while preserving user domain errors verbatim.
+ */
+export function hasKnownErrorCode(error: unknown): boolean {
+  if (error instanceof EarsError) return true;
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const maybeCode = (error as { readonly code?: unknown }).code;
+    if (typeof maybeCode === 'string') {
+      return (
+        Object.prototype.hasOwnProperty.call(KNOWN_ERROR_CODES, maybeCode)
+        || Object.prototype.hasOwnProperty.call(NAPI_INVALID_ARG_CODES, maybeCode)
+      );
+    }
+  }
+  return false;
+}
+
+/**
  * Normalizes any thrown error (native `elmdb` N-API error or JS error) into an `EarsError`
  * while preserving its canonical `code` and original error as `cause`.
  */

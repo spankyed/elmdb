@@ -182,6 +182,8 @@ struct DumpPayload {
     entities: Vec<DumpEntity>,
     relations: Vec<DumpRelation>,
     embeddings: Vec<DumpEmbedding>,
+    #[serde(default)]
+    counters: BTreeMap<String, u64>,
 }
 
 struct FileCleanupGuard(Option<PathBuf>);
@@ -279,6 +281,7 @@ pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
         entities,
         relations,
         embeddings,
+        counters: snap.counters,
     };
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|e| ElmdbError::new(ErrorCode::Internal, format!("serialize dump: {e}")))?;
@@ -428,6 +431,11 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
     // Pass 4: Restore primary embeddings BEFORE trashing entities so trashed entities keep their embeddings!
     for emb in &payload.embeddings {
         db.set_embeddings(&emb.index, &emb.id, &emb.vectors)?;
+    }
+
+    // Pass 4b: Restore all persisted named transactional counters cleanly.
+    for (name, &val) in &payload.counters {
+        db.set_counter(name, val)?;
     }
 
     // Pass 5: Trash entities that were trashed in the dump (frees unique keys before restoring unique constraints!).

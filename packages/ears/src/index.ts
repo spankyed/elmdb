@@ -48,6 +48,13 @@ export {
 } from './watch.ts';
 
 export type {
+  EarsOperation,
+  EarsOperationKind,
+  EarsOperationObserver,
+  EarsOperationResult,
+} from './observer.ts';
+
+export type {
   DegreesOptions,
   EntityRow,
   FieldPredicate,
@@ -55,6 +62,7 @@ export type {
   GraphPprResult,
   GraphTopoResult,
   HasLinkOptions,
+  HitsOptions,
   HopsOptions,
   KeysetCursor,
   LeidenOptions,
@@ -68,6 +76,7 @@ export type {
   ShortestPathOptions,
   SimilarityOptions,
   SourceOptions,
+  WatchHitsOptions,
   WhereInput,
 } from './query.ts';
 
@@ -110,6 +119,7 @@ export type {
   Row,
   Schema,
   SchemaChange,
+  TransactOptions,
   WatchPolicyOptions,
   WatchRegistration,
   WatchRerun,

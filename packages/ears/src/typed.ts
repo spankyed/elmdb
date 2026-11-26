@@ -1,4 +1,4 @@
-import type { BatchResult, QueryAnswer, QuerySpec, RelationRow } from 'elmdb';
+import type { BatchResult, QueryAnswer, QuerySpec, RelationRow, TransactOptions } from 'elmdb';
 import type { BatchSlot, BatchWriter, LinkOptions } from './batch.ts';
 import type { CommitDelta } from './database.ts';
 import type { EarsAdmin, EarsEngine, GetEdgesOptions } from './engine.ts';
@@ -162,6 +162,11 @@ export interface TypedEars<TSchema extends EarsSchemaShape> {
     vectors: ReadonlyArray<ReadonlyArray<number>>,
   ): void;
   batch(fn: (batch: TypedBatchWriter<TSchema>) => void): BatchResult;
+  transact<T>(fn: () => T, opts?: TransactOptions): T;
+  pendingCommitSeq(): number | null;
+  nextCounter(name: string): number;
+  getCounter(name: string): number;
+  setCounter(name: string, value: number): void;
   beforeCommit(
     typeNames: readonly EntityTypeName<TSchema>[] | null,
     callback: TypedBeforeCommitHook<TSchema>,
@@ -246,6 +251,21 @@ export function defineEars<TSchema extends EarsSchemaShape>(
       return getEngine().batch((raw: BatchWriter) => {
         fn(raw as unknown as TypedBatchWriter<TSchema>);
       });
+    },
+    transact(fn, opts) {
+      return getEngine().transact(fn, opts);
+    },
+    pendingCommitSeq() {
+      return getEngine().pendingCommitSeq();
+    },
+    nextCounter(name) {
+      return getEngine().nextCounter(name);
+    },
+    getCounter(name) {
+      return getEngine().getCounter(name);
+    },
+    setCounter(name, value) {
+      getEngine().setCounter(name, value);
     },
     beforeCommit(typeNames, callback) {
       return getEngine().beforeCommit(typeNames, (delta) => {

@@ -41,6 +41,30 @@ export declare class Database {
   renameRelation(oldRel: string, newRel: string): number
   /** Executes an atomic `elmdb-wire` binary batch directly (single FFI crossing, zero MsgPack/JSON). */
   executeWireBatch(payload: Uint8Array): BatchResult
+  /**
+   * Executes a strictly-synchronous callback inside a write transaction (or native LMDB savepoint when nested).
+   *
+   * - Reads (`get`, `getEdges`, `query`, `getCounter`) and writes (`executeWireBatch`, `nextCounter`, `setCounter`)
+   *   see all uncommitted outer and inner writes immediately (RYOW).
+   * - Throwing rolls back this transaction (or nested savepoint only, preserving outer writes).
+   * - Returning a Promise or thenable aborts immediately with `ASYNC_CALLBACK_FORBIDDEN`.
+   * - `beforeCommit` hooks run once on the outermost commit unless `{ runBeforeCommit: false }`.
+   */
+  transact(callback: () => unknown, options?: TransactOptions | undefined | null): unknown
+  /** Returns the pending commit sequence while inside `transact()` or `beforeCommit`, or `null` outside a write txn. */
+  pendingCommitSeq(): number | null
+  /**
+   * Atomically increments and returns the named persistent counter (`1, 2, 3, ...`).
+   * Participates in the active `transact()` / `beforeCommit` savepoint and rolls back on abort.
+   */
+  nextCounter(name: string): number
+  /** Reads the current value of the named persistent counter (`0` if unset), with RYOW inside `transact()`. */
+  getCounter(name: string): number
+  /**
+   * Sets the named persistent counter (e.g. preserving imported high-water marks).
+   * Participates in the active `transact()` / `beforeCommit` savepoint and rolls back on abort.
+   */
+  setCounter(name: string, value: number): void
   /** Sets primary vector embeddings for `extId` on `indexName`. */
   setEmbeddings(indexName: string, extId: string, vectors: Array<Array<number>>): void
   /** Permanently destroys all entities belonging to an archived type. */
@@ -48,7 +72,9 @@ export declare class Database {
   /**
    * Registers a synchronous same-thread JS `beforeCommit` hook.
    *
-   * The callback receives `{ entities, edges }` inside a native LMDB nested savepoint:
+   * The callback receives `{ commitSeq, entities, edges }` inside a native LMDB nested savepoint:
+   * - Full read-your-own-writes (`get`, `getEdges`, `query`, `getCounter`, `nextCounter`, `setCounter`,
+   *   `pendingCommitSeq`, `executeWireBatch`, and nested `transact`) are available directly inside the hook.
    * - Throwing an error aborts the commit cleanly with `HOOK_ABORTED`.
    * - Returning a `Uint8Array`/`Buffer` containing an `elmdb-wire` batch applies those derived writes
    *   in the same savepoint cascade (up to `MAX_HOOK_ROUNDS`).
@@ -107,6 +133,12 @@ export interface OpenOptions {
   maxReaders?: number
   planCacheCapacity?: number
   watchTurnSliceMs?: number
+}
+
+/** Options for `Database.transact`. */
+export interface TransactOptions {
+  /** Whether registered `beforeCommit` hooks run when the outermost transaction commits (default `true`). */
+  runBeforeCommit?: boolean
 }
 
 /** Watch throttling & delivery mode policy for `registerWatch`. */
