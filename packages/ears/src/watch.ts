@@ -844,10 +844,12 @@ function sameValueInner(a: unknown, b: unknown, seen?: WeakMap<object, Set<objec
     for (const [key, value] of a) if (!mb.has(key) || !sameValueInner(value, mb.get(key), nextSeen)) return false;
     return true;
   }
+  // Each side's own enumerable string keys: as many on each, and every one of `a`'s enumerable on `b` too, so that
+  // neither a key `b` holds unenumerated nor the order of the two decides
   const keys = Object.keys(a);
   if (keys.length !== Object.keys(b).length) return false;
   for (const key of keys) {
-    if (!Object.prototype.hasOwnProperty.call(b, key)) return false;
+    if (!Object.prototype.propertyIsEnumerable.call(b, key)) return false;
     if (!sameValueInner((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], nextSeen)) return false;
   }
   return true;

@@ -478,17 +478,14 @@ export function createConnection(
   };
   let hook: BeforeCommit | undefined;
   let hookPaused = false;
-  const typeOfId = (id: string): string | undefined => {
+  // The type an id names as the engine reads it: what is before its first dash, or the whole id where it has none
+  const typeOfId = (id: string): string => {
     const dash = id.indexOf('-');
-    return dash > 0 ? id.slice(0, dash) : undefined;
+    return dash === -1 ? id : id.slice(0, dash);
   };
   // `wants` is called as the hook's method, so a hook may keep what it wants on itself
   const opWantsHook = (op: Op, hook: BeforeCommit): boolean => {
-    const wanted = (id: string | undefined) => {
-      if (id === undefined) return false;
-      const type = typeOfId(id);
-      return type !== undefined && hook.wants(type);
-    };
+    const wanted = (id: string | undefined) => id !== undefined && hook.wants(typeOfId(id));
     switch (op.op) {
       case 'create':
       case 'upsert':
@@ -837,6 +834,12 @@ export function createConnection(
     },
     beforeCommit(given) { hook = given; },
     transactWithoutHook(fn, options) {
+      // Inside a unit the hook runs in, this would be a savepoint of it, whose writes the hook would see as it commits
+      if (levels.length > 0 && hook && !hookPaused) {
+        throw new Error(
+          'transactWithoutHook() was called inside a unit the beforeCommit hook runs in, whose writes the hook would see; call it outside any transact()',
+        );
+      }
       const wasPaused = hookPaused;
       hookPaused = true;
       try { return transact(fn, options); } finally { hookPaused = wasPaused; }
