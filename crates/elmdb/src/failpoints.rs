@@ -104,6 +104,8 @@ pub(crate) mod points {
     /// Runs in a unit's commit once it has ended, landed or failed, and the unit has let the writer go, before its
     /// change set is made: another writer may commit here
     pub const UNIT_COMMITTED: &str = "engine::unit_committed";
+    /// Runs in a unit's commit as each of its tracked reads is filed, with the tracking lock held
+    pub const READ_FILING: &str = "engine::read_filing";
     /// Runs once a backup's compacted copy is complete, before it is published
     pub const BACKUP_READY: &str = "backup::ready";
     /// A backup fails at publication, its copy complete and not yet visible
