@@ -709,6 +709,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "elmdb-engine"
+version = "0.1.0"
+dependencies = [
+ "elmdb-lmdb",
+ "elmdb-sim",
+ "elmdb-storage",
+ "elmdb-wire",
+ "parking_lot 0.13.0",
+ "proptest",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "zstd",
+]
+
+[[package]]
 name = "elmdb-lmdb"
 version = "0.1.0"
 dependencies = [
@@ -756,6 +773,17 @@ dependencies = [
  "parking_lot 0.13.0",
  "sha2",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "elmdb-wire"
+version = "0.1.0"
+dependencies = [
+ "elmdb-storage",
+ "proptest",
+ "rustc-hash 2.1.3",
+ "serde",
  "thiserror",
 ]
 
