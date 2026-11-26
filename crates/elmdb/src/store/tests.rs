@@ -1019,6 +1019,33 @@ fn a_store_closing_at_exit_reports_a_sync_that_failed() {
     assert_eq!(error.code, ErrorCode::Io);
 }
 
+#[test]
+fn a_store_closing_at_exit_does_not_wait_for_a_blocked_wake_listener() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release = std::sync::Mutex::new(release_rx);
+    store
+        .wake
+        .listen(Arc::new(move || {
+            let _ = entered_tx.send(());
+            let _ = release.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        }))
+        .unwrap();
+    store.wake.wake_self();
+    entered_rx.recv_timeout(Duration::from_secs(5)).expect("listener entered callback");
+
+    let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+    let closer = std::thread::spawn(move || {
+        store.close_at_exit(Duration::from_secs(1)).unwrap();
+        let _ = closed_tx.send(());
+    });
+    closed_rx.recv_timeout(Duration::from_secs(2)).expect("close_at_exit must not wait for a blocked wake listener");
+    let _ = release_tx.send(());
+    closer.join().unwrap();
+}
+
 /// What `grow_elsewhere` runs as a child of this test binary: writes well past its parent's map, in two commits, and
 /// closes
 #[test]

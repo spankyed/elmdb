@@ -1867,6 +1867,7 @@ impl Store {
     /// to close, which a handle a gone thread held would keep open
     pub fn close_at_exit(mut self, wait: Duration) -> Result<()> {
         let deadline = sync::deadline_from(Instant::now(), wait);
+        self.wake.stop_at_exit();
         let synced = self.sync_owed(deadline);
         if let Some(commit) = self.commit.take() {
             commit.stop_at_exit(deadline.saturating_duration_since(Instant::now()));

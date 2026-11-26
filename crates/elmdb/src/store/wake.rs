@@ -17,6 +17,7 @@
 //! and a commit with nobody to tell costs a `stat` of the directory. Listening writes into the database's directory, so a
 //! handle on a directory it can't write, or on a filesystem with no FIFOs, can't listen.
 
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +26,14 @@ use std::time::{Duration, SystemTime};
 
 use crate::error::{Error, ErrorCode, Result};
 use crate::sync::PlainMutex;
+
+thread_local! {
+    /// Address of the `stopping` flag for the wake listener running on this thread, if any.
+    /// Destructor-free (`const`-initialized `Cell`), so `stop()` can check whether it is on the
+    /// listener thread even during thread-local or C `atexit` teardown after `std::thread::current()`
+    /// TLS has already been destroyed.
+    static ACTIVE_LISTENER: Cell<usize> = const { Cell::new(0) };
+}
 
 /// What a listener is told: something committed. Its caller asks what
 pub type WakeListener = Arc<dyn Fn() + Send + Sync>;
@@ -162,6 +171,14 @@ impl Wake {
         let stopping = Arc::new(AtomicBool::new(false));
         let (stop, waiting) = (Arc::clone(&stopping), Arc::clone(&mailbox));
         let thread = match spawn(Box::new(move || {
+            struct ActiveGuard(usize);
+            impl Drop for ActiveGuard {
+                fn drop(&mut self) {
+                    ACTIVE_LISTENER.with(|cell| cell.set(self.0));
+                }
+            }
+            let previous = ACTIVE_LISTENER.with(|cell| cell.replace(Arc::as_ptr(&stop) as usize));
+            let _active = ActiveGuard(previous);
             loop {
                 // Nothing wakes this again after a failure, and whoever asks next learns what was missed
                 if waiting.wait().is_err() || stop.load(Ordering::Acquire) {
@@ -186,9 +203,18 @@ impl Wake {
         stopping.store(true, Ordering::Release);
         self.peers.lock().own = None;
         mailbox.ring_own();
-        if thread.thread().id() != std::thread::current().id() {
+        if ACTIVE_LISTENER.with(Cell::get) != Arc::as_ptr(&stopping) as usize {
             let _ = thread.join();
         }
+    }
+
+    /// Stops listening during process exit without joining the listener thread, whose OS thread may already have been
+    /// ended (Windows `exit`) or still be blocked in a callback
+    pub(crate) fn stop_at_exit(&self) {
+        let Some(Listening { stopping, mailbox, thread: _ }) = self.listening.lock().take() else { return };
+        stopping.store(true, Ordering::Release);
+        self.peers.lock().own = None;
+        mailbox.ring_own();
     }
 }
 
@@ -713,5 +739,66 @@ mod tests {
         assert!(wake.peers.lock().own.is_none(), "peers.own must be cleared when spawn fails");
         assert!(wake.listening.lock().is_none(), "listening slot must remain empty");
         assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "mailbox removed on failure");
+    }
+
+    #[test]
+    fn stopping_from_the_listener_thread_itself_does_not_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = Arc::new(Wake::new(dir.path()));
+        let inside = Arc::clone(&wake);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        wake.listen(Arc::new(move || {
+            inside.stop();
+            let _ = done_tx.send(());
+        }))
+        .unwrap();
+        wake.wake_self();
+        done_rx.recv_timeout(SETTLES).expect("listener stopped itself without deadlocking");
+        assert!(wake.listening.lock().is_none());
+        assert!(wake.peers.lock().own.is_none());
+    }
+
+    #[test]
+    fn stop_at_exit_returns_without_waiting_for_a_blocked_listener() {
+        let dir = tempfile::tempdir().unwrap();
+        let wake = Wake::new(dir.path());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release = std::sync::Mutex::new(release_rx);
+        wake.listen(Arc::new(move || {
+            let _ = entered_tx.send(());
+            let _ = release.lock().unwrap().recv_timeout(SETTLES);
+        }))
+        .unwrap();
+        wake.wake_self();
+        entered_rx.recv_timeout(SETTLES).expect("listener entered callback");
+
+        wake.stop_at_exit();
+        assert!(wake.listening.lock().is_none());
+        assert!(wake.peers.lock().own.is_none());
+        let _ = release_tx.send(());
+    }
+
+    #[test]
+    fn stopping_during_thread_local_teardown_does_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let handle = std::thread::spawn(move || {
+            struct DropOnExit(std::cell::RefCell<Option<Wake>>);
+            impl Drop for DropOnExit {
+                fn drop(&mut self) {
+                    if let Some(wake) = self.0.borrow_mut().take() {
+                        wake.stop();
+                    }
+                }
+            }
+            thread_local! {
+                static HELD: DropOnExit = const { DropOnExit(std::cell::RefCell::new(None)) };
+            }
+            let wake = Wake::new(&path);
+            wake.listen(Arc::new(|| {})).unwrap();
+            HELD.with(|held| *held.0.borrow_mut() = Some(wake));
+        });
+        handle.join().expect("thread-local teardown must not panic");
     }
 }

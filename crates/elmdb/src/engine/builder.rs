@@ -8,6 +8,7 @@
 //! build's chunks and a drain's commit like any other write, telling the watches and the tracked reads whose reads
 //! they wrote into.
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -22,6 +23,13 @@ use crate::sync::{Condvar, Mutex};
 
 use super::derive::build_chunk;
 use super::unit::Txn;
+
+crate::sync::thread_local! {
+    /// Address of the `Core` currently executing on this thread, if any.
+    /// Destructor-free (`const`-initialized `Cell`), so `on_its_thread()` and `join()` never panic
+    /// during thread-local teardown after `std::thread::current()` TLS has already been destroyed.
+    static ACTIVE_BUILDER: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(all(test, shuttle))]
 mod model;
@@ -206,7 +214,7 @@ impl Core {
 
     /// Whether the caller is the thread that runs this
     fn on_its_thread(&self) -> bool {
-        self.lock().thread == Some(std::thread::current().id())
+        ACTIVE_BUILDER.with(Cell::get) == (self as *const Self as usize)
     }
 
     /// Whether `work` is put off (`put_off`): not waited for (`waited`)
@@ -372,6 +380,7 @@ impl Core {
     /// Takes the queue's work one piece at a time until stopped, `build` doing each, given whether to stop. Run by
     /// the thread `claim_start` claimed, which it gives up as it ends
     fn run(&self, mut build: impl FnMut(&Work, &dyn Fn() -> bool) -> crate::Result<()>) {
+        let previous_active = ACTIVE_BUILDER.with(|cell| cell.replace(self as *const Self as usize));
         {
             let mut state = self.lock();
             debug_assert!(state.running, "a thread runs the building that wasn't claimed");
@@ -379,20 +388,24 @@ impl Core {
         }
         // Ends idle, and given up, whichever way it ends, a panic outside a build's own among them: a thread started
         // after it finds no work under way, and may be started at all, and no wait is left waiting on this one
-        struct Ending<'a>(&'a Core);
+        struct Ending<'a> {
+            core: &'a Core,
+            previous_active: usize,
+        }
         impl Drop for Ending<'_> {
             fn drop(&mut self) {
-                let mut state = self.0.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                ACTIVE_BUILDER.with(|cell| cell.set(self.previous_active));
+                let mut state = self.core.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                 state.busy = false;
                 state.active = None;
                 state.running = false;
                 state.thread = None;
                 holds(&state);
                 drop(state);
-                self.0.changed.notify_all();
+                self.core.changed.notify_all();
             }
         }
-        let _ending = Ending(self);
+        let _ending = Ending { core: self, previous_active };
         let ended = drop::<crate::sync::MutexGuard<'_, State>>;
         loop {
             let (work, generation) = {
@@ -750,7 +763,7 @@ impl Building {
         let thread = self.handle().take();
         if let Some(thread) = thread
             && !at_exit
-            && thread.thread().id() != std::thread::current().id()
+            && !self.core.on_its_thread()
         {
             thread.join().expect("the index thread doesn't panic");
         }
