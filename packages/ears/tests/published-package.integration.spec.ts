@@ -17,18 +17,24 @@ const consumer = packedConsumer();
 
 /** Typed reads over a schema a consumer declares, and an engine over a database it holds */
 const TYPED = `
-import { createEarsEngine, defineEars, type EARS, type EarsDatabase, type UntypedSchema } from '${MANIFEST.name}';
-interface NoteEntity { entityType: 'Note'; title: string }
+import { createEarsEngine, defineEars, type EARS, type EarsDatabase, type EarsSchemaShape } from '${MANIFEST.name}';
+interface AppSchema extends EarsSchemaShape {
+  readonly entities: {
+    readonly Note: { readonly title: string; readonly pinned?: boolean };
+  };
+  readonly relations: 'linksTo';
+}
 declare const database: EarsDatabase;
 const engine = createEarsEngine({ database });
-const { query } = defineEars<UntypedSchema & { shapes: { Note: NoteEntity }; names: 'Note' }>(() => engine);
+const typed = defineEars<AppSchema>(() => engine);
 declare const noteId: EARS.EntityId<'Note'>;
-const note = query.ids(noteId).pickOne()!;
-export const title: string = note.title;
+const note = typed.query.ids([noteId]).first()!;
+export const title: string = note.fields.title;
 // @ts-expect-error a declared shape's field is typed: neither any nor unknown
-export const titleNumber: number = note.title;
-engine.create('Note', { title: 'held' });
-engine.admin.clear();
+export const titleNumber: number = note.fields.title;
+const created: EARS.EntityId<'Note'> = typed.create('Note', { title: 'held' });
+export const createdId: string = created;
+engine.admin.flush();
 `;
 
 describe('the packed package', () => {

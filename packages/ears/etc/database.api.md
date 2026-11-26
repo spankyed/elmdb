@@ -4,190 +4,720 @@
 
 ```ts
 
-import type { OpenReport } from 'elmdb/protocol/OpenReport.js';
-import type { Schema } from 'elmdb/protocol/Schema.js';
-import type { SchemaChange } from 'elmdb/protocol/SchemaChange.js';
-import type { Stats } from 'elmdb/protocol/Stats.js';
+import { BatchResult } from 'elmdb';
+import { BatchSlot } from 'elmdb/client';
+import { CheckReport } from 'elmdb';
+import { DatabaseStats } from 'elmdb';
+import { DumpReport } from 'elmdb';
+import { EntityTarget } from 'elmdb/client';
+import { ErrorCode } from 'elmdb';
+import { Hit } from 'elmdb/protocol/Hit.js';
+import { IndexStatus } from 'elmdb';
+import { LinkOptions } from 'elmdb/client';
+import { NextDueWatch } from 'elmdb';
+import { OpenReport } from 'elmdb';
+import { QueryAnswer } from 'elmdb';
+import { QueryFilter } from 'elmdb/protocol/QueryFilter.js';
+import { QueryScore } from 'elmdb/protocol/QueryScore.js';
+import { QuerySpec } from 'elmdb';
+import { QueryStep } from 'elmdb/protocol/QueryStep.js';
+import { QueryTerminal } from 'elmdb/protocol/QueryTerminal.js';
+import { RelationRow } from 'elmdb';
+import { Row } from 'elmdb';
+import { Schema } from 'elmdb';
+import { SchemaChange } from 'elmdb';
+import { WatchPolicyOptions } from 'elmdb';
+import { WatchRegistration } from 'elmdb';
+import { WatchRerun } from 'elmdb';
+import { WatchTick } from 'elmdb';
+
+export { BatchResult }
+
+export { BatchSlot }
+
+// @public
+export interface BatchWriter {
+    // (undocumented)
+    create(typeName: string, fields: Record<string, unknown>, externalId?: string): BatchSlot;
+    // (undocumented)
+    destroy(target: EntityTarget): this;
+    // (undocumented)
+    encode(returnFlags?: number): Uint8Array;
+    // (undocumented)
+    readonly length: number;
+    // (undocumented)
+    link(source: EntityTarget, relKind: string, target: EntityTarget, opts?: LinkOptions): this;
+    // (undocumented)
+    patch(target: EntityTarget, fields: Record<string, unknown>): this;
+    // (undocumented)
+    restore(target: EntityTarget): this;
+    // (undocumented)
+    trash(target: EntityTarget): this;
+    // (undocumented)
+    unlink(source: EntityTarget, relKind?: string, target?: EntityTarget): this;
+    // (undocumented)
+    unset(target: EntityTarget, fields: readonly string[]): this;
+}
+
+// @public
+export type BeforeCommitHook = (delta: CommitDelta) => void | Uint8Array | ((batch: BatchWriter) => void);
+
+// @public
+export type BuildPolicy = 'deferred' | 'eager';
+
+export { CheckReport }
+
+// @public
+export interface CommitDelta {
+    // (undocumented)
+    readonly edges: readonly EdgeDeltaEvent[];
+    // (undocumented)
+    readonly entities: readonly EntityDeltaEvent[];
+}
 
 // @public
 export function createTemporaryDatabases(): TemporaryDatabases;
 
 // @public
-export const DATABASE_FORMAT = "elmdb/1";
+export const DATABASE_FORMAT = "elmdb/2";
 
-// @public (undocumented)
+// @public
 export interface DatabaseOptions {
-    mapSizeBytes?: number;
-    path: string;
-    readOnly?: boolean;
-    schema?: EngineSchema;
-    syncEachCommit?: boolean;
-    syncIdleMs?: number;
-    syncIntervalMs?: number;
-    syncs?: boolean;
+    readonly buildPolicy?: BuildPolicy;
+    readonly durability?: DurabilityMode;
+    // (undocumented)
+    readonly mapSizeBytes?: number;
+    // (undocumented)
+    readonly maxDbs?: number;
+    // (undocumented)
+    readonly maxReaders?: number;
+    readonly path: string;
+    // (undocumented)
+    readonly planCacheCapacity?: number;
+    readonly readOnly?: boolean;
+    readonly schema?: Schema;
+    // (undocumented)
+    readonly watchTurnSliceMs?: number;
+}
+
+export { DatabaseStats }
+
+// @public
+export interface DegreesOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+}
+
+export { DumpReport }
+
+// @public
+export type DurabilityMode = 'strict' | 'grouped' | 'unsafe';
+
+// @public
+export interface EarsAdmin {
+    // (undocumented)
+    acknowledgeRestore(): void;
+    // (undocumented)
+    backup(targetDir: string, overwriteBackup?: boolean): void;
+    // (undocumented)
+    backupAsync(targetDir: string, overwriteBackup?: boolean): Promise<void>;
+    // (undocumented)
+    check(indexName?: string): CheckReport;
+    // (undocumented)
+    checkAsync(indexName?: string): Promise<CheckReport>;
+    // (undocumented)
+    close(): void;
+    // (undocumented)
+    driveBackgroundWork(maxEntities?: number): boolean;
+    // (undocumented)
+    dump(targetFile: string): DumpReport;
+    // (undocumented)
+    flush(): void;
+    // (undocumented)
+    flushAsync(): Promise<void>;
+    // (undocumented)
+    getSchema(): Schema;
+    // (undocumented)
+    indexStatus(): IndexStatus[];
+    // (undocumented)
+    openReport(): OpenReport;
+    // (undocumented)
+    readonly path: string;
+    // (undocumented)
+    purgeArchived(typeName: string): number;
+    // (undocumented)
+    readonly readOnly: boolean;
+    // (undocumented)
+    rebuild(indexName?: string): void;
+    // (undocumented)
+    rebuildAsync(indexName?: string): Promise<void>;
+    // (undocumented)
+    renameField(typeName: string, oldField: string, newField: string): number;
+    // (undocumented)
+    renameRelation(oldRel: string, newRel: string): number;
+    // (undocumented)
+    renameType(oldType: string, newType: string, rewriteIds?: boolean): number;
+    // (undocumented)
+    setSchema(schema: Schema): SchemaChange;
+    // (undocumented)
+    stats(): DatabaseStats;
+}
+
+// @public
+export interface EarsClock {
+    // (undocumented)
+    clearTimeout(handle: unknown): void;
+    // (undocumented)
+    now(): number;
+    // (undocumented)
+    setTimeout(callback: () => void, delayMs: number): unknown;
 }
 
 // @public
 export interface EarsDatabase {
+    // (undocumented)
     acknowledgeRestore(): void;
-    adoptReplacement(epoch: number): boolean;
-    backup(target: string): void;
     // (undocumented)
-    begin(): EarsUnit;
+    backup(targetDir: string, overwriteBackup?: boolean | undefined | null): void;
     // (undocumented)
-    bulkLoad(loads: Uint8Array): void;
-    changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
-    checkpoint(name: string): Uint8Array | null;
+    backupAsync(targetDir: string, overwriteBackup?: boolean | undefined | null): Promise<void>;
+    // (undocumented)
+    catchUpCrossProcess(nowMs?: number | undefined | null): Array<number>;
+    // (undocumented)
+    caughtUp(nowMs?: number | undefined | null, soon?: boolean | undefined | null): boolean;
+    // (undocumented)
+    check(indexName?: string | undefined | null): CheckReport;
+    // (undocumented)
+    checkAsync(indexName?: string | undefined | null): Promise<CheckReport>;
     // (undocumented)
     close(): void;
-    committedElsewhere(): boolean;
     // (undocumented)
-    durable(): Promise<void>;
-    hearBuilderCommits(listener: (commit: {
-        sequence: number;
-        touched: number[];
-    }) => void): void;
-    hearCommitsElsewhere(listener: () => void): void;
+    driveBackgroundWork(maxEntities?: number | undefined | null): boolean;
     // (undocumented)
-    readonly isOpen: boolean;
-    readonly openReport: OpenReport;
+    dump(targetFile: string): DumpReport;
+    // (undocumented)
+    executeWireBatch(payload: Uint8Array): BatchResult;
+    // (undocumented)
+    flush(): void;
+    // (undocumented)
+    flushAsync(): Promise<void>;
+    // (undocumented)
+    get(extId: string): Row | null;
+    // (undocumented)
+    getEdges(extId: string, relKind?: string | undefined | null, dir?: string | undefined | null): Array<RelationRow>;
+    // (undocumented)
+    getSchema(): Schema;
+    // (undocumented)
+    indexStatus(): Array<IndexStatus>;
+    // (undocumented)
+    nextDueWatch(nowMs?: number | undefined | null, elapsedTurnMs?: number | undefined | null): NextDueWatch;
+    // (undocumented)
+    openReport(): OpenReport;
     // (undocumented)
     readonly path: string;
     // (undocumented)
-    read(reads: Uint8Array): Uint8Array;
+    purgeArchived(typeName: string): number;
+    // (undocumented)
+    query(spec: QuerySpec): QueryAnswer;
+    // (undocumented)
+    queryAsync(spec: QuerySpec): Promise<QueryAnswer>;
     // (undocumented)
     readonly readOnly: boolean;
-    rebuild(type?: string | null, index?: string | null): void;
-    replacedElsewhere(): number | null;
-    replaceWith(source: string): void;
-    reset(): void;
-    readonly schema: Schema | null;
-    readonly sequence: number;
     // (undocumented)
-    setSchema(schema: Schema): SchemaChange[];
+    rebuild(indexName?: string | undefined | null): void;
     // (undocumented)
-    stats(): Stats;
-    trackStats(): {
-        owners: number;
-        keys: number;
-        ranges: number;
-    };
-    untrack(token: number): void;
-    waitForIndexBuilds(): void;
+    rebuildAsync(indexName?: string | undefined | null): Promise<void>;
     // (undocumented)
-    write(batch: Uint8Array, durable?: boolean | null): Uint8Array;
+    registerBeforeCommit(typeNames: Array<string> | undefined | null, callback: (delta: CommitDelta) => unknown): number;
+    // (undocumented)
+    registerWatch(spec: QuerySpec, policy?: WatchPolicyOptions | undefined | null, nowMs?: number | undefined | null): WatchRegistration;
+    // (undocumented)
+    renameField(typeName: string, oldField: string, newField: string): number;
+    // (undocumented)
+    renameRelation(oldRel: string, newRel: string): number;
+    // (undocumented)
+    renameType(oldType: string, newType: string, rewriteIds?: boolean | undefined | null): number;
+    // (undocumented)
+    rerunWatch(watchId: number, spec: QuerySpec, nowMs?: number | undefined | null, costMs?: number | undefined | null): WatchRerun;
+    // (undocumented)
+    setEmbeddings(indexName: string, extId: string, vectors: Array<Array<number>>): void;
+    // (undocumented)
+    setSchema(schema: Schema): SchemaChange;
+    // (undocumented)
+    stats(): DatabaseStats;
+    // (undocumented)
+    stopWatches(): void;
+    // (undocumented)
+    tickWatches(nowMs?: number | undefined | null): WatchTick;
+    // (undocumented)
+    unregisterBeforeCommit(hookId: number): boolean;
+    // (undocumented)
+    unregisterWatch(watchId: number): boolean;
+    // (undocumented)
+    watchesSettled(): boolean;
 }
 
 // @public
-export interface EarsUnit {
+export interface EarsEngine {
     // (undocumented)
-    abort(): void;
-    changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
-    checkpoint(name: string): Uint8Array | null;
+    readonly admin: EarsAdmin;
+    batch(fn: (batch: BatchWriter) => void): BatchResult;
+    beforeCommit(typeNames: readonly string[] | null, callback: BeforeCommitHook): () => void;
     // (undocumented)
-    commit(durable?: boolean | null): Uint8Array;
+    create(typeName: string, fields: Record<string, unknown>, externalId?: string): string;
     // (undocumented)
-    readonly isOpen: boolean;
-    nextSequence(): number;
-    pendingChanges(): Uint8Array;
+    destroy(id: string): BatchResult;
+    executeWireBatch(payload: Uint8Array): BatchResult;
     // (undocumented)
-    read(reads: Uint8Array): Uint8Array;
+    get(id: string): EntityRow | null;
     // (undocumented)
-    release(depth: number): void;
+    getEdges(id: string, opts?: GetEdgesOptions): RelationRow[];
     // (undocumented)
-    rollbackTo(depth: number): void;
+    link(sourceId: string, relKind: string, targetId: string, opts?: LinkOptions): BatchResult;
     // (undocumented)
-    savepoint(): number;
-    setCheckpoint(name: string, value: Uint8Array): void;
+    patch(id: string, fields: Record<string, unknown>): BatchResult;
     // (undocumented)
-    write(batch: Uint8Array): Uint8Array;
+    readonly query: QueryRoot;
+    // (undocumented)
+    restore(id: string): BatchResult;
+    // (undocumented)
+    setEmbeddings(indexName: string, id: string, vectors: ReadonlyArray<ReadonlyArray<number>>): void;
+    // (undocumented)
+    trash(id: string): BatchResult;
+    // (undocumented)
+    unlink(sourceId: string, relKind?: string, targetId?: string): BatchResult;
+    // (undocumented)
+    unset(id: string, fields: readonly string[]): BatchResult;
+    // (undocumented)
+    readonly watches: WatchController;
+}
+
+// @public
+export class EarsError extends Error {
+    constructor(code: EarsErrorCode, message: string, options?: {
+        readonly cause?: unknown;
+    });
+    // (undocumented)
+    readonly code: EarsErrorCode;
+}
+
+// @public
+export type EarsErrorCode = ErrorCode;
+
+// @public
+export interface EdgeDeltaEvent {
+    // (undocumented)
+    readonly op: 'link' | 'unlink' | 'update';
+    // (undocumented)
+    readonly relKind: string;
+    // (undocumented)
+    readonly sourceId: string;
+    // (undocumented)
+    readonly targetId: string;
 }
 
 // @public
 export type EdgeDirection = 'out' | 'in' | 'both';
 
 // @public
-export interface EmbedDeclaration {
-    readonly chunk?: 'whole' | 'paragraph' | 'heading';
-    readonly dims: number;
-    readonly from: readonly string[];
-    readonly model: string;
-}
-
-// @public
-export interface EngineSchema {
-    ranks?: Readonly<Record<string, RankDeclaration>>;
-    relations: Readonly<Record<string, RelationRules>>;
+export interface EntityDeltaEvent {
     // (undocumented)
-    roles: readonly string[];
-    types: Readonly<Record<string, RowRules>>;
+    readonly id: string;
+    // (undocumented)
+    readonly op: 'create' | 'update' | 'trash' | 'restore' | 'destroy';
+    // (undocumented)
+    readonly typeName: string;
 }
 
 // @public
-export type FieldRule = FieldType & {
-    readonly optional?: boolean;
-    readonly nullable?: boolean;
+export type EntityRow<TName extends string = string, TFields extends Record<string, unknown> = Record<string, unknown>> = {
+    readonly id: string;
+    readonly typeName: TName;
+    readonly trashed: boolean;
+    readonly fields: Readonly<TFields>;
 };
 
-// @public
-export type FieldType = {
-    readonly type: 'string' | 'number' | 'boolean' | 'any';
-} | {
-    readonly type: 'enum';
-    readonly values: readonly string[];
-} | {
-    readonly type: 'ref';
-    readonly to: readonly string[];
-} | {
-    readonly type: 'list';
-    readonly of: FieldType;
-};
+export { EntityTarget }
+
+export { ErrorCode }
 
 // @public
-export function openDatabase(input: DatabaseOptions): EarsDatabase;
-
-// @public
-export interface RankDeclaration {
-    damping?: number;
-    direction?: EdgeDirection;
-    relations: readonly string[];
-    tolerance?: number;
-    types: readonly string[];
-    weights?: boolean;
+export interface FieldPredicate {
+    // (undocumented)
+    readonly contains?: string;
+    // (undocumented)
+    readonly eq?: unknown;
+    // (undocumented)
+    readonly gt?: unknown;
+    // (undocumented)
+    readonly gte?: unknown;
+    // (undocumented)
+    readonly in?: readonly unknown[];
+    // (undocumented)
+    readonly isNull?: boolean;
+    // (undocumented)
+    readonly isPresent?: boolean;
+    // (undocumented)
+    readonly lt?: unknown;
+    // (undocumented)
+    readonly lte?: unknown;
+    // (undocumented)
+    readonly ne?: unknown;
+    // (undocumented)
+    readonly regex?: string;
+    // (undocumented)
+    readonly startsWith?: string;
 }
 
 // @public
-export interface RelationRules {
-    acyclic?: boolean;
-    key?: readonly string[];
-    weighted?: boolean;
+export interface FuseOptions {
+    // (undocumented)
+    readonly method?: FusionMethod;
+    // (undocumented)
+    readonly rrfK?: number;
 }
 
 // @public
-export interface RowRules {
-    changeOrder?: boolean;
-    embed?: EmbedDeclaration;
-    fields?: Readonly<Record<string, FieldRule>>;
-    indexes?: readonly string[];
-    required: readonly string[];
-    search?: SearchDeclaration;
-    shortCode?: string;
-    substrings?: readonly string[];
+export type FusionMethod = 'rrf' | 'linear';
+
+// @public
+export interface GetEdgesOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly relKind?: string;
 }
 
 // @public
-export interface SearchDeclaration {
-    readonly fields: Readonly<Record<string, number>>;
-    readonly stem?: string;
+export interface GraphPprResult {
+    // (undocumented)
+    readonly converged: boolean;
+    // (undocumented)
+    readonly iterations: number;
+    // (undocumented)
+    readonly scores: Hit[];
+}
+
+// @public
+export interface GraphTopoResult {
+    // (undocumented)
+    readonly cycles: number;
+    // (undocumented)
+    readonly order: string[];
+}
+
+// @public
+export interface HasLinkOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+    // (undocumented)
+    readonly targetId?: string;
+}
+
+export { Hit }
+
+// @public
+export interface HopsOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly maxHops: number;
+    // (undocumented)
+    readonly minHops?: number;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+}
+
+export { IndexStatus }
+
+// @public
+export interface KeysetCursor {
+    // (undocumented)
+    readonly id?: string;
+    // (undocumented)
+    readonly score?: number;
+    // (undocumented)
+    readonly value?: unknown;
+}
+
+// @public
+export interface LeidenOptions {
+    // (undocumented)
+    readonly iterations?: number;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+    // (undocumented)
+    readonly resolution?: number;
+    // (undocumented)
+    readonly seed?: number;
+    // (undocumented)
+    readonly weighted?: boolean;
+}
+
+export { LinkOptions }
+
+// @public
+export function loadDump(dumpFile: string, targetDir: string): DumpReport;
+
+// @public
+export interface MinMaxResult {
+    // (undocumented)
+    readonly max: unknown | null;
+    // (undocumented)
+    readonly min: unknown | null;
+}
+
+export { NextDueWatch }
+
+// @public
+export function openDatabase(options: DatabaseOptions): EarsDatabase;
+
+// @public
+export function openDatabaseAsync(options: DatabaseOptions): Promise<EarsDatabase>;
+
+// @public
+export function openEngine(options: OpenEngineOptions): EarsEngine;
+
+// @public
+export function openEngineAsync(options: OpenEngineOptions): Promise<EarsEngine>;
+
+// @public
+export interface OpenEngineOptions extends DatabaseOptions {
+    // (undocumented)
+    readonly clock?: EarsClock;
+    // (undocumented)
+    readonly onWatchError?: (error: EarsError) => void;
+}
+
+export { OpenReport }
+
+// @public
+export interface OrderByOptions {
+    // (undocumented)
+    readonly locale?: string;
+}
+
+// @public
+export interface PprOptions {
+    // (undocumented)
+    readonly damping?: number;
+    // (undocumented)
+    readonly iterations?: number;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+    // (undocumented)
+    readonly tolerance?: number;
+    // (undocumented)
+    readonly weighted?: boolean;
+}
+
+export { QueryAnswer }
+
+// @public
+export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
+    adamicAdar(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow>;
+    after(cursor: KeysetCursor): QueryBuilder<TResult>;
+    all(fields?: readonly string[]): TResult[];
+    allAsync(fields?: readonly string[]): Promise<TResult[]>;
+    count(): number;
+    countAsync(): Promise<number>;
+    degrees(opts?: DegreesOptions): Array<[string, number]>;
+    distinct(): QueryBuilder<TResult>;
+    exists(): boolean;
+    existsAsync(): Promise<boolean>;
+    explain(terminal?: QueryTerminal): QueryAnswer;
+    filterLocal(predicate: (row: TResult) => boolean): QueryBuilder<TResult>;
+    first(fields?: readonly string[]): TResult | null;
+    firstAsync(fields?: readonly string[]): Promise<TResult | null>;
+    fuse(inputs: ReadonlyArray<readonly [QueryScore, number]>, opts?: FuseOptions): QueryBuilder<TResult>;
+    fuzzy(field: string, query: string, maxDistance: number): QueryBuilder<TResult>;
+    graphGroups(): string[][];
+    graphPpr(): GraphPprResult;
+    graphTopo(): GraphTopoResult;
+    groupBy(field: string): Array<[unknown, string[]]>;
+    groupCounts(field: string): Array<[unknown, number]>;
+    hasLink(opts?: HasLinkOptions): QueryBuilder<TResult>;
+    hits(): Hit[];
+    hitsAsync(): Promise<Hit[]>;
+    hops(opts: HopsOptions): QueryBuilder<EntityRow>;
+    ids(): string[];
+    idsAsync(): Promise<string[]>;
+    jaccard(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow>;
+    leiden(opts?: LeidenOptions): QueryBuilder<EntityRow>;
+    like(index: string, seedId: string, topK: number): QueryBuilder<TResult>;
+    limit(n: number): QueryBuilder<TResult>;
+    minMax(field: string): MinMaxResult;
+    minMaxAsync(field: string): Promise<MinMaxResult>;
+    near(index: string, vector: readonly number[], topK: number): QueryBuilder<TResult>;
+    orderBy(field: string, dir?: SortDirection, opts?: OrderByOptions): QueryBuilder<TResult>;
+    orderById(dir?: SortDirection): QueryBuilder<TResult>;
+    orderByScore(dir?: SortDirection): QueryBuilder<TResult>;
+    ppr(seeds: ReadonlyArray<readonly [string, number]>, opts?: PprOptions): QueryBuilder<EntityRow>;
+    ranked(index: string): QueryBuilder<TResult>;
+    recency(field: string, opts: RecencyOptions): QueryBuilder<TResult>;
+    scc(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+    score(spec: QueryScore): QueryBuilder<TResult>;
+    search(index: string, query: string, opts?: SearchOptions): QueryBuilder<TResult>;
+    shortestPath(targetId: string, opts: ShortestPathOptions): QueryBuilder<EntityRow>;
+    sum(field: string): number;
+    sumAsync(field: string): Promise<number>;
+    topoSort(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+    toSpec(terminal?: QueryTerminal, explain?: boolean): QuerySpec;
+    watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle;
+    watchCount(callback: (count: number) => void, opts?: WatchOptions): WatchHandle;
+    watchHits(callback: (hits: Hit[]) => void, opts?: WatchOptions): WatchHandle;
+    watchIds(callback: (ids: string[]) => void, opts?: WatchOptions): WatchHandle;
+    weakComponents(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+    where(filter: QueryFilter): QueryBuilder<TResult>;
+    // (undocumented)
+    where(field: string, valueOrPredicate: WhereInput): QueryBuilder<TResult>;
+    whereAll(filters: readonly QueryFilter[]): QueryBuilder<TResult>;
+    whereAny(filters: readonly QueryFilter[]): QueryBuilder<TResult>;
+    whereNot(filter: QueryFilter): QueryBuilder<TResult>;
+}
+
+export { QueryFilter }
+
+// @public
+export interface QueryRoot {
+    // (undocumented)
+    allEntities(opts?: SourceOptions): QueryBuilder<EntityRow>;
+    // (undocumented)
+    ids(ids: readonly string[]): QueryBuilder<EntityRow>;
+    // (undocumented)
+    of(typeName: string, opts?: SourceOptions): QueryBuilder<EntityRow>;
+    // (undocumented)
+    ofTypes(typeNames: readonly string[], opts?: SourceOptions): QueryBuilder<EntityRow>;
+    // (undocumented)
+    raw(spec: QuerySpec): QueryAnswer;
+    // (undocumented)
+    rawAsync(spec: QuerySpec): Promise<QueryAnswer>;
+}
+
+export { QueryScore }
+
+export { QuerySpec }
+
+export { QueryStep }
+
+export { QueryTerminal }
+
+// @public
+export interface RecencyOptions {
+    // (undocumented)
+    readonly halfLifeMs: number;
+    // (undocumented)
+    readonly nowMs: number;
+}
+
+export { RelationRow }
+
+export { Row }
+
+export { Schema }
+
+export { SchemaChange }
+
+// @public
+export interface SearchOptions {
+    // (undocumented)
+    readonly phrase?: readonly string[];
+    // (undocumented)
+    readonly requireAll?: boolean;
+    // (undocumented)
+    readonly topK?: number;
+}
+
+// @public
+export interface ShortestPathOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly maxHops: number;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+}
+
+// @public
+export interface SimilarityOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+}
+
+// @public
+export type SortDirection = 'asc' | 'desc';
+
+// @public
+export interface SourceOptions {
+    // (undocumented)
+    readonly includeTrashed?: boolean;
+}
+
+// @public
+export interface TemporaryDatabaseHandle {
+    // (undocumented)
+    readonly database: EarsDatabase;
+    // (undocumented)
+    dispose(): void;
+    // (undocumented)
+    readonly path: string;
 }
 
 // @public
 export interface TemporaryDatabases {
+    // (undocumented)
     disposeAll(): void;
-    open(schema: EngineSchema): {
-        database: EarsDatabase;
-        dispose(): void;
-    };
+    // (undocumented)
+    open(options?: Omit<DatabaseOptions, 'path'>): TemporaryDatabaseHandle;
 }
+
+// @public
+export interface WatchController {
+    readonly activeCount: number;
+    catchUpCrossProcess(): number[];
+    caughtUp(soon?: boolean): boolean;
+    flushSync(nowMs?: number): number;
+    settled(): boolean;
+    stopAll(): void;
+}
+
+// @public
+export interface WatchHandle {
+    // (undocumented)
+    readonly active: boolean;
+    // (undocumented)
+    readonly id: number;
+    // (undocumented)
+    stop(): void;
+}
+
+// @public
+export type WatchMode = 'declarative' | 'imperative';
+
+// @public
+export interface WatchOptions {
+    readonly adaptiveMultiplier?: number;
+    readonly immediate?: boolean;
+    readonly minGapMs?: number;
+    readonly mode?: WatchMode;
+    readonly onError?: (error: EarsError) => void;
+}
+
+export { WatchPolicyOptions }
+
+export { WatchRegistration }
+
+export { WatchRerun }
+
+export { WatchTick }
+
+// @public
+export type WhereInput = string | number | boolean | null | Uint8Array | FieldPredicate;
 
 ```

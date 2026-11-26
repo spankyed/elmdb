@@ -26,8 +26,6 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run && vitest run --config vitest.integration.config.ts",
     "bench": "node scripts/build.mjs && vitest bench --run",
-    "bench:heap": "node scripts/build.mjs && node --expose-gc bench/heap.ts",
-    "bench:watch": "node scripts/build.mjs && node bench/watch-stress.ts",
     "api:check": "node scripts/api-report.mjs",
     "api:update": "node scripts/api-report.mjs --local"
   },
@@ -44,8 +42,5 @@
   },
   "peerDependencies": {
     "elmdb": "0.1.0"
-  },
-  "dependencies": {
-    "msgpackr": "^2.1.4"
   }
 }

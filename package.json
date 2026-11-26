@@ -24,7 +24,6 @@
     "@napi-rs/cli": "3.10.9",
     "@types/node": "^24.1.0",
     "fast-check": "^3.23.2",
-    "msgpackr": "^2.1.4",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   }

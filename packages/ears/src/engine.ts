@@ -1,504 +1,411 @@
-// An EARS engine: the operations over an elmdb database as the engine's own members, with the creator's privileges
-// beside them in `admin`. A program is handed the engine typed as `Ears`, which has no `admin`: the faces define the
-// contract, not a security boundary (code handed the engine runs in-process). Everything the engine holds is in the database; the
-// engine holds its connection, and the names its schema declares, read again when `admin.setSchema` changes them.
-import type { EARS } from './entities.ts';
-import type { EARSRuntimeDeps, Embedding, PendingEmbeddings, RelationEdge, RelationPatch } from './runtime.ts';
-import type { CallCounting } from './calls.ts';
-import type { EarsOperationObserver } from './observation.ts';
-import { createConnection, crossingAsync, runCommitted, type Answer, type BeforeCommit, type ChangedEntities, type ChangedPosition, type PendingChanges, type SchemaChange, type UnitOptions } from './database.ts';
-import { createQuery, relationRow, type Query } from './query.ts';
-import { createWrites, type Create, type Upsert, type Write } from './write.ts';
-import { createNameChecks } from './names.ts';
-import { declaredNames, toElmdbSchema, withDeclarations, type EngineSchema } from './schema.ts';
-import { idSuffix, newId as makeNewId } from './ids.ts';
-import { createWatches, watchClockOf, type WatchDiagnostics, type WatchObserver, type WatchOptions, type WatchReadContext, type Watching } from './watch.ts';
-import { RESERVED_ENTITY_TYPES } from './errors.ts';
-
-/** An entity as a read gives it: its id and type, and every attribute it holds */
-export type EntityRow = { id: EARS.EntityId; entityType: EARS.Entity } & Record<string, unknown>;
-
-/** Which relations to match: any combination of kind, source and target */
-export interface RelationMatch {
-  kind?: EARS.RelKind;
-  source?: EARS.EntityId;
-  target?: EARS.EntityId;
-}
+import type {
+  BatchResult,
+  CheckReport,
+  DatabaseStats,
+  DumpReport,
+  IndexStatus,
+  OpenReport,
+  RelationRow,
+  Schema,
+  SchemaChange,
+} from 'elmdb';
+import { encodeBatch, type BatchWriter, type LinkOptions } from './batch.ts';
+import type { CommitDelta, EarsDatabase, EdgeDirection } from './database.ts';
+import { EarsError, toEarsError } from './errors.ts';
+import { createQueryRoot, type EntityRow, type QueryRoot } from './query.ts';
+import { createSystemClock, WatchPump, type EarsClock, type WatchController } from './watch.ts';
 
 /**
- * A relation row: its id (`removeRelation(id)` removes that one relation), kind, ends and info. The row
- * `RelationEdge` types, with its kind and ends untyped
+ * Synchronous hook invoked inside a native LMDB nested savepoint before a commit finalizes.
+ *
+ * - Throw any error to abort the entire commit atomically (`HOOK_ABORTED`).
+ * - Return `void`/`undefined` to allow the commit as-is.
+ * - Return a `(batch: BatchWriter) => void` callback or an encoded `Uint8Array` to apply derived writes
+ *   in the same savepoint cascade.
  */
-export type RelationRow = RelationEdge;
+export type BeforeCommitHook = (
+  delta: CommitDelta,
+) => void | Uint8Array | ((batch: BatchWriter) => void);
 
-/** Counts for one relation kind */
-export interface RelationStats {
-  /** Relations of the kind */
-  total: number;
-  /** Distinct entities that are a source of one */
-  uniqueSources: number;
-  /** Distinct entities that are a target of one */
-  uniqueTargets: number;
+/** Options for `EarsEngine.getEdges`. */
+export interface GetEdgesOptions {
+  readonly relKind?: string;
+  readonly dir?: EdgeDirection;
 }
 
-/** What an engine holds, each map keyed by a name its data holds */
-export interface SchemaStats {
-  /** Entities per type, the trash included */
-  entities: Record<string, number>;
-  /** Per attribute kind, the entities holding it and the values they hold (a list's elements each count) */
-  attributes: Record<string, { entityCount: number; totalValues: number }>;
-  /** Per relation kind, its relations and the distinct entities at each end */
-  relations: Record<string, RelationStats>;
-  /** Per role, the entities holding it */
-  roles: Record<string, number>;
+/** Options for `createEarsEngine`. */
+export interface CreateEarsEngineOptions {
+  readonly database: EarsDatabase;
+  readonly clock?: EarsClock;
+  /** Optional fallback handler for errors thrown inside watch callbacks or reruns. */
+  readonly onWatchError?: (error: EarsError) => void;
 }
 
-/** What an engine holds, from what its database keeps as it writes: reads one key per name, so a watch can follow it */
-export interface DatabaseCatalog {
-  /** Each entity type with its live entities and the fields its entities have held. A field stays when its last value goes */
-  types: Array<{ name: string; count: number; fields: string[] }>;
-  /** Each relation kind with its relations */
-  relations: Array<{ kind: string; count: number }>;
-  /** The roles */
-  roles: string[];
-}
-
-/** An engine's operations — its queries, writes and transactions: what a program is handed */
-export interface Ears {
-  /** Queries the engine, untyped (a typed facade, `defineEars`, types it) */
-  query: Query;
-  /** Creates an entity of a registered type, with a new id or the one given */
-  create: Create;
-  /** Writes to the entity with an id, creating it as the type when no entity has it */
-  upsert: Upsert;
-  /** Writes to the entity with an id, which must exist */
-  write: Write;
-  /**
-   * Runs `fn` as one unit: if it throws, every write it made is undone; if it returns, its writes commit together.
-   * Reads inside see its own writes. `fn` must be synchronous, and a unit inside another commits into it. A
-   * `durable` unit is on disk when it returns, rather than with the database's next sync.
-   */
-  transact<T>(fn: () => T, options?: UnitOptions): T;
-  /** Whether `name` is an entity type the engine's schema declares */
-  isEntityType(name: string): boolean;
-  /** Whether `name` is a relation kind the engine's schema declares */
-  isRelationKind(name: string): boolean;
-  /** Whether `name` is a role the engine's schema declares */
-  isRole(name: string): boolean;
-  /** The entity's row — its id, type and every attribute, each exactly as written, the trash included — or undefined */
-  getRow(id: EARS.EntityId): EntityRow | undefined;
-  /** One field of the entity's row, read as `getRow` reads it (the trash included), or undefined when it holds none */
-  getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
-  getRoles(id: EARS.EntityId): string[];
-  /** What the engine holds, cheaply and exactly: what a view or anything frequent reads */
-  catalog(): DatabaseCatalog;
-  /**
-   * What only a walk answers: values per field, entities per role, a kind's distinct ends, keyed by the names its data
-   * holds, the trash included. It reads every row and relation, so it is for a person asking, never a view or a hot path
-   */
-  getSchemaStats(): SchemaStats;
-  /** The relation's row — its id, kind, ends and info — or undefined when no relation has the id */
-  getRelation(relId: EARS.RelationId): RelationRow | undefined;
-  /** The rows of the relations matching every end and kind named; with none named, every relation */
-  findRelations(match?: RelationMatch): RelationRow[];
-  /** Moves a relation to new ends, or replaces its info or its weight, keeping its id; refuses an id no relation has */
-  updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
-  /** Removes the relation with the id, refusing an id no relation has */
-  removeRelation(relId: EARS.RelationId): void;
-  /** Whether linking `source` to `target` would close a cycle through `kinds` */
-  wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
-  /** `<base> <n>`, numbered per type and base and never handed out twice: a default label that must be unique */
-  nextLabel(type: EARS.Entity, base: string): string;
-  /** The entity types holding a vector index (their row rules' `embed`) */
-  embeddedTypes(): string[];
-  /** Up to `limit` (100 unless given) of the type's chunks waiting for embeddings, in key order, and how many wait in all */
-  pendingEmbeddings(type: EARS.Entity, options?: { limit?: number }): PendingEmbeddings;
-  /**
-   * Stores embeddings of pending chunks, together: each one whose chunk's text has changed since `pendingEmbeddings`
-   * answered is not stored, its chunk still pending under its new hash, and counted `stale`
-   */
-  embed(embeddings: readonly Embedding[]): { stored: number; stale: number };
-  /**
-   * Runs `read` and hands `observer` its result, then runs it again after every commit that wrote into what it read,
-   * handing over each result that differs from the last, with the number of the commit it reflects. Never inside a
-   * write: deliveries come once the writing code has returned, a burst of commits as one, and however fast commits come
-   * a watch runs again at most once per gap its own cost sets (`WATCH_SCHEDULE`). `read` must be a pure read of the
-   * engine; what it reads anywhere else isn't tracked, and its result goes stale when that changes. `label` names it
-   * where its cost is reported
-   */
-  watch<T>(read: (context: WatchReadContext | undefined) => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
-  /** The engine's current wall-clock time in milliseconds (`clock.now()` when given, otherwise `Date.now()`) */
-  now(): number;
-  /** Creates an id for a new entity of `type`, stamped with the engine's clock (`now()`) */
-  newId(type: EARS.Entity): EARS.EntityId;
-  /** The number of the last commit the engine's database made, or 0: what a watch's delivery is compared against */
-  lastCommit(): number;
-}
-
-/** An engine's data lifecycle and direct writes: for the code that created it (a program's composition root, tests, tooling) */
+/** Administrative, schema evolution, and maintenance operations on an `EarsEngine`. */
 export interface EarsAdmin {
-  /** Empties the engine's database, keeping its schema */
-  clear(): void;
-  /**
-   * Replaces every entry with another elmdb database's primary data, the derived data rebuilt under this one's schema,
-   * the database staying open (elmdb's `replaceWith`); refused while a unit is open
-   */
-  replaceWith(source: string): void;
-  /**
-   * Another process committed to this database, and said so. Commits this engine didn't make dispatch no watch of its
-   * own (elmdb's tracked reads belong to one process), and what they wrote isn't known key by key, so every watch runs
-   * again, as after `clear` or `replaceWith`. If nothing else committed, as the database answers, nothing runs. Answers
-   * whether something did.
-   */
-  changedElsewhere(): boolean;
-  /** What the open unit has changed so far, which code running before it commits may need to act on; none outside a unit */
-  pendingChanges(): PendingChanges | undefined;
-  /**
-   * What of `types` changed after `from`, in the order of the commits that changed them, at most `limit`, with the
-   * entities destroyed since: read in the open unit, whose own writes are stamped only as it commits. A type answers
-   * only when its row rules have it keep a change order (`RowRules.changeOrder`); otherwise, or when what changed can't
-   * all be known, `complete` is false
-   */
-  changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
-  /** The sequence the open unit commits as, which what it writes is stamped with; none outside a unit */
-  nextSequence(): number | undefined;
-  /**
-   * The checkpoint `name`: a reader's place in what it has read, read in the open unit when there is one. A backup keeps
-   * it with the rows it describes; a dump leaves it out, and `clear` and `replaceWith` drop it
-   */
-  checkpoint(name: string): unknown;
-  /** Records `value` as the checkpoint `name` in the open unit, so it commits with the work it records or not at all */
-  setCheckpoint(name: string, value: unknown): void;
-  /** The epoch another process's replacement of every row moved the database to, when this engine hasn't adopted it. Until it does its writes are refused (`DATA_REPLACED`) and its reads read what's there now */
-  replacedElsewhere(): number | undefined;
-  /**
-   * Takes the replacement `replacedElsewhere` named as seen, so writes are taken again and every watch runs. False,
-   * adopting nothing, when another has landed since: the caller starts over from what is there now
-   */
-  adoptReplacement(epoch: number): boolean;
-  /**
-   * Sets what runs in every unit before it commits, so what it writes commits with what caused it. A write outside a unit
-   * runs in one of its own when `hook.wants` the type of an entity it writes, or when it may write an entity of any
-   * type: a relation's update or removal, and an `unlink` without a target, whose types the write alone doesn't name.
-   */
-  beforeCommit(hook: BeforeCommit): void;
-  /**
-   * Runs `fn` in a unit that what's set to run before a commit stays out of: for that code's own catching up. Refused
-   * inside a unit the hook runs in, whose writes the hook would see
-   */
-  transactWithoutHook<T>(fn: () => T, options?: UnitOptions): T;
-  /**
-   * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or the
-   * database is closed. Resolves at once where nothing is owed (`syncs: false`, `syncEachCommit`, or read-only)
-   */
-  durable(): Promise<void>;
-  /**
-   * Calls `listener` soon after another process commits, which `changedElsewhere` then answers. The database hears of
-   * one whose wake was lost at its own next commit, and of one that may not be news, so the answer can be false. Throws
-   * when this database can't hear of commits, keeping the listener: a commit here then asks, and calls it when one did.
-   * Returns the unregistration.
-   */
-  onFoundElsewhere(listener: () => void): () => void;
-  /** Every entity's id, those in the trash included: a raw listing */
-  getAllEntities(): EARS.EntityId[];
-  /** Every id of a type, those in the trash included, whether or not the schema declares the type: a raw listing */
-  getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
-  /** How many entities each type holds, the trash included, without reading their attributes */
-  countEntities(): Record<string, number>;
-  /** Loads a stored attribute value as it was: unchecked, with no `updatedAt` stamp */
-  bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-  /** Writes an attribute's value, any kind the engine owns included */
-  putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-  /** Removes an attribute, any kind the engine owns included */
-  deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
-  /** Links any kind between any ids, either end missing included: unchecked, as loaded data is */
-  addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown, weight?: number): EARS.RelationId;
-  /** `updateRelation` without its checks: any relation, to any ends; one given no weight keeps the weight it holds */
-  updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
-  /** Loads a stored relation under its own id, unchecked */
-  bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown, weight?: number): void;
-  /** Runs `fn`, whose loads are applied together as one unit when it returns */
-  bulkLoad<T>(fn: () => T): T;
-  /**
-   * Changes the database's schema to `schema` (elmdb's `setSchema`), answering each change and what was done about it:
-   * an index added is built in the background, and a change elmdb refuses — a short code prefix changed — leaves
-   * the schema as it was. Refused while a unit is open
-   */
-  setSchema(schema: EngineSchema): SchemaChange[];
-  /**
-   * Declares what `schema` declares — each of its types, relation kinds, roles and rank indexes, with their rules — keeping every other
-   * declaration the database holds: what a program whose parts declare their names one at a time applies as each does,
-   * so one part's declaration changes nothing another declared. Answers the changes as `setSchema` does
-   */
-  declare(schema: EngineSchema): SchemaChange[];
-  /**
-   * Blocks until every index waiting to be built is built or has failed, and every rank index's pushes are done, as
-   * the database says once its builder is idle; throws `SYNC_BEHIND` or `READERS_FULL` when what holds a build up is a
-   * sync that failed or a reader table that is full, `CLOSED` on a closed database, `DATA_REPLACED` while another
-   * process's replacement of every row is not adopted, `BUILDS_STOPPED` where a close at exit gave up and left builds,
-   * and `THREAD_REFUSED` where the system won't start the builder's thread (calling it again starts one). It doesn't
-   * wait for the order of an index's strings that another elmdb's writes put off: reads sort meanwhile
-   */
-  waitForIndexBuilds(): void;
-  /** Resolves once no watch is waiting to run again: every commit before the call has been delivered */
-  watchesSettled(): Promise<void>;
-  /**
-   * Stops every open watch, untracks their read sets when the database is still open, cancels any pending flush or
-   * gap timers, and resolves pending `caughtUp()` and `watchesSettled()` waiters synchronously
-   */
-  stopWatches(): void;
-  /** How many watches are open, and how many keys and ranges their read sets hold */
-  watchStats(): { watches: number; keys: number; ranges: number };
-  /** Payload-free snapshot of the watch scheduler and open watches, for diagnosing stalls */
-  watchDiagnostics(): WatchDiagnostics;
-  /**
-   * Counting the engine's calls to its database — reads, writes outside a unit, and units — with their time and the
-   * code that made each, off until started: what a measurement of a program's work reads
-   */
-  readonly calls: CallCounting;
-  /** Observe operation boundaries without stack capture; unregister to restore the disabled path. */
-  observe(observer: EarsOperationObserver): () => void;
+  readonly path: string;
+  readonly readOnly: boolean;
+  openReport(): OpenReport;
+  acknowledgeRestore(): void;
+  setSchema(schema: Schema): SchemaChange;
+  getSchema(): Schema;
+  renameType(oldType: string, newType: string, rewriteIds?: boolean): number;
+  renameField(typeName: string, oldField: string, newField: string): number;
+  renameRelation(oldRel: string, newRel: string): number;
+  purgeArchived(typeName: string): number;
+  driveBackgroundWork(maxEntities?: number): boolean;
+  flush(): void;
+  flushAsync(): Promise<void>;
+  check(indexName?: string): CheckReport;
+  checkAsync(indexName?: string): Promise<CheckReport>;
+  rebuild(indexName?: string): void;
+  rebuildAsync(indexName?: string): Promise<void>;
+  stats(): DatabaseStats;
+  indexStatus(): IndexStatus[];
+  backup(targetDir: string, overwriteBackup?: boolean): void;
+  backupAsync(targetDir: string, overwriteBackup?: boolean): Promise<void>;
+  dump(targetFile: string): DumpReport;
+  close(): void;
 }
-
-/** An EARS engine as its creator holds it: its operations, and the creator's privileges in `admin` */
-export interface EarsEngine extends Ears {
-  admin: EarsAdmin;
-}
-
-/** A relation id for an unchecked load: a relation is no entity, but its id has an entity id's form */
-const newRelationId = (now?: () => number) => `${RESERVED_ENTITY_TYPES.relation}-${idSuffix(now)}` as EARS.RelationId;
 
 /**
- * A new engine over `database`, which holds everything the engine does: its entity types, relation kinds and roles
- * are those the database's schema declares. Whoever holds the engine calls its operations on it; a program that binds
- * one engine for code that holds none passes it a getter of that engine (`defineEars`).
+ * Primary instance-scoped EARS v2 engine handle wrapping an `EarsDatabase`.
+ *
+ * Holds zero module-level state: every write, query, hook, and watch is scoped strictly to this instance.
  */
-export function createEarsEngine({ database, warn, freeze, callSites, clock, schedule }: EARSRuntimeDeps): EarsEngine {
-  const wallNow = clock ? () => clock.now() : undefined;
-  const connection = createConnection(database, { freeze, callSites, clock });
-  // A write's result names what it touched. An index's own commits have no result to read, so a watch over a `ranked`
-  // would otherwise hold its answer until something writes. One engine to a database: elmdb refuses a second listener
-  database.hearBuilderCommits((commit) => connection.heard(commit, 'builder'));
-  let declared = declaredNames(database.schema);
-  const isEntityType = (name: string) => declared.types.has(name);
-  const isRelationKind = (name: string) => declared.relationKinds.has(name);
-  const isRole = (name: string) => declared.roles.has(name);
-  const names = createNameChecks({ isRelationKind, isRole });
-  const read = connection.read;
-  const one = (op: Record<string, unknown>): Answer => read([op])[0]!;
+export interface EarsEngine {
+  readonly query: QueryRoot;
+  readonly watches: WatchController;
+  readonly admin: EarsAdmin;
 
-  const getRow = (id: EARS.EntityId) => (one({ read: 'row', id }).row as EntityRow | null) ?? undefined;
-  const getAttr = (id: EARS.EntityId, field: EARS.AttrKind) => {
-    const answer = one({ read: 'field', id, field });
-    return answer.present ? answer.value as EARS.AttributeValue : undefined;
-  };
-  // A weight of 1 is no weight on a relation's row, as a link stores it, so a loaded edge is the bytes a linked one is
-  const storedWeight = (weight: number | undefined) => (weight === 1 ? undefined : weight);
-  const getRelation = (relId: EARS.RelationId) => {
-    const row = one({ read: 'relation', id: relId }).relation as Record<string, unknown> | null;
-    return row ? relationRow(row) : undefined;
-  };
-  const findRelations = ({ kind, source, target }: RelationMatch = {}): RelationRow[] => {
-    if (kind !== undefined) names.relationKinds(kind, 'findRelations');
-    return (one({ read: 'findRelations', kind, source, target }).relations as Record<string, unknown>[]).map(relationRow);
-  };
+  get(id: string): EntityRow | null;
+  getEdges(id: string, opts?: GetEdgesOptions): RelationRow[];
 
-  const query = createQuery({
-    read, isEntityType, names, warn, now: wallNow,
-    indexed: (type, field) => declared.indexed.get(type)?.has(field) ?? false,
-  });
-  const { create, upsert, write, updateRelation, removeRelation } = createWrites({
-    isEntityType,
-    write: connection.write,
-    getRow,
-    names,
-    now: wallNow,
-    exists: (id) => {
-      const [entity, relation] = read([{ read: 'field', id, field: 'entityType' }, { read: 'relation', id }]);
-      return { entity: entity!.present === true, relation: relation!.relation !== null };
-    },
-  });
+  create(typeName: string, fields: Record<string, unknown>, externalId?: string): string;
+  patch(id: string, fields: Record<string, unknown>): BatchResult;
+  unset(id: string, fields: readonly string[]): BatchResult;
+  trash(id: string): BatchResult;
+  restore(id: string): BatchResult;
+  destroy(id: string): BatchResult;
+  link(sourceId: string, relKind: string, targetId: string, opts?: LinkOptions): BatchResult;
+  unlink(sourceId: string, relKind?: string, targetId?: string): BatchResult;
+  setEmbeddings(indexName: string, id: string, vectors: ReadonlyArray<ReadonlyArray<number>>): void;
 
-  const countEntities = (): Record<string, number> => Object.fromEntries(
-    Object.entries(database.stats().types)
-      .map(([type, { live, trashed }]) => [type, live + trashed] as const)
-      .filter(([, n]) => n > 0),
-  );
+  /** Executes a synchronous multi-operation atomic batch in a single `elmdb-wire` FFI crossing. */
+  batch(fn: (batch: BatchWriter) => void): BatchResult;
+  /** Executes a pre-encoded `elmdb-wire` binary batch directly. */
+  executeWireBatch(payload: Uint8Array): BatchResult;
 
-  const getSchemaStats = (): SchemaStats => {
-    // Maps while counting, since a field may be named for an Object.prototype member (`__proto__`, `constructor`)
-    const attributes = new Map<string, { entityCount: number; totalValues: number }>();
-    const roles = new Map<string, number>();
-    for (const row of query.withTrashed.all().pickAll() as EntityRow[]) {
-      for (const [field, value] of Object.entries(row)) {
-        if (field === 'id' || field === 'entityType') continue;
-        let held = attributes.get(field);
-        if (!held) attributes.set(field, held = { entityCount: 0, totalValues: 0 });
-        held.entityCount++;
-        held.totalValues += Array.isArray(value) ? value.length : 1;
-        if (field === 'role') for (const role of new Set(value as string[])) roles.set(role, (roles.get(role) ?? 0) + 1);
-      }
+  /**
+   * Registers a synchronous engine-native `beforeCommit` hook.
+   * Pass `null` for `typeNames` to subscribe to all entity/edge mutations.
+   * Returns an idempotent unsubscribe function.
+   */
+  beforeCommit(typeNames: readonly string[] | null, callback: BeforeCommitHook): () => void;
+}
+
+/** Creates an instance-scoped EARS v2 engine over an open `EarsDatabase`. */
+export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
+  const db = options.database;
+  const clock = options.clock ?? createSystemClock();
+  const pump = new WatchPump(db, clock, options.onWatchError);
+  const query = createQueryRoot(db, pump);
+
+  const runBatchPayload = (payload: Uint8Array): BatchResult => {
+    let result: BatchResult;
+    try {
+      result = db.executeWireBatch(payload);
+    } catch (error) {
+      throw toEarsError(error);
     }
-    const kinds = new Map<string, { total: number; sources: Set<string>; targets: Set<string> }>();
-    for (const { kind, source, target } of findRelations()) {
-      let held = kinds.get(kind);
-      if (!held) kinds.set(kind, held = { total: 0, sources: new Set(), targets: new Set() });
-      held.total++;
-      held.sources.add(source);
-      held.targets.add(target);
-    }
-    return {
-      entities: countEntities(),
-      attributes: Object.fromEntries(attributes),
-      relations: Object.fromEntries([...kinds].map(([kind, { total, sources, targets }]) => [kind, { total, uniqueSources: sources.size, uniqueTargets: targets.size }])),
-      roles: Object.fromEntries(roles),
-    };
+    pump.notifyMutation();
+    return result;
   };
 
-  const watches = createWatches(connection, { clock: clock ? watchClockOf(clock) : undefined, schedule, warn });
-
-  const operations: Ears = {
-    query, create, upsert, write, isEntityType, isRelationKind, isRole,
-    transact: connection.transact,
-    nextLabel: (type, base) => (connection.write([{ op: 'takeLabel', type, base }])[0] as { label: string }).label,
-    wouldCreateCycle: (source, target, kinds) => {
-      names.relationKinds(kinds, 'wouldCreateCycle');
-      return one({ read: 'wouldCreateCycle', source, target, kinds: [...kinds] }).value as boolean;
-    },
-    embeddedTypes: () => [...declared.embedded],
-    pendingEmbeddings: (type, { limit = 100 } = {}) => {
-      const { model, dims, count, chunks } = one({ read: 'pendingEmbeddings', type, limit });
-      return { model, dims, count, chunks } as PendingEmbeddings;
-    },
-    embed(embeddings) {
-      if (!embeddings.length) return { stored: 0, stale: 0 };
-      const results = connection.write(embeddings.map(({ id, chunk, hash, model, vector }) => ({ op: 'embed', id, chunk, hash, model, vector: [...vector] })));
-      const stale = results.filter((result) => result.kind === 'stale').length;
-      return { stored: results.length - stale, stale };
-    },
-    watch: watches.watch,
-    now: () => (wallNow ? wallNow() : Date.now()),
-    newId: (type) => makeNewId(type, wallNow),
-    lastCommit: connection.lastCommit,
-    getRow,
-    getAttr,
-    getRoles: (id) => (getAttr(id, 'role' as EARS.AttrKind) as string[] | undefined) ?? [],
-    catalog: () => {
-      const { types, relations, roles } = one({ read: 'catalog' }) as unknown as DatabaseCatalog;
-      return { types: types.filter((type) => isEntityType(type.name)), relations, roles };
-    },
-    getSchemaStats,
-    getRelation,
-    findRelations,
-    updateRelation,
-    removeRelation,
-  };
-
-  /** Refuses `what` inside `transact`: it commits as a unit of its own, which the transact's rollback could not undo */
-  const outsideUnit = (what: string) => {
-    if (connection.inUnit) throw new Error(`${what} inside transact(): it commits on its own, so a unit could not undo it`);
-  };
-
-  // Unchecked loads: sent together when `bulkLoad`'s function returns, and each on its own outside one
-  let loading: Array<Record<string, unknown>> | undefined;
-  const load = (item: Record<string, unknown>) => {
-    outsideUnit('An unchecked load');
-    if (loading) loading.push(item);
-    else connection.load([item]);
-  };
-  const entityLoad = (id: EARS.EntityId, kind: EARS.AttrKind, value: unknown) =>
-    load({ load: 'entity', id, fields: { [kind]: value }, trashed: false });
+  const batch = (fn: (b: BatchWriter) => void): BatchResult => runBatchPayload(encodeBatch(fn));
 
   const admin: EarsAdmin = {
-    clear() {
-      outsideUnit('clear()');
-      runCommitted(() => database.reset(), () => connection.committedEverything());
+    get path(): string {
+      return db.path;
     },
-    replaceWith(source) {
-      outsideUnit('replaceWith()');
-      runCommitted(() => database.replaceWith(source), () => connection.committedEverything());
+    get readOnly(): boolean {
+      return db.readOnly;
     },
-    changedElsewhere: () => connection.changedElsewhere(),
-    pendingChanges: () => connection.pendingChanges(),
-    changedSince: (types, from, limit) => connection.changedSince(types, from, limit),
-    nextSequence: () => connection.nextSequence(),
-    checkpoint: (name) => connection.checkpoint(name),
-    setCheckpoint: (name, value) => connection.setCheckpoint(name, value),
-    replacedElsewhere: () => connection.replacedElsewhere(),
-    adoptReplacement: (epoch) => connection.adoptReplacement(epoch),
-    beforeCommit: (hook) => connection.beforeCommit(hook),
-    transactWithoutHook: (fn, options) => connection.transactWithoutHook(fn, options),
-    durable: () => crossingAsync(() => database.durable()),
-    onFoundElsewhere: (listener) => connection.onFoundElsewhere(listener),
-    getAllEntities: () => query.withTrashed.all().ids(),
-    // From every entity, so a type the schema no longer declares is listed too
-    getEntitiesOfType: (type) => {
-      const answer = one({ read: 'query', plan: { scope: 'withTrashed', start: { from: 'all' }, steps: [{ step: 'ofType', type }], terminal: { answer: 'ids' } } });
-      return answer.ids as EARS.EntityId[];
-    },
-    countEntities,
-    bulkLoadAttr: entityLoad,
-    putAttr: entityLoad,
-    deleteAttr: (id, kind) => load({ load: 'unset', id, field: kind }),
-    addRelation(source, kind, target, info, weight) {
-      const id = newRelationId(wallNow);
-      load({ load: 'relation', id, kind, source, target, info, weight: storedWeight(weight) });
-      return id;
-    },
-    updateRelation(relId, { source, target, info, weight }) {
-      const held = getRelation(relId);
-      if (!held) return;
-      load({
-        load: 'relation', id: relId, kind: held.kind,
-        source: source || held.source, target: target || held.target,
-        info: info !== undefined ? info : held.info,
-        weight: storedWeight(weight ?? held.weight),
-      });
-    },
-    bulkLoadRelation: (relId, kind, source, target, info, weight) =>
-      load({ load: 'relation', id: relId, kind, source, target, info, weight: storedWeight(weight) }),
-    bulkLoad<T>(fn: () => T): T {
-      if (loading) return fn();
-      outsideUnit('bulkLoad()');
-      loading = [];
+    openReport(): OpenReport {
       try {
-        const value = fn();
-        if (loading.length) connection.load(loading);
-        return value;
-      } finally {
-        loading = undefined;
+        return db.openReport();
+      } catch (error) {
+        throw toEarsError(error);
       }
     },
-    setSchema(schema) {
-      outsideUnit('setSchema()');
-      return runCommitted(() => database.setSchema(toElmdbSchema(schema)), () => {
-        declared = declaredNames(database.schema);
-        connection.committedEverything();
-      });
+    acknowledgeRestore(): void {
+      try {
+        db.acknowledgeRestore();
+      } catch (error) {
+        throw toEarsError(error);
+      }
     },
-    declare(schema) {
-      outsideUnit('declare()');
-      return runCommitted(() => {
-        const held = database.schema;
-        return database.setSchema(withDeclarations(held, toElmdbSchema(schema, Object.keys(held?.types ?? {}))));
-      }, () => {
-        declared = declaredNames(database.schema);
-        connection.committedEverything();
-      });
+    setSchema(schema: Schema): SchemaChange {
+      let change: SchemaChange;
+      try {
+        change = db.setSchema(schema);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+      return change;
     },
-    waitForIndexBuilds() {
-      outsideUnit('waitForIndexBuilds()');
-      database.waitForIndexBuilds();
-      watches.syncBuilder();
+    getSchema(): Schema {
+      try {
+        return db.getSchema();
+      } catch (error) {
+        throw toEarsError(error);
+      }
     },
-    watchesSettled: watches.settled,
-    stopWatches: watches.stopAll,
-    watchStats: watches.stats,
-    watchDiagnostics: watches.diagnostics,
-    calls: connection.calls,
-    observe: connection.observe,
+    renameType(oldType: string, newType: string, rewriteIds?: boolean): number {
+      let count: number;
+      try {
+        count = db.renameType(oldType, newType, rewriteIds);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+      return count;
+    },
+    renameField(typeName: string, oldField: string, newField: string): number {
+      let count: number;
+      try {
+        count = db.renameField(typeName, oldField, newField);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+      return count;
+    },
+    renameRelation(oldRel: string, newRel: string): number {
+      let count: number;
+      try {
+        count = db.renameRelation(oldRel, newRel);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+      return count;
+    },
+    purgeArchived(typeName: string): number {
+      let count: number;
+      try {
+        count = db.purgeArchived(typeName);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+      return count;
+    },
+    driveBackgroundWork(maxEntities?: number): boolean {
+      let more: boolean;
+      try {
+        more = db.driveBackgroundWork(maxEntities);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+      return more;
+    },
+    flush(): void {
+      try {
+        db.flush();
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+    },
+    async flushAsync(): Promise<void> {
+      try {
+        await db.flushAsync();
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+    },
+    check(indexName?: string): CheckReport {
+      try {
+        return db.check(indexName);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    async checkAsync(indexName?: string): Promise<CheckReport> {
+      try {
+        return await db.checkAsync(indexName);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    rebuild(indexName?: string): void {
+      try {
+        db.rebuild(indexName);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+    },
+    async rebuildAsync(indexName?: string): Promise<void> {
+      try {
+        await db.rebuildAsync(indexName);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+    },
+    stats(): DatabaseStats {
+      try {
+        return db.stats();
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    indexStatus(): IndexStatus[] {
+      try {
+        return db.indexStatus();
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    backup(targetDir: string, overwriteBackup?: boolean): void {
+      try {
+        db.backup(targetDir, overwriteBackup);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    async backupAsync(targetDir: string, overwriteBackup?: boolean): Promise<void> {
+      try {
+        await db.backupAsync(targetDir, overwriteBackup);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    dump(targetFile: string): DumpReport {
+      try {
+        return db.dump(targetFile);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    close(): void {
+      pump.markClosed();
+      try {
+        db.close();
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
   };
 
-  return { ...operations, admin };
+  return {
+    query,
+    watches: pump,
+    admin,
+    get(id: string): EntityRow | null {
+      try {
+        return db.get(id);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    getEdges(id: string, opts?: GetEdgesOptions): RelationRow[] {
+      try {
+        return db.getEdges(id, opts?.relKind, opts?.dir);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    create(typeName: string, fields: Record<string, unknown>, externalId?: string): string {
+      const res = batch((b) => {
+        b.create(typeName, fields, externalId);
+      });
+      const created = res.createdIds[0];
+      if (created === undefined) {
+        throw new EarsError('INTERNAL', 'create batch committed without returning a created entity ID');
+      }
+      return created;
+    },
+    patch(id: string, fields: Record<string, unknown>): BatchResult {
+      return batch((b) => {
+        b.patch(id, fields);
+      });
+    },
+    unset(id: string, fields: readonly string[]): BatchResult {
+      return batch((b) => {
+        b.unset(id, fields);
+      });
+    },
+    trash(id: string): BatchResult {
+      return batch((b) => {
+        b.trash(id);
+      });
+    },
+    restore(id: string): BatchResult {
+      return batch((b) => {
+        b.restore(id);
+      });
+    },
+    destroy(id: string): BatchResult {
+      return batch((b) => {
+        b.destroy(id);
+      });
+    },
+    link(sourceId: string, relKind: string, targetId: string, opts?: LinkOptions): BatchResult {
+      return batch((b) => {
+        b.link(sourceId, relKind, targetId, opts);
+      });
+    },
+    unlink(sourceId: string, relKind?: string, targetId?: string): BatchResult {
+      return batch((b) => {
+        b.unlink(sourceId, relKind, targetId);
+      });
+    },
+    setEmbeddings(indexName: string, id: string, vectors: ReadonlyArray<ReadonlyArray<number>>): void {
+      try {
+        db.setEmbeddings(
+          indexName,
+          id,
+          vectors.map((v) => [...v]),
+        );
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      pump.notifyMutation();
+    },
+    batch,
+    executeWireBatch: runBatchPayload,
+    beforeCommit(typeNames: readonly string[] | null, callback: BeforeCommitHook): () => void {
+      let hookId: number;
+      try {
+        hookId = db.registerBeforeCommit(
+          typeNames === null ? null : [...typeNames],
+          (delta: CommitDelta): unknown => {
+            const ret = callback(delta);
+            if (typeof ret === 'function') {
+              return encodeBatch(ret);
+            }
+            return ret;
+          },
+        );
+      } catch (error) {
+        throw toEarsError(error);
+      }
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        try {
+          db.unregisterBeforeCommit(hookId);
+        } catch {
+          // Best-effort if database was already closed.
+        }
+      };
+    },
+  };
 }
-
