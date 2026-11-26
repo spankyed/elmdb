@@ -62,5 +62,15 @@ slow-timeout = { period = "20s", terminate-after = 2 }
 filter = "test(/^store::(retention_tests|idle_reads)::/)"
 slow-timeout = { period = "10s", terminate-after = 2 }
 
+# Each of these holds several copies of a value of the 64 MiB a field holds at once, its text, its msgpack, its frame
+# and what a read makes of it (`engine::values`' tests and `engine::tests::compression`'s), so they run one at a time
+# rather than beside each other
+[test-groups]
+field-sized-values = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "test(/most_a_field_holds/) | test(=engine::values::tests::streaming_decompression_enforces_byte_limit_without_unbounded_growth)"
+test-group = "field-sized-values"
+
 [profile.ci]
 fail-fast = false

@@ -205,7 +205,17 @@ pub(crate) fn primary_loads_of(r: &impl Read, mut each: impl FnMut(Load) -> Resu
             let Some(Part::String(field)) = decode_key(key)?.pop() else {
                 return Err(corrupt("An entity's field key"));
             };
-            fields.insert(field, values::decode_stored(bytes)?);
+            let plain = values::unstored(bytes)?;
+            // A build before the cap stored such a value as it was, uncompressed, and a load refuses it: refused here,
+            // before anything is made of the loads, rather than by the load after them
+            if plain.len() > values::MAX_VALUE_BYTES {
+                return Err(values::too_large(
+                    &format!("The value of `{field}` of {id}"),
+                    plain.len(),
+                    "a build before the cap wrote it, and a load refuses it: write it smaller or remove it, then go again",
+                ));
+            }
+            fields.insert(field, values::decode(&plain)?);
             Ok(())
         })?;
         each(Load::Entity { id, fields, trashed })?;

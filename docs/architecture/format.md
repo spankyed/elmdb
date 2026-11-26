@@ -82,9 +82,12 @@ A value is msgpack bytes, written by the caller and stored as given:
   text.
 
 A field's value is at most 64 MiB of msgpack (`MAX_VALUE_BYTES`, `crates/elmdb/src/engine/values.rs`): a write of one
-past it is refused (`VALUE_TOO_LARGE`) before anything of its batch is written, and a read refuses a stored frame that
-expands past it as `CORRUPTED`, whatever size the frame records, so no stored bytes make a read hold more and every
-value written reads back.
+past it is refused (`VALUE_TOO_LARGE`, naming the field and the entity), and nothing of its batch is kept. A read
+refuses a stored frame that expands past it as `CORRUPTED`, whatever size the frame records, and one that asks for a
+wider window than a write compresses with, so a read decompresses no more than 64 MiB and every value written reads
+back. Decoding what it decompressed builds the value as a write of it would have: a list or map of many small members
+is many times its bytes. A value past the cap that a build before it stored uncompressed still reads, and refuses the
+loads `primary_loads` makes (`VALUE_TOO_LARGE`), a dump among them, until it is written smaller or removed.
 
 A field's value of `COMPRESS_FROM` bytes of msgpack or more (`crates/elmdb/src/engine/values.rs`) is stored compressed
 when that is smaller: the byte `0xc1`, which no msgpack value starts with and which a write's value therefore never
