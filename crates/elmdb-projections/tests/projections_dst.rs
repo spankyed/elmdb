@@ -809,3 +809,58 @@ fn review_regression_compound_unique_long_plus_null_and_prefix_range_and_stamp_m
     reg.rebuild(&engine, Some(order_idx.id)).unwrap();
     assert!(reg.check(&engine, None).unwrap().is_ok());
 }
+
+#[test]
+fn prefix_bmw_matches_exhaustive_oracle_and_prunes_blocks() {
+    let (engine, _reg) = open_sim_engine(BuildPolicy::EagerInSchemaChange);
+    engine.set_schema(&full_schema()).unwrap();
+
+    // Populate 320 docs across 3 posting blocks (128 entities per bucket) with varying TF & prefixes.
+    // Docs 1..=10 (bucket 0) have high TF and minimal length so their BM25F score sets a high top-5
+    // threshold; buckets 1 & 2 (ids > 128) have long bodies and single prefix occurrences so BMW
+    // soundly prunes later posting blocks while preserving exact top-K equivalence.
+    let long_padding = "padding ".repeat(64);
+    let mut ops = Vec::with_capacity(320);
+    for i in 1u64..=320 {
+        let (title, body) = match i {
+            1..=10 => ("auth auth auth auth auth token token token token token".to_owned(), String::new()),
+            _ => {
+                let t = match i % 10 {
+                    0 => "authentication token authorization".to_owned(),
+                    1 => "authenticator tokenizer".to_owned(),
+                    2 => "authoring toolkit".to_owned(),
+                    3 => "authentication only".to_owned(),
+                    4 => "tokenization only".to_owned(),
+                    _ => format!("filler word{i} doc{i}"),
+                };
+                (t, format!("{long_padding} document {i}"))
+            }
+        };
+        ops.push(WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some(format!("p-{i}")),
+            fields: make_fields(&[("title", CanonicalValue::String(title)), ("body", CanonicalValue::String(body))]),
+        });
+    }
+    engine.execute_batch(&ops).unwrap();
+
+    let (txn, schema) = engine.begin_read_pinned().unwrap();
+    let fts_idx = schema.indexes.iter().find(|i| matches!(i.kind, IndexKind::Text { .. })).unwrap();
+    let db = engine.gate().open_subdb_ro(&txn, &fts_idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+
+    for require_all in [false, true] {
+        // Uncapped top_k = 1000 gives full reference ordering without BMW pruning.
+        let (full_hits, _) =
+            text::search_bmw_with_prefix(&txn, db, "auth tok", None, 1000, require_all, true, None).unwrap();
+        let top_k = 5;
+        let (bmw_hits, bmw_stats) =
+            text::search_bmw_with_prefix(&txn, db, "auth tok", None, top_k, require_all, true, None).unwrap();
+
+        assert_eq!(bmw_hits.len(), top_k);
+        assert_eq!(bmw_hits, full_hits[..top_k], "BMW top-K must exactly match uncapped prefix search");
+        assert!(
+            bmw_stats.blocks_pruned > 0,
+            "expected BMW block pruning across 3 buckets for prefix search (require_all={require_all})"
+        );
+    }
+}

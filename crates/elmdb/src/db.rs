@@ -294,7 +294,7 @@ impl Database {
 
     #[inline]
     fn has_active_txn(&self) -> bool {
-        ACTIVE_TXNS.with(|m| m.borrow().contains_key(&self.id))
+        ACTIVE_TXNS.try_with(|m| m.borrow().contains_key(&self.id)).unwrap_or(false)
     }
 
     #[inline]
@@ -355,6 +355,7 @@ impl Database {
     pub fn acknowledge_restore(&self) -> Result<()> {
         let eng = self.enter_op()?;
         self.require_writable()?;
+        self.forbid_inside_txn("acknowledgeRestore")?;
         eng.sync()?;
         Ok(())
     }
@@ -445,6 +446,14 @@ impl Database {
     ///   savepoint; returning `Err` rolls back ONLY the inner savepoint while outer writes stay visible via RYOW.
     ///   `beforeCommit` never fires on inner savepoint release.
     pub fn transact_scoped<R>(&self, opts: TransactOptions, f: impl FnOnce() -> Result<R>) -> Result<R> {
+        Ok(self.transact_scoped_with_receipt(opts, f)?.0)
+    }
+
+    fn transact_scoped_with_receipt<R>(
+        &self,
+        opts: TransactOptions,
+        f: impl FnOnce() -> Result<R>,
+    ) -> Result<(R, Option<(u64, elmdb_storage::CommitReceipt)>)> {
         let eng = self.enter_op()?;
         self.require_writable()?;
 
@@ -489,7 +498,7 @@ impl Database {
                         slot.depth = slot.depth.saturating_sub(1);
                         commit_res
                     })?;
-                    Ok(val)
+                    Ok((val, None))
                 }
                 Err(err) => {
                     ACTIVE_TXNS.with(|m| {
@@ -537,10 +546,16 @@ impl Database {
             .with(|m| m.borrow_mut().remove(&self.id))
             .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
         let committed = slot.ctx.finish_and_commit(true)?;
-        if let Some((_seq, _receipt, Some(ref sum))) = committed {
-            self.hub.notify_commit(&eng.schema(), sum, now_unix_ms());
-        }
-        Ok(value)
+        let out_meta = match committed {
+            Some((seq, receipt, sum)) => {
+                if let Some(ref s) = sum {
+                    self.hub.notify_commit(&eng.schema(), s, now_unix_ms());
+                }
+                Some((seq, receipt))
+            }
+            None => None,
+        };
+        Ok((value, out_meta))
     }
 
     fn run_combined_hook_cascade(&self, eng: &EngineHandle) -> Result<()> {
@@ -635,22 +650,23 @@ impl Database {
                 })
             });
         }
-        // Single choke point: standalone batches also route through `transact_scoped` so host/JS
-        // `beforeCommit` hooks enjoy identical RYOW `get`/`query`/`nextCounter`/`pendingCommitSeq`!
-        let mut out_seq = 0u64;
-        let created_ids = self.transact_scoped(TransactOptions::default(), || {
-            self.with_active_ctx_mut(|ctx| {
-                out_seq = ctx.commit_seq();
-                ctx.exec_batch_and_flush(ops)
-            })
+        // Single choke point: standalone batches also route through `transact_scoped_with_receipt` so host/JS
+        // `beforeCommit` hooks enjoy identical RYOW `get`/`query`/`nextCounter`/`pendingCommitSeq` and we return
+        // the exact committed `(commit_seq, CommitReceipt)` (never a phantom seq on empty/no-op batches!).
+        let (created_ids, committed) = self.transact_scoped_with_receipt(TransactOptions::default(), || {
+            self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(ops))
         })?;
-        let txnid = eng.gate().last_txnid()?;
-        Ok(BatchOutcome {
-            commit_seq: out_seq,
-            receipt: elmdb_storage::CommitReceipt { txnid, roots_sha256: [0u8; 32] },
-            created_ids,
-            summary: None,
-        })
+        let (commit_seq, receipt) = match committed {
+            Some((seq, receipt)) => (seq, receipt),
+            None => {
+                let (ro, _) = eng.begin_read_pinned()?;
+                let seq = read_commit_seq(&ro, &eng.dbs())?;
+                drop(ro);
+                let txnid = eng.gate().last_txnid()?;
+                (seq, elmdb_storage::CommitReceipt { txnid, roots_sha256: [0u8; 32] })
+            }
+        };
+        Ok(BatchOutcome { commit_seq, receipt, created_ids, summary: None })
     }
 
     /// Decodes a binary `elmdb-wire` batch buffer, executes it atomically, and returns `BatchResult`.
@@ -826,9 +842,15 @@ impl Database {
         Ok(())
     }
 
-    /// Executes a typed integer-ID `LogicalPlan` directly.
+    /// Executes a typed integer-ID `LogicalPlan` directly (with full RYOW inside an active `transact_scoped`).
     pub fn execute_query(&self, plan: &LogicalPlan, budgets: ExecBudgets<'_>) -> Result<QueryOutput> {
         let eng = self.enter_op()?;
+        if self.has_active_txn() {
+            return self.with_active_ctx(|ctx| {
+                let mut noop = elmdb_query::NoopReadRecorder;
+                self.query_engine.execute_in_txn(&eng, ctx.txn(), ctx.schema(), plan, budgets, &mut noop)
+            });
+        }
         self.query_engine.execute(&eng, plan, budgets)
     }
 
@@ -868,6 +890,7 @@ impl Database {
         now_ms: u64,
     ) -> Result<(WatchId, QueryAnswer)> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("registerWatch")?;
         let dbs = eng.dbs();
         self.hub.register_query_watch_in_snapshot(
             &eng,
@@ -898,6 +921,7 @@ impl Database {
         cost_ms: u64,
     ) -> Result<(QueryAnswer, bool)> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("rerunWatch")?;
         let dbs = eng.dbs();
         self.hub.rerun_query_watch_in_snapshot(
             watch_id,
@@ -926,6 +950,7 @@ impl Database {
 
     pub fn catch_up_cross_process(&self, now_ms: u64) -> Result<Vec<WatchId>> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("catchUpCrossProcess")?;
         self.hub.catch_up_cross_process(&eng, now_ms)
     }
 
@@ -1069,6 +1094,7 @@ impl Database {
 
     pub fn index_status(&self) -> Result<Vec<IndexStatus>> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("indexStatus")?;
         let schema = eng.schema();
         let raw = self.registry.index_status(&eng)?;
         Ok(raw.iter().map(|st| IndexStatus::from_proj(&schema, st)).collect())
@@ -1076,6 +1102,7 @@ impl Database {
 
     pub fn check(&self, index_name: Option<&str>) -> Result<CheckReport> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("check")?;
         let schema = eng.schema();
         let idx_id = match index_name {
             Some(name) => {
@@ -1147,6 +1174,7 @@ impl Database {
 
     pub fn stats(&self) -> Result<DatabaseStats> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("stats")?;
         let (ro, schema) = eng.begin_read_pinned()?;
         let dbs = eng.dbs();
         let commit_seq = read_commit_seq(&ro, &dbs)?;
@@ -1260,8 +1288,18 @@ impl Database {
     /// syncs if drained & writable, and immediately drops the underlying `Engine<LmdbStore>` (`mdb_env_close`).
     /// Concurrent `close()` callers wait until closing finishes instead of returning prematurely.
     fn close_inner(&self, timeout: Option<Duration>, propagate_sync_err: bool) -> Result<()> {
-        if propagate_sync_err {
+        let in_self_txn = self.has_active_txn();
+        if propagate_sync_err && in_self_txn {
             self.forbid_inside_txn("close")?;
+        }
+        if !propagate_sync_err && in_self_txn {
+            // Process exit while a transact() is still on the calling thread's stack:
+            // abort its thread-local RwTxn immediately and skip waiting on our own OpGuard.
+            let _ = ACTIVE_TXNS.try_with(|m| {
+                if let Ok(mut map) = m.try_borrow_mut() {
+                    let _ = map.remove(&self.id);
+                }
+            });
         }
         if self.closed.swap(true, Ordering::SeqCst) {
             let mut st = self.close_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1287,8 +1325,11 @@ impl Database {
         // any concurrent `enter_op` acquiring `engine.read()` + incrementing `active_ops`.
         let taken = self.engine.write().unwrap_or_else(std::sync::PoisonError::into_inner).take();
 
-        // Wait for already-entered operations to drain cleanly via `drain_cv`.
-        let drained = {
+        // Wait for already-entered operations to drain cleanly via `drain_cv` (unless this very
+        // thread is tearing down inside its own aborted active transaction).
+        let drained = if in_self_txn {
+            false
+        } else {
             let mut lock = self.drain_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let deadline = timeout.map(|d| std::time::Instant::now() + d);
             loop {
@@ -1327,6 +1368,7 @@ impl Database {
     /// Single-snapshot scan of schema, primary rows, outgoing edges, and embeddings (used by `dump`).
     pub(crate) fn snapshot_for_dump(&self) -> Result<DumpSnapshot> {
         let eng = self.enter_op()?;
+        self.forbid_inside_txn("dump")?;
         let (ro, schema) = eng.begin_read_pinned()?;
         let dbs = eng.dbs();
 

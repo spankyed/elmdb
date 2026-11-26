@@ -248,6 +248,20 @@ test('transact nested savepoints, RYOW, counters, runBeforeCommit: false, and Pr
   assert.equal(db.get('n-async'), null);
   assert.equal(db.getCounter('NOTE'), 2);
 
+  // P0 #4: Returning an object with a throwing `.then` getter MUST roll back and rethrow the getter error!
+  assert.throws(
+    () => db.transact(() => {
+      db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'GetterThrow' }, 'n-getter'); }));
+      return {
+        get then() {
+          throw new Error('getter boom');
+        },
+      };
+    }),
+    /getter boom/,
+  );
+  assert.equal(db.get('n-getter'), null, 'writes must roll back when .then getter throws');
+
   // { runBeforeCommit: false } skips hooks cleanly
   db.transact(() => {
     db.setCounter('IMPORT', 99);
@@ -256,6 +270,19 @@ test('transact nested savepoints, RYOW, counters, runBeforeCommit: false, and Pr
   assert.equal(hookRuns, 1);
   assert.equal(db.getCounter('IMPORT'), 99);
   assert.equal(db.unregisterBeforeCommit(hid), true);
+
+  // P1 #6: Calling db.close() inside db.transact() rejects with INVALID_ARGUMENT without wiping hooks!
+  let hookStillAlive = false;
+  const hAlive = db.registerBeforeCommit(['Note'], () => {
+    hookStillAlive = true;
+    return null;
+  });
+  db.transact(() => {
+    assert.throws(() => db.close(), (err) => err.code === 'INVALID_ARGUMENT');
+    db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'AfterCloseAttempt' }, 'n-alive'); }));
+  });
+  assert.equal(hookStillAlive, true, 'failed db.close() inside transact must not wipe registered hooks');
+  assert.equal(db.unregisterBeforeCommit(hAlive), true);
 
   // Dump & load preserves counters
   const dumpFile = join(tmp, 'counters.json');

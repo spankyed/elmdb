@@ -879,28 +879,30 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
 
   #run(terminal?: QueryTerminal, explain?: boolean): QueryAnswer {
     const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: this.#inUnit() });
+    let answer: QueryAnswer;
     try {
-      const answer = this.#db.query(this.toSpec(terminal, explain));
-      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-      return answer;
+      answer = this.#db.query(this.toSpec(terminal, explain));
     } catch (error) {
       const earsErr = toEarsError(error);
       finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
       throw earsErr;
     }
+    finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    return answer;
   }
 
   async #runAsync(terminal?: QueryTerminal, explain?: boolean): Promise<QueryAnswer> {
     const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: false });
+    let answer: QueryAnswer;
     try {
-      const answer = await this.#db.queryAsync(this.toSpec(terminal, explain));
-      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-      return answer;
+      answer = await this.#db.queryAsync(this.toSpec(terminal, explain));
     } catch (error) {
       const earsErr = toEarsError(error);
       finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
       throw earsErr;
     }
+    finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    return answer;
   }
 
   #hitsTerminal(opts?: HitsOptions): QueryTerminal | undefined {
@@ -1302,27 +1304,29 @@ export function createQueryRoot(
     },
     raw(spec) {
       const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: inUnit() });
+      let answer: QueryAnswer;
       try {
-        const answer = db.query(spec);
-        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-        return answer;
+        answer = db.query(spec);
       } catch (error) {
         const earsErr = toEarsError(error);
         finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
         throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return answer;
     },
     async rawAsync(spec) {
       const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: false });
+      let answer: QueryAnswer;
       try {
-        const answer = await db.queryAsync(spec);
-        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-        return answer;
+        answer = await db.queryAsync(spec);
       } catch (error) {
         const earsErr = toEarsError(error);
         finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
         throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return answer;
     },
   };
 }

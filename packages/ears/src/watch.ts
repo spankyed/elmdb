@@ -146,12 +146,12 @@ export class WatchPump implements WatchController {
     let reg;
     try {
       reg = this.#db.registerWatch(spec, policy, nowMs);
-      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
     } catch (error) {
       const earsErr = toEarsError(error);
       finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
       throw earsErr;
     }
+    finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
 
     const entry: WatchEntry = {
       id: reg.watchId,
@@ -407,20 +407,9 @@ export class WatchPump implements WatchController {
 
         const runStart = this.#clock.now();
         const finishRerun = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
+        let rerun;
         try {
-          const rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
-          finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-          entry.lastCostMs = Math.max(1, this.#clock.now() - runStart);
-          entry.backoffMs = 0;
-          entry.backoffUntilMs = 0;
-          ran++;
-          if (entry.active && rerun.changed) {
-            try {
-              entry.deliver(rerun.answer);
-            } catch (callbackErr) {
-              this.#reportError(entry, toEarsError(callbackErr), true);
-            }
-          }
+          rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
         } catch (rerunErr) {
           const earsErr = toEarsError(rerunErr);
           finishRerun?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
@@ -441,6 +430,23 @@ export class WatchPump implements WatchController {
           this.#reportError(entry, earsErr, true);
           // Break if all remaining due watches are backed off so we don't pop the same watch again in this turn.
           if (this.#allDueBlocked(nowMs, failedThisTurn)) break;
+          continue;
+        }
+        try {
+          finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+        } catch (observerErr) {
+          this.#reportError(entry, toEarsError(observerErr), true);
+        }
+        entry.lastCostMs = Math.max(1, this.#clock.now() - runStart);
+        entry.backoffMs = 0;
+        entry.backoffUntilMs = 0;
+        ran++;
+        if (entry.active && rerun.changed) {
+          try {
+            entry.deliver(rerun.answer);
+          } catch (callbackErr) {
+            this.#reportError(entry, toEarsError(callbackErr), true);
+          }
         }
       }
     } finally {

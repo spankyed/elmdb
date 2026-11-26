@@ -855,3 +855,180 @@ fn search_highlights_prefix_bm25f_unicode_lists_and_fusion() {
 
     db.close().unwrap();
 }
+
+#[test]
+fn review_regressions_atomic_batch_in_transact_lock_guards_noop_seq_cross_proc_and_code_phrase() {
+    let tmp = tempdir().unwrap();
+    let db_dir = tmp.path().join("rev_db");
+
+    let mut fields = BTreeMap::new();
+    fields.insert("code".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    fields.insert("body".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    let mut indexes = BTreeMap::new();
+    indexes.insert("uniq_code".into(), IndexDefinition::Value { fields: vec!["code".into()], unique: true });
+    indexes.insert("fts".into(), IndexDefinition::Text { fields: vec![("body".into(), 1)] });
+    let mut types = BTreeMap::new();
+    types.insert("Ticket".into(), TypeDefinition { fields, indexes, ..Default::default() });
+    let schema = Schema { dollar_schema: None, types, relations: BTreeMap::new() };
+
+    let db = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_schema(&schema).unwrap();
+
+    // P1 #7: Empty no-op batch must NOT return a phantom incremented commit_seq!
+    let seq_before = db.stats().unwrap().commit_seq;
+    let noop_out = db.execute_batch(&[]).unwrap();
+    assert_eq!(noop_out.commit_seq, seq_before, "empty batch must not return phantom commit_seq");
+
+    db.execute_batch(&[WireOp::Create {
+        type_name: "Ticket".into(),
+        external_id: Some("t1".into()),
+        fields: vec![
+            ("code".into(), CanonicalValue::String("C-1".into())),
+            ("body".into(), CanonicalValue::String("Fix THR-12 error immediately".into())),
+        ],
+    }])
+    .unwrap();
+    db.execute_batch(&[WireOp::Create {
+        type_name: "Ticket".into(),
+        external_id: Some("t2".into()),
+        fields: vec![
+            ("code".into(), CanonicalValue::String("C-2".into())),
+            ("body".into(), CanonicalValue::String("Mentioned THR 12 error with space".into())),
+        ],
+    }])
+    .unwrap();
+
+    // P1 #5: Compound code phrase ["THR-12", "error"] matches "THR-12 error" (not "THR 12 error") and highlights it!
+    let q_phrase = QuerySpec {
+        source: QuerySource::Type { type_name: "Ticket".into(), include_trashed: false },
+        steps: vec![QueryStep::Score {
+            spec: QueryScore::Bm25f {
+                index: "fts".into(),
+                query: "THR-12 error".into(),
+                require_all: true,
+                prefix: false,
+                phrase: Some(vec!["THR-12".into(), "error".into()]),
+                top_k: Some(5),
+            },
+        }],
+        terminal: Some(QueryTerminal::Hits { fields: Some(vec!["body".into()]), highlights: true }),
+        explain: false,
+    };
+    let QueryAnswerBody::Hits { hits } = db.execute_query_spec(&q_phrase, ExecBudgets::default()).unwrap().body else {
+        panic!("expected Hits");
+    };
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "t1");
+    let body_text = "Fix THR-12 error immediately";
+    let body_hl = hits[0].highlights.as_ref().unwrap().get("body").unwrap();
+    assert!(
+        body_hl.iter().any(|&(el, s, e)| el == 0 && &body_text[s..e] == "THR-12 error"),
+        "expected full compound code phrase highlight, got {body_hl:?}"
+    );
+
+    // P0 #1 + P0 #2: Failing UniqueViolation execute_batch caught inside transact_scoped must NOT corrupt
+    // primary vs derived indexes, and forbidden lock-order methods return InvalidArgument cleanly!
+    let dump_tmp = tmp.path().join("nope.json");
+    db.transact_scoped(elmdb::TransactOptions::default(), || {
+        // Forbidden methods inside transact must fail with InvalidArgument (zero deadlock / lock-order panic!)
+        assert_eq!(db.acknowledge_restore().unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.stats().unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.check(None).unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.index_status().unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            db.register_query_watch(&q_phrase, WatchPolicy::default(), 0).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(elmdb::dump::dump(&db, &dump_tmp).unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.close().unwrap_err().code, ErrorCode::InvalidArgument);
+
+        // Execute a batch whose 2nd op violates unique index `uniq_code` ("C-1") -> catches error cleanly!
+        let err = db
+            .execute_batch(&[
+                WireOp::Create {
+                    type_name: "Ticket".into(),
+                    external_id: Some("t-partial".into()),
+                    fields: vec![
+                        ("code".into(), CanonicalValue::String("C-PARTIAL".into())),
+                        ("body".into(), CanonicalValue::String("partial".into())),
+                    ],
+                },
+                WireOp::Create {
+                    type_name: "Ticket".into(),
+                    external_id: Some("t-dup".into()),
+                    fields: vec![
+                        ("code".into(), CanonicalValue::String("C-1".into())),
+                        ("body".into(), CanonicalValue::String("dup".into())),
+                    ],
+                },
+            ])
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::UniqueViolation);
+        assert!(db.get_row_resolved("t-partial")?.is_none(), "op[0] must be rolled back on UniqueViolation");
+        assert!(db.get_row_resolved("t-dup")?.is_none());
+
+        // Subsequent valid write in the same outer transaction commits cleanly!
+        db.execute_batch(&[WireOp::Create {
+            type_name: "Ticket".into(),
+            external_id: Some("t-ok".into()),
+            fields: vec![
+                ("code".into(), CanonicalValue::String("C-OK".into())),
+                ("body".into(), CanonicalValue::String("ok".into())),
+            ],
+        }])?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(db.get_row_resolved("t-partial").unwrap().is_none());
+    assert!(db.get_row_resolved("t-ok").unwrap().is_some());
+    assert!(db.check(None).unwrap().is_clean(), "derived indexes must be 100% consistent after caught UniqueViolation");
+
+    // P1 #10: Second already-open handle sees new index added by first handle and writes inside nested savepoint!
+    let db2 = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut schema2 = schema.clone();
+    schema2
+        .types
+        .get_mut("Ticket")
+        .unwrap()
+        .indexes
+        .insert("by_body_val".into(), IndexDefinition::Value { fields: vec!["body".into()], unique: false });
+    db.set_schema(&schema2).unwrap();
+
+    db2.transact_scoped(elmdb::TransactOptions::default(), || {
+        db2.transact_scoped(elmdb::TransactOptions::default(), || {
+            db2.execute_batch(&[WireOp::Create {
+                type_name: "Ticket".into(),
+                external_id: Some("t-xproc".into()),
+                fields: vec![
+                    ("code".into(), CanonicalValue::String("C-XPROC".into())),
+                    ("body".into(), CanonicalValue::String("cross process nested".into())),
+                ],
+            }])?;
+            Ok(())
+        })?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(db2.get_row_resolved("t-xproc").unwrap().is_some());
+    assert!(db2.check(None).unwrap().is_clean());
+
+    db2.close().unwrap();
+    db.close().unwrap();
+}

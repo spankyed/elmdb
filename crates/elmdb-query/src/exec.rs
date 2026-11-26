@@ -1739,20 +1739,8 @@ fn eval_score_signal<R: KvRead>(
             if k == 0 {
                 return Ok(Vec::new());
             }
-            let normalized_phrase: Option<Vec<String>> = phrase.as_ref().map(|terms| {
-                let mut analyzed = Vec::new();
-                for t in terms {
-                    let toks = text::analyze_text(t, None);
-                    if toks.is_empty() {
-                        analyzed.push(t.to_lowercase());
-                    } else {
-                        for tok in toks {
-                            analyzed.push(tok.term);
-                        }
-                    }
-                }
-                analyzed
-            });
+            let normalized_phrase: Option<Vec<(String, u32)>> =
+                phrase.as_ref().map(|terms| text::analyze_phrase(terms, None));
 
             if let Some(phrase_terms) = normalized_phrase {
                 // Exponential widening ensures zero phrase false negatives even when > 128 higher-scoring
@@ -1774,7 +1762,7 @@ fn eval_score_signal<R: KvRead>(
                     let mut verified = Vec::new();
                     for h in hits {
                         ctx.check_cancel()?;
-                        if text::matches_phrase(ctx.txn, db, h.key, &phrase_terms)? {
+                        if text::matches_phrase_positions(ctx.txn, db, h.key, &phrase_terms)? {
                             ctx.charge_heap(16)?;
                             verified.push((h.key, h.score));
                             if verified.len() >= k {

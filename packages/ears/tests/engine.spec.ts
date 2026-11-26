@@ -196,7 +196,7 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
       asyncHookErr = err;
     }
     expect(isEarsError(asyncHookErr)).toBe(true);
-    expect((asyncHookErr as EarsError).code).toBe('HOOK_ABORTED');
+    expect((asyncHookErr as EarsError).code).toBe('ASYNC_CALLBACK_FORBIDDEN');
     expect((asyncHookErr as EarsError).message).toContain('synchronous');
     unsubAsync();
   });
@@ -383,6 +383,43 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     expect(events.some((e) => e.op.kind === 'read' && e.op.inUnit)).toBe(true);
     expect(events.some((e) => e.op.kind === 'write' && e.op.inUnit)).toBe(true);
     expect(events.some((e) => e.op.kind === 'read' && e.op.watch)).toBe(true);
+
+    // P2 #11: Read-only transact must NOT report an uncommitted tentative sequence to observer
+    const beforeReadOnly = events.length;
+    engine.transact(() => engine.get('t-outer'));
+    const roUnit = events.slice(beforeReadOnly).find((e) => e.op.kind === 'unit');
+    expect(roUnit?.res.outcome).toBe('ok');
+    expect(roUnit?.res.sequence).toBeUndefined();
+
+    // P1 #6: Calling engine.admin.close() inside transact rejects without killing WatchPump!
+    engine.transact(() => {
+      let closeErr: unknown;
+      try {
+        engine.admin.close();
+      } catch (err) {
+        closeErr = err;
+      }
+      expect(isEarsError(closeErr)).toBe(true);
+      expect((closeErr as EarsError).code).toBe('INVALID_ARGUMENT');
+      engine.create('Task', { title: 'Watch still live', done: false }, 't-after-close');
+    });
+    engine.watches.flushSync(Date.now() + 200);
+    expect(watchSnapshots[watchSnapshots.length - 1]).toBe(4);
+
+    // P1 #9: Throwing observer finisher is called ONCE (never double-finished on throw)
+    let finishCalls = 0;
+    const throwingObserver: EarsOperationObserver = {
+      start() {
+        return () => {
+          finishCalls++;
+          throw new Error('observer boom');
+        };
+      },
+    };
+    const obsHandle = temps.open({ schema: baseSchema });
+    const obsEngine = createEarsEngine({ database: obsHandle.database, observer: throwingObserver });
+    expect(() => obsEngine.get('missing')).toThrow('observer boom');
+    expect(finishCalls).toBe(1);
 
     unsub();
     watch.stop();

@@ -238,29 +238,55 @@ pub struct TransactOptions {
     pub run_before_commit: Option<bool>,
 }
 
-fn check_not_thenable(val: Unknown<'static>) -> elmdb::Result<Unknown<'static>> {
-    if val.is_promise().unwrap_or(false) {
-        return Err(ElmdbError::new(
-            ErrorCode::AsyncCallbackForbidden,
-            "synchronous callback must not return a Promise or thenable",
-        ));
+enum ThenableCheck {
+    Value(Unknown<'static>),
+    AsyncForbidden,
+    JsThrown(napi::Error),
+}
+
+fn check_not_thenable(val: Unknown<'static>) -> ThenableCheck {
+    match val.is_promise() {
+        Ok(true) => return ThenableCheck::AsyncForbidden,
+        Ok(false) => {}
+        Err(e) => return ThenableCheck::JsThrown(e),
     }
-    if matches!(val.get_type(), Ok(ValueType::Object | ValueType::Function)) {
-        if let Ok(obj) = val.coerce_to_object() {
-            if obj.has_named_property("then").unwrap_or(false)
-                && let Ok(then_val) = obj.get_named_property_unchecked::<Unknown>("then")
-                && matches!(then_val.get_type(), Ok(ValueType::Function))
-            {
-                return Err(ElmdbError::new(
-                    ErrorCode::AsyncCallbackForbidden,
-                    "synchronous callback must not return a Promise or thenable",
-                ));
+    let vtype = match val.get_type() {
+        Ok(t) => t,
+        Err(e) => return ThenableCheck::JsThrown(e),
+    };
+    if matches!(vtype, ValueType::Object | ValueType::Function) {
+        let obj = match val.coerce_to_object() {
+            Ok(o) => o,
+            Err(e) => return ThenableCheck::JsThrown(e),
+        };
+        let has_then = match obj.has_named_property("then") {
+            Ok(b) => b,
+            Err(e) => return ThenableCheck::JsThrown(e),
+        };
+        if has_then {
+            let then_val: Unknown<'_> = match obj.get_named_property_unchecked("then") {
+                Ok(v) => v,
+                Err(e) => return ThenableCheck::JsThrown(e),
+            };
+            match then_val.get_type() {
+                Ok(ValueType::Function) => return ThenableCheck::AsyncForbidden,
+                Ok(_) => {}
+                Err(e) => return ThenableCheck::JsThrown(e),
             }
-            return Ok(obj.to_unknown());
         }
-        return Err(ElmdbError::new(ErrorCode::Internal, "failed to inspect synchronous callback return value"));
+        return ThenableCheck::Value(obj.to_unknown());
     }
-    Ok(val)
+    ThenableCheck::Value(val)
+}
+
+fn counter_to_js_safe(val: u64) -> Result<f64, Code> {
+    if val > MAX_SAFE_JS_INT as u64 {
+        return Err(to_js(ElmdbError::new(
+            ErrorCode::ResourceLimit,
+            format!("counter value {val} exceeds JS safe integer range"),
+        )));
+    }
+    Ok(val as f64)
 }
 
 fn parse_open_options(opts: Option<OpenOptions>) -> Result<(elmdb::OpenOptions, Option<Schema>), Code> {
@@ -519,7 +545,17 @@ impl Database {
                 EngineTransactOptions { run_before_commit: options.and_then(|o| o.run_before_commit).unwrap_or(true) };
             let mut thrown_js: Option<napi::Error> = None;
             let outcome = self.inner.transact_scoped(opts, || match callback.call(()) {
-                Ok(ret) => check_not_thenable(ret),
+                Ok(ret) => match check_not_thenable(ret) {
+                    ThenableCheck::Value(v) => Ok(v),
+                    ThenableCheck::AsyncForbidden => Err(ElmdbError::new(
+                        ErrorCode::AsyncCallbackForbidden,
+                        "synchronous callback must not return a Promise or thenable",
+                    )),
+                    ThenableCheck::JsThrown(js_err) => {
+                        thrown_js = Some(js_err);
+                        Err(ElmdbError::new(ErrorCode::Cancelled, "JS getter threw while inspecting return value"))
+                    }
+                },
                 Err(js_err) => {
                     thrown_js = Some(js_err);
                     Err(ElmdbError::new(ErrorCode::Cancelled, "JS transaction callback threw"))
@@ -550,7 +586,7 @@ impl Database {
     pub fn next_counter(&self, name: String) -> Result<f64, Code> {
         self.health.guarded("Database.nextCounter", || {
             let val = self.inner.next_counter(&name).map_err(to_js)?;
-            Ok(val as f64)
+            counter_to_js_safe(val)
         })
     }
 
@@ -559,7 +595,7 @@ impl Database {
     pub fn get_counter(&self, name: String) -> Result<f64, Code> {
         self.health.guarded("Database.getCounter", || {
             let val = self.inner.get_counter(&name).map_err(to_js)?;
-            Ok(val as f64)
+            counter_to_js_safe(val)
         })
     }
 
@@ -702,7 +738,18 @@ impl Database {
                                     let ret = func
                                         .call(payload)
                                         .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
-                                    let ret = check_not_thenable(ret)?;
+                                    let ret = match check_not_thenable(ret) {
+                                        ThenableCheck::Value(v) => v,
+                                        ThenableCheck::AsyncForbidden => {
+                                            return Err(ElmdbError::new(
+                                                ErrorCode::AsyncCallbackForbidden,
+                                                "beforeCommit hooks must be synchronous (Promises and async callbacks are forbidden)",
+                                            ));
+                                        }
+                                        ThenableCheck::JsThrown(e) => {
+                                            return Err(ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()));
+                                        }
+                                    };
                                     let vtype = ret
                                         .get_type()
                                         .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
@@ -711,7 +758,7 @@ impl Database {
                                     } else {
                                         let bytes = Uint8Array::from_unknown(ret).map_err(|e| {
                                             ElmdbError::new(
-                                                ErrorCode::HookAborted,
+                                                ErrorCode::InvalidArgument,
                                                 format!(
                                                     "beforeCommit hook must return void/null or Uint8Array wire batch: {e}"
                                                 ),
@@ -1053,12 +1100,15 @@ impl Database {
     #[napi]
     pub fn close(&self) -> Result<(), Code> {
         self.health.unrefused("Database.close", || {
+            // Close the underlying engine FIRST so rejecting `close()` inside `transact()`
+            // never wipes registered JS `beforeCommit` hooks on a live database!
+            self.inner.close().map_err(to_js)?;
             let hooks = std::mem::take(&mut *self.js_hooks.borrow_mut());
             for (engine_id, js_key) in hooks {
                 let _ = self.inner.unregister_before_commit(engine_id);
                 let _ = JS_HOOKS.try_with(|m| m.borrow_mut().remove(&js_key));
             }
-            self.inner.close().map_err(to_js)
+            Ok(())
         })
     }
 }

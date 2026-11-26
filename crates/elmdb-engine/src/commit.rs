@@ -714,12 +714,32 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             // Drop L3 before taking L1.write() to uphold strict L1 -> L3 order.
         }
         let mut state = self.schema_state.write();
-        let txn = self.gate.begin_write()?;
+        let mut txn = self.gate.begin_write()?;
         let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
         if disk_epoch > state.schema.epoch {
             let (schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
-            state.schema = Arc::new(schema);
-            state.pool = pool;
+            // Drop L3 write txn BEFORE pre-opening new sub-DBs in an RO txn so every newly discovered
+            // DBI is permanently published in `MDB_env` prior to `mdb_txn_begin()` of the write txn!
+            drop(txn);
+            {
+                let ro = self.gate.begin_read()?;
+                for idx in &schema.indexes {
+                    let _ = self.gate.open_subdb_ro(&ro, &idx.subdb_slot().name(), DbFlags::DEFAULT)?;
+                }
+            }
+            txn = self.gate.begin_write()?;
+            let recheck_epoch = read_schema_epoch(&txn, &self.dbs)?;
+            if recheck_epoch > schema.epoch {
+                let (fresh_schema, fresh_pool) = load_schema_and_pool(&txn, &self.dbs)?;
+                for idx in &fresh_schema.indexes {
+                    let _ = txn.open_subdb(&idx.subdb_slot().name(), DbFlags::DEFAULT)?;
+                }
+                state.schema = Arc::new(fresh_schema);
+                state.pool = fresh_pool;
+            } else {
+                state.schema = Arc::new(schema);
+                state.pool = pool;
+            }
         }
         let schema = Arc::clone(&state.schema);
         drop(state);
@@ -881,12 +901,32 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             }
         }
         let mut state = self.schema_state.write();
-        let txn = self.gate.begin_write_owned()?;
+        let mut txn = self.gate.begin_write_owned()?;
         let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
         if disk_epoch > state.schema.epoch {
             let (schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
-            state.schema = Arc::new(schema);
-            state.pool = pool;
+            // Drop L3 write txn BEFORE pre-opening new sub-DBs in an RO txn so every newly discovered
+            // DBI is permanently published in `MDB_env` prior to `mdb_txn_begin()` of the write txn!
+            drop(txn);
+            {
+                let ro = self.gate.begin_read()?;
+                for idx in &schema.indexes {
+                    let _ = self.gate.open_subdb_ro(&ro, &idx.subdb_slot().name(), DbFlags::DEFAULT)?;
+                }
+            }
+            txn = self.gate.begin_write_owned()?;
+            let recheck_epoch = read_schema_epoch(&txn, &self.dbs)?;
+            if recheck_epoch > schema.epoch {
+                let (fresh_schema, fresh_pool) = load_schema_and_pool(&txn, &self.dbs)?;
+                for idx in &fresh_schema.indexes {
+                    let _ = txn.open_subdb(&idx.subdb_slot().name(), DbFlags::DEFAULT)?;
+                }
+                state.schema = Arc::new(fresh_schema);
+                state.pool = fresh_pool;
+            } else {
+                state.schema = Arc::new(schema);
+                state.pool = pool;
+            }
         }
         let schema = Arc::clone(&state.schema);
         drop(state);
@@ -1137,15 +1177,18 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         Ok(())
     }
 
-    /// Executes a batch of wire ops inside this active transaction, supporting intra-batch `BatchSlot` refs,
+    /// Executes a batch of wire ops inside an atomic nested savepoint, supporting intra-batch `BatchSlot` refs,
     /// and immediately flushes projections so subsequent reads/queries in the same transaction see fresh indexes.
+    /// Any mid-batch or projection error (e.g. `UniqueViolation`) rolls back both LMDB writes and delta accumulators.
     pub fn exec_batch_and_flush(&mut self, ops: &[WireOp]) -> Result<Vec<String>> {
-        let mut slots = Vec::new();
-        for op in ops {
-            self.apply_op(op, &mut slots)?;
-        }
-        self.flush_projections()?;
-        Ok(slots.into_iter().map(|(_, ext_id)| ext_id).collect())
+        self.savepoint(|ctx| {
+            let mut slots = Vec::new();
+            for op in ops {
+                ctx.apply_op(op, &mut slots)?;
+            }
+            ctx.flush_projections()?;
+            Ok(slots.into_iter().map(|(_, ext_id)| ext_id).collect())
+        })
     }
 
     /// Opens an explicit native LMDB nested savepoint and snapshots in-memory delta state.
@@ -1163,9 +1206,16 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
     }
 
     /// Commits (merges into parent) the top-most explicit nested savepoint without firing `beforeCommit`.
+    /// On any error, aborts the savepoint and restores delta/dirty state so no orphan savepoint leaks.
     pub fn commit_savepoint(&mut self, depth: u32) -> Result<()> {
-        self.flush_projections()?;
-        self.txn.commit_savepoint(depth)?;
+        if let Err(err) = self.flush_projections() {
+            self.abort_savepoint(depth);
+            return Err(err);
+        }
+        if let Err(err) = self.txn.commit_savepoint(depth) {
+            self.abort_savepoint(depth);
+            return Err(err.into());
+        }
         if let Some(pos) = self.saved_frames.iter().rposition(|f| f.depth == depth) {
             self.saved_frames.truncate(pos);
         }

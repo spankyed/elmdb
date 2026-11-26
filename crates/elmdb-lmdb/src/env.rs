@@ -218,7 +218,8 @@ impl LmdbStore {
         }
         let copied_data = target_dir.join("data.mdb");
         {
-            let f = fs::File::open(&copied_data)?;
+            // Windows FlushFileBuffers (File::sync_all) requires GENERIC_WRITE access.
+            let f = fs::OpenOptions::new().read(true).write(true).open(&copied_data)?;
             f.sync_all()?;
         }
         let meta = read_active_meta_page(&copied_data)?;

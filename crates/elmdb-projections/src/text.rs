@@ -838,8 +838,45 @@ pub fn prefix_terms<R: KvRead>(
     Ok(matches)
 }
 
+/// Analyzes a sequence of phrase elements into `(term, relative_position)` pairs, preserving
+/// co-located compound code tokens (e.g. `THR-12` emits `"thr"` and `"thr-12"` at `rel_pos = 0`
+/// and `"12"` at `rel_pos = 1`, followed by the next element at `rel_pos = 2`).
+pub fn analyze_phrase(terms: &[String], stem_lang: Option<&str>) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let mut base_pos = 0u32;
+    for t in terms {
+        let toks = analyze_text(t, stem_lang);
+        if toks.is_empty() {
+            let lower = t.to_lowercase();
+            if !lower.is_empty() {
+                out.push((lower, base_pos));
+                base_pos = base_pos.saturating_add(1);
+            }
+        } else {
+            let mut max_pos = 0u32;
+            for tok in toks {
+                max_pos = max_pos.max(tok.position);
+                out.push((tok.term, base_pos.saturating_add(tok.position)));
+            }
+            base_pos = base_pos.saturating_add(max_pos.saturating_add(1));
+        }
+    }
+    out
+}
+
 /// Checks whether document `key` contains `phrase_terms` consecutively within the same field.
 pub fn matches_phrase<R: KvRead>(txn: &R, db: SubDbHandle, key: EntityKey, phrase_terms: &[String]) -> Result<bool> {
+    let positioned: Vec<(String, u32)> = phrase_terms.iter().enumerate().map(|(i, t)| (t.clone(), i as u32)).collect();
+    matches_phrase_positions(txn, db, key, &positioned)
+}
+
+/// Checks whether document `key` contains `(term, relative_position)` phrase terms within the same field.
+pub fn matches_phrase_positions<R: KvRead>(
+    txn: &R,
+    db: SubDbHandle,
+    key: EntityKey,
+    phrase_terms: &[(String, u32)],
+) -> Result<bool> {
     if phrase_terms.is_empty() {
         return Ok(true);
     }
@@ -848,24 +885,26 @@ pub fn matches_phrase<R: KvRead>(txn: &R, db: SubDbHandle, key: EntityKey, phras
     };
     let doc = StoredDoc::decode(raw)?;
     if phrase_terms.len() == 1 {
-        return Ok(doc.terms.binary_search_by(|(t, _, _)| t.as_str().cmp(phrase_terms[0].as_str())).is_ok());
+        return Ok(doc.terms.binary_search_by(|(t, _, _)| t.as_str().cmp(phrase_terms[0].0.as_str())).is_ok());
     }
-    // Map each phrase term to its per-field position lists.
-    let mut lists: Vec<&[(u8, Vec<u32>)]> = Vec::with_capacity(phrase_terms.len());
-    for pt in phrase_terms {
+    // Map each phrase term to its `(rel_pos, per-field position lists)`.
+    type FieldPosSlice<'a> = &'a [(u8, Vec<u32>)];
+    let mut lists: Vec<(u32, FieldPosSlice<'_>)> = Vec::with_capacity(phrase_terms.len());
+    for (pt, rel_pos) in phrase_terms {
         let Ok(idx) = doc.terms.binary_search_by(|(t, _, _)| t.as_str().cmp(pt.as_str())) else {
             return Ok(false);
         };
-        lists.push(&doc.terms[idx].2);
+        lists.push((*rel_pos, &doc.terms[idx].2));
     }
+    let first_rel = lists[0].0;
     // Check each field present in the first term.
-    for (fi, first_positions) in lists[0] {
-        let mut field_pos_lists: Vec<&[u32]> = Vec::with_capacity(lists.len());
-        field_pos_lists.push(first_positions.as_slice());
+    for (fi, first_positions) in lists[0].1 {
+        let mut field_pos_lists: Vec<(u32, &[u32])> = Vec::with_capacity(lists.len());
+        field_pos_lists.push((first_rel, first_positions.as_slice()));
         let mut all_in_field = true;
-        for other in &lists[1..] {
+        for &(rel_pos, other) in &lists[1..] {
             if let Some((_, ps)) = other.iter().find(|(f, _)| f == fi) {
-                field_pos_lists.push(ps.as_slice());
+                field_pos_lists.push((rel_pos, ps.as_slice()));
             } else {
                 all_in_field = false;
                 break;
@@ -874,10 +913,13 @@ pub fn matches_phrase<R: KvRead>(txn: &R, db: SubDbHandle, key: EntityKey, phras
         if !all_in_field {
             continue;
         }
-        for &start_pos in field_pos_lists[0] {
+        for &start_pos in field_pos_lists[0].1 {
+            let Some(anchor) = start_pos.checked_sub(first_rel) else {
+                continue;
+            };
             let mut matched = true;
-            for (delta, ps) in field_pos_lists.iter().enumerate().skip(1) {
-                let target = start_pos.saturating_add(delta as u32);
+            for &(rel_pos, ps) in &field_pos_lists[1..] {
+                let target = anchor.saturating_add(rel_pos);
                 if ps.binary_search(&target).is_err() {
                     matched = false;
                     break;
@@ -1171,6 +1213,7 @@ impl PrefixGroupCursor {
         }
         let mut i = 0;
         let mut min_doc: Option<EntityKey> = None;
+        let mut removed_any = false;
         while i < self.children.len() {
             if self.children[i].cur_doc.is_some_and(|d| d < target) {
                 self.children[i].advance_to(txn, db, target)?;
@@ -1184,7 +1227,11 @@ impl PrefixGroupCursor {
             } else {
                 self.blocks_pruned += self.children[i].blocks_pruned;
                 self.children.swap_remove(i);
+                removed_any = true;
             }
+        }
+        if removed_any {
+            self.term_ub = self.children.iter().map(|c| c.term_ub).fold(0.0f64, f64::max);
         }
         self.cur_doc = min_doc;
         Ok(())
@@ -1506,7 +1553,8 @@ pub fn search_bmw_with_prefix<R: KvRead>(
         }
     }
 
-    for c in &cursors {
+    for c in &mut cursors {
+        c.exhaust();
         search_stats.blocks_pruned += c.total_blocks_pruned();
     }
 
@@ -1535,25 +1583,7 @@ pub fn compute_highlights(
         }
     }
 
-    let phrase_terms: Vec<String> = phrase
-        .map(|terms| {
-            let mut out = Vec::new();
-            for t in terms {
-                let toks = analyze_text(t, stem_lang);
-                if toks.is_empty() {
-                    let lower = t.to_lowercase();
-                    if !lower.is_empty() {
-                        out.push(lower);
-                    }
-                } else {
-                    for tok in toks {
-                        out.push(tok.term);
-                    }
-                }
-            }
-            out
-        })
-        .unwrap_or_default();
+    let phrase_terms: Vec<(String, u32)> = phrase.map(|terms| analyze_phrase(terms, stem_lang)).unwrap_or_default();
 
     if query_terms.is_empty() && phrase_terms.is_empty() {
         return BTreeMap::new();
@@ -1596,31 +1626,37 @@ pub fn compute_highlights(
                 }
             }
 
-            // 2. Phrase matches (consecutive positions within this string element).
+            // 2. Phrase matches (position-aware, supporting co-located compound code tokens like THR-12).
             if !phrase_terms.is_empty() {
                 let mut by_pos: BTreeMap<u32, Vec<&AnalyzedToken>> = BTreeMap::new();
                 for tok in &tokens {
                     by_pos.entry(tok.position).or_default().push(tok);
                 }
+                let (ref first_term, first_rel) = phrase_terms[0];
                 for (&start_pos, first_toks) in &by_pos {
-                    let Some(first_tok) = first_toks.iter().find(|t| t.term == phrase_terms[0]) else {
+                    let Some(anchor) = start_pos.checked_sub(first_rel) else {
                         continue;
                     };
-                    let mut last_end = first_tok.byte_end;
+                    let Some(first_tok) = first_toks.iter().find(|t| t.term == *first_term) else {
+                        continue;
+                    };
+                    let mut span_start = first_tok.byte_start;
+                    let mut span_end = first_tok.byte_end;
                     let mut matched = true;
-                    for (delta, pt) in phrase_terms.iter().enumerate().skip(1) {
-                        let target_pos = start_pos.saturating_add(delta as u32);
+                    for (pt, rel_pos) in &phrase_terms[1..] {
+                        let target_pos = anchor.saturating_add(*rel_pos);
                         if let Some(toks) = by_pos.get(&target_pos)
                             && let Some(t) = toks.iter().find(|t| t.term == *pt)
                         {
-                            last_end = last_end.max(t.byte_end);
+                            span_start = span_start.min(t.byte_start);
+                            span_end = span_end.max(t.byte_end);
                         } else {
                             matched = false;
                             break;
                         }
                     }
-                    if matched && first_tok.byte_start < last_end {
-                        byte_spans.push((first_tok.byte_start, last_end));
+                    if matched && span_start < span_end {
+                        byte_spans.push((span_start, span_end));
                     }
                 }
             }

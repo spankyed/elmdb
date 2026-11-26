@@ -133,6 +133,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
   const observer = options.observer;
   let txnDepth = 0;
   let hookDepth = 0;
+  let outerTxnMutated = false;
   const isInWriteTxn = (): boolean => txnDepth > 0 || hookDepth > 0;
   const pump = new WatchPump(db, clock, options.onWatchError, observer);
   const query = createQueryRoot(db, pump, observer, isInWriteTxn);
@@ -142,12 +143,6 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
     let result: BatchResult;
     try {
       result = db.executeWireBatch(payload);
-      finish?.({
-        outcome: 'ok',
-        sequence: result.commitSeq,
-        requestBytes: payload.byteLength,
-        responseBytes: 0,
-      });
     } catch (error) {
       const earsErr = toEarsError(error);
       finish?.({
@@ -158,6 +153,15 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       });
       throw earsErr;
     }
+    if (isInWriteTxn()) {
+      outerTxnMutated = true;
+    }
+    finish?.({
+      outcome: 'ok',
+      sequence: result.commitSeq,
+      requestBytes: payload.byteLength,
+      responseBytes: 0,
+    });
     if (!isInWriteTxn()) {
       pump.notifyMutation();
     }
@@ -351,12 +355,14 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       }
     },
     close(): void {
-      pump.markClosed();
+      // Close the underlying database FIRST so rejecting `close()` inside `transact()`
+      // never permanently stops `WatchPump` on an open database!
       try {
         db.close();
       } catch (error) {
         throw toEarsError(error);
       }
+      pump.markClosed();
     },
   };
 
@@ -366,27 +372,29 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
     admin,
     get(id: string): EntityRow | null {
       const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      let row: EntityRow | null;
       try {
-        const row = db.get(id);
-        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-        return row;
+        row = db.get(id);
       } catch (error) {
         const earsErr = toEarsError(error);
         finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
         throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return row;
     },
     getEdges(id: string, opts?: GetEdgesOptions): RelationRow[] {
       const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      let edges: RelationRow[];
       try {
-        const edges = db.getEdges(id, opts?.relKind, opts?.dir);
-        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-        return edges;
+        edges = db.getEdges(id, opts?.relKind, opts?.dir);
       } catch (error) {
         const earsErr = toEarsError(error);
         finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
         throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return edges;
     },
     create(typeName: string, fields: Record<string, unknown>, externalId?: string): string {
       const res = batch((b) => {
@@ -434,6 +442,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       });
     },
     setEmbeddings(indexName: string, id: string, vectors: ReadonlyArray<ReadonlyArray<number>>): void {
+      const finish = observer?.start({ kind: 'write', ops: 1, watch: false, inUnit: isInWriteTxn() });
       try {
         db.setEmbeddings(
           indexName,
@@ -441,8 +450,11 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
           vectors.map((v) => [...v]),
         );
       } catch (error) {
-        throw toEarsError(error);
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
       pump.notifyMutation();
     },
     batch,
@@ -452,6 +464,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       const finish = isOuter
         ? observer?.start({ kind: 'unit', ops: 1, watch: false, inUnit: false })
         : undefined;
+      if (isOuter) outerTxnMutated = false;
       let commitSeq: number | undefined;
       txnDepth++;
       let value: T;
@@ -464,7 +477,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
               'transact() callbacks must be synchronous (Promises and async callbacks are forbidden)',
             );
           }
-          if (isOuter && finish !== undefined) {
+          if (isOuter && finish !== undefined && outerTxnMutated) {
             const pending = db.pendingCommitSeq();
             if (pending !== null) commitSeq = pending;
           }
@@ -501,38 +514,42 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
     },
     nextCounter(name: string): number {
       const finish = observer?.start({ kind: 'write', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      let val: number;
       try {
-        const val = db.nextCounter(name);
-        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-        return val;
+        val = db.nextCounter(name);
       } catch (error) {
         const earsErr = toEarsError(error);
         finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
         throw earsErr;
       }
+      if (isInWriteTxn()) outerTxnMutated = true;
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return val;
     },
     getCounter(name: string): number {
       const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      let val: number;
       try {
-        const val = db.getCounter(name);
-        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-        return val;
+        val = db.getCounter(name);
       } catch (error) {
         const earsErr = toEarsError(error);
         finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
         throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return val;
     },
     setCounter(name: string, value: number): void {
       const finish = observer?.start({ kind: 'write', ops: 1, watch: false, inUnit: isInWriteTxn() });
       try {
         db.setCounter(name, value);
-        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
       } catch (error) {
         const earsErr = toEarsError(error);
         finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
         throw earsErr;
       }
+      if (isInWriteTxn()) outerTxnMutated = true;
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
     },
     beforeCommit(typeNames: readonly string[] | null, callback: BeforeCommitHook): () => void {
       let hookId: number;
@@ -543,22 +560,12 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
             hookDepth++;
             try {
               const ret: unknown = callback(delta);
-              if (isThenable(ret)) {
-                throw new EarsError(
-                  'ASYNC_CALLBACK_FORBIDDEN',
-                  'beforeCommit hooks must be synchronous (Promises and async callbacks are forbidden)',
-                );
-              }
               if (typeof ret === 'function') {
                 return encodeBatch(ret as (b: BatchWriter) => void);
               }
-              if (ret === undefined || ret === null || ret instanceof Uint8Array) {
-                return ret;
-              }
-              throw new EarsError(
-                'INVALID_ARGUMENT',
-                'beforeCommit hook must return void, a batch callback, or a Uint8Array wire batch',
-              );
+              // Pass thenables and invalid return types straight to the native binding so it raises
+              // exact `ASYNC_CALLBACK_FORBIDDEN` / `INVALID_ARGUMENT` error codes cleanly.
+              return ret;
             } finally {
               hookDepth--;
             }
