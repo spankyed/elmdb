@@ -709,6 +709,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "elmdb-lmdb"
+version = "0.1.0"
+dependencies = [
+ "elmdb-sim",
+ "elmdb-storage",
+ "libc",
+ "lmdb-master-sys",
+ "proptest",
+ "sha2",
+ "tempfile",
+]
+
+[[package]]
 name = "elmdb-node"
 version = "0.1.0"
 dependencies = [
@@ -724,6 +737,26 @@ dependencies = [
  "tempfile",
  "tracing",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "elmdb-sim"
+version = "0.1.0"
+dependencies = [
+ "elmdb-storage",
+ "parking_lot 0.13.0",
+ "sha2",
+]
+
+[[package]]
+name = "elmdb-storage"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.4.3",
+ "parking_lot 0.13.0",
+ "sha2",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

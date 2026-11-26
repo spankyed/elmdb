@@ -1,6 +1,14 @@
 [workspace]
 resolver = "3"
-members = ["crates/elmdb", "crates/elmdb-node", "crates/elmdb-cli", "xtask"]
+members = [
+    "crates/elmdb",
+    "crates/elmdb-storage",
+    "crates/elmdb-sim",
+    "crates/elmdb-lmdb",
+    "crates/elmdb-node",
+    "crates/elmdb-cli",
+    "xtask",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +21,10 @@ repository = "https://github.com/spankyed/elmdb"
 libc = "0.2.191"
 windows-sys = "0.61.2"
 elmdb = { path = "crates/elmdb" }
+elmdb-storage = { path = "crates/elmdb-storage" }
+elmdb-sim = { path = "crates/elmdb-sim" }
+elmdb-lmdb = { path = "crates/elmdb-lmdb" }
+lmdb-master-sys = "0.2.6"
 # Without heed's default features, which add serde codecs (bincode's, unmaintained, and serde_json's) that nothing
 # here uses: every database is read and written as `heed::types::Bytes`
 heed = { version = "0.23.0", default-features = false }
