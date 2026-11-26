@@ -1,31 +1,132 @@
-// The EARS engine: an instance you create over an elmdb database and hold, with its operations as its members
-// (`engine.create(...)`) and the creator's privileges beside them (`engine.admin`). Nothing here acts on an engine you
-// didn't pass: a program that binds one engine for code that holds none does that itself, over `defineEars`'s getter.
-// The database is opened by `@elmdb/ears/database`, the one entry that loads elmdb.
+/**
+ * `@elmdb/ears` — TypeScript v2 facade over elmdb: immutable algebraic query builder,
+ * single-crossing `elmdb-wire` binary batch writer, clock-driven sans-I/O live watches,
+ * and compile-time typed facades (`defineEars`).
+ *
+ * This root entrypoint never imports the native `elmdb` addon; open databases via `@elmdb/ears/database`.
+ *
+ * @packageDocumentation
+ */
+
 export {
-  createEarsEngine, type EarsEngine, type Ears, type EarsAdmin,
-  type EntityRow, type DatabaseCatalog, type SchemaStats, type RelationMatch, type RelationRow, type RelationStats,
-} from './engine.ts';
-export type { BeforeCommit, ChangedEntities, ChangedPosition, EarsDatabase, PendingChanges, EarsUnit, OpenReport, SchemaChange, UnitOptions } from './database.ts';
-export { WATCH_SCHEDULE } from './watch.ts';
+  EarsError,
+  isEarsError,
+  toEarsError,
+  RESERVED_ENTITY_TYPES,
+  RESERVED_FIELDS,
+  type EarsErrorCode,
+} from './errors.ts';
+
 export type {
-  WatchCauseSource, WatchDiagnostics, WatchEntryDiagnostics, WatchObserver, WatchOptions, WatchReadContext,
-  WatchSchedulerDiagnostics, Watching, WatchSchedule,
+  BuildPolicy,
+  CommitDelta,
+  DurabilityMode,
+  EarsDatabase,
+  EdgeDeltaEvent,
+  EdgeDirection,
+  EntityDeltaEvent,
+  FusionMethod,
+  SortDirection,
+} from './database.ts';
+
+export {
+  BatchSlot,
+  createBatchWriter,
+  encodeBatch,
+  type BatchWriter,
+  type EntityTarget,
+  type LinkOptions,
+} from './batch.ts';
+
+export {
+  createSystemClock,
+  type EarsClock,
+  type WatchController,
+  type WatchHandle,
+  type WatchMode,
+  type WatchOptions,
 } from './watch.ts';
-export type { CallCounting, CallKind, CallReport, CallSite, CallSiteNaming, WatchCount } from './calls.ts';
-export type { EngineSchema, RankDeclaration, RelationRules } from './schema.ts';
-export type { Create, Upsert, Write, TypeName } from './write.ts';
-export { EarsError, RESERVED_ATTRIBUTES, RESERVED_ENTITY_TYPES, type EarsErrorCode } from './errors.ts';
+
 export type {
-  EARSRuntimeDeps, EarsClock, EarsWarning, EarsSchema, UntypedSchema, QueryBuilder, WriteBuilder, SearchDeclaration, SearchOptions, SearchHit, RankedOptions, RankBound, SearchHighlights, QueryExplanation, QueryStage, EdgeDirection, SimilarityMeasure, FieldRule, FieldType, EmbedDeclaration, PendingEmbeddings, Embedding, RelationEdge, LinkOptions, WeightedLinkOptions, RelationPatch, RankSeed, RankOptions, RowIdentity, ShortCodeIdentity, WriteOptions, WriteTarget, FieldValue, FieldValues, ListElement, WritableField, OptionalField, RequiredField, CreateFields, WhereValue, RowRules, ShortCode, NoInferType,
-} from './runtime.ts';
-export { b64Encode, b64Decode, type Query, type QueryEntries } from './query.ts';
-export { entityTypeOf } from './ids.ts';
-export { EARS } from './entities.ts';
-export type { EntityShapes, ShapeOf, EntityNameArg, BaseEntity } from './entities.ts';
+  DegreesOptions,
+  EntityRow,
+  FieldPredicate,
+  FuseOptions,
+  GraphPprResult,
+  GraphTopoResult,
+  HasLinkOptions,
+  HopsOptions,
+  KeysetCursor,
+  LeidenOptions,
+  MinMaxResult,
+  OrderByOptions,
+  PprOptions,
+  QueryBuilder,
+  QueryRoot,
+  RecencyOptions,
+  SearchOptions,
+  ShortestPathOptions,
+  SimilarityOptions,
+  SourceOptions,
+  WhereInput,
+} from './query.ts';
+
 export {
+  createEarsEngine,
+  type BeforeCommitHook,
+  type CreateEarsEngineOptions,
+  type EarsAdmin,
+  type EarsEngine,
+  type GetEdgesOptions,
+} from './engine.ts';
+
+export {
+  asEntityId,
   defineEars,
-  type RowArg, type TypedEars, type TypedQuery, type TypedQueryEntries, type TypedCreate, type TypedUpsert, type TypedWrite, type TypedNewId, type TypedGetAttr,
+  type EARS,
+  type EarsSchemaShape,
+  type EntityTypeName,
+  type RelationKindName,
+  type TypedBatchWriter,
+  type TypedBeforeCommitHook,
+  type TypedEars,
+  type TypedEntityRow,
+  type TypedQueryRoot,
 } from './typed.ts';
 
-export type { EarsOperation, EarsOperationResult, EarsOperationObserver } from './observation.ts';
+export type {
+  BatchResult,
+  CheckReport,
+  DatabaseStats,
+  DumpReport,
+  ErrorCode,
+  IndexStatus,
+  NextDueWatch,
+  OpenOptions,
+  OpenReport,
+  QueryAnswer,
+  QuerySpec,
+  RelationRow,
+  Row,
+  Schema,
+  SchemaChange,
+  WatchPolicyOptions,
+  WatchRegistration,
+  WatchRerun,
+  WatchTick,
+} from 'elmdb';
+
+export type { FieldDefinition } from 'elmdb/protocol/FieldDefinition.js';
+export type { FieldSpec } from 'elmdb/protocol/FieldSpec.js';
+export type { Hit } from 'elmdb/protocol/Hit.js';
+export type { IndexDefinition } from 'elmdb/protocol/IndexDefinition.js';
+export type { ProtocolCardinality } from 'elmdb/protocol/ProtocolCardinality.js';
+export type { ProtocolOnDelete } from 'elmdb/protocol/ProtocolOnDelete.js';
+export type { QueryFilter } from 'elmdb/protocol/QueryFilter.js';
+export type { QueryScore } from 'elmdb/protocol/QueryScore.js';
+export type { QuerySource } from 'elmdb/protocol/QuerySource.js';
+export type { QueryStep } from 'elmdb/protocol/QueryStep.js';
+export type { QueryTerminal } from 'elmdb/protocol/QueryTerminal.js';
+export type { RelationDefinition } from 'elmdb/protocol/RelationDefinition.js';
+export type { RelationEndpoint } from 'elmdb/protocol/RelationEndpoint.js';
+export type { TypeDefinition } from 'elmdb/protocol/TypeDefinition.js';

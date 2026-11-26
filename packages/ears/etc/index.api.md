@@ -4,1246 +4,847 @@
 
 ```ts
 
-import type { OpenReport } from 'elmdb/protocol/OpenReport.js';
-import type { Schema } from 'elmdb/protocol/Schema.js';
-import type { SchemaChange } from 'elmdb/protocol/SchemaChange.js';
-import type { Stats } from 'elmdb/protocol/Stats.js';
+import { BatchResult } from 'elmdb';
+import { BatchSlot } from 'elmdb/client';
+import { CheckReport } from 'elmdb';
+import { DatabaseStats } from 'elmdb';
+import { DumpReport } from 'elmdb';
+import { EntityTarget } from 'elmdb/client';
+import { ErrorCode } from 'elmdb';
+import { FieldDefinition } from 'elmdb/protocol/FieldDefinition.js';
+import { FieldSpec } from 'elmdb/protocol/FieldSpec.js';
+import { Hit } from 'elmdb/protocol/Hit.js';
+import { IndexDefinition } from 'elmdb/protocol/IndexDefinition.js';
+import { IndexStatus } from 'elmdb';
+import { LinkOptions } from 'elmdb/client';
+import { NextDueWatch } from 'elmdb';
+import { OpenOptions } from 'elmdb';
+import { OpenReport } from 'elmdb';
+import { ProtocolCardinality } from 'elmdb/protocol/ProtocolCardinality.js';
+import { ProtocolOnDelete } from 'elmdb/protocol/ProtocolOnDelete.js';
+import { QueryAnswer } from 'elmdb';
+import { QueryFilter } from 'elmdb/protocol/QueryFilter.js';
+import { QueryScore } from 'elmdb/protocol/QueryScore.js';
+import { QuerySource } from 'elmdb/protocol/QuerySource.js';
+import { QuerySpec } from 'elmdb';
+import { QueryStep } from 'elmdb/protocol/QueryStep.js';
+import { QueryTerminal } from 'elmdb/protocol/QueryTerminal.js';
+import { RelationDefinition } from 'elmdb/protocol/RelationDefinition.js';
+import { RelationEndpoint } from 'elmdb/protocol/RelationEndpoint.js';
+import { RelationRow } from 'elmdb';
+import { Row } from 'elmdb';
+import { Schema } from 'elmdb';
+import { SchemaChange } from 'elmdb';
+import { TypeDefinition } from 'elmdb/protocol/TypeDefinition.js';
+import { WatchPolicyOptions } from 'elmdb';
+import { WatchRegistration } from 'elmdb';
+import { WatchRerun } from 'elmdb';
+import { WatchTick } from 'elmdb';
 
-// @public (undocumented)
-export const b64Decode: (s: string) => number;
+// @public
+export function asEntityId<TName extends string>(id: string): EARS.EntityId<TName>;
 
-// @public (undocumented)
-export const b64Encode: (n: number) => string;
+export { BatchResult }
 
-// @public (undocumented)
-export interface BaseEntity {
+export { BatchSlot }
+
+// @public
+export interface BatchWriter {
     // (undocumented)
-    createdAt: number;
+    create(typeName: string, fields: Record<string, unknown>, externalId?: string): BatchSlot;
     // (undocumented)
-    entityType: EARS.Entity;
+    destroy(target: EntityTarget): this;
     // (undocumented)
-    id: EARS.EntityId;
-    trashedAt?: number;
+    encode(returnFlags?: number): Uint8Array;
     // (undocumented)
-    updatedAt?: number;
-}
-
-// @public
-export interface BeforeCommit {
-    run(): void;
-    wants(type: string): boolean;
-}
-
-// @public
-export interface CallCounting {
-    report(): CallReport;
-    start(): void;
-    stop(): CallReport;
-}
-
-// @public
-export type CallKind = 'read' | 'write' | 'unit';
-
-// @public
-export interface CallReport {
-    counting: boolean;
-    elapsedMs: number;
-    sites: CallSite[];
-    totals: Record<CallKind, {
-        calls: number;
-        ops: number;
-        ms: number;
-    }> & {
-        watchRuns: {
-            calls: number;
-            ms: number;
-        };
-    };
-    watches: WatchCount[];
-}
-
-// @public
-export interface CallSite {
-    calls: number;
-    kind: CallKind;
-    ms: number;
-    ops: number;
-    site: string;
-    watch: boolean;
-    writes: number;
-}
-
-// @public
-export interface CallSiteNaming {
-    engineFrames?: RegExp;
-    roots?: readonly string[];
-}
-
-// @public
-export interface ChangedEntities {
-    complete: boolean;
-    destroyed: string[];
-    done: boolean;
-    ids: string[];
-    next: ChangedPosition;
-    sequences: number[];
-}
-
-// @public
-export interface ChangedPosition {
-    after?: {
-        type: string;
-        place: number;
-    };
-    sequence: number;
-}
-
-// @public
-export interface Create {
+    readonly length: number;
     // (undocumented)
-    <E extends string>(type: TypeName<E>, row?: Record<string, unknown> & RowIdentity): WriteBuilder<E>;
+    link(source: EntityTarget, relKind: string, target: EntityTarget, opts?: LinkOptions): this;
+    // (undocumented)
+    patch(target: EntityTarget, fields: Record<string, unknown>): this;
+    // (undocumented)
+    restore(target: EntityTarget): this;
+    // (undocumented)
+    trash(target: EntityTarget): this;
+    // (undocumented)
+    unlink(source: EntityTarget, relKind?: string, target?: EntityTarget): this;
+    // (undocumented)
+    unset(target: EntityTarget, fields: readonly string[]): this;
 }
 
 // @public
-export function createEarsEngine(input: EARSRuntimeDeps): EarsEngine;
+export type BeforeCommitHook = (delta: CommitDelta) => void | Uint8Array | ((batch: BatchWriter) => void);
 
 // @public
-export type CreateFields<S extends EntityShapes, E extends string> = [
-E
-] extends [keyof S] ? {
-    [K in keyof ShapeOf<S, E> as K extends RequiredField<S, E> ? K : never]: ShapeOf<S, E>[K];
-} & {
-    [K in keyof ShapeOf<S, E> as K extends OptionalField<S, E> ? K : never]?: ShapeOf<S, E>[K];
-} : Record<string, unknown>;
+export type BuildPolicy = 'deferred' | 'eager';
+
+export { CheckReport }
 
 // @public
-export interface DatabaseCatalog {
-    relations: Array<{
-        kind: string;
-        count: number;
-    }>;
-    roles: string[];
-    types: Array<{
-        name: string;
-        count: number;
-        fields: string[];
-    }>;
+export interface CommitDelta {
+    // (undocumented)
+    readonly edges: readonly EdgeDeltaEvent[];
+    // (undocumented)
+    readonly entities: readonly EntityDeltaEvent[];
 }
 
 // @public
-export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<D>;
+export function createBatchWriter(): BatchWriter;
 
-// @public (undocumented)
+// @public
+export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine;
+
+// @public
+export interface CreateEarsEngineOptions {
+    // (undocumented)
+    readonly clock?: EarsClock;
+    // (undocumented)
+    readonly database: EarsDatabase;
+    readonly onWatchError?: (error: EarsError) => void;
+}
+
+// @public
+export function createSystemClock(): EarsClock;
+
+export { DatabaseStats }
+
+// @public
+export function defineEars<TSchema extends EarsSchemaShape>(getEngine: () => EarsEngine): TypedEars<TSchema>;
+
+// @public
+export interface DegreesOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+}
+
+export { DumpReport }
+
+// @public
+export type DurabilityMode = 'strict' | 'grouped' | 'unsafe';
+
+// @public
 export namespace EARS {
-    // (undocumented)
-    export interface AttributePayloads {
-        // (undocumented)
-        [key: string]: unknown;
-        // (undocumented)
-        [AttrKindValues.Role]: RoleKind;
-    }
-    // (undocumented)
-    export type AttributeStore = Record<string, AttributeTypeMap>;
-    // (undocumented)
-    export type AttributeType = AttrKind;
     const // (undocumented)
-    RelKind: {
-        readonly Custom: <T extends string>(k: T) => T & RelKind;
-    };
-    // (undocumented)
-    export type AttributeTypeMap = Record<EntityId, AttributeValue[]>;
+    entityTypeBrand: unique symbol;
     const // (undocumented)
-    RoleKind: {
-        readonly Custom: <T extends string>(k: T) => T & RoleKind;
+    batchSlotTypeBrand: unique symbol;
+    export type EntityId<TName extends string = string> = string & {
+        readonly [entityTypeBrand]: TName;
     };
-    // (undocumented)
-    export type AttributeValue<K extends AttrKind = AttrKind> = K extends keyof AttributePayloads ? AttributePayloads[K] : unknown;
-    const // (undocumented)
-    AttrKindValues: {
-        readonly Role: "role";
+    export type TypedBatchSlot<TName extends string = string> = BatchSlot & {
+        readonly [batchSlotTypeBrand]: TName;
     };
-    const // (undocumented)
-    AttrKind: {
-        readonly Custom: <T extends string>(k: T) => T & AttrKind;
-        readonly Role: "role";
-    };
-    // (undocumented)
-    export type AttrKind = typeof AttrKindValues[keyof typeof AttrKindValues] | (string & {});
-    // (undocumented)
-    export type Entity = string & {};
-    export type EntityId<E extends string = string> = string extends E ? `${string}-${string}` : `${string}-${string}` & {
-        readonly __entity?: E;
-    };
-    export type RelationId = `${string}-${string}` & {
-        readonly __relation: true;
-    };
-    // (undocumented)
-    export type RelKind = string & {};
-    // (undocumented)
-    export type RoleKind = string & {};
-}
-
-// @public
-export interface Ears {
-    catalog(): DatabaseCatalog;
-    create: Create;
-    embed(embeddings: readonly Embedding[]): {
-        stored: number;
-        stale: number;
-    };
-    embeddedTypes(): string[];
-    findRelations(match?: RelationMatch): RelationRow[];
-    getAttr(id: EARS.EntityId, field: EARS.AttrKind): EARS.AttributeValue | undefined;
-    getRelation(relId: EARS.RelationId): RelationRow | undefined;
-    // (undocumented)
-    getRoles(id: EARS.EntityId): string[];
-    getRow(id: EARS.EntityId): EntityRow | undefined;
-    getSchemaStats(): SchemaStats;
-    isEntityType(name: string): boolean;
-    isRelationKind(name: string): boolean;
-    isRole(name: string): boolean;
-    lastCommit(): number;
-    newId(type: EARS.Entity): EARS.EntityId;
-    nextLabel(type: EARS.Entity, base: string): string;
-    now(): number;
-    pendingEmbeddings(type: EARS.Entity, options?: {
-        limit?: number;
-    }): PendingEmbeddings;
-    query: Query;
-    removeRelation(relId: EARS.RelationId): void;
-    transact<T>(fn: () => T, options?: UnitOptions): T;
-    updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
-    upsert: Upsert;
-    watch<T>(read: (context: WatchReadContext | undefined) => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
-    wouldCreateCycle(source: EARS.EntityId, target: EARS.EntityId, kinds: readonly EARS.RelKind[]): boolean;
-    write: Write;
+    export {};
 }
 
 // @public
 export interface EarsAdmin {
-    addRelation(source: EARS.EntityId, kind: string, target: EARS.EntityId, info?: unknown, weight?: number): EARS.RelationId;
-    adoptReplacement(epoch: number): boolean;
-    beforeCommit(hook: BeforeCommit): void;
-    bulkLoad<T>(fn: () => T): T;
-    bulkLoadAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    bulkLoadRelation(relId: EARS.RelationId, kind: string, source: EARS.EntityId, target: EARS.EntityId, info?: unknown, weight?: number): void;
-    readonly calls: CallCounting;
-    changedElsewhere(): boolean;
-    changedSince(types: readonly string[], from: ChangedPosition, limit: number): ChangedEntities;
-    checkpoint(name: string): unknown;
-    clear(): void;
-    countEntities(): Record<string, number>;
-    declare(schema: EngineSchema): SchemaChange[];
-    deleteAttr(id: EARS.EntityId, kind: EARS.AttrKind): void;
-    durable(): Promise<void>;
-    getAllEntities(): EARS.EntityId[];
-    getEntitiesOfType(type: EARS.Entity): EARS.EntityId[];
-    nextSequence(): number | undefined;
-    observe(observer: EarsOperationObserver): () => void;
-    onFoundElsewhere(listener: () => void): () => void;
-    pendingChanges(): PendingChanges | undefined;
-    putAttr(id: EARS.EntityId, kind: EARS.AttrKind, value: unknown): void;
-    replacedElsewhere(): number | undefined;
-    replaceWith(source: string): void;
-    setCheckpoint(name: string, value: unknown): void;
-    setSchema(schema: EngineSchema): SchemaChange[];
-    stopWatches(): void;
-    transactWithoutHook<T>(fn: () => T, options?: UnitOptions): T;
-    updateRelation(relId: EARS.RelationId, patch: RelationPatch): void;
-    waitForIndexBuilds(): void;
-    watchDiagnostics(): WatchDiagnostics;
-    watchesSettled(): Promise<void>;
-    watchStats(): {
-        watches: number;
-        keys: number;
-        ranges: number;
-    };
+    // (undocumented)
+    acknowledgeRestore(): void;
+    // (undocumented)
+    backup(targetDir: string, overwriteBackup?: boolean): void;
+    // (undocumented)
+    backupAsync(targetDir: string, overwriteBackup?: boolean): Promise<void>;
+    // (undocumented)
+    check(indexName?: string): CheckReport;
+    // (undocumented)
+    checkAsync(indexName?: string): Promise<CheckReport>;
+    // (undocumented)
+    close(): void;
+    // (undocumented)
+    driveBackgroundWork(maxEntities?: number): boolean;
+    // (undocumented)
+    dump(targetFile: string): DumpReport;
+    // (undocumented)
+    flush(): void;
+    // (undocumented)
+    flushAsync(): Promise<void>;
+    // (undocumented)
+    getSchema(): Schema;
+    // (undocumented)
+    indexStatus(): IndexStatus[];
+    // (undocumented)
+    openReport(): OpenReport;
+    // (undocumented)
+    readonly path: string;
+    // (undocumented)
+    purgeArchived(typeName: string): number;
+    // (undocumented)
+    readonly readOnly: boolean;
+    // (undocumented)
+    rebuild(indexName?: string): void;
+    // (undocumented)
+    rebuildAsync(indexName?: string): Promise<void>;
+    // (undocumented)
+    renameField(typeName: string, oldField: string, newField: string): number;
+    // (undocumented)
+    renameRelation(oldRel: string, newRel: string): number;
+    // (undocumented)
+    renameType(oldType: string, newType: string, rewriteIds?: boolean): number;
+    // (undocumented)
+    setSchema(schema: Schema): SchemaChange;
+    // (undocumented)
+    stats(): DatabaseStats;
 }
 
 // @public
 export interface EarsClock {
-    after(ms: number, run: () => void): () => void;
-    monotonic?(): number;
+    // (undocumented)
+    clearTimeout(handle: unknown): void;
+    // (undocumented)
     now(): number;
+    // (undocumented)
+    setTimeout(callback: () => void, delayMs: number): unknown;
 }
 
 // @public
 export interface EarsDatabase {
+    // (undocumented)
     acknowledgeRestore(): void;
-    adoptReplacement(epoch: number): boolean;
-    backup(target: string): void;
     // (undocumented)
-    begin(): EarsUnit;
+    backup(targetDir: string, overwriteBackup?: boolean | undefined | null): void;
     // (undocumented)
-    bulkLoad(loads: Uint8Array): void;
-    changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
-    checkpoint(name: string): Uint8Array | null;
+    backupAsync(targetDir: string, overwriteBackup?: boolean | undefined | null): Promise<void>;
+    // (undocumented)
+    catchUpCrossProcess(nowMs?: number | undefined | null): Array<number>;
+    // (undocumented)
+    caughtUp(nowMs?: number | undefined | null, soon?: boolean | undefined | null): boolean;
+    // (undocumented)
+    check(indexName?: string | undefined | null): CheckReport;
+    // (undocumented)
+    checkAsync(indexName?: string | undefined | null): Promise<CheckReport>;
     // (undocumented)
     close(): void;
-    committedElsewhere(): boolean;
     // (undocumented)
-    durable(): Promise<void>;
-    hearBuilderCommits(listener: (commit: {
-        sequence: number;
-        touched: number[];
-    }) => void): void;
-    hearCommitsElsewhere(listener: () => void): void;
+    driveBackgroundWork(maxEntities?: number | undefined | null): boolean;
     // (undocumented)
-    readonly isOpen: boolean;
-    readonly openReport: OpenReport;
+    dump(targetFile: string): DumpReport;
+    // (undocumented)
+    executeWireBatch(payload: Uint8Array): BatchResult;
+    // (undocumented)
+    flush(): void;
+    // (undocumented)
+    flushAsync(): Promise<void>;
+    // (undocumented)
+    get(extId: string): Row | null;
+    // (undocumented)
+    getEdges(extId: string, relKind?: string | undefined | null, dir?: string | undefined | null): Array<RelationRow>;
+    // (undocumented)
+    getSchema(): Schema;
+    // (undocumented)
+    indexStatus(): Array<IndexStatus>;
+    // (undocumented)
+    nextDueWatch(nowMs?: number | undefined | null, elapsedTurnMs?: number | undefined | null): NextDueWatch;
+    // (undocumented)
+    openReport(): OpenReport;
     // (undocumented)
     readonly path: string;
     // (undocumented)
-    read(reads: Uint8Array): Uint8Array;
+    purgeArchived(typeName: string): number;
+    // (undocumented)
+    query(spec: QuerySpec): QueryAnswer;
+    // (undocumented)
+    queryAsync(spec: QuerySpec): Promise<QueryAnswer>;
     // (undocumented)
     readonly readOnly: boolean;
-    rebuild(type?: string | null, index?: string | null): void;
-    replacedElsewhere(): number | null;
-    replaceWith(source: string): void;
-    reset(): void;
-    readonly schema: Schema | null;
-    readonly sequence: number;
     // (undocumented)
-    setSchema(schema: Schema): SchemaChange[];
+    rebuild(indexName?: string | undefined | null): void;
     // (undocumented)
-    stats(): Stats;
-    trackStats(): {
-        owners: number;
-        keys: number;
-        ranges: number;
-    };
-    untrack(token: number): void;
-    waitForIndexBuilds(): void;
+    rebuildAsync(indexName?: string | undefined | null): Promise<void>;
     // (undocumented)
-    write(batch: Uint8Array, durable?: boolean | null): Uint8Array;
+    registerBeforeCommit(typeNames: Array<string> | undefined | null, callback: (delta: CommitDelta) => unknown): number;
+    // (undocumented)
+    registerWatch(spec: QuerySpec, policy?: WatchPolicyOptions | undefined | null, nowMs?: number | undefined | null): WatchRegistration;
+    // (undocumented)
+    renameField(typeName: string, oldField: string, newField: string): number;
+    // (undocumented)
+    renameRelation(oldRel: string, newRel: string): number;
+    // (undocumented)
+    renameType(oldType: string, newType: string, rewriteIds?: boolean | undefined | null): number;
+    // (undocumented)
+    rerunWatch(watchId: number, spec: QuerySpec, nowMs?: number | undefined | null, costMs?: number | undefined | null): WatchRerun;
+    // (undocumented)
+    setEmbeddings(indexName: string, extId: string, vectors: Array<Array<number>>): void;
+    // (undocumented)
+    setSchema(schema: Schema): SchemaChange;
+    // (undocumented)
+    stats(): DatabaseStats;
+    // (undocumented)
+    stopWatches(): void;
+    // (undocumented)
+    tickWatches(nowMs?: number | undefined | null): WatchTick;
+    // (undocumented)
+    unregisterBeforeCommit(hookId: number): boolean;
+    // (undocumented)
+    unregisterWatch(watchId: number): boolean;
+    // (undocumented)
+    watchesSettled(): boolean;
 }
 
 // @public
-export interface EarsEngine extends Ears {
+export interface EarsEngine {
     // (undocumented)
-    admin: EarsAdmin;
+    readonly admin: EarsAdmin;
+    batch(fn: (batch: BatchWriter) => void): BatchResult;
+    beforeCommit(typeNames: readonly string[] | null, callback: BeforeCommitHook): () => void;
+    // (undocumented)
+    create(typeName: string, fields: Record<string, unknown>, externalId?: string): string;
+    // (undocumented)
+    destroy(id: string): BatchResult;
+    executeWireBatch(payload: Uint8Array): BatchResult;
+    // (undocumented)
+    get(id: string): EntityRow | null;
+    // (undocumented)
+    getEdges(id: string, opts?: GetEdgesOptions): RelationRow[];
+    // (undocumented)
+    link(sourceId: string, relKind: string, targetId: string, opts?: LinkOptions): BatchResult;
+    // (undocumented)
+    patch(id: string, fields: Record<string, unknown>): BatchResult;
+    // (undocumented)
+    readonly query: QueryRoot;
+    // (undocumented)
+    restore(id: string): BatchResult;
+    // (undocumented)
+    setEmbeddings(indexName: string, id: string, vectors: ReadonlyArray<ReadonlyArray<number>>): void;
+    // (undocumented)
+    trash(id: string): BatchResult;
+    // (undocumented)
+    unlink(sourceId: string, relKind?: string, targetId?: string): BatchResult;
+    // (undocumented)
+    unset(id: string, fields: readonly string[]): BatchResult;
+    // (undocumented)
+    readonly watches: WatchController;
 }
 
 // @public
 export class EarsError extends Error {
-    constructor(code: EarsErrorCode, message: string);
+    constructor(code: EarsErrorCode, message: string, options?: {
+        readonly cause?: unknown;
+    });
     // (undocumented)
     readonly code: EarsErrorCode;
 }
 
 // @public
-export type EarsErrorCode =
-/** `create`, `upsert` or `query` was given a name that is not a registered entity type */
-'UNKNOWN_ENTITY_TYPE'
-/** `write` was given an id no entity in the engine has */
-| 'NO_SUCH_ENTITY'
-/** `updateRelation` or `removeRelation` was given an id no relation in the engine has */
-| 'NO_SUCH_RELATION'
-/** `create` was given an id an entity already has */
-| 'ID_IN_USE'
-/** `upsert` or `create` named a type the id's entity doesn't have */
-| 'TYPE_MISMATCH'
-/** A write named an attribute the engine owns */
-| 'RESERVED_ATTRIBUTE'
-/** `create` or `upsert` named one of the engine's own types, which its ids are written with (`RESERVED_ENTITY_TYPES`) */
-| 'RESERVED_ENTITY_TYPE'
-/** A `where` was given no value to compare with, or `set` none to store */
-| 'NO_VALUE'
-/** A list write (`append`, `removeAt`, `removeValue`) named an attribute whose value isn't a list */
-| 'NOT_A_LIST'
-/** A link, or a read or walk over links, named a relation kind that is not registered */
-| 'UNKNOWN_RELATION_KIND'
-/** A role write, or a query by role, named a role that is not registered */
-| 'UNKNOWN_ROLE'
-/** A created row lacked a field its type requires, or a delete named one */
-| 'REQUIRED_FIELD'
-/**
-* A created row brought a short code its type doesn't number, or one that isn't the type's `<prefix>-<n>`, or an
-* upsert's row one other than the entity's
-*/
-| 'INVALID_SHORT_CODE'
-/** A created row brought a short code another entity holds */
-| 'SHORT_CODE_IN_USE'
-/** `link` named the entity it links from as its target */
-| 'SELF_LINK'
-/** `link` would close a cycle through a relation kind its declaration makes acyclic */
-| 'CYCLE'
-/**
-* `updateRelation` would move an edge, or change its kind's key fields in its info, onto the identity of another
-* edge: the same ends and key values
-*/
-| 'DUPLICATE_EDGE'
-/** A write's value is one the database doesn't store: a function, a symbol, `undefined` in a list, or a number that isn't finite */
-| 'VALUE_INVALID'
-/**
-* `search` was on a type with no text index (no `search` in its row rules), `near`, `like`, `hybrid` or
-* `pendingEmbeddings` on one with no vector index (no `embed`), or `containing` or `matching` on one with no trigram
-* index (no `substrings`)
-*/
-| 'UNKNOWN_INDEX' | 'INDEX_BUILDING'
-/** `hits()` was asked of a query with no `search`, `near`, `like` or `hybrid`, or with a `where` given a function after it */
-| 'NO_SEARCH'
-/** `explain()` was asked of a query with a `where` given a function, which runs outside the plan the database explains */
-| 'NOT_EXPLAINABLE'
-/** A write's value isn't of its field's type, as the entity type's shape declares it: the message names the field and the type */
-| 'FIELD_TYPE'
-/** `matching` was given a pattern Rust's `regex` syntax doesn't hold, look-around and backreferences among them: the message says why */
-| 'PATTERN_INVALID';
+export type EarsErrorCode = ErrorCode;
 
 // @public
-export interface EarsOperation {
+export interface EarsSchemaShape {
     // (undocumented)
-    inUnit: boolean;
+    readonly entities: {
+        readonly [typeName: string]: Record<string, unknown>;
+    };
     // (undocumented)
-    kind: 'read' | 'write' | 'unit' | 'load';
-    // (undocumented)
-    ops: number;
-    sequence?: number;
-    // (undocumented)
-    watch: boolean;
+    readonly relations?: string;
 }
 
 // @public
-export interface EarsOperationObserver {
+export interface EdgeDeltaEvent {
     // (undocumented)
-    start(operation: Readonly<EarsOperation>): (result: Readonly<EarsOperationResult>) => void;
+    readonly op: 'link' | 'unlink' | 'update';
+    // (undocumented)
+    readonly relKind: string;
+    // (undocumented)
+    readonly sourceId: string;
+    // (undocumented)
+    readonly targetId: string;
 }
-
-// @public
-export interface EarsOperationResult {
-    // (undocumented)
-    errorCode?: string;
-    // (undocumented)
-    outcome: 'ok' | 'error' | 'committed-not-durable';
-    // (undocumented)
-    requestBytes: number;
-    // (undocumented)
-    responseBytes: number;
-    sequence?: number;
-}
-
-// @public
-export interface EARSRuntimeDeps {
-    callSites?: CallSiteNaming;
-    clock?: EarsClock;
-    database: EarsDatabase;
-    freeze?: boolean;
-    schedule?: WatchSchedule;
-    warn?: (message: string, warning: EarsWarning) => void;
-}
-
-// @public
-export interface EarsSchema {
-    names: string;
-    rankIndexes: string;
-    relKinds: string;
-    roles: string;
-    shapes: EntityShapes;
-    weightedKinds: string;
-}
-
-// @public
-export interface EarsUnit {
-    // (undocumented)
-    abort(): void;
-    changedSince(types: string[], from: Uint8Array, limit: number): Uint8Array;
-    checkpoint(name: string): Uint8Array | null;
-    // (undocumented)
-    commit(durable?: boolean | null): Uint8Array;
-    // (undocumented)
-    readonly isOpen: boolean;
-    nextSequence(): number;
-    pendingChanges(): Uint8Array;
-    // (undocumented)
-    read(reads: Uint8Array): Uint8Array;
-    // (undocumented)
-    release(depth: number): void;
-    // (undocumented)
-    rollbackTo(depth: number): void;
-    // (undocumented)
-    savepoint(): number;
-    setCheckpoint(name: string, value: Uint8Array): void;
-    // (undocumented)
-    write(batch: Uint8Array): Uint8Array;
-}
-
-// @public
-export type EarsWarning =
-/**
-* A `where` on `field`, straight after a start from `types`, filtered `visited` rows, since one of those types
-* declares no value index on the field (`RowRules.indexes`); `site` is the code that made the query
-*/
-    {
-    kind: 'unindexedWalk';
-    types: readonly string[];
-    field: string;
-    visited: number;
-    site: string;
-}
-/** The watch `label` cost `ms` a run, more than a flush's slice, `runs` runs in a row */
-| {
-    kind: 'slowWatch';
-    label: string;
-    ms: number;
-    runs: number;
-};
 
 // @public
 export type EdgeDirection = 'out' | 'in' | 'both';
 
 // @public
-export interface EmbedDeclaration {
-    readonly chunk?: 'whole' | 'paragraph' | 'heading';
-    readonly dims: number;
-    readonly from: readonly string[];
-    readonly model: string;
+export function encodeBatch(fn: (batch: BatchWriter) => void, returnFlags?: number): Uint8Array;
+
+// @public
+export interface EntityDeltaEvent {
+    // (undocumented)
+    readonly id: string;
+    // (undocumented)
+    readonly op: 'create' | 'update' | 'trash' | 'restore' | 'destroy';
+    // (undocumented)
+    readonly typeName: string;
 }
 
 // @public
-export interface Embedding {
-    // (undocumented)
-    chunk: number;
-    // (undocumented)
-    hash: string;
-    // (undocumented)
-    id: EARS.EntityId;
-    // (undocumented)
-    model: string;
-    // (undocumented)
-    vector: readonly number[];
-}
-
-// @public
-export interface EngineSchema {
-    ranks?: Readonly<Record<string, RankDeclaration>>;
-    relations: Readonly<Record<string, RelationRules>>;
-    // (undocumented)
-    roles: readonly string[];
-    types: Readonly<Record<string, RowRules>>;
-}
-
-// @public
-export type EntityNameArg<N extends string, E extends string> = string extends E ? E : [E] extends [N] ? E : N;
-
-// @public
-export type EntityRow = {
-    id: EARS.EntityId;
-    entityType: EARS.Entity;
-} & Record<string, unknown>;
-
-// @public
-export type EntityShapes = {
-    [entityType: string]: object;
+export type EntityRow<TName extends string = string, TFields extends Record<string, unknown> = Record<string, unknown>> = {
+    readonly id: string;
+    readonly typeName: TName;
+    readonly trashed: boolean;
+    readonly fields: Readonly<TFields>;
 };
 
-// @public
-export const entityTypeOf: (id: EARS.EntityId) => EARS.Entity;
+export { EntityTarget }
 
 // @public
-export type FieldRule = FieldType & {
-    readonly optional?: boolean;
-    readonly nullable?: boolean;
-};
+export type EntityTypeName<TSchema extends EarsSchemaShape> = Extract<keyof TSchema['entities'], string>;
+
+export { ErrorCode }
+
+export { FieldDefinition }
 
 // @public
-export type FieldType = {
-    readonly type: 'string' | 'number' | 'boolean' | 'any';
-} | {
-    readonly type: 'enum';
-    readonly values: readonly string[];
-} | {
-    readonly type: 'ref';
-    readonly to: readonly string[];
-} | {
-    readonly type: 'list';
-    readonly of: FieldType;
-};
+export interface FieldPredicate {
+    // (undocumented)
+    readonly contains?: string;
+    // (undocumented)
+    readonly eq?: unknown;
+    // (undocumented)
+    readonly gt?: unknown;
+    // (undocumented)
+    readonly gte?: unknown;
+    // (undocumented)
+    readonly in?: readonly unknown[];
+    // (undocumented)
+    readonly isNull?: boolean;
+    // (undocumented)
+    readonly isPresent?: boolean;
+    // (undocumented)
+    readonly lt?: unknown;
+    // (undocumented)
+    readonly lte?: unknown;
+    // (undocumented)
+    readonly ne?: unknown;
+    // (undocumented)
+    readonly regex?: string;
+    // (undocumented)
+    readonly startsWith?: string;
+}
+
+export { FieldSpec }
 
 // @public
-export type FieldValue<S extends EntityShapes, E extends string, K extends string> = [
-E
-] extends [keyof S] ? (K extends keyof ShapeOf<S, E> ? ShapeOf<S, E>[K] : unknown) : unknown;
-
-// @public
-export type FieldValues<S extends EntityShapes, E extends string> = [
-E
-] extends [keyof S] ? {
-    [K in keyof ShapeOf<S, E> as K extends (typeof RESERVED_ATTRIBUTES)[number] ? never : K]?: ShapeOf<S, E>[K];
-} : Record<string, unknown>;
-
-// @public
-export interface LinkOptions {
-    info?: unknown;
+export interface FuseOptions {
+    // (undocumented)
+    readonly method?: FusionMethod;
+    // (undocumented)
+    readonly rrfK?: number;
 }
 
 // @public
-export type ListElement<T> = [T] extends [readonly (infer U)[]] ? U : unknown;
+export type FusionMethod = 'rrf' | 'linear';
 
 // @public
-export type NoInferType<T> = [T][T extends unknown ? 0 : never];
+export interface GetEdgesOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly relKind?: string;
+}
+
+// @public
+export interface GraphPprResult {
+    // (undocumented)
+    readonly converged: boolean;
+    // (undocumented)
+    readonly iterations: number;
+    // (undocumented)
+    readonly scores: Hit[];
+}
+
+// @public
+export interface GraphTopoResult {
+    // (undocumented)
+    readonly cycles: number;
+    // (undocumented)
+    readonly order: string[];
+}
+
+// @public
+export interface HasLinkOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+    // (undocumented)
+    readonly targetId?: string;
+}
+
+export { Hit }
+
+// @public
+export interface HopsOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly maxHops: number;
+    // (undocumented)
+    readonly minHops?: number;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+}
+
+export { IndexDefinition }
+
+export { IndexStatus }
+
+// @public
+export function isEarsError(error: unknown): error is EarsError;
+
+// @public
+export interface KeysetCursor {
+    // (undocumented)
+    readonly id: string;
+    // (undocumented)
+    readonly score?: number;
+    // (undocumented)
+    readonly value?: unknown;
+}
+
+// @public
+export interface LeidenOptions {
+    // (undocumented)
+    readonly iterations?: number;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+    // (undocumented)
+    readonly resolution?: number;
+    // (undocumented)
+    readonly seed?: number;
+    // (undocumented)
+    readonly weighted?: boolean;
+}
+
+export { LinkOptions }
+
+// @public
+export interface MinMaxResult {
+    // (undocumented)
+    readonly max: unknown | null;
+    // (undocumented)
+    readonly min: unknown | null;
+}
+
+export { NextDueWatch }
+
+export { OpenOptions }
 
 export { OpenReport }
 
 // @public
-export type OptionalField<S extends EntityShapes, E extends string> = [
-E
-] extends [keyof S] ? Extract<{
-    [K in keyof ShapeOf<S, E>]-?: {} extends Pick<ShapeOf<S, E>, K> ? K : never;
-}[keyof ShapeOf<S, E>], WritableField<S, E>> : string;
-
-// @public
-export interface PendingChanges {
+export interface OrderByOptions {
     // (undocumented)
-    entities: Record<string, unknown>;
+    readonly locale?: string;
 }
 
 // @public
-export interface PendingEmbeddings {
-    chunks: Array<{
-        id: EARS.EntityId;
-        chunk: number;
-        hash: string;
-        text: string;
-    }>;
-    count: number;
+export interface PprOptions {
     // (undocumented)
-    dims: number;
+    readonly damping?: number;
     // (undocumented)
-    model: string;
+    readonly iterations?: number;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
+    // (undocumented)
+    readonly tolerance?: number;
+    // (undocumented)
+    readonly weighted?: boolean;
 }
 
-// @public
-export interface Query extends QueryEntries {
-    // (undocumented)
-    trashed: QueryEntries;
-    // (undocumented)
-    withTrashed: QueryEntries;
-}
+export { ProtocolCardinality }
+
+export { ProtocolOnDelete }
+
+export { QueryAnswer }
 
 // @public
-export interface QueryBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
-    after(id: EARS.EntityId): QueryBuilder<E, D>;
-    ancestors<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined, options?: {
-        depth?: number;
-    }): QueryBuilder<T, D>;
-    // (undocumented)
-    ancestors(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined, options?: {
-        depth?: number;
-    }): QueryBuilder<string, D>;
-    both<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
-    // (undocumented)
-    both(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
-    communities(kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
-        resolution?: number;
-        seed?: number;
-        weights?: boolean;
-    }): EARS.EntityId<E>[][];
-    containing(text: string, options?: {
-        caseInsensitive?: boolean;
-    }): QueryBuilder<E, D>;
-    // (undocumented)
+export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
+    adamicAdar(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow>;
+    after(cursor: KeysetCursor): QueryBuilder<TResult>;
+    all(fields?: readonly string[]): TResult[];
+    allAsync(fields?: readonly string[]): Promise<TResult[]>;
     count(): number;
-    degrees<T extends string = string>(kinds: D['relKinds'] | readonly D['relKinds'][], type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[], options?: {
-        direction?: EdgeDirection;
-    }): Map<EARS.EntityId<E>, number>;
-    descendants<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined, options?: {
-        depth?: number;
-    }): QueryBuilder<T, D>;
-    // (undocumented)
-    descendants(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined, options?: {
-        depth?: number;
-    }): QueryBuilder<string, D>;
-    // (undocumented)
-    distinct(field?: keyof ShapeOf<D['shapes'], E> & string): QueryBuilder<E, D>;
-    // (undocumented)
+    countAsync(): Promise<number>;
+    degrees(opts?: DegreesOptions): Array<[string, number]>;
+    degreesAsync(opts?: DegreesOptions): Promise<Array<[string, number]>>;
+    distinct(): QueryBuilder<TResult>;
     exists(): boolean;
-    explain(): QueryExplanation<E>;
-    first(): EARS.EntityId<E> | undefined;
+    existsAsync(): Promise<boolean>;
+    explain(terminal?: QueryTerminal): QueryAnswer;
+    filterLocal(predicate: (row: TResult) => boolean): QueryBuilder<TResult>;
+    first(fields?: readonly string[]): TResult | null;
+    firstAsync(fields?: readonly string[]): Promise<TResult | null>;
+    fuse(inputs: ReadonlyArray<readonly [QueryScore, number]>, opts?: FuseOptions): QueryBuilder<TResult>;
+    fuzzy(field: string, query: string, maxDistance: number): QueryBuilder<TResult>;
+    graphGroups(): string[][];
+    graphGroupsAsync(): Promise<string[][]>;
+    graphPpr(): GraphPprResult;
+    graphPprAsync(): Promise<GraphPprResult>;
+    graphTopo(): GraphTopoResult;
+    graphTopoAsync(): Promise<GraphTopoResult>;
+    groupBy(field: string): Array<[unknown, string[]]>;
+    groupByAsync(field: string): Promise<Array<[unknown, string[]]>>;
+    groupCounts(field: string): Array<[unknown, number]>;
+    groupCountsAsync(field: string): Promise<Array<[unknown, number]>>;
+    hasLink(opts?: HasLinkOptions): QueryBuilder<TResult>;
+    hits(): Hit[];
+    hitsAsync(): Promise<Hit[]>;
+    hops(opts: HopsOptions): QueryBuilder<EntityRow>;
+    ids(): string[];
+    idsAsync(): Promise<string[]>;
+    jaccard(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow>;
+    leiden(opts?: LeidenOptions): QueryBuilder<EntityRow>;
+    like(index: string, seedId: string, topK: number): QueryBuilder<TResult>;
+    limit(n: number): QueryBuilder<TResult>;
+    minMax(field: string): MinMaxResult;
+    minMaxAsync(field: string): Promise<MinMaxResult>;
+    near(index: string, vector: readonly number[], topK: number): QueryBuilder<TResult>;
+    orderBy(field: string, dir?: SortDirection, opts?: OrderByOptions): QueryBuilder<TResult>;
+    orderById(dir?: SortDirection): QueryBuilder<TResult>;
+    orderByScore(dir?: SortDirection): QueryBuilder<TResult>;
+    ppr(seeds: ReadonlyArray<readonly [string, number]>, opts?: PprOptions): QueryBuilder<EntityRow>;
+    ranked(index: string): QueryBuilder<TResult>;
+    recency(field: string, opts: RecencyOptions): QueryBuilder<TResult>;
+    scc(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+    score(spec: QueryScore): QueryBuilder<TResult>;
+    search(index: string, query: string, opts?: SearchOptions): QueryBuilder<TResult>;
+    shortestPath(targetId: string, opts: ShortestPathOptions): QueryBuilder<EntityRow>;
+    sum(field: string): number;
+    sumAsync(field: string): Promise<number>;
+    topoSort(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+    toSpec(terminal?: QueryTerminal, explain?: boolean): QuerySpec;
+    watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle;
+    watchCount(callback: (count: number) => void, opts?: WatchOptions): WatchHandle;
+    watchHits(callback: (hits: Hit[]) => void, opts?: WatchOptions): WatchHandle;
+    watchIds(callback: (ids: string[]) => void, opts?: WatchOptions): WatchHandle;
+    weakComponents(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+    where(filter: QueryFilter): QueryBuilder<TResult>;
     // (undocumented)
-    forEach(fn: (id: EARS.EntityId<E>) => void): QueryBuilder<E, D>;
-    groupBy(field: keyof ShapeOf<D['shapes'], E> & string): Map<unknown, EARS.EntityId<E>[]>;
-    has<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
-    hits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(options: {
-        fields: A;
-        highlights?: boolean;
-    }): Array<SearchHit<E> & {
-        row: {
-            id: EARS.EntityId<E>;
-        } & Pick<ShapeOf<D['shapes'], E>, A[number]>;
-    }>;
-    // (undocumented)
-    hits(options?: {
-        highlights?: boolean;
-    }): SearchHit<E>[];
-    hybrid(query: string, vector: readonly number[], options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string> & {
-        k?: number;
-    }): QueryBuilder<E, D>;
-    // (undocumented)
-    ids(): EARS.EntityId<E>[];
-    in<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
-    // (undocumented)
-    in(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
-    inEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, NoInferType<T>, E>>;
-    lacks<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K): QueryBuilder<E, D>;
-    last(): EARS.EntityId<E> | undefined;
-    like(id: EARS.EntityId, options?: {
-        k?: number;
-    }): QueryBuilder<E, D>;
-    // (undocumented)
-    limit(n: number): QueryBuilder<E, D>;
-    linkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
-    linkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
-    linkedWith(other: EARS.EntityId): QueryBuilder<E, D>;
-    // (undocumented)
-    map<T>(fn: (id: EARS.EntityId<E>) => T): T[];
-    matching(pattern: string): QueryBuilder<E, D>;
-    near(vector: readonly number[], options?: {
-        k?: number;
-    }): QueryBuilder<E, D>;
-    // (undocumented)
-    ofType<T extends string>(t: EntityNameArg<D['names'], T>): QueryBuilder<T, D>;
-    // (undocumented)
-    orderBy(field: keyof ShapeOf<D['shapes'], E> & string, dir?: 'asc' | 'desc'): QueryBuilder<E, D>;
-    out<T extends string>(kinds: D['relKinds'] | readonly D['relKinds'][], type: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[] | undefined): QueryBuilder<T, D>;
-    // (undocumented)
-    out(kinds: D['relKinds'] | readonly D['relKinds'][], type?: undefined): QueryBuilder<string, D>;
-    outEdges<K extends D['relKinds'], T extends string = string>(kinds: K | readonly K[], type?: EntityNameArg<D['names'], T> | readonly EntityNameArg<D['names'], T>[]): Array<RelationEdge<K, E, NoInferType<T>>>;
-    pathTo(to: EARS.EntityId, kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
-        direction?: EdgeDirection;
-        depth?: number;
-    }): QueryBuilder<string, D>;
-    // (undocumented)
-    pick<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(fields: A): ({
-        id: EARS.EntityId<E>;
-    } & Pick<ShapeOf<D['shapes'], E>, A[number]>)[];
-    // (undocumented)
-    pickAll(): ShapeOf<D['shapes'], E>[];
-    pickOne<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(f: A): ({
-        id: EARS.EntityId<E>;
-    } & Pick<ShapeOf<D['shapes'], E>, A[number]>) | undefined;
-    pickOne(): ShapeOf<D['shapes'], E> | undefined;
-    rank(kinds: D['relKinds'] | readonly D['relKinds'][], options?: RankOptions): QueryBuilder<E, D>;
-    ranked(index: D['rankIndexes'], options?: RankedOptions): QueryBuilder<E, D>;
-    rankedHits<A extends readonly (keyof ShapeOf<D['shapes'], E> & string)[]>(options: {
-        fields: A;
-    }): {
-        hits: Array<SearchHit<E> & {
-            row: {
-                id: EARS.EntityId<E>;
-            } & Pick<ShapeOf<D['shapes'], E>, A[number]>;
-        }>;
-        bound: RankBound;
-    };
-    // (undocumented)
-    rankedHits(): {
-        hits: SearchHit<E>[];
-        bound: RankBound;
-    };
-    // (undocumented)
-    reduce<T>(fn: (acc: T, id: EARS.EntityId<E>) => T, init: T): T;
-    // (undocumented)
-    reverse(): QueryBuilder<E, D>;
-    search(query: string, options?: SearchOptions<keyof ShapeOf<D['shapes'], E> & string>): QueryBuilder<E, D>;
-    similar(to: EARS.EntityId, kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
-        direction?: EdgeDirection;
-        measure?: SimilarityMeasure;
-    }): QueryBuilder<E, D>;
-    strongComponents(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
-    topological(kinds: D['relKinds'] | readonly D['relKinds'][], options?: {
-        direction?: 'out' | 'in';
-    }): QueryBuilder<E, D>;
-    unlinkedFrom(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
-    unlinkedTo(kind: D['relKinds'], other?: EARS.EntityId): QueryBuilder<E, D>;
-    weakComponents(kinds: D['relKinds'] | readonly D['relKinds'][]): EARS.EntityId<E>[][];
-    where<K extends keyof ShapeOf<D['shapes'], E> & string>(k: K, v: WhereValue<D['shapes'], E, K>): QueryBuilder<E, D>;
-    within(ids: readonly EARS.EntityId[]): QueryBuilder<E, D>;
-    // (undocumented)
-    withRole(r: D['roles']): QueryBuilder<E, D>;
+    where(field: string, valueOrPredicate: WhereInput): QueryBuilder<TResult>;
+    whereAll(filters: readonly QueryFilter[]): QueryBuilder<TResult>;
+    whereAny(filters: readonly QueryFilter[]): QueryBuilder<TResult>;
+    whereNot(filter: QueryFilter): QueryBuilder<TResult>;
 }
 
+export { QueryFilter }
+
 // @public
-export interface QueryEntries {
+export interface QueryRoot {
     // (undocumented)
-    <E extends string>(type: TypeName<E>): QueryBuilder<E>;
+    allEntities(opts?: SourceOptions): QueryBuilder<EntityRow>;
     // (undocumented)
-    <E extends string>(types: readonly TypeName<E>[]): QueryBuilder<string>;
+    ids(ids: readonly string[]): QueryBuilder<EntityRow>;
     // (undocumented)
-    all(): QueryBuilder<string>;
+    of(typeName: string, opts?: SourceOptions): QueryBuilder<EntityRow>;
     // (undocumented)
-    ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
+    ofTypes(typeNames: readonly string[], opts?: SourceOptions): QueryBuilder<EntityRow>;
+    // (undocumented)
+    raw(spec: QuerySpec): QueryAnswer;
+    // (undocumented)
+    rawAsync(spec: QuerySpec): Promise<QueryAnswer>;
 }
 
+export { QueryScore }
+
+export { QuerySource }
+
+export { QuerySpec }
+
+export { QueryStep }
+
+export { QueryTerminal }
+
 // @public
-export interface QueryExplanation<E extends string = string> {
+export interface RecencyOptions {
     // (undocumented)
-    ids: EARS.EntityId<E>[];
-    ms: number;
+    readonly halfLifeMs: number;
     // (undocumented)
-    stages: QueryStage[];
-    visited: number;
+    readonly nowMs: number;
 }
 
-// @public
-export interface QueryStage {
-    building?: boolean;
-    candidates?: number;
-    converged?: boolean;
-    cycles?: number;
-    edges?: number;
-    error?: number;
-    held?: number;
-    index?: string;
-    iterations?: number;
-    kept: number;
-    ms: number;
-    neighbours?: number;
-    nodes?: number;
-    places?: number;
-    set?: string;
-    sorted?: string;
-    stage: string;
-    visited: number;
-    wants?: string;
-    weight?: number;
-    within?: number;
-}
+export { RelationDefinition }
+
+export { RelationEndpoint }
 
 // @public
-export type RankBound =
-/** A `ranked`: its index, and how far its scores may be from PageRank's, as an L1 distance */
-    {
-    index: string;
-    error: number;
-}
-/** A `rank`: the rounds it ran, and whether its scores settled within them */
-| {
-    converged: boolean;
-    iterations: number;
-};
+export type RelationKindName<TSchema extends EarsSchemaShape> = TSchema['relations'] extends string ? TSchema['relations'] : string;
+
+export { RelationRow }
 
 // @public
-export interface RankDeclaration {
-    damping?: number;
-    direction?: EdgeDirection;
-    relations: readonly string[];
-    tolerance?: number;
-    types: readonly string[];
-    weights?: boolean;
-}
+export const RESERVED_ENTITY_TYPES: readonly string[];
 
 // @public
-export interface RankedOptions {
-    whileBuilding?: 'compute' | 'refuse';
-}
+export const RESERVED_FIELDS: readonly string[];
 
-// @public
-export interface RankOptions {
-    direction?: EdgeDirection;
-    seeds?: readonly RankSeed[];
-    weights?: boolean;
-}
+export { Row }
 
-// @public
-export type RankSeed = EARS.EntityId | {
-    id: EARS.EntityId;
-    weight: number;
-};
-
-// @public
-export interface RelationEdge<K extends string = string, Source extends string = string, Target extends string = string> {
-    // (undocumented)
-    id: EARS.RelationId;
-    // (undocumented)
-    info?: EARS.AttributeValue;
-    // (undocumented)
-    kind: K;
-    // (undocumented)
-    source: EARS.EntityId<Source>;
-    // (undocumented)
-    target: EARS.EntityId<Target>;
-    weight?: number;
-}
-
-// @public
-export interface RelationMatch {
-    // (undocumented)
-    kind?: EARS.RelKind;
-    // (undocumented)
-    source?: EARS.EntityId;
-    // (undocumented)
-    target?: EARS.EntityId;
-}
-
-// @public
-export interface RelationPatch {
-    info?: unknown;
-    source?: EARS.EntityId;
-    target?: EARS.EntityId;
-    weight?: number;
-}
-
-// @public
-export type RelationRow = RelationEdge;
-
-// @public
-export interface RelationRules {
-    acyclic?: boolean;
-    key?: readonly string[];
-    weighted?: boolean;
-}
-
-// @public
-export interface RelationStats {
-    total: number;
-    uniqueSources: number;
-    uniqueTargets: number;
-}
-
-// @public
-export type RequiredField<S extends EntityShapes, E extends string> = [
-E
-] extends [keyof S] ? Exclude<WritableField<S, E>, OptionalField<S, E>> : never;
-
-// @public
-export const RESERVED_ATTRIBUTES: readonly ["id", "entityType", "shortCode", "createdAt", "updatedAt", "role", "trashedAt"];
-
-// @public
-export const RESERVED_ENTITY_TYPES: {
-    readonly relation: "Relation";
-};
-
-// @public
-export type RowArg<S extends EntityShapes, E extends string, Row> = [RequiredField<S, E>] extends [never] ? [row?: Row] : [row: Row];
-
-// @public
-export interface RowIdentity {
-    createdAt?: number;
-    id?: EARS.EntityId;
-    updatedAt?: number;
-}
-
-// @public
-export interface RowRules {
-    changeOrder?: boolean;
-    embed?: EmbedDeclaration;
-    fields?: Readonly<Record<string, FieldRule>>;
-    indexes?: readonly string[];
-    required: readonly string[];
-    search?: SearchDeclaration;
-    shortCode?: string;
-    substrings?: readonly string[];
-}
+export { Schema }
 
 export { SchemaChange }
 
 // @public
-export interface SchemaStats {
-    attributes: Record<string, {
-        entityCount: number;
-        totalValues: number;
-    }>;
-    entities: Record<string, number>;
-    relations: Record<string, RelationStats>;
-    roles: Record<string, number>;
+export interface SearchOptions {
+    // (undocumented)
+    readonly phrase?: readonly string[];
+    // (undocumented)
+    readonly requireAll?: boolean;
+    // (undocumented)
+    readonly topK?: number;
 }
 
 // @public
-export interface SearchDeclaration {
-    readonly fields: Readonly<Record<string, number>>;
-    readonly stem?: string;
+export interface ShortestPathOptions {
+    // (undocumented)
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly maxHops: number;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
 }
 
 // @public
-export type SearchHighlights = Record<string, ReadonlyArray<readonly [element: number, start: number, end: number]>>;
-
-// @public
-export interface SearchHit<E extends string = string> {
-    highlights?: SearchHighlights;
+export interface SimilarityOptions {
     // (undocumented)
-    id: EARS.EntityId<E>;
-    score: number;
-    terms: string[];
+    readonly dir?: EdgeDirection;
+    // (undocumented)
+    readonly relKinds?: readonly string[];
 }
 
 // @public
-export interface SearchOptions<F extends string = string> {
-    any?: boolean;
+export type SortDirection = 'asc' | 'desc';
+
+// @public
+export interface SourceOptions {
     // (undocumented)
-    fields?: readonly F[];
-    fuzzy?: boolean;
-    prefix?: boolean;
-    // (undocumented)
-    recency?: {
-        field: F;
-        halfLife: number;
-        now?: number;
-    };
+    readonly includeTrashed?: boolean;
 }
 
 // @public
-export type ShapeOf<S extends EntityShapes, E extends string> = [
-E
-] extends [keyof S] ? S[E] & BaseEntity & {
-    id: EARS.EntityId<E>;
-} : BaseEntity & Record<string, unknown>;
+export function toEarsError(error: unknown, fallbackCode?: EarsErrorCode): EarsError;
 
 // @public
-export type ShortCode<P extends string> = `${P}-${number}`;
-
-// @public
-export type ShortCodeIdentity<S extends EntityShapes, E extends string> = [
-E
-] extends [keyof S] ? (ShapeOf<S, E> extends {
-    shortCode?: infer C;
-} ? {
-    shortCode?: C;
-} : {}) : {
-    shortCode?: string;
-};
-
-// @public
-export type SimilarityMeasure = 'jaccard' | 'adamicAdar';
-
-// @public
-export interface TypedCreate<D extends EarsSchema> {
+export interface TypedBatchWriter<TSchema extends EarsSchemaShape> {
     // (undocumented)
-    <E extends string>(type: EntityNameArg<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E>>): WriteBuilder<E, D>;
-}
-
-// @public (undocumented)
-export interface TypedEars<D extends EarsSchema> {
+    create<TName extends EntityTypeName<TSchema>>(typeName: TName, fields: TSchema['entities'][TName], externalId?: EARS.EntityId<TName> | string): EARS.TypedBatchSlot<TName>;
     // (undocumented)
-    create: TypedCreate<D>;
+    destroy(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
     // (undocumented)
-    getAttr: TypedGetAttr<D>;
-    newId: TypedNewId<D>;
-    now: Ears['now'];
+    readonly length: number;
     // (undocumented)
-    query: TypedQuery<D>;
+    link(source: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>, relKind: RelationKindName<TSchema>, target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>, opts?: LinkOptions): this;
     // (undocumented)
-    transact: Ears['transact'];
+    patch<TName extends EntityTypeName<TSchema>>(target: EARS.EntityId<TName> | EARS.TypedBatchSlot<TName>, fields: Partial<TSchema['entities'][TName]>): this;
     // (undocumented)
-    upsert: TypedUpsert<D>;
+    restore(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
     // (undocumented)
-    write: TypedWrite<D>;
+    trash(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
+    // (undocumented)
+    unlink(source: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>, relKind?: RelationKindName<TSchema>, target?: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
+    // (undocumented)
+    unset<TName extends EntityTypeName<TSchema>>(target: EARS.EntityId<TName> | EARS.TypedBatchSlot<TName>, fields: ReadonlyArray<Extract<keyof TSchema['entities'][TName], string>>): this;
 }
 
 // @public
-export interface TypedGetAttr<D extends EarsSchema> {
+export type TypedBeforeCommitHook<TSchema extends EarsSchemaShape> = (delta: CommitDelta) => void | Uint8Array | ((batch: TypedBatchWriter<TSchema>) => void);
+
+// @public
+export interface TypedEars<TSchema extends EarsSchemaShape> {
     // (undocumented)
-    <E extends string, K extends keyof ShapeOf<D['shapes'], E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<D['shapes'], E>[K] | undefined;
+    readonly admin: () => EarsAdmin;
     // (undocumented)
-    (id: EARS.EntityId, field: string): unknown;
+    batch(fn: (batch: TypedBatchWriter<TSchema>) => void): BatchResult;
+    // (undocumented)
+    beforeCommit(typeNames: readonly EntityTypeName<TSchema>[] | null, callback: TypedBeforeCommitHook<TSchema>): () => void;
+    // (undocumented)
+    create<TName extends EntityTypeName<TSchema>>(typeName: TName, fields: TSchema['entities'][TName], externalId?: EARS.EntityId<TName> | string): EARS.EntityId<TName>;
+    // (undocumented)
+    destroy(id: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
+    // (undocumented)
+    readonly engine: () => EarsEngine;
+    // (undocumented)
+    get<TName extends EntityTypeName<TSchema>>(id: EARS.EntityId<TName>): TypedEntityRow<TSchema, TName> | null;
+    // (undocumented)
+    getEdges(id: EARS.EntityId<EntityTypeName<TSchema>>, opts?: GetEdgesOptions): RelationRow[];
+    // (undocumented)
+    link(sourceId: EARS.EntityId<EntityTypeName<TSchema>>, relKind: RelationKindName<TSchema>, targetId: EARS.EntityId<EntityTypeName<TSchema>>, opts?: LinkOptions): BatchResult;
+    // (undocumented)
+    patch<TName extends EntityTypeName<TSchema>>(id: EARS.EntityId<TName>, fields: Partial<TSchema['entities'][TName]>): BatchResult;
+    // (undocumented)
+    readonly query: TypedQueryRoot<TSchema>;
+    // (undocumented)
+    restore(id: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
+    // (undocumented)
+    setEmbeddings(indexName: string, id: EARS.EntityId<EntityTypeName<TSchema>>, vectors: ReadonlyArray<ReadonlyArray<number>>): void;
+    // (undocumented)
+    trash(id: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
+    // (undocumented)
+    unlink(sourceId: EARS.EntityId<EntityTypeName<TSchema>>, relKind?: RelationKindName<TSchema>, targetId?: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
+    // (undocumented)
+    unset<TName extends EntityTypeName<TSchema>>(id: EARS.EntityId<TName>, fields: ReadonlyArray<Extract<keyof TSchema['entities'][TName], string>>): BatchResult;
+    // (undocumented)
+    readonly watches: () => WatchController;
+}
+
+export { TypeDefinition }
+
+// @public
+export type TypedEntityRow<TSchema extends EarsSchemaShape, TName extends EntityTypeName<TSchema>> = TName extends EntityTypeName<TSchema> ? {
+    readonly id: EARS.EntityId<TName>;
+    readonly typeName: TName;
+    readonly trashed: boolean;
+    readonly fields: Readonly<TSchema['entities'][TName]>;
+} : never;
+
+// @public
+export interface TypedQueryRoot<TSchema extends EarsSchemaShape> {
+    // (undocumented)
+    allEntities(opts?: SourceOptions): QueryBuilder<EntityRow>;
+    // (undocumented)
+    ids<TName extends EntityTypeName<TSchema>>(ids: ReadonlyArray<EARS.EntityId<TName>>): QueryBuilder<TypedEntityRow<TSchema, TName>>;
+    // (undocumented)
+    of<TName extends EntityTypeName<TSchema>>(typeName: TName, opts?: SourceOptions): QueryBuilder<TypedEntityRow<TSchema, TName>>;
+    // (undocumented)
+    ofTypes<TName extends EntityTypeName<TSchema>>(typeNames: readonly TName[], opts?: SourceOptions): QueryBuilder<TypedEntityRow<TSchema, TName>>;
+    // (undocumented)
+    raw(spec: QuerySpec): QueryAnswer;
+    // (undocumented)
+    rawAsync(spec: QuerySpec): Promise<QueryAnswer>;
 }
 
 // @public
-export type TypedNewId<D extends EarsSchema> = <E extends string>(t: EntityNameArg<D['names'], E>) => EARS.EntityId<E extends keyof D['shapes'] ? E : string>;
-
-// @public
-export interface TypedQuery<D extends EarsSchema> extends TypedQueryEntries<D> {
-    // (undocumented)
-    trashed: TypedQueryEntries<D>;
-    // (undocumented)
-    withTrashed: TypedQueryEntries<D>;
+export interface WatchController {
+    readonly activeCount: number;
+    catchUpCrossProcess(): number[];
+    caughtUp(soon?: boolean): boolean;
+    flushSync(nowMs?: number): number;
+    settled(): boolean;
+    stopAll(): void;
 }
 
 // @public
-export interface TypedQueryEntries<D extends EarsSchema> {
+export interface WatchHandle {
     // (undocumented)
-    <E extends string>(type: EntityNameArg<D['names'], E>): QueryBuilder<E, D>;
+    readonly active: boolean;
     // (undocumented)
-    <E extends string>(types: readonly EntityNameArg<D['names'], E>[]): QueryBuilder<string, D>;
+    readonly id: number;
     // (undocumented)
-    all(): QueryBuilder<string, D>;
-    // (undocumented)
-    ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, D>;
-}
-
-// @public
-export interface TypedUpsert<D extends EarsSchema> {
-    // (undocumented)
-    <E extends string>(type: EntityNameArg<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E> & {
-        id: EARS.EntityId;
-    }): WriteBuilder<E, D>;
-}
-
-// @public
-export interface TypedWrite<D extends EarsSchema> {
-    // (undocumented)
-    <E extends string>(id: WriteTarget<E>, options?: WriteOptions): WriteBuilder<E, D>;
-}
-
-// @public
-export type TypeName<T extends string> = T extends `${string}-${string}` ? never : T;
-
-// @public
-export interface UnitOptions {
-    durable?: boolean;
-}
-
-// @public
-export interface UntypedSchema extends EarsSchema {
-    // (undocumented)
-    names: string;
-    // (undocumented)
-    rankIndexes: string;
-    // (undocumented)
-    relKinds: string;
-    // (undocumented)
-    roles: string;
-    // (undocumented)
-    shapes: {};
-    // (undocumented)
-    weightedKinds: string;
-}
-
-// @public
-export interface Upsert {
-    // (undocumented)
-    <E extends string>(type: TypeName<E>, row: Record<string, unknown> & RowIdentity & {
-        id: EARS.EntityId;
-    }): WriteBuilder<E>;
-}
-
-// @public
-export const WATCH_SCHEDULE: WatchSchedule;
-
-// @public
-export type WatchCauseSource = 'local' | 'builder' | 'elsewhere';
-
-// @public
-export interface WatchCount {
-    label: string;
-    // (undocumented)
-    ms: number;
-    runs: number;
-    skipped: number;
-}
-
-// @public
-export interface WatchDiagnostics {
-    readonly scheduler: WatchSchedulerDiagnostics;
-    readonly watches: readonly WatchEntryDiagnostics[];
-}
-
-// @public
-export interface WatchEntryDiagnostics {
-    readonly costMs: number;
-    readonly dueAt: number | null;
-    readonly label: string;
-    readonly lastDeliveredCommit: number | null;
-    readonly owed: boolean;
-    readonly running: boolean;
-    readonly soon: boolean;
-    readonly waiters: number;
-}
-
-// @public
-export interface Watching {
-    caughtUp(options?: {
-        soon?: boolean;
-    }): Promise<void>;
     stop(): void;
 }
 
 // @public
-export interface WatchObserver<T> {
-    error?(error: unknown, commit: number): void;
-    next(value: T, commit: number): void;
-}
+export type WatchMode = 'declarative' | 'imperative';
 
 // @public
 export interface WatchOptions {
-    label?: string;
-    recordCauses?: () => boolean;
+    readonly adaptiveMultiplier?: number;
+    readonly immediate?: boolean;
+    readonly minGapMs?: number;
+    readonly mode?: WatchMode;
+    readonly onError?: (error: EarsError) => void;
 }
 
-// @public
-export interface WatchReadContext {
-    readonly dropped: number;
-    // (undocumented)
-    readonly sequences: readonly number[];
-    readonly sources: readonly WatchCauseSource[];
-    readonly wildcard: boolean;
-}
+export { WatchPolicyOptions }
+
+export { WatchRegistration }
+
+export { WatchRerun }
+
+export { WatchTick }
 
 // @public
-export interface WatchSchedule {
-    // (undocumented)
-    readonly delayFactor: number;
-    // (undocumented)
-    readonly flushSliceMs: number;
-    // (undocumented)
-    readonly minimumGapMs: number;
-}
-
-// @public
-export interface WatchSchedulerDiagnostics {
-    readonly caughtUpWaiting: number;
-    readonly databaseCommit: number;
-    readonly dirtyCount: number;
-    readonly flushing: boolean;
-    readonly lastSeenCommit: number;
-    readonly queued: 'none' | 'microtask' | 'later';
-    readonly settledWaiting: number;
-    readonly timerAt: number | null;
-    readonly timerHeld: boolean;
-}
-
-// @public
-export interface WeightedLinkOptions extends LinkOptions {
-    weight?: number;
-}
-
-// @public
-export type WhereValue<S extends EntityShapes, E extends string, K extends keyof ShapeOf<S, E>> = ShapeOf<S, E>[K] | (NonNullable<ShapeOf<S, E>[K]> extends readonly (infer U)[] ? U : never) | ((value: ShapeOf<S, E>[K]) => boolean);
-
-// @public
-export type WritableField<S extends EntityShapes, E extends string> = [
-E
-] extends [keyof S] ? Exclude<keyof ShapeOf<S, E> & string, (typeof RESERVED_ATTRIBUTES)[number]> : string;
-
-// @public
-export interface Write {
-    // (undocumented)
-    <E extends string>(id: WriteTarget<E>, options?: WriteOptions): WriteBuilder<E>;
-}
-
-// @public
-export interface WriteBuilder<E extends string = string, D extends EarsSchema = UntypedSchema> {
-    append<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
-    delete(k: OptionalField<D['shapes'], E>): WriteBuilder<E, D>;
-    destroy(): void;
-    // (undocumented)
-    grant(role: D['roles']): WriteBuilder<E, D>;
-    grantExclusive(role: D['roles'], among: readonly EARS.EntityId[]): WriteBuilder<E, D>;
-    // (undocumented)
-    id(): EARS.EntityId<E>;
-    link<K extends D['relKinds']>(kind: K, target: EARS.EntityId, options?: [K] extends [D['weightedKinds']] ? WeightedLinkOptions : LinkOptions): WriteBuilder<E, D>;
-    merge<K extends WritableField<D['shapes'], E>>(k: K, v: Partial<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
-    removeAt(k: WritableField<D['shapes'], E>, index: number): WriteBuilder<E, D>;
-    removeValue<K extends WritableField<D['shapes'], E>>(k: K, v: ListElement<FieldValue<D['shapes'], E, K>>): WriteBuilder<E, D>;
-    restore(): WriteBuilder<E, D>;
-    // (undocumented)
-    revoke(role: D['roles']): WriteBuilder<E, D>;
-    row(): ShapeOf<D['shapes'], E>;
-    set<K extends WritableField<D['shapes'], E>>(k: K, v: FieldValue<D['shapes'], E, K>): WriteBuilder<E, D>;
-    setMany(attrs: FieldValues<D['shapes'], E>): WriteBuilder<E, D>;
-    trash(at?: number): WriteBuilder<E, D>;
-    unlink(kind: D['relKinds'], target?: EARS.EntityId): WriteBuilder<E, D>;
-    unlinkAll(): WriteBuilder<E, D>;
-}
-
-// @public
-export interface WriteOptions {
-    touch?: boolean;
-}
-
-// @public
-export type WriteTarget<E extends string = string> = EARS.EntityId<E> & {
-    readonly __relation?: never;
-};
-
-// (No @packageDocumentation comment for this package)
+export type WhereInput = string | number | boolean | null | Uint8Array | Date | FieldPredicate;
 
 ```

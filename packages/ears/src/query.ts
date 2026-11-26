@@ -1,443 +1,1241 @@
-// The engine's queries: a builder chain compiled to one of elmdb's plans (`elmdb/docs/architecture/engine.md`, Reads: plans), which a
-// terminal sends and decodes the answer of. Each step and terminal is written whole as a literal of elmdb's generated
-// type, so a field renamed there fails to compile here.
-import type { Plan } from 'elmdb/protocol/Plan.js';
-import type { ReadOp } from 'elmdb/protocol/ReadOp.js';
-import type { Scope } from 'elmdb/protocol/Scope.js';
-import type { SearchOptions as ElmdbSearchOptions } from 'elmdb/protocol/SearchOptions.js';
-import type { Start } from 'elmdb/protocol/Start.js';
-import type { Step } from 'elmdb/protocol/Step.js';
-import type { Terminal } from 'elmdb/protocol/Terminal.js';
-import type { EARS } from './entities.ts';
-import type { EARSRuntimeDeps, EdgeDirection, QueryBuilder, QueryStage, RankedOptions, RankOptions, RelationEdge, SearchOptions, SimilarityMeasure } from './runtime.ts';
-import { EarsError } from './errors.ts';
-import type { Answer } from './database.ts';
-import type { TypeName } from './write.ts';
-import type { NameChecks } from './names.ts';
+import type { QueryAnswer, QuerySpec, Row } from 'elmdb';
+import type { Hit } from 'elmdb/protocol/Hit.js';
+import type { QueryFilter } from 'elmdb/protocol/QueryFilter.js';
+import type { QueryScore } from 'elmdb/protocol/QueryScore.js';
+import type { QuerySource } from 'elmdb/protocol/QuerySource.js';
+import type { QueryStep } from 'elmdb/protocol/QueryStep.js';
+import type { QueryTerminal } from 'elmdb/protocol/QueryTerminal.js';
+import type { EarsDatabase, EdgeDirection, FusionMethod, SortDirection } from './database.ts';
+import { EarsError, toEarsError } from './errors.ts';
+import type { WatchHandle, WatchOptions, WatchPump } from './watch.ts';
 
-type MaybeArr<T> = T | readonly T[];
-const asArr = <T>(v: MaybeArr<T>): T[] => (Array.isArray(v) ? [...v] : [v]) as T[];
-
-export const b64Encode = (n: number) => btoa(String(n));
-export const b64Decode = (s: string) => {
-  try {
-    const decoded = atob(s);
-    const num = parseInt(decoded, 10);
-    return isNaN(num) ? 0 : num;
-  } catch {
-    return 0;
-  }
+/** Canonical entity row returned by `get` and row-returning queries. */
+export type EntityRow<
+  TName extends string = string,
+  TFields extends Record<string, unknown> = Record<string, unknown>,
+> = {
+  readonly id: string;
+  readonly typeName: TName;
+  readonly trashed: boolean;
+  readonly fields: Readonly<TFields>;
 };
 
-/**
- * The query entry points over the entities they reach. `(type)` starts from every entity of a registered type, and
- * refuses a name that isn't one rather than finding nothing; `ids` starts from the ids given that exist; `all` from
- * every entity. A relation is not an entity: `findRelations` reads them.
- */
-export interface QueryEntries {
-  <E extends string>(type: TypeName<E>): QueryBuilder<E>;
-  <E extends string>(types: readonly TypeName<E>[]): QueryBuilder<string>;
-  ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E>;
-  all(): QueryBuilder<string>;
+/** Options for source selectors (`of`, `ofTypes`, `allEntities`). */
+export interface SourceOptions {
+  readonly includeTrashed?: boolean;
 }
 
-/**
- * The engine's queries. They reach no entity in the trash — not as a start, not at a link's far end — and
- * `withTrashed` is the same entry points reaching those too; `trashed` the same entry points starting from only the
- * trashed entities.
- */
-export interface Query extends QueryEntries {
-  withTrashed: QueryEntries;
-  trashed: QueryEntries;
+/** Ergonomic field filter operator shorthand accepted by `QueryBuilder.where(field, predicate)`. */
+export interface FieldPredicate {
+  readonly eq?: unknown;
+  readonly ne?: unknown;
+  readonly in?: readonly unknown[];
+  readonly gt?: unknown;
+  readonly gte?: unknown;
+  readonly lt?: unknown;
+  readonly lte?: unknown;
+  readonly startsWith?: string;
+  readonly contains?: string;
+  readonly regex?: string;
+  readonly isNull?: boolean;
+  readonly isPresent?: boolean;
 }
 
-/** How many rows an unindexed `where` filters before the engine's creator is told (`warn`) the field wants an index */
-export const UNINDEXED_WALK_WARNING = 2_000;
+/** Value or predicate shorthand accepted by `QueryBuilder.where(field, valueOrPredicate)`. */
+export type WhereInput =
+  | string
+  | number
+  | boolean
+  | null
+  | Uint8Array
+  | Date
+  | FieldPredicate;
 
-/**
- * A step not yet sent: one of elmdb's, or a `where` holding the caller's function, which can't cross. A plan holding
- * one is sent up to it, answering each entity's value of the field, and goes on from the ids the function admits
- */
-type Pending = { step: Step } | { field: string; test: (value: unknown) => boolean };
-
-interface Recipe {
-  scope: Scope;
-  start: Start;
-  steps: readonly Pending[];
-  /** The `where` straight after a start from types whose field one of them doesn't index: what `warn` is told of */
-  unindexed?: { types: string[]; field: string };
+/** Options for `QueryBuilder.search(...)` (BM25F full-text search). */
+export interface SearchOptions {
+  readonly requireAll?: boolean;
+  readonly phrase?: readonly string[];
+  readonly topK?: number;
 }
 
-export interface QueryScope {
-  /** Answers reads, in the unit `transact` holds open or a snapshot of their own */
-  read(reads: readonly ReadOp[]): Answer[];
-  isEntityType(name: string): boolean;
-  /** Whether a `where` on the type's field reads a value index */
-  indexed(type: string, field: string): boolean;
-  names: NameChecks;
-  warn?: EARSRuntimeDeps['warn'];
-  /** Wall time in milliseconds for recency scoring when a query omits `recency.now` */
-  now?: () => number;
+/** Options for `QueryBuilder.recency(...)`. */
+export interface RecencyOptions {
+  readonly nowMs: number;
+  readonly halfLifeMs: number;
 }
 
-/** A relation row as a read answers it: `info` is left out when the edge holds none */
-export function relationRow(row: Record<string, unknown>): RelationEdge {
-  const { info, ...rest } = row;
-  return (info === null || info === undefined ? rest : { ...rest, info }) as unknown as RelationEdge;
+/** Options for `QueryBuilder.fuse(...)`. */
+export interface FuseOptions {
+  readonly method?: FusionMethod;
+  readonly rrfK?: number;
 }
 
-/** The terminals answered by the first id a plan reaches */
-const FIRST: readonly string[] = ['first', 'exists', 'firstRow'];
-/** The steps that keep or walk the ids one at a time, so the first id of their answer comes from the first ids they're given */
-const STREAMING: readonly string[] = [
-  'ofType', 'within', 'where', 'has', 'lacks', 'withRole', 'linkedWith', 'linkedTo', 'linkedFrom', 'unlinkedTo', 'unlinkedFrom', 'out', 'in', 'both',
-];
-/** The steps whose hits `hits()` answers */
-const SEARCHES: readonly string[] = ['search', 'near', 'like', 'hybrid', 'rank', 'ranked', 'similar'];
-/** The steps whose scores `rankedHits()` can say something of */
-const RANKS: readonly string[] = ['rank', 'ranked'];
+/** Options for `QueryBuilder.hops(...)`. */
+export interface HopsOptions {
+  readonly relKinds?: readonly string[];
+  readonly dir?: EdgeDirection;
+  readonly minHops?: number;
+  readonly maxHops: number;
+}
 
-/**
- * A count of edges as elmdb takes it (a `u32`): rounded down, `0` for a negative count or one that isn't a number, and
- * for an infinite count, or one past what a `u32` holds, none, so any number
- */
-const edgeCount = (n: number | undefined): number | undefined =>
-  n === undefined || n >= 2 ** 32 ? undefined : Number.isNaN(n) ? 0 : Math.max(0, Math.floor(n));
+/** Options for `QueryBuilder.shortestPath(...)`. */
+export interface ShortestPathOptions {
+  readonly relKinds?: readonly string[];
+  readonly dir?: EdgeDirection;
+  readonly maxHops: number;
+}
 
-/** A list given as one or many, as elmdb takes it; none when none is given */
-const optionalArr = <T>(v: MaybeArr<T> | undefined): T[] | undefined => (v === undefined ? undefined : asArr(v));
+/** Options for `QueryBuilder.hasLink(...)`. */
+export interface HasLinkOptions {
+  readonly relKinds?: readonly string[];
+  readonly dir?: EdgeDirection;
+  readonly targetId?: string;
+}
 
-/** The steps of pending ones that are elmdb's: those before or after a `where` given a function */
-const stepsOf = (pending: readonly Pending[]): Step[] => pending.flatMap((p) => ('step' in p ? [p.step] : []));
+/** Options for `QueryBuilder.orderBy(...)`. */
+export interface OrderByOptions {
+  readonly locale?: string;
+}
 
-/** Search options as elmdb takes them, each named, so a field renamed there fails to compile here */
-const searchOptions = ({ prefix, fuzzy, any, fields, recency }: SearchOptions = {}): ElmdbSearchOptions => ({
-  prefix,
-  fuzzy,
-  any,
-  fields: fields && [...fields],
-  recency: recency && { field: recency.field, halfLife: recency.halfLife, now: recency.now },
+/** Keyset pagination cursor for `QueryBuilder.after(...)`. `id` is required as the tie-breaker key. */
+export interface KeysetCursor {
+  readonly id: string;
+  readonly score?: number;
+  readonly value?: unknown;
+}
+
+/** Options for `QueryBuilder.ppr(...)` (Personalized PageRank). */
+export interface PprOptions {
+  readonly relKinds?: readonly string[];
+  readonly weighted?: boolean;
+  readonly damping?: number;
+  readonly iterations?: number;
+  readonly tolerance?: number;
+}
+
+/** Options for `QueryBuilder.leiden(...)` community detection. */
+export interface LeidenOptions {
+  readonly relKinds?: readonly string[];
+  readonly weighted?: boolean;
+  readonly resolution?: number;
+  readonly seed?: number;
+  readonly iterations?: number;
+}
+
+/** Options for `QueryBuilder.jaccard(...)` and `QueryBuilder.adamicAdar(...)`. */
+export interface SimilarityOptions {
+  readonly relKinds?: readonly string[];
+  readonly dir?: EdgeDirection;
+}
+
+/** Options for `QueryBuilder.degrees(...)`. */
+export interface DegreesOptions {
+  readonly relKinds?: readonly string[];
+  readonly dir?: EdgeDirection;
+}
+
+/** Result of `QueryBuilder.minMax(...)`. */
+export interface MinMaxResult {
+  readonly min: unknown | null;
+  readonly max: unknown | null;
+}
+
+/** Result of `QueryBuilder.graphTopo()`. */
+export interface GraphTopoResult {
+  readonly order: string[];
+  readonly cycles: number;
+}
+
+/** Result of `QueryBuilder.graphPpr()`. */
+export interface GraphPprResult {
+  readonly scores: Hit[];
+  readonly converged: boolean;
+  readonly iterations: number;
+}
+
+const PREDICATE_KEYS: Readonly<Record<keyof FieldPredicate, true>> = Object.freeze({
+  eq: true,
+  ne: true,
+  in: true,
+  gt: true,
+  gte: true,
+  lt: true,
+  lte: true,
+  startsWith: true,
+  contains: true,
+  regex: true,
+  isNull: true,
+  isPresent: true,
 });
 
-/** Whether a value is one a `where` sends to elmdb, which matches it with `===` or as an element of a list */
-const sendable = (v: unknown) =>
-  v === null || typeof v === 'string' || typeof v === 'boolean' || (typeof v === 'number' && Number.isFinite(v));
+const GRAPH_ANALYZE_STEP_KINDS: Readonly<Record<string, true>> = Object.freeze({
+  graphPpr: true,
+  graphWeakComponents: true,
+  graphScc: true,
+  graphTopoSort: true,
+  graphLeiden: true,
+  graphJaccard: true,
+  graphAdamicAdar: true,
+});
 
-export function createQuery({ read, isEntityType, indexed, names, warn, now }: QueryScope): Query {
-  /** Fills omitted recency timestamps from the injected clock at read time so recipes stay reusable across ticks */
-  const resolveSteps = (raw: readonly Step[]): Step[] => {
-    if (!now) return [...raw];
-    let stamp: number | undefined;
-    return raw.map((step) => {
-      if ((step.step === 'search' || step.step === 'hybrid') && step.options?.recency && step.options.recency.now === undefined) {
-        stamp ??= now();
-        return {
-          ...step,
-          options: {
-            ...step.options,
-            recency: { ...step.options.recency, now: stamp },
-          },
-        };
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (
+    typeof value !== 'object'
+    || value === null
+    || Array.isArray(value)
+    || value instanceof Uint8Array
+    || value instanceof Date
+  ) {
+    return false;
+  }
+  const proto = Object.getPrototypeOf(value) as unknown;
+  return proto === Object.prototype || proto === null;
+}
+
+function normalizeQueryValue(value: unknown): unknown {
+  if (value === undefined) {
+    throw new EarsError('INVALID_ARGUMENT', 'Query value cannot be undefined');
+  }
+  if (value instanceof Uint8Array) {
+    // Rust protocol `coerce_json_for_field` decodes `Bytes` fields from JSON `number[]` (0..=255).
+    return Array.from(value);
+  }
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    if (!Number.isFinite(ms)) {
+      throw new EarsError('INVALID_ARGUMENT', 'Invalid Date passed to query filter or cursor');
+    }
+    // Rust protocol `coerce_json_for_field` accepts epoch milliseconds for `Timestamp` fields.
+    return ms;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => normalizeQueryValue(item));
+  }
+  if (isPlainRecord(value)) {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      if (key === '__proto__') {
+        throw new EarsError('INVALID_ARGUMENT', "Reserved key '__proto__' is not allowed in query values");
       }
-      return step;
+      const v = value[key];
+      if (v !== undefined) out[key] = normalizeQueryValue(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+function compileFieldPredicate(field: string, valueOrPredicate: WhereInput): QueryFilter {
+  if (valueOrPredicate === undefined) {
+    throw new EarsError('INVALID_ARGUMENT', `Filter value for field '${field}' cannot be undefined`);
+  }
+  if (!isPlainRecord(valueOrPredicate)) {
+    return { op: 'eq', field, value: normalizeQueryValue(valueOrPredicate) };
+  }
+
+  const keys = Object.keys(valueOrPredicate);
+  if (keys.length === 0) {
+    throw new EarsError(
+      'INVALID_ARGUMENT',
+      `Empty filter predicate for field '${field}' (use where({ op: 'eq', field: '${field}', value: {} }) to match an empty object)`,
+    );
+  }
+  const unknownKeys = keys.filter((k) => !Object.prototype.hasOwnProperty.call(PREDICATE_KEYS, k));
+  if (unknownKeys.length > 0) {
+    throw new EarsError(
+      'INVALID_ARGUMENT',
+      `Unknown filter predicate key(s) for field '${field}': ${unknownKeys.join(', ')} (use { eq: obj } to match a plain object value)`,
+    );
+  }
+
+  const pred = valueOrPredicate as FieldPredicate;
+  if (pred.gt !== undefined && pred.gte !== undefined) {
+    throw new EarsError(
+      'INVALID_ARGUMENT',
+      `Conflicting lower range bounds for field '${field}': specify either 'gt' or 'gte', not both`,
+    );
+  }
+  if (pred.lt !== undefined && pred.lte !== undefined) {
+    throw new EarsError(
+      'INVALID_ARGUMENT',
+      `Conflicting upper range bounds for field '${field}': specify either 'lt' or 'lte', not both`,
+    );
+  }
+
+  const filters: QueryFilter[] = [];
+  if (pred.eq !== undefined) {
+    filters.push({ op: 'eq', field, value: normalizeQueryValue(pred.eq) });
+  }
+  if (pred.ne !== undefined) {
+    filters.push({ op: 'ne', field, value: normalizeQueryValue(pred.ne) });
+  }
+  if (pred.in !== undefined) {
+    filters.push({ op: 'in', field, values: pred.in.map((v) => normalizeQueryValue(v)) });
+  }
+  if (pred.gt !== undefined || pred.gte !== undefined || pred.lt !== undefined || pred.lte !== undefined) {
+    const low: [unknown, boolean] | undefined =
+      pred.gte !== undefined
+        ? [normalizeQueryValue(pred.gte), true]
+        : pred.gt !== undefined
+          ? [normalizeQueryValue(pred.gt), false]
+          : undefined;
+    const high: [unknown, boolean] | undefined =
+      pred.lte !== undefined
+        ? [normalizeQueryValue(pred.lte), true]
+        : pred.lt !== undefined
+          ? [normalizeQueryValue(pred.lt), false]
+          : undefined;
+    filters.push({
+      op: 'range',
+      field,
+      ...(low !== undefined && { low }),
+      ...(high !== undefined && { high }),
     });
-  };
-  /** The types a start names; refuses a name that isn't a registered type */
-  const ofTypes = (start: unknown): string[] => {
-    const types = Array.isArray(start) ? start as unknown[] : [start];
-    const unknown = types.filter((t) => typeof t !== 'string' || !isEntityType(t));
-    if (unknown.length) {
+  }
+  if (pred.startsWith !== undefined) {
+    filters.push({ op: 'startsWith', field, prefix: pred.startsWith });
+  }
+  if (pred.contains !== undefined) {
+    filters.push({ op: 'contains', field, needle: pred.contains });
+  }
+  if (pred.regex !== undefined) {
+    filters.push({ op: 'regex', field, pattern: pred.regex });
+  }
+  if (pred.isNull !== undefined) {
+    filters.push(
+      pred.isNull
+        ? { op: 'isNull', field }
+        : { op: 'not', filter: { op: 'isNull', field } },
+    );
+  }
+  if (pred.isPresent !== undefined) {
+    filters.push(
+      pred.isPresent
+        ? { op: 'isPresent', field }
+        : { op: 'not', filter: { op: 'isPresent', field } },
+    );
+  }
+  if (filters.length === 0) {
+    throw new EarsError('INVALID_ARGUMENT', `Empty filter predicate for field '${field}'`);
+  }
+  return filters.length === 1 ? filters[0]! : { op: 'and', filters };
+}
+
+function isGraphAnalyzeStep(step: QueryStep | undefined): boolean {
+  return step !== undefined && Object.prototype.hasOwnProperty.call(GRAPH_ANALYZE_STEP_KINDS, step.kind);
+}
+
+function isGraphHitsStep(step: QueryStep | undefined): boolean {
+  return step !== undefined && (step.kind === 'graphJaccard' || step.kind === 'graphAdamicAdar');
+}
+
+/**
+ * Immutable algebraic fluent query builder compiling 1:1 to elmdb v2 `QuerySpec`.
+ *
+ * Every combinator returns a new `QueryBuilder` so base queries can be safely shared and branched.
+ */
+export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
+  /** Adds a raw `QueryFilter` AST or a `where(field, valueOrPredicate)` filter step. */
+  where(filter: QueryFilter): QueryBuilder<TResult>;
+  where(field: string, valueOrPredicate: WhereInput): QueryBuilder<TResult>;
+  /** Adds a negated filter step (`NOT filter`). */
+  whereNot(filter: QueryFilter): QueryBuilder<TResult>;
+  /** Adds a disjunctive filter step (`OR filters`). */
+  whereAny(filters: readonly QueryFilter[]): QueryBuilder<TResult>;
+  /** Adds a conjunctive filter step (`AND filters`). */
+  whereAll(filters: readonly QueryFilter[]): QueryBuilder<TResult>;
+  /** Filters to entities having a matching relation edge. */
+  hasLink(opts?: HasLinkOptions): QueryBuilder<TResult>;
+
+  /** BM25F full-text search scoring step. */
+  search(index: string, query: string, opts?: SearchOptions): QueryBuilder<TResult>;
+  /** HNSW approximate nearest-neighbor vector search scoring step. */
+  near(index: string, vector: readonly number[], topK: number): QueryBuilder<TResult>;
+  /** Vector similarity scoring seeded from an existing entity's embedding. */
+  like(index: string, seedId: string, topK: number): QueryBuilder<TResult>;
+  /** Materialized rank projection scoring step. */
+  ranked(index: string): QueryBuilder<TResult>;
+  /** Trigram + Levenshtein fuzzy label scoring step. */
+  fuzzy(field: string, query: string, maxDistance: number): QueryBuilder<TResult>;
+  /** Exponential recency decay scoring step over a timestamp/numeric field. */
+  recency(field: string, opts: RecencyOptions): QueryBuilder<TResult>;
+  /** Multi-signal score fusion (Reciprocal Rank Fusion or normalized linear blend). */
+  fuse(inputs: ReadonlyArray<readonly [QueryScore, number]>, opts?: FuseOptions): QueryBuilder<TResult>;
+  /** Appends an arbitrary `QueryScore` step. */
+  score(spec: QueryScore): QueryBuilder<TResult>;
+
+  /** Multi-hop BFS graph traversal (returns untyped `EntityRow` since hops can cross types). */
+  hops(opts: HopsOptions): QueryBuilder<EntityRow>;
+  /** Shortest-path traversal to `targetId`. */
+  shortestPath(targetId: string, opts: ShortestPathOptions): QueryBuilder<EntityRow>;
+  /** Deduplicates entities in the stream. */
+  distinct(): QueryBuilder<TResult>;
+  /** Personalized PageRank graph analytics step. */
+  ppr(seeds: ReadonlyArray<readonly [string, number]>, opts?: PprOptions): QueryBuilder<EntityRow>;
+  /** Weakly connected components graph analytics step. */
+  weakComponents(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+  /** Tarjan strongly connected components graph analytics step. */
+  scc(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+  /** Topological sort (with cycle count) graph analytics step. */
+  topoSort(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
+  /** Leiden community detection graph analytics step. */
+  leiden(opts?: LeidenOptions): QueryBuilder<EntityRow>;
+  /** Top-K Jaccard neighborhood similarity graph step (consume via `hits()` / `hitsAsync()`). */
+  jaccard(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow>;
+  /** Top-K Adamic-Adar neighborhood similarity graph step (consume via `hits()` / `hitsAsync()`). */
+  adamicAdar(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow>;
+
+  /** Orders results by a field (with optional ICU collation `locale`). */
+  orderBy(field: string, dir?: SortDirection, opts?: OrderByOptions): QueryBuilder<TResult>;
+  /** Orders results by computed score (default `'desc'`). */
+  orderByScore(dir?: SortDirection): QueryBuilder<TResult>;
+  /** Orders results by external ID (default `'asc'`). */
+  orderById(dir?: SortDirection): QueryBuilder<TResult>;
+  /** Keyset pagination cursor applied to the current ordering. */
+  after(cursor: KeysetCursor): QueryBuilder<TResult>;
+  /** Caps the number of returned results (must be a non-negative safe integer). */
+  limit(n: number): QueryBuilder<TResult>;
+
+  /**
+   * Explicit single-snapshot JavaScript post-filter applied to materialized rows (`all`/`first`/`watch`).
+   * Must be placed at the end of the pipeline (chaining further Rust steps or calling non-row terminals
+   * like `count`/`ids`/`sum`/`minMax`/`groupBy`/`degrees` throws `INVALID_ARGUMENT`).
+   */
+  filterLocal(predicate: (row: TResult) => boolean): QueryBuilder<TResult>;
+
+  /** Compiles this builder into the wire `QuerySpec` without executing it. */
+  toSpec(terminal?: QueryTerminal, explain?: boolean): QuerySpec;
+  /** Executes this query with `explain: true` and returns the full `QueryAnswer` including its plan. */
+  explain(terminal?: QueryTerminal): QueryAnswer;
+
+  /** Materializes matching entity rows synchronously. */
+  all(fields?: readonly string[]): TResult[];
+  /** Materializes matching entity rows asynchronously on Node's worker pool. */
+  allAsync(fields?: readonly string[]): Promise<TResult[]>;
+  /** Materializes the first matching entity row (or `null`) synchronously. */
+  first(fields?: readonly string[]): TResult | null;
+  /** Materializes the first matching entity row (or `null`) asynchronously. */
+  firstAsync(fields?: readonly string[]): Promise<TResult | null>;
+  /** Returns matching entity IDs synchronously. */
+  ids(): string[];
+  /** Returns matching entity IDs asynchronously. */
+  idsAsync(): Promise<string[]>;
+  /** Returns scored `{ id, score }` hits synchronously (also consumes `jaccard` / `adamicAdar`). */
+  hits(): Hit[];
+  /** Returns scored `{ id, score }` hits asynchronously (also consumes `jaccard` / `adamicAdar`). */
+  hitsAsync(): Promise<Hit[]>;
+  /** Returns count of matching entities synchronously. */
+  count(): number;
+  /** Returns count of matching entities asynchronously. */
+  countAsync(): Promise<number>;
+  /** Returns whether any entity matches synchronously. */
+  exists(): boolean;
+  /** Returns whether any entity matches asynchronously. */
+  existsAsync(): Promise<boolean>;
+  /** Computes numeric sum of `field` synchronously. */
+  sum(field: string): number;
+  /** Computes numeric sum of `field` asynchronously. */
+  sumAsync(field: string): Promise<number>;
+  /** Computes `{ min, max }` of `field` synchronously. */
+  minMax(field: string): MinMaxResult;
+  /** Computes `{ min, max }` of `field` asynchronously. */
+  minMaxAsync(field: string): Promise<MinMaxResult>;
+  /** Groups matching entity IDs by `field` synchronously. */
+  groupBy(field: string): Array<[unknown, string[]]>;
+  /** Groups matching entity IDs by `field` asynchronously. */
+  groupByAsync(field: string): Promise<Array<[unknown, string[]]>>;
+  /** Counts matching entities grouped by `field` synchronously. */
+  groupCounts(field: string): Array<[unknown, number]>;
+  /** Counts matching entities grouped by `field` asynchronously. */
+  groupCountsAsync(field: string): Promise<Array<[unknown, number]>>;
+  /** Computes per-entity edge degrees synchronously. */
+  degrees(opts?: DegreesOptions): Array<[string, number]>;
+  /** Computes per-entity edge degrees asynchronously. */
+  degreesAsync(opts?: DegreesOptions): Promise<Array<[string, number]>>;
+  /** Executes a community / component graph query (`leiden`, `scc`, `weakComponents`) synchronously. */
+  graphGroups(): string[][];
+  /** Executes a community / component graph query (`leiden`, `scc`, `weakComponents`) asynchronously. */
+  graphGroupsAsync(): Promise<string[][]>;
+  /** Executes a `topoSort` graph query synchronously. */
+  graphTopo(): GraphTopoResult;
+  /** Executes a `topoSort` graph query asynchronously. */
+  graphTopoAsync(): Promise<GraphTopoResult>;
+  /** Executes a `ppr` graph query synchronously. */
+  graphPpr(): GraphPprResult;
+  /** Executes a `ppr` graph query asynchronously. */
+  graphPprAsync(): Promise<GraphPprResult>;
+
+  /** Subscribes to live row updates driven by the engine's sans-I/O `WatchPump`. */
+  watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle;
+  /** Subscribes to live ID list updates. */
+  watchIds(callback: (ids: string[]) => void, opts?: WatchOptions): WatchHandle;
+  /** Subscribes to live scored hit updates. */
+  watchHits(callback: (hits: Hit[]) => void, opts?: WatchOptions): WatchHandle;
+  /** Subscribes to live count updates. */
+  watchCount(callback: (count: number) => void, opts?: WatchOptions): WatchHandle;
+}
+
+/** Root query entrypoints bound to an `EarsEngine`. */
+export interface QueryRoot {
+  of(typeName: string, opts?: SourceOptions): QueryBuilder<EntityRow>;
+  ofTypes(typeNames: readonly string[], opts?: SourceOptions): QueryBuilder<EntityRow>;
+  allEntities(opts?: SourceOptions): QueryBuilder<EntityRow>;
+  ids(ids: readonly string[]): QueryBuilder<EntityRow>;
+  raw(spec: QuerySpec): QueryAnswer;
+  rawAsync(spec: QuerySpec): Promise<QueryAnswer>;
+}
+
+class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResult> {
+  readonly #db: EarsDatabase;
+  readonly #pump: WatchPump;
+  readonly #source: QuerySource;
+  readonly #steps: readonly QueryStep[];
+  readonly #localFilters: ReadonlyArray<(row: TResult) => boolean>;
+  readonly #implicitOrderSlice: boolean;
+
+  constructor(
+    db: EarsDatabase,
+    pump: WatchPump,
+    source: QuerySource,
+    steps: readonly QueryStep[] = [],
+    localFilters: ReadonlyArray<(row: TResult) => boolean> = [],
+    implicitOrderSlice = false,
+  ) {
+    this.#db = db;
+    this.#pump = pump;
+    this.#source = source;
+    this.#steps = steps;
+    this.#localFilters = localFilters;
+    this.#implicitOrderSlice = implicitOrderSlice;
+  }
+
+  #assertNoLocalFilters(stepName: string): void {
+    if (this.#localFilters.length > 0) {
       throw new EarsError(
-        'UNKNOWN_ENTITY_TYPE',
-        `query(${unknown.map((t) => JSON.stringify(t) ?? 'undefined').join(', ')}): not a registered entity type. ` +
-          'query.ids(...) starts from ids, and query.all() from every entity.',
+        'INVALID_ARGUMENT',
+        `Cannot chain '${stepName}()' after filterLocal() — place filterLocal() at the end of the pipeline`,
       );
-    }
-    return [...new Set(types as string[])];
-  };
-
-  /**
-   * Tells the engine's creator, once per call site, that a `where` filtered a type's rows for want of an index: the
-   * site is the first frame outside this module's directory (`src/` or `dist/`, or the bundle it was built into), so
-   * the message names the caller's code. The directory is read off this frame rather than `import.meta`, which a
-   * CommonJS bundle leaves empty
-   */
-  const warnedSites = new Set<string>();
-  const ownDir = /\(?((?:file:\/\/)?[^()\s]*?)[\\/][^\\/]+:\d+:\d+\)?$/.exec(new Error().stack?.split('\n')[1]?.trim() ?? '')?.[1];
-  const own = (frame: string) => ownDir !== undefined && frame.includes(ownDir);
-  const callSite = () => {
-    // Deep enough to get past the engine's own frames
-    const limit = Error.stackTraceLimit;
-    Error.stackTraceLimit = 50;
-    const stack = new Error().stack;
-    Error.stackTraceLimit = limit;
-    return stack?.split('\n').slice(1).find((frame) => !own(frame))?.trim() ?? 'unknown';
-  };
-  const unindexed = (types: string[], field: string, visited: number, site: string) => {
-    const type = types.join('/');
-    const key = `${type}\x1F${field}\x1F${site}`;
-    if (!warn || warnedSites.has(key)) return;
-    warnedSites.add(key);
-    warn(`where('${field}') filtered ${visited} ${type} rows without an index (${site}). `
-      + `Declare a value index on ${type}.${field}: "indexes": ["${field}"] in its row rules`,
-      { kind: 'unindexedWalk', types, field, visited, site });
-  };
-
-  /**
-   * How many of the ids a caller's function admits the rest of a plan can use, when that is fewer than all: any
-   * leading limits cap what the rest can ever read, and when the rest is limits alone and its terminal answers from
-   * the first, one is enough so the function stops being called once that many pass
-   */
-  const wanted = (rest: readonly Pending[], terminal: Terminal): number => {
-    let bound = Infinity;
-    let allLimits = true;
-    for (const p of rest) {
-      if ('step' in p && p.step.step === 'limit') {
-        const n = Number.isNaN(p.step.n) ? 0 : Math.max(0, Math.floor(p.step.n));
-        bound = Math.min(bound, n);
-      } else {
-        allLimits = false;
-        break;
-      }
-    }
-    return allLimits && FIRST.includes(terminal.answer) ? Math.min(1, bound) : bound;
-  };
-
-  /** Runs the recipe to its terminal: the plans before each caller's function, then the one after the last */
-  const run = (recipe: Recipe, terminal: Terminal): Answer => {
-    let { scope, start } = recipe;
-    let steps: Step[] = [];
-    // The first plan answers how many rows its walk reached, which says whether an unindexed `where` should be reported
-    let visits = warn !== undefined && recipe.unindexed !== undefined;
-    const send = (plan: Plan): Answer => {
-      const resolved: Plan = now && plan.steps ? { ...plan, steps: resolveSteps(plan.steps) } : plan;
-      if (!visits) return read([{ read: 'query', plan: resolved }])[0]!;
-      visits = false;
-      const [{ answer, visited }] = read([{ read: 'query', plan: resolved, visits: true }]) as Array<Answer & { answer: Answer; visited: number }>;
-      if (visited >= UNINDEXED_WALK_WARNING) unindexed(recipe.unindexed!.types, recipe.unindexed!.field, visited, callSite());
-      return answer;
-    };
-    for (const [at, pending] of recipe.steps.entries()) {
-      if ('step' in pending) {
-        steps.push(pending.step);
-        continue;
-      }
-      const rows = send({ scope, start, steps, terminal: { answer: 'rows', fields: [pending.field] } }).rows as Array<Record<string, unknown> & { id: string }>;
-      const passes = (row: Record<string, unknown>) =>
-        Object.prototype.hasOwnProperty.call(row, pending.field) && pending.test(row[pending.field]);
-      const rest = recipe.steps.slice(at + 1);
-      // The ids kept are each one the scope reached, so the rest reaches what the scope's steps do: the trash too,
-      // for a query from it
-      scope = scope === 'trashed' ? 'withTrashed' : scope;
-      steps = [];
-      if (FIRST.includes(terminal.answer) && rest.every((p) => 'step' in p && STREAMING.includes(p.step.step))) {
-        // An answer from the first id the rest reaches: each admitted id is tried in turn, until one reaches one
-        const restSteps = stepsOf(rest);
-        for (const row of rows) {
-          if (!passes(row)) continue;
-          const answer = send({ scope, start: { from: 'ids', ids: [row.id] }, steps: restSteps, terminal });
-          if (answer.id != null || answer.value === true || answer.row != null) return answer;
-        }
-        return send({ scope, start: { from: 'ids', ids: [] }, steps: restSteps, terminal });
-      }
-      const enough = wanted(rest, terminal);
-      const kept: string[] = [];
-      for (const row of rows) {
-        if (kept.length >= enough) break;
-        if (passes(row)) kept.push(row.id);
-      }
-      start = { from: 'ids', ids: kept };
-    }
-    return send({ scope, start, steps, terminal });
-  };
-
-  class Builder {
-    readonly #recipe: Recipe;
-    #methods?: Map<string, (...args: unknown[]) => unknown>;
-    constructor(recipe: Recipe) {
-      this.#recipe = recipe;
-    }
-
-    #next(step: Step, unindexedWhere?: Recipe['unindexed']): QueryBuilder<string> {
-      return builder({ ...this.#recipe, steps: [...this.#recipe.steps, { step }], ...(unindexedWhere && { unindexed: unindexedWhere }) });
-    }
-    /** A walk one edge from each entity */
-    #walk(step: 'out' | 'in' | 'both', kinds: MaybeArr<string>, type?: MaybeArr<string>) {
-      names.relationKinds(kinds, step);
-      return this.#next({ step, kinds: asArr(kinds), types: optionalArr(type) });
-    }
-    /** A walk any number of edges deep, `depth` at most */
-    #deepWalk(step: 'descendants' | 'ancestors', kinds: MaybeArr<string>, type?: MaybeArr<string>, depth?: number) {
-      names.relationKinds(kinds, step);
-      return this.#next({ step, kinds: asArr(kinds), types: optionalArr(type), depth: edgeCount(depth) });
-    }
-    #filterByLink(step: 'linkedTo' | 'linkedFrom' | 'unlinkedTo' | 'unlinkedFrom', kind: string, other?: EARS.EntityId) {
-      names.relationKinds(kind, step);
-      return this.#next({ step, kind, other });
-    }
-    #edges(via: string, kinds: MaybeArr<string>, type: MaybeArr<string> | undefined, direction: 'out' | 'in') {
-      names.relationKinds(kinds, via);
-      const answer = run(this.#recipe, { answer: 'edges', kinds: asArr(kinds), direction, types: optionalArr(type) });
-      return (answer.relations as Record<string, unknown>[]).map(relationRow);
-    }
-    #ids() { return run(this.#recipe, { answer: 'ids' }).ids as EARS.EntityId[]; }
-
-    ofType(t: string) { return this.#next({ step: 'ofType', type: t }); }
-    within(sub: readonly EARS.EntityId[]) { return this.#next({ step: 'within', ids: [...sub] }); }
-    where(k: string, v: unknown) {
-      if (v === undefined) {
-        throw new EarsError('NO_VALUE', `where('${k}'): no value to compare with. has('${k}') and lacks('${k}') ask whether there is one`);
-      }
-      if (typeof v === 'function') {
-        return builder({ ...this.#recipe, steps: [...this.#recipe.steps, { field: k, test: v as (value: unknown) => boolean }] });
-      }
-      // A value only `===` itself matches, an object or a Date, matches nothing a read gives back
-      if (!sendable(v)) return builder({ ...this.#recipe, steps: [...this.#recipe.steps, { field: k, test: (value) => value === v }] });
-      const atStart = this.#recipe.steps.length === 0 && this.#recipe.start.from === 'types' ? this.#recipe.start.types : undefined;
-      const walked = atStart?.filter((type) => !indexed(type, k));
-      return this.#next({ step: 'where', field: k, value: v }, walked?.length ? { types: walked, field: k } : undefined);
-    }
-    has(k: string) { return this.#next({ step: 'has', field: k }); }
-    lacks(k: string) { return this.#next({ step: 'lacks', field: k }); }
-    withRole(r: string) {
-      names.role(r, 'withRole');
-      return this.#next({ step: 'withRole', role: r });
-    }
-    linkedWith(other: EARS.EntityId) { return this.#next({ step: 'linkedWith', other }); }
-    linkedTo(kind: string, other?: EARS.EntityId) { return this.#filterByLink('linkedTo', kind, other); }
-    linkedFrom(kind: string, other?: EARS.EntityId) { return this.#filterByLink('linkedFrom', kind, other); }
-    unlinkedTo(kind: string, other?: EARS.EntityId) { return this.#filterByLink('unlinkedTo', kind, other); }
-    unlinkedFrom(kind: string, other?: EARS.EntityId) { return this.#filterByLink('unlinkedFrom', kind, other); }
-    out(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#walk('out', kinds, type); }
-    in(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#walk('in', kinds, type); }
-    both(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#walk('both', kinds, type); }
-    descendants(kinds: MaybeArr<string>, type?: MaybeArr<string>, { depth }: { depth?: number; } = {}) { return this.#deepWalk('descendants', kinds, type, depth); }
-    ancestors(kinds: MaybeArr<string>, type?: MaybeArr<string>, { depth }: { depth?: number; } = {}) { return this.#deepWalk('ancestors', kinds, type, depth); }
-    pathTo(to: EARS.EntityId, kinds: MaybeArr<string>, { direction = 'out', depth }: { direction?: EdgeDirection; depth?: number; } = {}) {
-      names.relationKinds(kinds, 'pathTo');
-      return this.#next({ step: 'pathTo', to, kinds: asArr(kinds), direction, depth: edgeCount(depth) });
-    }
-    outEdges(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#edges('outEdges', kinds, type, 'out'); }
-    inEdges(kinds: MaybeArr<string>, type?: MaybeArr<string>) { return this.#edges('inEdges', kinds, type, 'in'); }
-    degrees(kinds: MaybeArr<string>, type?: MaybeArr<string>, { direction = 'out' }: { direction?: EdgeDirection; } = {}) {
-      names.relationKinds(kinds, 'degrees');
-      const answer = run(this.#recipe, { answer: 'degrees', kinds: asArr(kinds), direction, types: optionalArr(type) });
-      return new Map(answer.degrees as Array<[EARS.EntityId, number]>);
-    }
-    ranked(index: string, { whileBuilding }: RankedOptions = {}) { return this.#next({ step: 'ranked', index, whileBuilding }); }
-    rank(kinds: MaybeArr<string>, { direction = 'out', seeds, weights }: RankOptions = {}) {
-      names.relationKinds(kinds, 'rank');
-      return this.#next({ step: 'rank', kinds: asArr(kinds), direction, seeds: seeds && [...seeds], weights });
-    }
-    topological(kinds: MaybeArr<string>, { direction = 'out' }: { direction?: 'out' | 'in'; } = {}) {
-      names.relationKinds(kinds, 'topological');
-      return this.#next({ step: 'topological', kinds: asArr(kinds), direction });
-    }
-    similar(to: EARS.EntityId, kinds: MaybeArr<string>, { direction = 'out', measure = 'jaccard' }: { direction?: EdgeDirection; measure?: SimilarityMeasure; } = {}) {
-      names.relationKinds(kinds, 'similar');
-      return this.#next({ step: 'similar', to, kinds: asArr(kinds), direction, measure });
-    }
-    weakComponents(kinds: MaybeArr<string>) {
-      names.relationKinds(kinds, 'weakComponents');
-      return run(this.#recipe, { answer: 'weakComponents', kinds: asArr(kinds) }).weakComponents as EARS.EntityId[][];
-    }
-    strongComponents(kinds: MaybeArr<string>) {
-      names.relationKinds(kinds, 'strongComponents');
-      return run(this.#recipe, { answer: 'strongComponents', kinds: asArr(kinds) }).strongComponents as EARS.EntityId[][];
-    }
-    communities(kinds: MaybeArr<string>, { resolution, seed, weights }: { resolution?: number; seed?: number; weights?: boolean; } = {}) {
-      names.relationKinds(kinds, 'communities');
-      const answer = run(this.#recipe, { answer: 'communities', kinds: asArr(kinds), resolution, seed, weights });
-      return answer.communities as EARS.EntityId[][];
-    }
-    pick(fields: readonly string[]) { return run(this.#recipe, { answer: 'rows', fields: [...fields] }).rows; }
-    // The first row: the fields picked, or with none the whole row, as pickAll reads it
-    pickOne(fields?: readonly string[]) { return run(this.#recipe, { answer: 'firstRow', fields: fields && [...fields] }).row ?? undefined; }
-    pickAll() { return run(this.#recipe, { answer: 'rows' }).rows; }
-    orderBy(field: string, dir: 'asc' | 'desc' = 'asc') { return this.#next({ step: 'orderBy', field, descending: dir === 'desc' }); }
-    reverse() { return this.#next({ step: 'reverse' }); }
-    // The first `n` ids, `n` rounded down: none for a count below one, or one that isn't a number, and every one for
-    // an infinite count
-    limit(n: number) { return (n === Infinity ? this : this.#next({ step: 'limit', n: Number.isNaN(n) ? 0 : Math.max(0, Math.floor(n)) })); }
-    distinct(field?: string) { return this.#next({ step: 'distinct', field }); }
-    groupBy(field: string) { return new Map(run(this.#recipe, { answer: 'groupBy', field }).groups as Array<[unknown, EARS.EntityId[]]>); }
-    search(text: string, options?: SearchOptions) { return this.#next({ step: 'search', query: text, options: searchOptions(options) }); }
-    containing(text: string, { caseInsensitive = false }: { caseInsensitive?: boolean; } = {}) { return this.#next({ step: 'containing', text, caseInsensitive }); }
-    matching(pattern: string) { return this.#next({ step: 'matching', pattern }); }
-    after(id: EARS.EntityId) { return this.#next({ step: 'after', id }); }
-    near(vector: readonly number[], { k = 10 }: { k?: number; } = {}) { return this.#next({ step: 'near', vector: [...vector], k }); }
-    like(id: EARS.EntityId, { k = 10 }: { k?: number; } = {}) { return this.#next({ step: 'like', id, k }); }
-    hybrid(text: string, vector: readonly number[], { k = 10, ...options }: SearchOptions & { k?: number; } = {}) { return this.#next({ step: 'hybrid', query: text, vector: [...vector], k, options: searchOptions(options) }); }
-    hits({ fields, highlights = false }: { fields?: readonly string[]; highlights?: boolean; } = {}) {
-      this.#requireStep('hits', SEARCHES, 'search, a rank or a similar', 'search(...), near(...), like(...), hybrid(...), rank(...), ranked(...) or similar(...)');
-      return run(this.#recipe, { answer: 'hits', highlights, fields: fields && [...fields] }).hits;
-    }
-    rankedHits({ fields }: { fields?: readonly string[]; } = {}) {
-      this.#requireStep('rankedHits', RANKS, 'rank or a ranked', 'rank(...) or ranked(...)');
-      const answer = run(this.#recipe, { answer: 'hits', highlights: false, fields: fields && [...fields] });
-      return { hits: answer.hits, bound: answer.rank };
-    }
-    /** Refuses (`NO_SEARCH`) a terminal whose step isn't in the plan it ends, after every function a `where` was given */
-    #requireStep(terminal: string, steps: readonly string[], what: string, named: string) {
-      const lastWhere = (test: (p: Pending) => boolean) => this.#recipe.steps.reduce((last, p, at) => (test(p) ? at : last), -1);
-      const found = lastWhere((p) => 'step' in p && steps.includes(p.step.step));
-      const split = lastWhere((p) => !('step' in p));
-      if (found < 0) throw new EarsError('NO_SEARCH', `${terminal}() answers what a ${what} found: the query has no ${named}`);
-      if (split > found) throw new EarsError('NO_SEARCH', `${terminal}() answers what a ${what} found, and a where(...) given a function follows it: put it after that`);
-    }
-    ids() { return this.#ids(); }
-    explain() {
-      if (this.#recipe.steps.some((p) => !('step' in p))) {
-        throw new EarsError('NOT_EXPLAINABLE', 'explain() answers the plan the database runs, and a where(...) given a function runs outside it: explain the query up to that where');
-      }
-      const plan: Plan = { scope: this.#recipe.scope, start: this.#recipe.start, steps: resolveSteps(stepsOf(this.#recipe.steps)), terminal: { answer: 'ids' } };
-      const [explained] = read([{ read: 'query', plan, explain: true }]) as Array<Answer & { answer: Answer; visited: number; ms: number; stages: QueryStage[]; }>;
-      return { ids: explained!.answer.ids as EARS.EntityId[], visited: explained!.visited, ms: explained!.ms, stages: explained!.stages };
-    }
-    count() { return run(this.#recipe, { answer: 'count' }).n as number; }
-    first() { return (run(this.#recipe, { answer: 'first' }).id as EARS.EntityId | null) ?? undefined; }
-    last() { return (run(this.#recipe, { answer: 'last' }).id as EARS.EntityId | null) ?? undefined; }
-    exists() { return run(this.#recipe, { answer: 'exists' }).value as boolean; }
-    // A callback runs on the ids once they are read, so its own writes are its to read
-    map<T>(fn: (i: EARS.EntityId) => T) { return this.#ids().map(fn); }
-    forEach(fn: (i: EARS.EntityId) => void) { return (this.#ids().forEach(fn), this); }
-    reduce<T>(fn: (a: T, i: EARS.EntityId) => T, init: T) { return this.#ids().reduce(fn, init); }
-    // Share implementations, binding only methods a recipe uses. Private state also permits a
-    // frozen recipe to retain stable extracted functions without caching any database answers.
-    static {
-      for (const name of Object.getOwnPropertyNames(Builder.prototype)) {
-        if (name === 'constructor') continue;
-        const method = Object.getOwnPropertyDescriptor(Builder.prototype, name)!.value as (...args: unknown[]) => unknown;
-        Object.defineProperty(Builder.prototype, name, {
-          configurable: true,
-          get(this: Builder) {
-            const methods = this.#methods ??= new Map();
-            let bound = methods.get(name);
-            if (!bound) methods.set(name, bound = method.bind(this));
-            return bound;
-          },
-          set(this: Builder, value: unknown) {
-            Object.defineProperty(this, name, { value, writable: true, configurable: true, enumerable: true });
-          },
-        });
-      }
     }
   }
 
-  const builder = (recipe: Recipe): QueryBuilder<string> => new Builder(recipe) as unknown as QueryBuilder<string>;
+  #withStep(step: QueryStep, implicitOrderSlice = false): QueryBuilderImpl<TResult> {
+    this.#assertNoLocalFilters(step.kind);
+    return new QueryBuilderImpl<TResult>(
+      this.#db,
+      this.#pump,
+      this.#source,
+      [...this.#steps, step],
+      [],
+      implicitOrderSlice,
+    );
+  }
 
-  /** The entry points over a scope */
-  const entriesOver = (scope: Scope): QueryEntries => {
-    const from = (start: Start) => builder({ scope, start, steps: [] });
-    const types = (given: unknown) => from({ from: 'types', types: ofTypes(given) });
-    // The ids named: each checked when the query runs, so one that has left the engine (or the trash) is skipped
-    const ids = (given: EARS.EntityId | readonly EARS.EntityId[]) => from({ from: 'ids', ids: typeof given === 'string' ? [given] : [...given] });
-    const all = () => from({ from: 'all' });
-    return Object.assign(types, { ids, all }) as unknown as QueryEntries;
+  #withUntypedStep(step: QueryStep): QueryBuilderImpl<EntityRow> {
+    this.#assertNoLocalFilters(step.kind);
+    return new QueryBuilderImpl<EntityRow>(
+      this.#db,
+      this.#pump,
+      this.#source,
+      [...this.#steps, step],
+      [],
+      false,
+    );
+  }
+
+  #withOrderStep(step: Extract<QueryStep, { kind: 'orderSlice' }>): QueryBuilderImpl<TResult> {
+    this.#assertNoLocalFilters('orderBy');
+    if (this.#implicitOrderSlice) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        'Call orderBy() / orderByScore() / orderById() before limit() or after()',
+      );
+    }
+    return this.#withStep(step, false);
+  }
+
+  #withUpdatedOrderSlice(
+    patch: {
+      readonly resetCursor?: boolean;
+      readonly afterId?: string;
+      readonly afterScore?: number;
+      readonly afterValue?: unknown | null;
+      readonly limit?: number;
+    },
+  ): QueryBuilderImpl<TResult> {
+    this.#assertNoLocalFilters(patch.limit !== undefined ? 'limit' : 'after');
+    const last = this.#steps[this.#steps.length - 1];
+    if (last && last.kind === 'orderSlice') {
+      const next: Extract<QueryStep, { kind: 'orderSlice' }> = {
+        kind: 'orderSlice',
+        by: last.by,
+        dir: last.dir,
+        ...(last.field !== undefined && { field: last.field }),
+        ...(last.locale !== undefined && { locale: last.locale }),
+        ...(!patch.resetCursor && last.afterId !== undefined && { afterId: last.afterId }),
+        ...(!patch.resetCursor && last.afterScore !== undefined && { afterScore: last.afterScore }),
+        ...(!patch.resetCursor && last.afterValue !== undefined && { afterValue: last.afterValue }),
+        ...(last.limit !== undefined && { limit: last.limit }),
+        ...(patch.afterId !== undefined && { afterId: patch.afterId }),
+        ...(patch.afterScore !== undefined && { afterScore: patch.afterScore }),
+        ...(patch.afterValue !== undefined && { afterValue: patch.afterValue }),
+        ...(patch.limit !== undefined && { limit: patch.limit }),
+      };
+      return new QueryBuilderImpl<TResult>(
+        this.#db,
+        this.#pump,
+        this.#source,
+        [...this.#steps.slice(0, -1), next],
+        [],
+        this.#implicitOrderSlice,
+      );
+    }
+    const hasScore = this.#steps.some((s) => s.kind === 'score');
+    const created: Extract<QueryStep, { kind: 'orderSlice' }> = {
+      kind: 'orderSlice',
+      by: hasScore ? 'score' : 'id',
+      dir: hasScore ? 'desc' : 'asc',
+      ...(patch.afterId !== undefined && { afterId: patch.afterId }),
+      ...(patch.afterScore !== undefined && { afterScore: patch.afterScore }),
+      ...(patch.afterValue !== undefined && { afterValue: patch.afterValue }),
+      ...(patch.limit !== undefined && { limit: patch.limit }),
+    };
+    return this.#withStep(created, true);
+  }
+
+  #forbidLocalFilter(terminalName: string): void {
+    if (this.#localFilters.length > 0) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        `filterLocal() cannot be combined with '${terminalName}()' because non-row terminals do not materialize rows for local filtering`,
+      );
+    }
+  }
+
+  #applyLocalFilters(rows: readonly Row[]): TResult[] {
+    const typed = rows as unknown as TResult[];
+    if (this.#localFilters.length === 0) return [...typed];
+    return typed.filter((row) => this.#localFilters.every((fn) => fn(row)));
+  }
+
+  #existingZeroLimit(): boolean {
+    const last = this.#steps[this.#steps.length - 1];
+    return last !== undefined && last.kind === 'orderSlice' && last.limit === 0;
+  }
+
+  where(filterOrField: QueryFilter | string, valueOrPredicate?: WhereInput): QueryBuilder<TResult> {
+    const expr =
+      typeof filterOrField === 'string'
+        ? compileFieldPredicate(filterOrField, valueOrPredicate as WhereInput)
+        : filterOrField;
+    return this.#withStep({ kind: 'filter', expr });
+  }
+
+  whereNot(filter: QueryFilter): QueryBuilder<TResult> {
+    return this.#withStep({ kind: 'filter', expr: { op: 'not', filter } });
+  }
+
+  whereAny(filters: readonly QueryFilter[]): QueryBuilder<TResult> {
+    return this.#withStep({ kind: 'filter', expr: { op: 'or', filters: [...filters] } });
+  }
+
+  whereAll(filters: readonly QueryFilter[]): QueryBuilder<TResult> {
+    return this.#withStep({ kind: 'filter', expr: { op: 'and', filters: [...filters] } });
+  }
+
+  hasLink(opts?: HasLinkOptions): QueryBuilder<TResult> {
+    return this.#withStep({
+      kind: 'filter',
+      expr: {
+        op: 'hasLink',
+        dir: opts?.dir ?? 'out',
+        ...(opts?.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+        ...(opts?.targetId !== undefined && { targetId: opts.targetId }),
+      },
+    });
+  }
+
+  search(index: string, query: string, opts?: SearchOptions): QueryBuilder<TResult> {
+    return this.score({
+      kind: 'bm25f',
+      index,
+      query,
+      ...(opts?.requireAll !== undefined && { requireAll: opts.requireAll }),
+      ...(opts?.phrase !== undefined && { phrase: [...opts.phrase] }),
+      ...(opts?.topK !== undefined && { topK: opts.topK }),
+    });
+  }
+
+  near(index: string, vector: readonly number[], topK: number): QueryBuilder<TResult> {
+    return this.score({ kind: 'vectorNear', index, vector: [...vector], topK });
+  }
+
+  like(index: string, seedId: string, topK: number): QueryBuilder<TResult> {
+    return this.score({ kind: 'vectorLike', index, seedId, topK });
+  }
+
+  ranked(index: string): QueryBuilder<TResult> {
+    return this.score({ kind: 'rankIndex', index });
+  }
+
+  fuzzy(field: string, query: string, maxDistance: number): QueryBuilder<TResult> {
+    return this.score({ kind: 'fuzzyLabel', field, query, maxDistance });
+  }
+
+  recency(field: string, opts: RecencyOptions): QueryBuilder<TResult> {
+    return this.score({
+      kind: 'recencyDecay',
+      field,
+      nowMs: opts.nowMs,
+      halfLifeMs: opts.halfLifeMs,
+    });
+  }
+
+  fuse(inputs: ReadonlyArray<readonly [QueryScore, number]>, opts?: FuseOptions): QueryBuilder<TResult> {
+    return this.score({
+      kind: 'fuse',
+      inputs: inputs.map(([s, w]) => [s, w]),
+      ...(opts?.method !== undefined && { method: opts.method }),
+      ...(opts?.rrfK !== undefined && { rrfK: opts.rrfK }),
+    });
+  }
+
+  score(spec: QueryScore): QueryBuilder<TResult> {
+    return this.#withStep({ kind: 'score', spec });
+  }
+
+  hops(opts: HopsOptions): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'hops',
+      dir: opts.dir ?? 'out',
+      minHops: opts.minHops ?? 1,
+      maxHops: opts.maxHops,
+      ...(opts.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+    });
+  }
+
+  shortestPath(targetId: string, opts: ShortestPathOptions): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'shortestPath',
+      dir: opts.dir ?? 'out',
+      targetId,
+      maxHops: opts.maxHops,
+      ...(opts.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+    });
+  }
+
+  distinct(): QueryBuilder<TResult> {
+    return this.#withStep({ kind: 'distinct' });
+  }
+
+  ppr(seeds: ReadonlyArray<readonly [string, number]>, opts?: PprOptions): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'graphPpr',
+      seeds: seeds.map(([id, w]) => [id, w]),
+      damping: opts?.damping ?? 0.85,
+      iterations: opts?.iterations ?? 50,
+      tolerance: opts?.tolerance ?? 1e-6,
+      ...(opts?.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+      ...(opts?.weighted !== undefined && { weighted: opts.weighted }),
+    });
+  }
+
+  weakComponents(relKinds?: readonly string[]): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'graphWeakComponents',
+      ...(relKinds !== undefined && { relKinds: [...relKinds] }),
+    });
+  }
+
+  scc(relKinds?: readonly string[]): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'graphScc',
+      ...(relKinds !== undefined && { relKinds: [...relKinds] }),
+    });
+  }
+
+  topoSort(relKinds?: readonly string[]): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'graphTopoSort',
+      ...(relKinds !== undefined && { relKinds: [...relKinds] }),
+    });
+  }
+
+  leiden(opts?: LeidenOptions): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'graphLeiden',
+      resolution: opts?.resolution ?? 1.0,
+      seed: opts?.seed ?? 42,
+      iterations: opts?.iterations ?? 10,
+      ...(opts?.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+      ...(opts?.weighted !== undefined && { weighted: opts.weighted }),
+    });
+  }
+
+  jaccard(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'graphJaccard',
+      dir: opts?.dir ?? 'both',
+      seedId,
+      topK,
+      ...(opts?.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+    });
+  }
+
+  adamicAdar(seedId: string, topK: number, opts?: SimilarityOptions): QueryBuilder<EntityRow> {
+    return this.#withUntypedStep({
+      kind: 'graphAdamicAdar',
+      dir: opts?.dir ?? 'both',
+      seedId,
+      topK,
+      ...(opts?.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+    });
+  }
+
+  orderBy(field: string, dir: SortDirection = 'asc', opts?: OrderByOptions): QueryBuilder<TResult> {
+    return this.#withOrderStep({
+      kind: 'orderSlice',
+      by: 'field',
+      field,
+      dir,
+      ...(opts?.locale !== undefined && { locale: opts.locale }),
+    });
+  }
+
+  orderByScore(dir: SortDirection = 'desc'): QueryBuilder<TResult> {
+    return this.#withOrderStep({ kind: 'orderSlice', by: 'score', dir });
+  }
+
+  orderById(dir: SortDirection = 'asc'): QueryBuilder<TResult> {
+    return this.#withOrderStep({ kind: 'orderSlice', by: 'id', dir });
+  }
+
+  after(cursor: KeysetCursor): QueryBuilder<TResult> {
+    if (typeof cursor.id !== 'string' || cursor.id.length === 0) {
+      throw new EarsError('INVALID_ARGUMENT', 'Keyset cursor requires a non-empty string id');
+    }
+    if (cursor.score !== undefined && !Number.isFinite(cursor.score)) {
+      throw new EarsError('INVALID_ARGUMENT', 'Keyset cursor score must be a finite number');
+    }
+    return this.#withUpdatedOrderSlice({
+      resetCursor: true,
+      afterId: cursor.id,
+      ...(cursor.score !== undefined && { afterScore: cursor.score }),
+      ...(cursor.value !== undefined && { afterValue: normalizeQueryValue(cursor.value) }),
+    });
+  }
+
+  limit(n: number): QueryBuilder<TResult> {
+    if (!Number.isSafeInteger(n) || n < 0) {
+      throw new EarsError('INVALID_ARGUMENT', `limit() requires a non-negative safe integer, got ${String(n)}`);
+    }
+    return this.#withUpdatedOrderSlice({ limit: n });
+  }
+
+  filterLocal(predicate: (row: TResult) => boolean): QueryBuilder<TResult> {
+    return new QueryBuilderImpl<TResult>(
+      this.#db,
+      this.#pump,
+      this.#source,
+      this.#steps,
+      [...this.#localFilters, predicate],
+      this.#implicitOrderSlice,
+    );
+  }
+
+  toSpec(terminal?: QueryTerminal, explain?: boolean): QuerySpec {
+    return {
+      source: this.#source,
+      ...(this.#steps.length > 0 && { steps: [...this.#steps] }),
+      ...(terminal !== undefined && { terminal }),
+      ...(explain !== undefined && { explain }),
+    };
+  }
+
+  #run(terminal?: QueryTerminal, explain?: boolean): QueryAnswer {
+    try {
+      return this.#db.query(this.toSpec(terminal, explain));
+    } catch (error) {
+      throw toEarsError(error);
+    }
+  }
+
+  async #runAsync(terminal?: QueryTerminal, explain?: boolean): Promise<QueryAnswer> {
+    try {
+      return await this.#db.queryAsync(this.toSpec(terminal, explain));
+    } catch (error) {
+      throw toEarsError(error);
+    }
+  }
+
+  explain(terminal?: QueryTerminal): QueryAnswer {
+    const last = this.#steps[this.#steps.length - 1];
+    const effectiveTerminal = terminal ?? (isGraphAnalyzeStep(last) ? undefined : { kind: 'rows' });
+    return this.#run(effectiveTerminal, true);
+  }
+
+  all(fields?: readonly string[]): TResult[] {
+    const term: QueryTerminal = fields === undefined ? { kind: 'rows' } : { kind: 'rows', fields: [...fields] };
+    const ans = this.#run(term);
+    if (ans.kind !== 'rows') {
+      throw new EarsError('INTERNAL', `Expected 'rows' query answer, got '${ans.kind}'`);
+    }
+    return this.#applyLocalFilters(ans.rows);
+  }
+
+  async allAsync(fields?: readonly string[]): Promise<TResult[]> {
+    const term: QueryTerminal = fields === undefined ? { kind: 'rows' } : { kind: 'rows', fields: [...fields] };
+    const ans = await this.#runAsync(term);
+    if (ans.kind !== 'rows') {
+      throw new EarsError('INTERNAL', `Expected 'rows' query answer, got '${ans.kind}'`);
+    }
+    return this.#applyLocalFilters(ans.rows);
+  }
+
+  first(fields?: readonly string[]): TResult | null {
+    if (this.#existingZeroLimit()) return null;
+    const rows = this.#localFilters.length === 0 ? this.limit(1).all(fields) : this.all(fields);
+    return rows[0] ?? null;
+  }
+
+  async firstAsync(fields?: readonly string[]): Promise<TResult | null> {
+    if (this.#existingZeroLimit()) return null;
+    const rows = this.#localFilters.length === 0 ? await this.limit(1).allAsync(fields) : await this.allAsync(fields);
+    return rows[0] ?? null;
+  }
+
+  ids(): string[] {
+    this.#forbidLocalFilter('ids');
+    const ans = this.#run({ kind: 'ids' });
+    if (ans.kind !== 'ids') {
+      throw new EarsError('INTERNAL', `Expected 'ids' query answer, got '${ans.kind}'`);
+    }
+    return ans.ids;
+  }
+
+  async idsAsync(): Promise<string[]> {
+    this.#forbidLocalFilter('idsAsync');
+    const ans = await this.#runAsync({ kind: 'ids' });
+    if (ans.kind !== 'ids') {
+      throw new EarsError('INTERNAL', `Expected 'ids' query answer, got '${ans.kind}'`);
+    }
+    return ans.ids;
+  }
+
+  hits(): Hit[] {
+    this.#forbidLocalFilter('hits');
+    const last = this.#steps[this.#steps.length - 1];
+    const ans = this.#run(isGraphHitsStep(last) ? undefined : { kind: 'hits' });
+    if (ans.kind !== 'hits') {
+      throw new EarsError('INTERNAL', `Expected 'hits' query answer, got '${ans.kind}'`);
+    }
+    return ans.hits;
+  }
+
+  async hitsAsync(): Promise<Hit[]> {
+    this.#forbidLocalFilter('hitsAsync');
+    const last = this.#steps[this.#steps.length - 1];
+    const ans = await this.#runAsync(isGraphHitsStep(last) ? undefined : { kind: 'hits' });
+    if (ans.kind !== 'hits') {
+      throw new EarsError('INTERNAL', `Expected 'hits' query answer, got '${ans.kind}'`);
+    }
+    return ans.hits;
+  }
+
+  count(): number {
+    this.#forbidLocalFilter('count');
+    const ans = this.#run({ kind: 'count' });
+    if (ans.kind !== 'count') {
+      throw new EarsError('INTERNAL', `Expected 'count' query answer, got '${ans.kind}'`);
+    }
+    return ans.count;
+  }
+
+  async countAsync(): Promise<number> {
+    this.#forbidLocalFilter('countAsync');
+    const ans = await this.#runAsync({ kind: 'count' });
+    if (ans.kind !== 'count') {
+      throw new EarsError('INTERNAL', `Expected 'count' query answer, got '${ans.kind}'`);
+    }
+    return ans.count;
+  }
+
+  exists(): boolean {
+    this.#forbidLocalFilter('exists');
+    const ans = this.#run({ kind: 'exists' });
+    if (ans.kind !== 'exists') {
+      throw new EarsError('INTERNAL', `Expected 'exists' query answer, got '${ans.kind}'`);
+    }
+    return ans.exists;
+  }
+
+  async existsAsync(): Promise<boolean> {
+    this.#forbidLocalFilter('existsAsync');
+    const ans = await this.#runAsync({ kind: 'exists' });
+    if (ans.kind !== 'exists') {
+      throw new EarsError('INTERNAL', `Expected 'exists' query answer, got '${ans.kind}'`);
+    }
+    return ans.exists;
+  }
+
+  sum(field: string): number {
+    this.#forbidLocalFilter('sum');
+    const ans = this.#run({ kind: 'sum', field });
+    if (ans.kind !== 'sum') {
+      throw new EarsError('INTERNAL', `Expected 'sum' query answer, got '${ans.kind}'`);
+    }
+    return ans.sum;
+  }
+
+  async sumAsync(field: string): Promise<number> {
+    this.#forbidLocalFilter('sumAsync');
+    const ans = await this.#runAsync({ kind: 'sum', field });
+    if (ans.kind !== 'sum') {
+      throw new EarsError('INTERNAL', `Expected 'sum' query answer, got '${ans.kind}'`);
+    }
+    return ans.sum;
+  }
+
+  minMax(field: string): MinMaxResult {
+    this.#forbidLocalFilter('minMax');
+    const ans = this.#run({ kind: 'minMax', field });
+    if (ans.kind !== 'minMax') {
+      throw new EarsError('INTERNAL', `Expected 'minMax' query answer, got '${ans.kind}'`);
+    }
+    return { min: ans.min, max: ans.max };
+  }
+
+  async minMaxAsync(field: string): Promise<MinMaxResult> {
+    this.#forbidLocalFilter('minMaxAsync');
+    const ans = await this.#runAsync({ kind: 'minMax', field });
+    if (ans.kind !== 'minMax') {
+      throw new EarsError('INTERNAL', `Expected 'minMax' query answer, got '${ans.kind}'`);
+    }
+    return { min: ans.min, max: ans.max };
+  }
+
+  groupBy(field: string): Array<[unknown, string[]]> {
+    this.#forbidLocalFilter('groupBy');
+    const ans = this.#run({ kind: 'groupBy', field, countsOnly: false });
+    if (ans.kind !== 'groups') {
+      throw new EarsError('INTERNAL', `Expected 'groups' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
+  async groupByAsync(field: string): Promise<Array<[unknown, string[]]>> {
+    this.#forbidLocalFilter('groupByAsync');
+    const ans = await this.#runAsync({ kind: 'groupBy', field, countsOnly: false });
+    if (ans.kind !== 'groups') {
+      throw new EarsError('INTERNAL', `Expected 'groups' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
+  groupCounts(field: string): Array<[unknown, number]> {
+    this.#forbidLocalFilter('groupCounts');
+    const ans = this.#run({ kind: 'groupBy', field, countsOnly: true });
+    if (ans.kind !== 'groupCounts') {
+      throw new EarsError('INTERNAL', `Expected 'groupCounts' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
+  async groupCountsAsync(field: string): Promise<Array<[unknown, number]>> {
+    this.#forbidLocalFilter('groupCountsAsync');
+    const ans = await this.#runAsync({ kind: 'groupBy', field, countsOnly: true });
+    if (ans.kind !== 'groupCounts') {
+      throw new EarsError('INTERNAL', `Expected 'groupCounts' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
+  degrees(opts?: DegreesOptions): Array<[string, number]> {
+    this.#forbidLocalFilter('degrees');
+    const ans = this.#run({
+      kind: 'degrees',
+      dir: opts?.dir ?? 'both',
+      ...(opts?.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+    });
+    if (ans.kind !== 'degrees') {
+      throw new EarsError('INTERNAL', `Expected 'degrees' query answer, got '${ans.kind}'`);
+    }
+    return ans.degrees;
+  }
+
+  async degreesAsync(opts?: DegreesOptions): Promise<Array<[string, number]>> {
+    this.#forbidLocalFilter('degreesAsync');
+    const ans = await this.#runAsync({
+      kind: 'degrees',
+      dir: opts?.dir ?? 'both',
+      ...(opts?.relKinds !== undefined && { relKinds: [...opts.relKinds] }),
+    });
+    if (ans.kind !== 'degrees') {
+      throw new EarsError('INTERNAL', `Expected 'degrees' query answer, got '${ans.kind}'`);
+    }
+    return ans.degrees;
+  }
+
+  graphGroups(): string[][] {
+    this.#forbidLocalFilter('graphGroups');
+    const ans = this.#run();
+    if (ans.kind !== 'graphGroups') {
+      throw new EarsError('INTERNAL', `Expected 'graphGroups' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
+  async graphGroupsAsync(): Promise<string[][]> {
+    this.#forbidLocalFilter('graphGroupsAsync');
+    const ans = await this.#runAsync();
+    if (ans.kind !== 'graphGroups') {
+      throw new EarsError('INTERNAL', `Expected 'graphGroups' query answer, got '${ans.kind}'`);
+    }
+    return ans.groups;
+  }
+
+  graphTopo(): GraphTopoResult {
+    this.#forbidLocalFilter('graphTopo');
+    const ans = this.#run();
+    if (ans.kind !== 'graphTopo') {
+      throw new EarsError('INTERNAL', `Expected 'graphTopo' query answer, got '${ans.kind}'`);
+    }
+    return { order: ans.order, cycles: ans.cycles };
+  }
+
+  async graphTopoAsync(): Promise<GraphTopoResult> {
+    this.#forbidLocalFilter('graphTopoAsync');
+    const ans = await this.#runAsync();
+    if (ans.kind !== 'graphTopo') {
+      throw new EarsError('INTERNAL', `Expected 'graphTopo' query answer, got '${ans.kind}'`);
+    }
+    return { order: ans.order, cycles: ans.cycles };
+  }
+
+  graphPpr(): GraphPprResult {
+    this.#forbidLocalFilter('graphPpr');
+    const ans = this.#run();
+    if (ans.kind !== 'graphPpr') {
+      throw new EarsError('INTERNAL', `Expected 'graphPpr' query answer, got '${ans.kind}'`);
+    }
+    return { scores: ans.scores, converged: ans.converged, iterations: ans.iterations };
+  }
+
+  async graphPprAsync(): Promise<GraphPprResult> {
+    this.#forbidLocalFilter('graphPprAsync');
+    const ans = await this.#runAsync();
+    if (ans.kind !== 'graphPpr') {
+      throw new EarsError('INTERNAL', `Expected 'graphPpr' query answer, got '${ans.kind}'`);
+    }
+    return { scores: ans.scores, converged: ans.converged, iterations: ans.iterations };
+  }
+
+  watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle {
+    const spec = this.toSpec({ kind: 'rows' });
+    const localFilters = this.#localFilters;
+    const dedupPostFilter = localFilters.length > 0 && opts?.mode !== 'imperative';
+    let lastFilteredJson: string | undefined;
+    return this.#pump.register(
+      spec,
+      (answer) => {
+        if (answer.kind !== 'rows') {
+          throw new EarsError('INTERNAL', `Expected 'rows' watch answer, got '${answer.kind}'`);
+        }
+        const typed = answer.rows as unknown as TResult[];
+        const filtered = localFilters.length === 0 ? [...typed] : typed.filter((r) => localFilters.every((fn) => fn(r)));
+        if (dedupPostFilter) {
+          const serialized = JSON.stringify(filtered);
+          if (serialized === lastFilteredJson) return;
+          lastFilteredJson = serialized;
+        }
+        callback(filtered);
+      },
+      opts,
+    );
+  }
+
+  watchIds(callback: (ids: string[]) => void, opts?: WatchOptions): WatchHandle {
+    this.#forbidLocalFilter('watchIds');
+    return this.#pump.register(
+      this.toSpec({ kind: 'ids' }),
+      (answer) => {
+        if (answer.kind !== 'ids') {
+          throw new EarsError('INTERNAL', `Expected 'ids' watch answer, got '${answer.kind}'`);
+        }
+        callback(answer.ids);
+      },
+      opts,
+    );
+  }
+
+  watchHits(callback: (hits: Hit[]) => void, opts?: WatchOptions): WatchHandle {
+    this.#forbidLocalFilter('watchHits');
+    const last = this.#steps[this.#steps.length - 1];
+    return this.#pump.register(
+      this.toSpec(isGraphHitsStep(last) ? undefined : { kind: 'hits' }),
+      (answer) => {
+        if (answer.kind !== 'hits') {
+          throw new EarsError('INTERNAL', `Expected 'hits' watch answer, got '${answer.kind}'`);
+        }
+        callback(answer.hits);
+      },
+      opts,
+    );
+  }
+
+  watchCount(callback: (count: number) => void, opts?: WatchOptions): WatchHandle {
+    this.#forbidLocalFilter('watchCount');
+    return this.#pump.register(
+      this.toSpec({ kind: 'count' }),
+      (answer) => {
+        if (answer.kind !== 'count') {
+          throw new EarsError('INTERNAL', `Expected 'count' watch answer, got '${answer.kind}'`);
+        }
+        callback(answer.count);
+      },
+      opts,
+    );
+  }
+}
+
+/** Creates the `QueryRoot` bound to an `EarsDatabase` and `WatchPump`. */
+export function createQueryRoot(db: EarsDatabase, pump: WatchPump): QueryRoot {
+  return {
+    of(typeName, opts) {
+      return new QueryBuilderImpl(db, pump, {
+        kind: 'type',
+        typeName,
+        ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
+      });
+    },
+    ofTypes(typeNames, opts) {
+      return new QueryBuilderImpl(db, pump, {
+        kind: 'types',
+        typeNames: [...typeNames],
+        ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
+      });
+    },
+    allEntities(opts) {
+      return new QueryBuilderImpl(db, pump, {
+        kind: 'allEntities',
+        ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
+      });
+    },
+    ids(ids) {
+      return new QueryBuilderImpl(db, pump, { kind: 'ids', ids: [...ids] });
+    },
+    raw(spec) {
+      try {
+        return db.query(spec);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    async rawAsync(spec) {
+      try {
+        return await db.queryAsync(spec);
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
   };
-
-  const entry = entriesOver('live') as Query;
-  entry.withTrashed = entriesOver('withTrashed');
-  entry.trashed = entriesOver('trashed');
-  return entry;
 }

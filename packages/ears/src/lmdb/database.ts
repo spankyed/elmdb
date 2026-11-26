@@ -1,123 +1,206 @@
 /// <reference types="node" />
-// Opening the elmdb database an engine runs on: the one module that loads elmdb, which only whoever creates an engine
-// (a program's composition root, its tools and tests) reaches, through this entry.
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import elmdb from 'elmdb';
-import type { EarsDatabase } from '../database.ts';
-import { toElmdbSchema, type EngineSchema } from '../schema.ts';
+import { Database, type DumpReport, type OpenOptions, type Schema } from 'elmdb';
+import type { BuildPolicy, DurabilityMode, EarsDatabase } from '../database.ts';
+import { createEarsEngine, type EarsEngine } from '../engine.ts';
+import { toEarsError, type EarsError } from '../errors.ts';
+import type { EarsClock } from '../watch.ts';
 
-/** The storage format an elmdb database is in, as a backup records it: provenance, since opening is what decides */
-export const DATABASE_FORMAT = 'elmdb/1';
+/** Canonical elmdb v2 on-disk format identifier. */
+export const DATABASE_FORMAT = 'elmdb/2';
 
+/** Options for opening an elmdb v2 database via `@elmdb/ears/database`. */
 export interface DatabaseOptions {
-  /** The database's directory, created unless `readOnly` */
-  path: string;
-  /** The schema to hold the database to: a schema that differs from the stored one changes it. None keeps the stored one */
-  schema?: EngineSchema;
-  /** Opens existing files without writing: every write is refused, and the stored schema is used */
-  readOnly?: boolean;
-  /**
-   * Group commit's syncs, on by default: a commit is on disk within a second, and `durable()` waits for one. Off,
-   * periodic syncing is disabled for temporary data. Creating an environment still durably initializes its format
-   */
-  syncs?: boolean;
-  /**
-   * Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
-   * sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default
-   */
-  syncEachCommit?: boolean;
-  /**
-   * Group commit syncs once writes have paused for this many milliseconds: 100 by default. A whole number, or refused
-   * (`VALUE_INVALID`)
-   */
-  syncIdleMs?: number;
-  /** Group commit syncs no later than this many milliseconds after the first commit not yet synced: 1000 by default */
-  syncIntervalMs?: number;
-  /**
-   * The map's size at open: by default twice the data file, and 64 MiB at least. A whole number of 1 at least, or
-   * refused (`VALUE_INVALID`), and a multiple of the system's page size, or refused by LMDB's binding (`IO`)
-   */
-  mapSizeBytes?: number;
+  /** Database directory path (created unless `readOnly` is `true`). */
+  readonly path: string;
+  /** Schema to apply/evolve on open (omitted keeps stored schema; disallowed with `readOnly`). */
+  readonly schema?: Schema;
+  /** Opens existing database files in strict `MDB_RDONLY` read-only mode. */
+  readonly readOnly?: boolean;
+  /** Durability mode: `'strict'` (default), `'grouped'`, or `'unsafe'` (ephemeral/tests). */
+  readonly durability?: DurabilityMode;
+  /** Index build policy: `'deferred'` (default) or `'eager'`. */
+  readonly buildPolicy?: BuildPolicy;
+  readonly mapSizeBytes?: number;
+  readonly maxDbs?: number;
+  readonly maxReaders?: number;
+  readonly planCacheCapacity?: number;
+  readonly watchTurnSliceMs?: number;
+}
+
+/** Options for opening an `EarsEngine` directly in one call. */
+export interface OpenEngineOptions extends DatabaseOptions {
+  readonly clock?: EarsClock;
+  readonly onWatchError?: (error: EarsError) => void;
+}
+
+function toNativeOpenOptions(options: DatabaseOptions): OpenOptions {
+  const out: OpenOptions = {};
+  if (options.readOnly !== undefined) out.readOnly = options.readOnly;
+  if (options.schema !== undefined) out.schema = options.schema;
+  if (options.durability !== undefined) out.durability = options.durability;
+  if (options.buildPolicy !== undefined) out.buildPolicy = options.buildPolicy;
+  if (options.mapSizeBytes !== undefined) out.mapSizeBytes = options.mapSizeBytes;
+  if (options.maxDbs !== undefined) out.maxDbs = options.maxDbs;
+  if (options.maxReaders !== undefined) out.maxReaders = options.maxReaders;
+  if (options.planCacheCapacity !== undefined) out.planCacheCapacity = options.planCacheCapacity;
+  if (options.watchTurnSliceMs !== undefined) out.watchTurnSliceMs = options.watchTurnSliceMs;
+  return out;
 }
 
 /**
- * Opens the elmdb database at `path` for an engine (`createEarsEngine({ database })`): the binding's `Database`, which
- * is an `EarsDatabase` as it is, with no cast (`port.test-d.ts`)
+ * Opens an elmdb v2 database at `options.path` and returns it as an `EarsDatabase` with zero casts.
  */
-export function openDatabase({
-  path: dir, schema, readOnly, syncs, syncEachCommit, syncIdleMs, syncIntervalMs, mapSizeBytes,
-}: DatabaseOptions): EarsDatabase {
-  return elmdb.Database.open(dir, {
-    ...(readOnly !== undefined && { readOnly }),
-    // elmdb checks the schema whole, naming every problem
-    ...(schema && { schema: toElmdbSchema(schema) }),
-    ...(syncs !== undefined && { syncs }),
-    ...(syncEachCommit !== undefined && { syncEachCommit }),
-    ...(syncIdleMs !== undefined && { syncIdleMs }),
-    ...(syncIntervalMs !== undefined && { syncIntervalMs }),
-    ...(mapSizeBytes !== undefined && { mapSizeBytes }),
-  });
+export function openDatabase(options: DatabaseOptions): EarsDatabase {
+  try {
+    return Database.open(options.path, toNativeOpenOptions(options));
+  } catch (error) {
+    throw toEarsError(error);
+  }
 }
 
-/** Databases opened in temporary directories, each removed when it is disposed or the process exits */
+/**
+ * Opens an elmdb v2 database asynchronously on Node's worker pool.
+ */
+export async function openDatabaseAsync(options: DatabaseOptions): Promise<EarsDatabase> {
+  try {
+    return await Database.openAsync(options.path, toNativeOpenOptions(options));
+  } catch (error) {
+    throw toEarsError(error);
+  }
+}
+
+/** Opens an elmdb v2 database and wraps it in an `EarsEngine` in a single call. */
+export function openEngine(options: OpenEngineOptions): EarsEngine {
+  const database = openDatabase(options);
+  try {
+    return createEarsEngine({
+      database,
+      ...(options.clock !== undefined && { clock: options.clock }),
+      ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
+    });
+  } catch (error) {
+    try {
+      database.close();
+    } catch {
+      // Preserve original failure.
+    }
+    throw toEarsError(error);
+  }
+}
+
+/** Opens an elmdb v2 database asynchronously and wraps it in an `EarsEngine`. */
+export async function openEngineAsync(options: OpenEngineOptions): Promise<EarsEngine> {
+  const database = await openDatabaseAsync(options);
+  try {
+    return createEarsEngine({
+      database,
+      ...(options.clock !== undefined && { clock: options.clock }),
+      ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
+    });
+  } catch (error) {
+    try {
+      database.close();
+    } catch {
+      // Preserve original failure.
+    }
+    throw toEarsError(error);
+  }
+}
+
+/** Loads a portable elmdb v2 JSON dump file into a brand-new database directory. */
+export function loadDump(dumpFile: string, targetDir: string): DumpReport {
+  try {
+    return Database.load(dumpFile, targetDir);
+  } catch (error) {
+    throw toEarsError(error);
+  }
+}
+
+/** Temporary database handle created by `createTemporaryDatabases()`. */
+export interface TemporaryDatabaseHandle {
+  readonly path: string;
+  readonly database: EarsDatabase;
+  dispose(): void;
+}
+
+/** Factory for isolated temporary elmdb v2 databases (tests & ephemeral tooling). */
 export interface TemporaryDatabases {
-  /** A new database in its own temporary directory, with periodic syncing disabled; `dispose` closes it and removes the directory */
-  open(schema: EngineSchema): { database: EarsDatabase; dispose(): void };
-  /** Closes and removes every database still open */
+  open(options?: Omit<DatabaseOptions, 'path'>): TemporaryDatabaseHandle;
   disposeAll(): void;
 }
 
 /**
- * Temporary databases: what a test runtime, or tooling working on a copy, opens. Their directories are removed as each
- * is disposed, and those still there when the process exits are removed then
+ * Creates a temporary database registry whose directories are removed on `dispose()`,
+ * `disposeAll()`, or best-effort on process exit.
  */
 export function createTemporaryDatabases(): TemporaryDatabases {
   const open = new Map<string, EarsDatabase>();
   let listening = false;
-  const detach = () => {
+
+  const detach = (): void => {
     if (!listening) return;
     listening = false;
     process.off('exit', atExit);
   };
-  const remove = (dir: string) => {
-    if (!open.has(dir)) return;
+
+  const remove = (dir: string): void => {
     const database = open.get(dir);
+    if (!database) return;
     open.delete(dir);
     if (open.size === 0) detach();
     let failure: unknown;
-    if (database?.isOpen) {
-      try { database.close(); } catch (error) { failure = error; }
+    try {
+      database.close();
+    } catch (error) {
+      failure = error;
     }
     try {
       fs.rmSync(dir, { recursive: true, force: true });
     } catch (error) {
-      if (!failure) failure = error;
+      if (failure === undefined) failure = error;
     }
-    if (failure) throw failure;
+    if (failure !== undefined) throw toEarsError(failure);
   };
-  const disposeAll = () => {
+
+  const atExit = (): void => {
+    listening = false;
+    for (const dir of [...open.keys()]) {
+      try {
+        remove(dir);
+      } catch {
+        // Best-effort cleanup at process exit.
+      }
+    }
+  };
+
+  const disposeAll = (): void => {
     const errors: unknown[] = [];
     for (const dir of [...open.keys()]) {
-      try { remove(dir); } catch (error) { errors.push(error); }
+      try {
+        remove(dir);
+      } catch (error) {
+        errors.push(error);
+      }
     }
     detach();
     if (errors.length === 1) throw errors[0];
     if (errors.length > 1) throw new AggregateError(errors, 'Failed to dispose multiple temporary databases');
   };
-  const atExit = () => {
-    listening = false;
-    for (const dir of [...open.keys()]) {
-      try { remove(dir); } catch { /* Best-effort cleanup at process exit */ }
-    }
-  };
+
   return {
-    open(schema) {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-'));
+    open(options?: Omit<DatabaseOptions, 'path'>): TemporaryDatabaseHandle {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ears-v2-'));
       let database: EarsDatabase;
       try {
-        database = openDatabase({ path: dir, schema, syncs: false });
+        database = openDatabase({
+          ...options,
+          durability: options?.durability ?? 'unsafe',
+          buildPolicy: options?.buildPolicy ?? 'eager',
+          path: dir,
+        });
       } catch (error) {
         fs.rmSync(dir, { recursive: true, force: true });
         throw error;
@@ -127,7 +210,7 @@ export function createTemporaryDatabases(): TemporaryDatabases {
         listening = true;
         process.once('exit', atExit);
       }
-      return { database, dispose: () => remove(dir) };
+      return { path: dir, database, dispose: () => remove(dir) };
     },
     disposeAll,
   };
