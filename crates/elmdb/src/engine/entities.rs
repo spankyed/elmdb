@@ -190,8 +190,8 @@ fn place_for(t: &Txn<'_, '_>, id: &str, field: &str) -> Result<Option<u64>> {
 /// for the indexes and the unit's undo log both, and the entity's place once for all its indexes
 pub fn put_field(t: &mut Txn<'_, '_>, id: &str, field: &str, value: &Value) -> Result<()> {
     let key = keys::value(id, field);
-    // Refused for its size before anything of the write is done
-    let bytes = values::stored(value)?;
+    // Refused for its size before this field's write does anything
+    let bytes = values::stored_for(id, field, value)?;
     let stored = t.get(&key)?;
     let before = stored.as_deref().map(values::decode_stored).transpose()?;
     let seq = place_for(t, id, field)?;

@@ -6,6 +6,12 @@
 //! own transaction. The gate lets a reader in whenever another holds it, so an open unit, which holds it across calls,
 //! never waits on a growth that waits on the unit.
 //!
+//! So whoever holds the gate never waits on a lock another thread may hold while it reads: that thread's read can be
+//! refused for a growth another process made, and taking its size waits on the gate. A thread may take such a lock
+//! under the gate only while it holds LMDB's write transaction, as an open unit does, since no other process can
+//! commit to grow the file until it ends. A commit lets the gate go before it takes the tracking lock to file a unit's
+//! reads (`WriteTxn::commit_then`), the write transaction having ended by then.
+//!
 //! A transaction isn't all that reads through the map. LMDB's meta pages are in it, and a sync, the environment's
 //! sizes and its statistics each read them through a pointer into it, which a growth leaves pointing at nothing between
 //! unmapping the file and mapping it again. Each of those holds the gate for reading too.
@@ -18,7 +24,9 @@ mod idle_reads;
 mod kept;
 mod reach;
 mod record;
-pub use record::{is_backup_lock, left_by_a_backup, written_in};
+pub use backup::BackupInto;
+#[cfg(test)]
+pub(crate) use record::{left_by_a_backup, written_in};
 mod restore;
 #[cfg(unix)]
 pub(crate) use backup::directories_to_sync as publication_directories;
@@ -355,7 +363,7 @@ impl<'a, G> WriteTxn<'a, G> {
     /// `commit`, running `landed` once the commit has landed and before the writer is let go, so every later writer's
     /// commit sees what it did. The gate is let go first: the transaction has ended, so `landed` reads nothing through
     /// the map, and it may wait on a lock a thread holds while it reads, whose read can wait on a growth another process
-    /// made that the gate would keep this one from taking (the module's rule)
+    /// made that the gate would keep this one from taking (the module's doc)
     pub(crate) fn commit_then(self, store: &Store, landed: impl FnOnce()) -> Result<u64> {
         let Self { _gate, _writer, txn } = self;
         let result = store.commit_txn(txn);
@@ -1884,10 +1892,16 @@ impl Store {
     /// opens and other publishers in this process (`ALREADY_OPEN`). Across processes, it holds the destination's
     /// decision lock (`synced.lock`, created if absent) and, where an open made one, its presence lock (`open.lock`)
     /// until publication finishes, refusing a target another process has open (`TARGET_IN_USE`) while any open that
-    /// begins there waits for the backup to end. Failure before publication preserves an earlier backup; a later
-    /// directory sync failure reports that the complete copy is visible and a retry is safe
+    /// begins there waits for the backup to end. A data file there is replaced only where it is an elmdb database's
+    /// (`TARGET_REFUSED`, `BackupInto`). Failure before publication preserves an earlier backup; a later directory sync
+    /// failure reports that the complete copy is visible and a retry is safe
     pub fn copy_to(&self, target: &Path) -> Result<()> {
-        backup::copy(self, target)
+        backup::copy(self, target, BackupInto::default())
+    }
+
+    /// `copy_to`, replacing only what `into` lets it
+    pub fn copy_into(&self, target: &Path, into: BackupInto) -> Result<()> {
+        backup::copy(self, target, into)
     }
 
     /// Whether the record beside the data file named another file than this one, which was opened as it is

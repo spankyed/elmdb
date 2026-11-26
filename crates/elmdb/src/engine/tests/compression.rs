@@ -202,7 +202,9 @@ fn a_write_of_a_value_past_the_most_a_field_holds_is_refused_and_writes_nothing(
             json!({ "op": "create", "type": "Message", "id": "Message-big", "fields": { "blob": past } }),
         ],
     );
-    assert_eq!(refused.unwrap_err().code, crate::ErrorCode::ValueTooLarge);
+    let refused = refused.unwrap_err();
+    assert_eq!(refused.code, crate::ErrorCode::ValueTooLarge);
+    assert!(refused.message.contains("`blob` of Message-big"), "the refusal names the field and the entity: {refused}");
     let (ok_entity, big_entity, big_value) = db
         .snapshot(|r| {
             Ok((
@@ -276,4 +278,40 @@ fn a_bulk_load_of_a_value_past_the_most_a_field_holds_is_refused_and_writes_noth
         .unwrap();
     assert_eq!(ok_entity, None);
     assert_eq!(big_entity, None);
+}
+
+/// A value past the most a field holds that a build before the cap stored uncompressed still reads, and refuses the
+/// loads a dump is made of at once, naming it, rather than the load after them
+#[test]
+fn a_value_past_the_most_a_field_holds_stored_before_the_cap_refuses_the_loads_naming_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    // A value of the most a field holds is taken as it is
+    let most = "x".repeat(values::MAX_VALUE_BYTES - 5);
+    super::write(
+        &db,
+        vec![
+            json!({ "op": "create", "type": "Message", "id": "Message-most", "fields": { "blob": most } }),
+            json!({ "op": "create", "type": "Message", "id": "Message-old", "fields": { "blob": "small" } }),
+        ],
+    )
+    .unwrap();
+    db.primary_loads(|_| Ok(())).unwrap();
+    // What such a build stored: the value's msgpack as it is, one byte past the most
+    let old = values::encode(&rmpv::Value::Binary(vec![7u8; values::MAX_VALUE_BYTES - 4]));
+    assert_eq!(old.len(), values::MAX_VALUE_BYTES + 1);
+    db.store()
+        .unwrap()
+        .write(
+            |txn, d| {
+                d.main.put(txn, &keys::value("Message-old", "blob"), &old)?;
+                Ok(())
+            },
+            false,
+        )
+        .unwrap();
+    assert_eq!(stored(&db, "Message-old", "blob").len(), old.len());
+    let error = db.primary_loads(|_| Ok(())).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::ValueTooLarge);
+    assert!(error.message.contains("`blob` of Message-old"), "{error}");
 }

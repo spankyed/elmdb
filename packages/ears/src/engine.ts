@@ -178,10 +178,14 @@ export interface EarsAdmin {
   adoptReplacement(epoch: number): boolean;
   /**
    * Sets what runs in every unit before it commits, so what it writes commits with what caused it. A write outside a unit
-   * that `hook.wants` runs in one of its own.
+   * runs in one of its own when `hook.wants` the type of an entity it writes, or when it may write an entity of any
+   * type: a relation's update or removal, and an `unlink` without a target, whose types the write alone doesn't name.
    */
   beforeCommit(hook: BeforeCommit): void;
-  /** Runs `fn` in a unit that what's set to run before a commit stays out of: for that code's own catching up */
+  /**
+   * Runs `fn` in a unit that what's set to run before a commit stays out of: for that code's own catching up. Refused
+   * inside a unit the hook runs in, whose writes the hook would see
+   */
   transactWithoutHook<T>(fn: () => T, options?: UnitOptions): T;
   /**
    * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or the

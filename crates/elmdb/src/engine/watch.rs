@@ -495,17 +495,21 @@ impl PendingRead {
     }
 
     /// Files each read under its token, unless an `untrack` canceled it meanwhile, all under one hold of the lock;
-    /// nothing is locked when there are none
+    /// nothing is locked when there are none. The iterator is declared before the lock guard so that, should filing
+    /// unwind, any remaining `PendingRead`s drop after the lock is released and clean up their own registrations
     pub(crate) fn file_all(tracks: &SharedTracks, pending: Vec<(PendingRead, ReadSet)>) {
         if pending.is_empty() {
             return;
         }
+        let mut pending = pending.into_iter();
         let mut held = tracks.lock();
-        for (mut read, reads) in pending {
-            if let Some(token) = held.pending_reads.remove(&read.id) {
+        for (mut read, reads) in &mut pending {
+            read.filed = true;
+            let token = held.pending_reads.remove(&read.id);
+            run_point!(READ_FILING);
+            if let Some(token) = token {
                 held.file(token, reads);
             }
-            read.filed = true;
         }
     }
 }

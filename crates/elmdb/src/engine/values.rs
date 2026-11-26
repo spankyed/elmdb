@@ -33,24 +33,40 @@ pub const COMPRESS_FROM: usize = 256;
 const ZSTD_LEVEL: i32 = 3;
 
 /// A field's value as it is stored: its msgpack, compressed from `COMPRESS_FROM` bytes when that is smaller. A value
-/// past `MAX_VALUE_BYTES` of msgpack is refused (`VALUE_TOO_LARGE`), so every value stored reads back
+/// past `MAX_VALUE_BYTES` of msgpack is refused (`VALUE_TOO_LARGE`), so every value stored reads back. A write stores
+/// through `stored_for`, whose refusal names the field
+#[cfg(test)]
 pub fn stored(value: &Value) -> Result<Vec<u8>> {
+    stored_named(value, || "A value".to_owned())
+}
+
+/// `stored`, for the value a write brings to `field` of `id`, which a refusal names
+pub fn stored_for(id: &str, field: &str, value: &Value) -> Result<Vec<u8>> {
+    stored_named(value, || format!("The value written to `{field}` of {id}"))
+}
+
+/// The refusal of a value of `len` bytes of msgpack, past the most a field holds, with what to do instead
+pub fn too_large(named: &str, len: usize, fix: &str) -> Error {
+    Error::new(
+        ErrorCode::ValueTooLarge,
+        format!("{named} is {len} bytes as msgpack, past the {MAX_VALUE_BYTES} a field holds; {fix}"),
+    )
+}
+
+fn stored_named(value: &Value, named: impl FnOnce() -> String) -> Result<Vec<u8>> {
     let plain = encode(value);
     if plain.len() > MAX_VALUE_BYTES {
-        return Err(Error::new(
-            ErrorCode::ValueTooLarge,
-            format!(
-                "A value is {} bytes as msgpack, past the {MAX_VALUE_BYTES} a field holds; split it across fields or \
-                 entities, or keep it outside the database",
-                plain.len()
-            ),
+        return Err(too_large(
+            &named(),
+            plain.len(),
+            "split it across fields or entities, or keep it outside the database",
         ));
     }
     if plain.len() < COMPRESS_FROM {
         return Ok(plain);
     }
     match zstd::bulk::compress(&plain, ZSTD_LEVEL) {
-        // mutant-skip: replace (< with <=|\+ with -|\+ with \*) in stored
+        // mutant-skip: replace (< with <=|\+ with -|\+ with \*) in stored_named
         // stored's check that a frame is smaller than the msgpack it holds: moved by a byte, it keeps or drops a frame
         // within a byte of the msgpack's length, which decodes to the same value. Anchored by line, the same operator
         // being the threshold's on the line above; a line moved can hide a mutant of the same kind that lands here,
@@ -88,8 +104,9 @@ pub fn unstored_owned(bytes: Vec<u8>) -> Result<Vec<u8>> {
 const ONE_CALL_UP_TO: u64 = 16 << 20;
 
 /// The most msgpack a field's value holds. `stored` refuses a value past it, and a read refuses a frame that expands past
-/// it as `CORRUPTED`, whatever size the frame records: no stored bytes make a read hold more, and every value written
-/// reads back
+/// it as `CORRUPTED`, whatever size the frame records: a read decompresses no more than this, and every value written
+/// reads back. Decoding what it decompressed builds the value as a write of it would have, which for a list or map of
+/// many small members is many times its bytes
 pub const MAX_VALUE_BYTES: usize = 64 << 20;
 
 thread_local! {
@@ -100,9 +117,10 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// Maximum zstd window log accepted when streaming a stored value: 2^26 = 64 MiB, matching `MAX_VALUE_BYTES`
-/// (zstd's default decoder window limit is 2^27 = 128 MiB)
-const MAX_WINDOW_LOG: u32 = 26;
+/// The widest zstd window a streamed stored value may ask for: the window `ZSTD_LEVEL` compresses a value of any size
+/// with, which is what a streamed read holds beside what it decompresses. A frame asking for more was never written by
+/// `stored`, and is refused as `CORRUPTED` (zstd's own default is 2^27)
+const MAX_WINDOW_LOG: u32 = 21;
 
 fn decompress_stream(frame: &[u8], limit: usize) -> std::io::Result<Vec<u8>> {
     use std::io::Read as _;
@@ -696,20 +714,18 @@ mod tests {
         let over = stream_compress(&vec![b'x'; 513]);
         assert_eq!(decompress_stream(&over, 512).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 
-        // Power-of-2 chunk boundary: capacity stays within `limit` rather than doubling to `2 * limit`
-        let exact_chunk = stream_compress(&vec![b'y'; 65_536]);
-        let decoded = decompress_stream(&exact_chunk, 65_536).unwrap();
-        assert_eq!(decoded.len(), 65_536);
-        assert!(decoded.capacity() <= 65_536, "capacity {} exceeded limit 65536", decoded.capacity());
+        // One chunk past `limit` is refused at its first byte over
         let over_chunk = stream_compress(&vec![b'y'; 65_537]);
         assert_eq!(decompress_stream(&over_chunk, 65_536).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 
-        // Multi-chunk growth clamps to `limit` instead of `Vec`'s default 2x doubling (65_536 -> 131_072)
-        let bounded_input: Vec<u8> = (0..100_000usize).map(|i| (i % 251) as u8).collect();
-        let bounded_frame = stream_compress(&bounded_input);
-        let bounded = decompress_stream(&bounded_frame, 100_000).unwrap();
-        assert!(bounded == bounded_input);
-        assert!(bounded.capacity() <= 100_000, "capacity {} exceeded limit 100000", bounded.capacity());
+        // Growth stops at `limit`, where `Vec`'s own doubling would pass it: 65_536, then 131_072, then 262_144 for
+        // three chunks of 65_536, where the limit is three chunks' bytes
+        for limit in [100_000usize, 196_608] {
+            let input: Vec<u8> = (0..limit).map(|i| (i % 251) as u8).collect();
+            let decoded = decompress_stream(&stream_compress(&input), limit).unwrap();
+            assert!(decoded == input);
+            assert!(decoded.capacity() <= limit, "capacity {} exceeded limit {limit}", decoded.capacity());
+        }
 
         // Reaching exact current capacity on a later chunk does not pre-emptively double again
         let four_chunks = stream_compress(&vec![b'z'; 262_144]);
@@ -717,8 +733,9 @@ mod tests {
         assert_eq!(exact_cap.len(), 262_144);
         assert!(exact_cap.capacity() <= 262_144, "capacity {} grew past 262144", exact_cap.capacity());
 
-        // Window log boundary: 2^26 (64 MiB) matches `MAX_VALUE_BYTES` and is accepted; 2^27 (128 MiB) is refused
-        assert_eq!(1usize << MAX_WINDOW_LOG, MAX_VALUE_BYTES);
+        // Window log boundary: 2^21, the window `ZSTD_LEVEL` compresses a value of any size with, is accepted, and one
+        // wider is refused. The most a field holds, streamed, reads back within it
+        // (`a_value_of_the_most_a_field_holds_reads_back_whole_and_one_byte_more_is_refused`)
         let frame_with_window = |window_log: u32| {
             let mut enc = zstd::stream::Encoder::new(vec![COMPRESSED], 3).unwrap();
             enc.include_contentsize(false).unwrap();
@@ -726,10 +743,10 @@ mod tests {
             enc.write_all(b"window-check").unwrap();
             enc.finish().unwrap()
         };
-        let ok_window = frame_with_window(26);
+        let ok_window = frame_with_window(21);
         assert_eq!(unstored(&ok_window).unwrap().as_ref(), b"window-check");
-        let wide_window = frame_with_window(27);
-        // Valid under zstd's default 128 MiB window, proving our 64 MiB cap rejects it
+        let wide_window = frame_with_window(22);
+        // Valid under zstd's default window limit, so it is this one that refuses it
         let mut default_dec = zstd::stream::Decoder::new(&wide_window[1..]).unwrap();
         let mut check = Vec::new();
         std::io::Read::read_to_end(&mut default_dec, &mut check).unwrap();

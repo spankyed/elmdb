@@ -1,7 +1,7 @@
 //! The `elmdb` command: inspect, check, rebuild, back up, dump and load databases. Each opens the database itself, so the app
 //! that holds one open must close it first, except for `inspect`, `check`, `backup` and `dump`, which open it read-only.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -64,88 +64,6 @@ fn told(db: Database) -> elmdb::Result<Database> {
     Ok(db)
 }
 
-/// Refuses a backup target that is a file, or a directory holding a database an open has written in place or anything
-/// else no backup leaves: the command copies into a new directory, an empty one or an earlier backup, which it
-/// replaces, and never over what a target named in the wrong place holds. The engine refuses one another process has
-/// open
-fn check_backup_target(target: &Path) -> elmdb::Result<()> {
-    let meta = match std::fs::metadata(target) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => {
-            return Err(elmdb::Error::new(
-                elmdb::ErrorCode::Io,
-                format!("Cannot look at {}: {error}", target.display()),
-            ));
-        }
-    };
-    if !meta.is_dir() {
-        return Err(elmdb::Error::new(
-            elmdb::ErrorCode::Io,
-            format!("{} is a file; back up into a new directory, an empty one or an earlier backup", target.display()),
-        ));
-    }
-    if elmdb::written_in(target)? {
-        return Err(elmdb::Error::new(
-            elmdb::ErrorCode::TargetInUse,
-            format!(
-                "{} holds a database that has been opened for writing, which a backup would replace; back up into a \
-                 new directory, an empty one or an earlier backup",
-                target.display()
-            ),
-        ));
-    }
-    let mut has_lmdb = false;
-    let mut has_record_lock = false;
-    for entry in std::fs::read_dir(target)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let file_type = entry.file_type()?;
-        // Finder's, beside anything a person has looked at on macOS
-        if !elmdb::left_by_a_backup(&name) && name != ".DS_Store" {
-            return Err(elmdb::Error::new(
-                elmdb::ErrorCode::TargetInUse,
-                format!(
-                    "{} holds {}, which no backup leaves, so it may not be a backup; back up into a new directory, an \
-                     empty one or an earlier backup",
-                    target.display(),
-                    name.to_string_lossy()
-                ),
-            ));
-        }
-        // `wake` is a directory holding listeners' mailboxes; everything else a backup or Finder leaves is a regular
-        // file, never a directory or a symbolic link
-        let expected_type = if name == "wake" { file_type.is_dir() } else { file_type.is_file() };
-        if !expected_type {
-            return Err(elmdb::Error::new(
-                elmdb::ErrorCode::TargetInUse,
-                format!(
-                    "{} holds {} with an unexpected file type, which no backup leaves; back up into a new directory, \
-                     an empty one or an earlier backup",
-                    target.display(),
-                    name.to_string_lossy()
-                ),
-            ));
-        }
-        if name == "data.mdb" || name == "lock.mdb" {
-            has_lmdb = true;
-        } else if elmdb::is_backup_lock(&name) {
-            has_record_lock = true;
-        }
-    }
-    if has_lmdb && !has_record_lock {
-        return Err(elmdb::Error::new(
-            elmdb::ErrorCode::TargetInUse,
-            format!(
-                "{} holds LMDB files without an elmdb backup lock (synced.lock), so it may belong to another program; \
-                 back up into a new directory, an empty one or an earlier backup",
-                target.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn run(command: Command) -> elmdb::Result<bool> {
     match command {
         Command::Inspect { dir } => {
@@ -166,11 +84,9 @@ fn run(command: Command) -> elmdb::Result<bool> {
             Ok(true)
         }
         Command::Backup { dir, target } => {
-            let db = read_only(&dir)?;
-            // Once the source is open, which can take a while, so that the target is looked at as close to the backup
-            // as can be
-            check_backup_target(&target)?;
-            db.backup(&target)?;
+            // Into a new directory, an empty one or an earlier backup, never over what a target named in the wrong place
+            // holds: the engine looks at it under the lock that keeps any open there from beginning meanwhile
+            read_only(&dir)?.backup_into(&target, elmdb::BackupInto::Backups)?;
             println!("{} copied to {}", dir.display(), target.display());
             Ok(true)
         }

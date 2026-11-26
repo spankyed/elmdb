@@ -111,7 +111,7 @@ fn read(store: &Store) -> Result<()> {
 
 fn backed_up(store: &Store) -> Result<()> {
     let target = tempfile::tempdir().unwrap();
-    super::backup::copy(store, &target.path().join("copy"))
+    super::backup::copy(store, &target.path().join("copy"), super::BackupInto::default())
 }
 
 #[test]

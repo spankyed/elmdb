@@ -215,15 +215,21 @@ Held by the types and the specs, which say more than a rule over names could:
   `containing(text, { caseInsensitive? })` and `matching(pattern)` filter without ranking (`search.md`, Substrings and
   patterns as built); a type with none refuses them (`UNKNOWN_INDEX`).
 - **Watches.** `watch(read, observer)` runs `read` and delivers its result, then runs it again after every commit that
-  wrote into what it read, delivering each result that differs from the last it delivered, with the commit's sequence
-  (`lastCommit()`). A result differs unless it is the same object or `sameValue` finds it equal: arrays and plain
-  objects by their contents, a plain object's being its own enumerable string keys, so a change only to a symbol-keyed
-  or non-enumerable property isn't delivered; a map by the values under its keys and a set by its members, keys and
-  members matched by identity, so a map or set keyed by objects each run makes afresh differs every time; and dates,
-  regular expressions, URLs and bytes by their value. An instance of a class extending any of these (a Node `Buffer`,
-  say) is compared as what it extends. Any other object, such as an instance of a class extending none of them or a
-  plain object from another realm, differs unless it is the same object, since what it holds may not be its own
-  enumerable keys: a watch whose result holds a new one is delivered after every commit that wrote into what it read.
+  wrote into what it read, delivering each result that differs from the last run's, with the commit's sequence
+  (`lastCommit()`). A run that threw counts as the last even where the observer has no `error` to hear it, so the next
+  result is delivered whatever it is. Two results are the same where `Object.is` finds them so (`NaN` is `NaN`, and
+  `0` isn't `-0`), or where `sameValue` finds two objects of one prototype equal, comparing through what they hold:
+  arrays and plain objects (of `Object.prototype` or none) by their contents, a plain object's being its own
+  enumerable string keys, so a change only to a symbol-keyed or non-enumerable property isn't delivered; a map by the
+  values under its keys and a set by its members, keys and members matched by identity, so a map or set keyed by
+  objects each run makes afresh differs every time; dates by their time, regular expressions by their source, flags
+  and `lastIndex`, URLs by their `href`, and typed arrays, `DataView`s and `ArrayBuffer`s by their bytes. A cycle
+  compares as the same where it comes back to a pair already being compared. As the prototypes must be one, a class
+  extending any of these is compared as what it extends only against another of its own class: a Node `Buffer` and a
+  `Uint8Array` of the same bytes differ, as do a `Uint8Array` and a `Float32Array`. Any other object, such as an
+  instance of a class extending none of them or a plain object from another realm, differs unless it is the same
+  object, since what it holds may not be its own enumerable keys: a watch whose result holds a new one is delivered
+  after every commit that wrote into what it read.
   Tracking is the database's (`engine.md`, Change sets and watch): each run drops what the watch's token held and makes
   its reads tracked under it, and a commit's change set names the tokens it wrote into, so a write's cost doesn't grow
   with the watches open. **However fast anything commits, a watch's cost is bounded by the scheduler, not by its

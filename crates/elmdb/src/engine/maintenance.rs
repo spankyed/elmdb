@@ -205,7 +205,17 @@ pub(crate) fn primary_loads_of(r: &impl Read, mut each: impl FnMut(Load) -> Resu
             let Some(Part::String(field)) = decode_key(key)?.pop() else {
                 return Err(corrupt("An entity's field key"));
             };
-            fields.insert(field, values::decode_stored(bytes)?);
+            let plain = values::unstored(bytes)?;
+            // A build before the cap stored such a value as it was, uncompressed, and a load refuses it: refused here,
+            // before anything is made of the loads, rather than by the load after them
+            if plain.len() > values::MAX_VALUE_BYTES {
+                return Err(values::too_large(
+                    &format!("The value of `{field}` of {id}"),
+                    plain.len(),
+                    "a build before the cap wrote it, and a load refuses it: write it smaller or remove it, then go again",
+                ));
+            }
+            fields.insert(field, values::decode(&plain)?);
             Ok(())
         })?;
         each(Load::Entity { id, fields, trashed })?;
@@ -321,9 +331,15 @@ fn stats_of(r: &impl Read) -> Result<Stats> {
 }
 
 impl Database {
-    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own
+    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own. It
+    /// replaces the data file of an elmdb database closed there (`BackupInto::AnyClosedDatabase`)
     pub fn backup(&self, target: impl AsRef<Path>) -> Result<()> {
         self.store()?.copy_to(target.as_ref())
+    }
+
+    /// `backup`, replacing only what `into` lets it: `BackupInto::Backups` is the `elmdb` command's
+    pub fn backup_into(&self, target: impl AsRef<Path>, into: crate::BackupInto) -> Result<()> {
+        self.store()?.copy_into(target.as_ref(), into)
     }
 
     /// Atomically removes every entry but the database's own (its format and schema), with durable completion,

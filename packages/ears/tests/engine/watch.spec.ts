@@ -604,6 +604,14 @@ describe('closing the database during a watch flush', () => {
 });
 
 describe('sameValue', () => {
+  it('compares plain objects by their own enumerable keys alone, whichever comes first', () => {
+    const hidden = Object.defineProperty({ y: 2 }, 'x', { value: 1, enumerable: false });
+    expect(sameValue({ x: 1 }, hidden)).toBe(false);
+    expect(sameValue(hidden, { x: 1 })).toBe(false);
+    expect(sameValue({ y: 2 }, hidden)).toBe(true);
+    expect(sameValue(hidden, { y: 2 })).toBe(true);
+  });
+
   it('distinguishes typed array views with identical bytes', () => {
     expect(sameValue(new Uint8Array([0, 0, 0, 0]), new Float32Array([0]))).toBe(false);
     expect(sameValue(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 3]))).toBe(true);

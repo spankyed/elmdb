@@ -141,9 +141,14 @@ pub enum ErrorCode {
     /// elmdb panicked in a call from JavaScript, which is a bug in elmdb: the binding caught it, the call may not
     /// have finished, and the database handle refuses calls with this code until it is closed and opened again
     Panicked,
-    /// A backup's target holds what the backup mustn't replace: a database another process has open, whose file the
-    /// backup would replace beneath it, a database an open has written in place there, or files no backup leaves
+    /// A backup's target holds a database another process has open, whose file the backup would replace beneath it:
+    /// once it is closed there, the backup may be made again
     TargetInUse,
+    /// A backup's target is no directory a backup may be made in, whatever is open: a file, the listeners' directory of
+    /// the database backed up, one whose data file is no elmdb database's, or, where the backup is held to replacing only
+    /// backups, one holding a database an open has written in place or what no backup leaves. The fix is another
+    /// directory
+    TargetRefused,
 }
 
 impl ErrorCode {
@@ -210,6 +215,7 @@ impl ErrorCode {
             Self::CallbackActive => "CALLBACK_ACTIVE",
             Self::Panicked => "PANICKED",
             Self::TargetInUse => "TARGET_IN_USE",
+            Self::TargetRefused => "TARGET_REFUSED",
         }
     }
 }
@@ -329,6 +335,7 @@ mod tests {
             CallbackActive,
             Panicked,
             TargetInUse,
+            TargetRefused,
         );
     }
 }

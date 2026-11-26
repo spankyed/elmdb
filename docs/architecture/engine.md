@@ -841,10 +841,16 @@ unit is open.
   it where it isn't, and its presence lock where an open made one (Durability), until the copy is published: every
   open decides under the decision lock before it takes the presence lock, so a database another process has open there
   is refused (`TARGET_IN_USE`), and an open that begins there waits for the backup to end. Beside its data file, a
-  backup leaves the decision lock it made. A backup into a directory replaces the data file a backup or a closed
-  database there left. The `elmdb` command refuses a directory holding a database an open has written in place, or
-  anything else no backup or read-only open of one leaves (`TARGET_IN_USE`), so that a backup named in the wrong place
-  replaces nothing, and copies into a new directory, an empty one or an earlier backup. Failure before
+  backup leaves the decision lock it made. A backup into a directory replaces the data file of an elmdb database closed
+  there, a backup's or one written in place (`BackupInto::AnyClosedDatabase`, what `backup` and the binding's
+  `db.backup` do), and refuses (`TARGET_REFUSED`), before anything is made there, a file, the database's own `wake/`,
+  whose commits remove what isn't a listener's mailbox, and a directory whose data file is no elmdb database's, read from the file by seeks: another
+  program's LMDB file, whatever lock files a refused open of it left. The `elmdb` command backs up as
+  `BackupInto::Backups`, which also refuses a directory holding a database an open has written in place, or anything
+  else no backup or read-only open of one leaves, so that a backup named in the wrong place replaces nothing, and
+  copies into a new directory, an empty one or an earlier backup. What the target holds is looked at before the
+  decision lock is made there, so a directory refused is left as it was, and again under it, so what an open made
+  meanwhile is seen too. Failure before
   publication preserves the old backup. Unix backup data files are private to the creating user (mode 0600); arrange ownership/permissions
   explicitly before restoring under another account. Unix syncs affected directories; Windows clears the temporary
   file attribute before requesting a write-through replacement. If directory sync
@@ -907,7 +913,7 @@ unit is open.
   relations, a role, which goes from every entity holding it, a removed type's kept entities included. It refuses a name
   the schema still declares (`SCHEMA_CHANGE_REFUSED`). It refuses one of the engine's own fields too
   (`RESERVED_FIELD`): no schema declares `trashedAt` or `shortCode`, and neither is what a removed declaration left.
-- `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit; a new name the schema doesn't declare is refused (`SCHEMA_CHANGE_REFUSED`), and a `renameType` onto an id that exists already is refused (`ID_IN_USE`). A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves. A `renameType` rewrites the ids its entities are named by in relations' ends, in `ref` fields and in a relation's info declared a `ref`. It is refused (`SCHEMA_CHANGE_REFUSED`), and nothing moves, when `check()` would report of what it leaves a rule it didn't report before: an entity the new type's fields don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the new type, a `ref` that doesn't name it, or that names a moved entity where it is declared for neither type. A rule a load left broken is left to `check()` when it names no moved entity; one that does is reported in other words after the rename, and is held to as the rename's own.
+- `renameType`, `renameField`, `renameRelation`: move stored data to a name the schema declares, in one durable unit; a new name the schema doesn't declare is refused (`SCHEMA_CHANGE_REFUSED`), and a `renameType` onto an id that exists already is refused (`ID_IN_USE`), as is one whose rewrite of a `ref` list would take it past the 64 MiB a field holds (`VALUE_TOO_LARGE`). A rename that would make two edges of one kind join the same ends and key is refused (`DUPLICATE_EDGE`), as an update onto another edge's identity is, and nothing moves. A `renameType` rewrites the ids its entities are named by in relations' ends, in `ref` fields and in a relation's info declared a `ref`. It is refused (`SCHEMA_CHANGE_REFUSED`), and nothing moves, when `check()` would report of what it leaves a rule it didn't report before: an entity the new type's fields don't take or that shares a unique value with one of the type's own, a relation whose kind doesn't join the new type, a `ref` that doesn't name it, or that names a moved entity where it is declared for neither type. A rule a load left broken is left to `check()` when it names no moved entity; one that does is reported in other words after the rename, and is held to as the rename's own.
   `renameRelation` holds each edge it moves to the new kind's rules as a link of that kind is held: its info
   (`FIELD_TYPE`, `REQUIRED_FIELD`), no entity joined to itself (`SELF_LINK`), the types it joins (`ENDPOINT`), how
   many far ends an end may have (`CARDINALITY`) and, in a kind declared acyclic, no cycle (`CYCLE`), each against

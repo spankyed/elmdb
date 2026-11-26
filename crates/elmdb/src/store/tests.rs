@@ -789,10 +789,299 @@ fn what_a_backup_and_a_read_only_open_of_it_leave_is_left_by_a_backup_and_what_a
     }
     #[cfg(unix)]
     assert!(!left_by_a_backup(std::os::unix::ffi::OsStrExt::from_bytes(b"data.mdb\xff")));
+}
 
-    assert!(is_backup_lock(record::RECORD_LOCK.as_ref()));
-    assert!(!is_backup_lock("data.mdb".as_ref()));
-    assert!(!is_backup_lock(record::PRESENCE.as_ref()));
+/// Another program's LMDB files in `dir`: a data file naming a database of its own, and its lock file
+fn another_programs_lmdb(dir: &Path) {
+    // SAFETY: a test's own new directory, opened once
+    let env = unsafe { EnvOpenOptions::new().max_dbs(2).open(dir) }.unwrap();
+    let wtxn = env.write_txn().unwrap();
+    env.create_databases_and_commit(wtxn, |opener, wtxn| -> heed::Result<_> {
+        Ok(CommitOrAbort::<_, ()>::Commit(opener.create_database::<Bytes, Bytes>(wtxn, Some("theirs"))?))
+    })
+    .unwrap();
+    env.prepare_for_closing().wait();
+}
+
+#[test]
+fn a_backup_replaces_no_data_file_of_another_program_s_even_where_a_failed_open_left_its_locks() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    // Bytes LMDB never wrote, and an LMDB database naming no elmdb database
+    let bytes = tempfile::tempdir().unwrap();
+    std::fs::write(bytes.path().join("data.mdb"), b"another program's").unwrap();
+    let lmdb = tempfile::tempdir().unwrap();
+    another_programs_lmdb(lmdb.path());
+    // And one whose main tree holds a plain key named as elmdb's database is, which names no database
+    let keyed = tempfile::tempdir().unwrap();
+    {
+        // SAFETY: a test's own new directory, opened once
+        let env = unsafe { EnvOpenOptions::new().max_dbs(2).open(keyed.path()) }.unwrap();
+        let wtxn = env.write_txn().unwrap();
+        env.create_databases_and_commit(wtxn, |opener, wtxn| -> heed::Result<_> {
+            let main = opener.create_database::<Bytes, Bytes>(wtxn, None)?;
+            main.put(wtxn, crate::format::DB_NAME.as_bytes(), b"a value, no database")?;
+            Ok(CommitOrAbort::<_, ()>::Commit(()))
+        })
+        .unwrap();
+        env.prepare_for_closing().wait();
+    }
+    for target in [bytes.path(), lmdb.path(), keyed.path()] {
+        // An open of it is refused, and leaves the locks it made deciding: no evidence of a backup
+        assert!(Store::open(target, StoreOptions { read_only: true, ..quiet() }).is_err());
+        assert!(target.join(record::RECORD_LOCK).exists() && target.join(record::PRESENCE).exists());
+        let before = std::fs::read(target.join("data.mdb")).unwrap();
+        for into in [BackupInto::AnyClosedDatabase, BackupInto::Backups] {
+            let error = store.copy_into(target, into).unwrap_err();
+            assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+            assert!(error.message.contains("no elmdb database's"), "{error}");
+            assert_eq!(std::fs::read(target.join("data.mdb")).unwrap(), before, "{into:?}");
+        }
+    }
+    // An elmdb database's file is replaced: an earlier backup's under either, and a database's closed after writing
+    // where the backup may replace one
+    let earlier = tempfile::tempdir().unwrap();
+    store.copy_to(earlier.path()).unwrap();
+    Store::open(earlier.path(), StoreOptions { read_only: true, ..quiet() }).unwrap().close().unwrap();
+    store.copy_into(earlier.path(), BackupInto::Backups).unwrap();
+    let written = tempfile::tempdir().unwrap();
+    Store::open(written.path(), quiet()).unwrap().close().unwrap();
+    assert_eq!(store.copy_into(written.path(), BackupInto::Backups).unwrap_err().code, ErrorCode::TargetRefused);
+    store.copy_to(written.path()).unwrap();
+    assert_eq!(get(&Store::open(written.path(), quiet()).unwrap(), "a").as_deref(), Some(&b"1"[..]));
+}
+
+#[test]
+fn a_backup_into_the_listeners_wake_of_the_database_it_backs_up_is_refused_and_makes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    // What listeners that stopped leave: their directory, empty, which every commit clears of what isn't a mailbox
+    std::fs::create_dir(dir.path().join("wake")).unwrap();
+    for into in [
+        dir.path().join("wake"),
+        dir.path().join("wake").join("today"),
+        dir.path().join("nonexistent").join("..").join("wake"),
+        dir.path().join("nonexistent").join("..").join("wake").join("today"),
+    ] {
+        let error = store.copy_to(&into).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+        assert!(error.message.contains("listener's mailbox"), "{error}");
+        assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0, "{}", into.display());
+    }
+    // On case-insensitive OSes (macOS APFS, Windows NTFS), `WAKE` before `wake/` exists is refused too
+    #[cfg(any(windows, target_os = "macos"))]
+    {
+        let fresh = tempfile::tempdir().unwrap();
+        let fresh_store = Store::open(fresh.path(), quiet()).unwrap();
+        let error = fresh_store.copy_to(&fresh.path().join("WAKE")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+        assert!(!fresh.path().join("WAKE").exists());
+    }
+    // Named through a link to the database too
+    #[cfg(unix)]
+    {
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("db");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        assert_eq!(store.copy_to(&link.join("wake")).unwrap_err().code, ErrorCode::TargetRefused);
+        assert_eq!(std::fs::read_dir(dir.path().join("wake")).unwrap().count(), 0);
+    }
+    // Another directory inside it is the database's to hold
+    store.copy_to(&dir.path().join("backups")).unwrap();
+    assert!(dir.path().join("backups").join("data.mdb").is_file());
+}
+
+#[test]
+fn a_backup_held_to_backups_refuses_a_directory_holding_what_no_backup_leaves_and_leaves_it_as_it_was() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let names = |at: &Path| -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = std::fs::read_dir(at).unwrap().map(|e| e.unwrap().file_name()).collect();
+        names.sort();
+        names
+    };
+    let refused = |made: &dyn Fn(&Path), why: &str| {
+        let target = tempfile::tempdir().unwrap();
+        made(target.path());
+        let before = names(target.path());
+        let error = store.copy_into(target.path(), BackupInto::Backups).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+        assert!(error.message.contains(why), "{why}: {error}");
+        assert_eq!(names(target.path()), before, "{why}: nothing made or replaced");
+    };
+    refused(
+        &|at| std::fs::write(at.join("package.json"), b"{}").unwrap(),
+        "holds package.json, which no backup leaves",
+    );
+    refused(&|at| std::fs::create_dir(at.join("data.mdb")).unwrap(), "holds data.mdb of a kind no backup leaves");
+    refused(&|at| std::fs::write(at.join("wake"), b"").unwrap(), "holds wake of a kind no backup leaves");
+    refused(&|at| std::fs::write(at.join("lock.mdb"), b"").unwrap(), "holds lock.mdb and no data.mdb");
+    #[cfg(unix)]
+    {
+        let linked_backup = tempfile::tempdir().unwrap();
+        store.copy_to(linked_backup.path()).unwrap();
+        refused(
+            &|at| std::os::unix::fs::symlink(linked_backup.path().join("data.mdb"), at.join("data.mdb")).unwrap(),
+            "holds data.mdb of a kind no backup leaves",
+        );
+    }
+    // What a backup and a read-only open of it leave is replaced, Finder's `.DS_Store` beside it
+    let earlier = tempfile::tempdir().unwrap();
+    store.copy_into(earlier.path(), BackupInto::Backups).unwrap();
+    let read = Store::open(earlier.path(), StoreOptions { read_only: true, ..quiet() }).unwrap();
+    read.wake.listen(Arc::new(|| {})).unwrap();
+    read.wake.stop();
+    read.close().unwrap();
+    std::fs::write(earlier.path().join(".DS_Store"), b"").unwrap();
+    assert!(names(earlier.path()).iter().any(|name| name == "lock.mdb"));
+    store.copy_into(earlier.path(), BackupInto::Backups).unwrap();
+    // And an empty directory, and a new one
+    store.copy_into(tempfile::tempdir().unwrap().path(), BackupInto::Backups).unwrap();
+    store.copy_into(&tempfile::tempdir().unwrap().path().join("new"), BackupInto::Backups).unwrap();
+}
+
+#[test]
+fn a_backup_refuses_a_file_as_its_target_and_one_it_can_t_look_at_as_that() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let files = tempfile::tempdir().unwrap();
+    let file = files.path().join("a-file");
+    std::fs::write(&file, b"keep").unwrap();
+    for into in [BackupInto::AnyClosedDatabase, BackupInto::Backups] {
+        let error = store.copy_into(&file, into).unwrap_err();
+        assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+        assert!(error.message.contains("is not a directory"), "{error}");
+        // Beneath a file, which unix answers as not a directory and Windows as not found
+        #[cfg(unix)]
+        {
+            let error = store.copy_into(&file.join("backup"), into).unwrap_err();
+            assert_eq!(error.code, ErrorCode::Io, "{error}");
+            assert!(error.message.contains("Cannot look at"), "{error}");
+        }
+    }
+    assert_eq!(std::fs::read(&file).unwrap(), b"keep");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_backup_refuses_a_data_file_it_can_t_read_and_takes_a_presence_lock_it_may_only_read() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    let target = tempfile::tempdir().unwrap();
+    store.copy_to(target.path()).unwrap();
+    let data = target.path().join("data.mdb");
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root reads it all the same, and nothing here can make it fail to
+    if std::fs::File::open(&data).is_ok() {
+        return;
+    }
+    let error = store.copy_to(target.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Io, "{error}");
+    assert!(error.message.contains("Cannot look at") && error.message.contains("data.mdb"), "{error}");
+    std::fs::set_permissions(&data, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // A presence lock an open made that this process may read and not write is locked as it is
+    let presence = target.path().join(record::PRESENCE);
+    std::fs::write(&presence, b"").unwrap();
+    std::fs::set_permissions(&presence, std::fs::Permissions::from_mode(0o444)).unwrap();
+    store.copy_to(target.path()).unwrap();
+    // An unsearchable target directory fails `symlink_metadata(data.mdb)` as `IO`, never taken as absent
+    let unsearchable = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(unsearchable.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+    let error = store.copy_to(unsearchable.path()).unwrap_err();
+    std::fs::set_permissions(unsearchable.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(error.code, ErrorCode::Io, "{error}");
+    assert!(error.message.contains("Cannot look at") && error.message.contains("data.mdb"), "{error}");
+}
+
+#[test]
+fn a_backup_refuses_non_file_data_mdb_and_defers_data_inspection_when_locks_are_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+
+    // Another program's `data.mdb` without locks is refused before creating `synced.lock`
+    let bare_other = tempfile::tempdir().unwrap();
+    std::fs::write(bare_other.path().join("data.mdb"), b"not elmdb").unwrap();
+    let error = store.copy_to(bare_other.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+    assert!(!bare_other.path().join(record::RECORD_LOCK).exists(), "no decision lock created on pre-lock refusal");
+
+    // `AnyClosedDatabase` refuses a directory named `data.mdb` as `TARGET_REFUSED`
+    let subdir_data = tempfile::tempdir().unwrap();
+    std::fs::create_dir(subdir_data.path().join("data.mdb")).unwrap();
+    let error = store.copy_to(subdir_data.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+    assert!(error.message.contains("of a kind no backup leaves"), "{error}");
+
+    // When `open.lock` is held, an empty/in-progress `data.mdb` reports `TARGET_IN_USE` rather than racy `TARGET_REFUSED`
+    let in_use = tempfile::tempdir().unwrap();
+    std::fs::write(in_use.path().join("data.mdb"), b"").unwrap();
+    let presence_file = std::fs::File::create(in_use.path().join(record::PRESENCE)).unwrap();
+    presence_file.lock_shared().unwrap();
+    let error = store.copy_to(in_use.path()).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetInUse, "{error}");
+    drop(presence_file);
+
+    // When `synced.lock` is held while another open finishes initializing `data.mdb`, backup waits on `synced.lock`
+    // and then replaces the finished elmdb database instead of returning a racy `TARGET_REFUSED`
+    let initializing = tempfile::tempdir().unwrap();
+    std::fs::write(initializing.path().join("data.mdb"), b"").unwrap();
+    let decision = std::fs::File::create(initializing.path().join(record::RECORD_LOCK)).unwrap();
+    decision.lock().unwrap();
+    let valid_seed = tempfile::tempdir().unwrap();
+    store.copy_to(valid_seed.path()).unwrap();
+    let valid_bytes = std::fs::read(valid_seed.path().join("data.mdb")).unwrap();
+    let init_path = initializing.path().to_path_buf();
+    let releaser = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(init_path.join("data.mdb"), valid_bytes).unwrap();
+        drop(decision);
+    });
+    store.copy_to(initializing.path()).unwrap();
+    releaser.join().unwrap();
+    assert_eq!(get(&Store::open(initializing.path(), quiet()).unwrap(), "a").as_deref(), Some(&b"1"[..]));
+}
+
+#[test]
+fn a_backup_held_to_backups_looks_at_its_target_under_the_decision_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path(), quiet()).unwrap();
+    put(&store, "a", b"1").unwrap();
+    store.copy_into(target.path(), BackupInto::Backups).unwrap();
+    let before = std::fs::read(target.path().join("data.mdb")).unwrap();
+    // What an open there that wrote in place before the lock was taken leaves: seen, since it is looked for after
+    let at = target.path().to_owned();
+    crate::failpoints::run_once_here(crate::failpoints::points::BACKUP_DECIDING, move || {
+        std::fs::write(at.join(record::RECORD), b"").unwrap();
+    });
+    let error = store.copy_into(target.path(), BackupInto::Backups).unwrap_err();
+    assert_eq!(error.code, ErrorCode::TargetRefused, "{error}");
+    assert!(error.message.contains("opened for writing"), "{error}");
+    assert_eq!(std::fs::read(target.path().join("data.mdb")).unwrap(), before);
+}
+
+#[cfg(unix)]
+#[test]
+fn an_open_names_a_lock_file_it_can_t_open_as_that_rather_than_one_it_can_t_make() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    Store::open(dir.path(), quiet()).unwrap().close().unwrap();
+    let lock = dir.path().join(record::RECORD_LOCK);
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o000)).unwrap();
+    // Root opens it all the same, and nothing here can make it fail to
+    if std::fs::File::open(&lock).is_ok() {
+        return;
+    }
+    let error = Store::open(dir.path(), quiet()).err().unwrap();
+    assert_eq!(error.code, ErrorCode::Io);
+    assert!(error.message.contains("Cannot open the lock file") && error.message.contains("synced.lock"), "{error}");
 }
 
 #[test]

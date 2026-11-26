@@ -653,23 +653,38 @@ fn a_backup_refuses_a_target_another_process_has_open_and_goes_on_once_it_closes
 }
 
 #[test]
+fn a_backup_into_backups_alone_replaces_an_earlier_backup_and_refuses_a_database_written_in_place() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = open(&dir);
+    write(&db, vec![json!({ "op": "create", "type": "Task", "id": "Task-1" })]).unwrap();
+    let target = tempfile::tempdir().unwrap();
+    db.backup_into(target.path(), crate::BackupInto::Backups).unwrap();
+    db.backup_into(target.path(), crate::BackupInto::Backups).unwrap();
+    assert!(row(&Database::open(target.path(), OpenOptions::default()).unwrap(), "Task-1").is_some());
+    // Opened to write just now, it is a database written in place
+    let error = db.backup_into(target.path(), crate::BackupInto::Backups).unwrap_err();
+    assert_eq!(error.code, crate::ErrorCode::TargetRefused, "{error}");
+    db.backup(target.path()).unwrap();
+}
+
+#[test]
 fn a_directory_is_written_in_once_an_open_has_written_there_and_never_by_a_backup_or_a_read() {
     let dir = tempfile::tempdir().unwrap();
     let target = tempfile::tempdir().unwrap();
-    assert!(!crate::written_in(dir.path()).unwrap(), "an empty directory");
+    assert!(!crate::store::written_in(dir.path()).unwrap(), "an empty directory");
     let db = open(&dir);
-    assert!(crate::written_in(dir.path()).unwrap(), "a writable open's");
+    assert!(crate::store::written_in(dir.path()).unwrap(), "a writable open's");
     db.backup(target.path()).unwrap();
-    assert!(!crate::written_in(target.path()).unwrap(), "a backup");
+    assert!(!crate::store::written_in(target.path()).unwrap(), "a backup");
     Database::open(target.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap().close().unwrap();
-    assert!(!crate::written_in(target.path()).unwrap(), "a backup a read-only open read");
+    assert!(!crate::store::written_in(target.path()).unwrap(), "a backup a read-only open read");
     for mode in [
         OpenOptions { sync_each_commit: true, ..Default::default() },
         OpenOptions { syncs: false, ..Default::default() },
     ] {
         let other = tempfile::tempdir().unwrap();
         Database::open(other.path(), mode).unwrap().close().unwrap();
-        assert!(crate::written_in(other.path()).unwrap(), "a writable open's in each mode");
+        assert!(crate::store::written_in(other.path()).unwrap(), "a writable open's in each mode");
     }
 }
 

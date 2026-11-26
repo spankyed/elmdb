@@ -194,6 +194,63 @@ pub(super) fn named_roots(page: &[u8]) -> Vec<u64> {
         .collect()
 }
 
+/// Whether `page`, the root of a main tree, is a leaf naming the database `name`. elmdb's main tree names its few
+/// databases and nothing else, so its root is that leaf; another program's file names others, or none, or more than a
+/// leaf holds
+pub(super) fn root_names_database(page: &[u8], name: &[u8]) -> bool {
+    // mutant-skip: replace & with \| in root_names_database
+    // mutant-skip: replace & with \^ in root_names_database (as above)
+    // A branch taken for a leaf names no database either: where a leaf's node holds its flags, a branch's holds the
+    // high bits of a page number, which no file under 2^32 pages has
+    if u16_at(page, 10) & P_LEAF == 0 {
+        return false;
+    }
+    let Some(mut page_nodes) = nodes(page) else {
+        return false;
+    };
+    page_nodes.any(|node| {
+        let Some(head) = page.get(node..node + 8) else { return false };
+        let flags = u16::from_ne_bytes([head[4], head[5]]);
+        let key = u16::from_ne_bytes([head[6], head[7]]) as usize;
+        flags & F_SUBDATA != 0 && page.get(node + 8..node + 8 + key) == Some(name)
+    })
+}
+
+/// Reads `buf.len()` bytes starting at `at`, returning `Ok(false)` on `UnexpectedEof` and propagating other I/O errors
+fn read_exact_or_eof(file: &mut File, at: u64, buf: &mut [u8]) -> std::io::Result<bool> {
+    file.seek(SeekFrom::Start(at))?;
+    match file.read_exact(buf) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether `file` is an elmdb database's data file, read by seeks at the commit its newer meta page names: a file too
+/// short or not of LMDB's making is not. Reads only what is there to tell, so it is for a file no process is writing
+pub(super) fn is_elmdb_file(file: &mut File) -> std::io::Result<bool> {
+    let mut size = [0u8; 4];
+    if !read_exact_or_eof(file, (PAGE_HEADER + 24) as u64, &mut size)? {
+        return Ok(false);
+    }
+    let psize = u32::from_ne_bytes(size) as usize;
+    // The page sizes LMDB writes
+    if !matches!(psize, 512 | 1024 | 2048 | 4096 | 8192 | 16384 | 32768) {
+        return Ok(false);
+    }
+    let Some(meta) = newer_meta_page(file, psize)? else { return Ok(false) };
+    let root = meta.roots()[1];
+    if root == NONE {
+        return Ok(false);
+    }
+    let Some(at) = root.checked_mul(psize as u64) else { return Ok(false) };
+    let mut page = vec![0u8; psize];
+    if !read_exact_or_eof(file, at, &mut page)? {
+        return Ok(false);
+    }
+    Ok(root_names_database(&page, crate::format::DB_NAME.as_bytes()))
+}
+
 /// The meta page in `slot`, 0 or 1, where it reads as one: LMDB's magic, and whole as far as a read of it goes. None
 /// where the page doesn't carry the magic, and an error where the file can't be read there: a failed read says nothing
 /// of what the page holds
@@ -665,6 +722,16 @@ mod tests {
         assert_eq!(newer.map(|meta| meta.txnid), Some(5), "a file torn short refused");
         let mut unreadable = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         assert!(newer_meta_page(&mut unreadable, PSIZE).is_err(), "a failed read taken as no meta page");
+        assert!(is_elmdb_file(&mut unreadable).is_err(), "a failed read taken as not an elmdb file");
+
+        // A valid meta page whose main-tree root lies past EOF answers false rather than erring
+        let mut truncated = vec![0u8; PSIZE];
+        truncated[META_MAGIC..META_MAGIC + 4].copy_from_slice(&MAGIC.to_ne_bytes());
+        truncated[PAGE_HEADER + 24..PAGE_HEADER + 28].copy_from_slice(&(PSIZE as u32).to_ne_bytes());
+        truncated[META_MAIN_ROOT..META_MAIN_ROOT + 8].copy_from_slice(&5u64.to_ne_bytes());
+        truncated[META_TXNID..META_TXNID + 8].copy_from_slice(&1u64.to_ne_bytes());
+        std::fs::write(&path, &truncated).unwrap();
+        assert!(!is_elmdb_file(&mut File::open(&path).unwrap()).unwrap());
     }
 
     #[test]

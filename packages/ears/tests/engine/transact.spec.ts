@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { committing, engine, type Id, type RelId } from './helpers.ts';
 import type { EngineUnderTest } from './engine-under-test.ts';
+import { createConnection, type EarsDatabase } from '../../src/database.ts';
 
 let e: EngineUnderTest;
 /** The units the store committed since the spec's own setup */
@@ -331,6 +332,66 @@ describe('beforeCommit hook and transactWithoutHook', () => {
     expect(hook.runs).toBe(1);
     e.write(project).set('name', 'not wanted');
     expect(hook.runs).toBe(1);
+  });
+
+  it('asks one hook about every op of a write, even one whose wants sets another', () => {
+    let database: EarsDatabase | undefined;
+    engine({ wrap: (held) => (database = held) });
+    const connection = createConnection(database!);
+    const second = { runs: 0, wants: () => false, run() { this.runs++; } };
+    const first = {
+      asked: [] as string[],
+      wants(type: string) { this.asked.push(type); connection.beforeCommit(second); return type === 'Task'; },
+      run() {},
+    };
+    connection.beforeCommit(first);
+    // The first hook is asked about both ops, and the unit it wanted commits with the hook set by then
+    connection.write([
+      { op: 'create', type: 'Project', id: 'Project-pinned', fields: {} },
+      { op: 'create', type: 'Task', id: 'Task-pinned', fields: {} },
+    ]);
+    expect(first.asked).toEqual(['Project', 'Task']);
+    expect(second.runs).toBe(1);
+  });
+
+  it('asks the hook about an id with no dash by the whole id, the type the engine reads from it', () => {
+    const bare = 'Task' as Id;
+    e.create('Task', { id: bare, title: 'bare' });
+    const asked: string[] = [];
+    let runs = 0;
+    e.admin.beforeCommit({ wants: (type) => { asked.push(type); return type === 'Task'; }, run: () => { runs++; } });
+    e.write(bare).set('title', 'seen');
+    expect(asked).toEqual(['Task']);
+    expect(runs).toBe(1);
+  });
+
+  it('refuses transactWithoutHook inside a normal unit (with or without a hook) and allows it inside the hook or another transactWithoutHook', () => {
+    // Refused even before a hook is registered, so the contract does not depend on registration order
+    expect(() => e.transact(() => {
+      e.admin.transactWithoutHook(() => { e.write(other).set('title', 'no-hook'); });
+    })).toThrow(/inside a unit the beforeCommit hook runs in/);
+    expect(e.getRow(other)!.title).toBe('b');
+
+    let runs = 0;
+    e.admin.beforeCommit({
+      wants: () => true,
+      run: () => {
+        runs++;
+        // Allowed inside hook.run() itself (shared catch-up helpers) without re-invoking the hook
+        e.admin.transactWithoutHook(() => { e.write(other).set('title', 'from-hook'); });
+      },
+    });
+    expect(() => e.transact(() => {
+      e.write(task).set('title', 'hooked');
+      e.admin.transactWithoutHook(() => { e.write(other).set('title', 'catching up'); });
+    })).toThrow(/inside a unit the beforeCommit hook runs in/);
+    expect(runs).toBe(0);
+    expect(e.getRow(task)!.title).toBe('a');
+
+    // A normal write invokes the hook, which runs transactWithoutHook inside hook.run()
+    e.write(task).set('title', 'triggers-hook');
+    expect(runs).toBe(1);
+    expect(e.getRow(other)!.title).toBe('from-hook');
   });
 
   it('keeps the hook paused across nested transactWithoutHook calls', () => {
