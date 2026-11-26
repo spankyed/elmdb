@@ -9,6 +9,7 @@ members = [
     "crates/elmdb-engine",
     "crates/elmdb-projections",
     "crates/elmdb-vec",
+    "crates/elmdb-query",
     "crates/elmdb-node",
     "crates/elmdb-cli",
     "xtask",
@@ -32,6 +33,7 @@ elmdb-wire = { path = "crates/elmdb-wire" }
 elmdb-engine = { path = "crates/elmdb-engine" }
 elmdb-projections = { path = "crates/elmdb-projections" }
 elmdb-vec = { path = "crates/elmdb-vec" }
+elmdb-query = { path = "crates/elmdb-query" }
 lmdb-master-sys = "0.2.6"
 # Without heed's default features, which add serde codecs (bincode's, unmaintained, and serde_json's) that nothing
 # here uses: every database is read and written as `heed::types::Bytes`

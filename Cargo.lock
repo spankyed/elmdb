@@ -780,6 +780,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "elmdb-query"
+version = "0.1.0"
+dependencies = [
+ "elmdb-engine",
+ "elmdb-lmdb",
+ "elmdb-projections",
+ "elmdb-sim",
+ "elmdb-storage",
+ "elmdb-vec",
+ "elmdb-wire",
+ "leiden-rs",
+ "levenshtein_automata",
+ "libm",
+ "proptest",
+ "regex",
+ "regex-syntax",
+ "rustc-hash 2.1.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "elmdb-sim"
 version = "0.1.0"
 dependencies = [
