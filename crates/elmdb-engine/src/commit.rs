@@ -2206,7 +2206,7 @@ fn read_relations_for_ext_id<R: KvRead>(
     read_adj_edges(txn, schema, dbs, tag, node, kind_filter)
 }
 
-fn read_commit_seq<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
+pub fn read_commit_seq<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
     match txn.get(dbs.meta, META_COMMIT_SEQ_KEY)? {
         Some(bytes) => Ok(u64::from_le_bytes(
             bytes.try_into().map_err(|_| ElmdbError::new(ErrorCode::Corrupted, "corrupt commit_seq"))?,
@@ -2215,7 +2215,7 @@ fn read_commit_seq<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
     }
 }
 
-fn read_schema_epoch<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
+pub fn read_schema_epoch<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
     match txn.get(dbs.meta, META_SCHEMA_EPOCH_KEY)? {
         Some(bytes) => Ok(u64::from_le_bytes(
             bytes.try_into().map_err(|_| ElmdbError::new(ErrorCode::Corrupted, "corrupt schema_epoch"))?,
