@@ -461,6 +461,25 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 let db = txn.open_subdb(&slot.name(), DbFlags::DEFAULT)?;
                 txn.truncate(db)?;
             }
+            // Purge any primary embeddings owned by removed/recreated indexes so `dbs.embeddings` never leaks!
+            for &old_idx_id in &diff.removed_indexes {
+                let prefix = old_idx_id.0.to_be_bytes();
+                let mut to_del = Vec::new();
+                {
+                    let mut cur = txn.cursor(self.dbs.embeddings)?;
+                    let mut entry = cur.seek_ge(&prefix)?;
+                    while let Some((k, _)) = entry {
+                        if !k.starts_with(&prefix) {
+                            break;
+                        }
+                        to_del.push(k.to_vec());
+                        entry = cur.next()?;
+                    }
+                }
+                for k in to_del {
+                    txn.del(self.dbs.embeddings, &k)?;
+                }
+            }
             // Pre-open newly allocated slots at root write txn so readers never need `mdb_dbi_open`.
             for &idx_id in &diff.added_indexes {
                 if let Some(def) = compiled.index_by_id(idx_id) {
@@ -875,30 +894,34 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// (`disk_epoch < cached.epoch`), deserializes the snapshot's historical schema locally so
     /// shared state never regresses backwards!
     pub fn begin_read_pinned(&self) -> Result<(S::RoTxn<'_>, Arc<CompiledSchema>)> {
-        let ro = self.gate.begin_read()?;
-        let disk_epoch = read_schema_epoch(&ro, &self.dbs)?;
-        let cached = Arc::clone(&self.schema_state.read().schema);
-        if cached.epoch == disk_epoch {
-            return Ok((ro, cached));
-        }
-        if disk_epoch < cached.epoch {
-            let (historical, _) = load_schema_and_pool(&ro, &self.dbs)?;
-            return Ok((ro, Arc::new(historical)));
-        }
-        // Cross-process schema advance (`disk_epoch > cached.epoch`): refresh shared cache monotonically.
-        let mut state = self.schema_state.write();
-        if disk_epoch > state.schema.epoch {
+        loop {
+            let ro = self.gate.begin_read()?;
+            let disk_epoch = read_schema_epoch(&ro, &self.dbs)?;
+            let cached = Arc::clone(&self.schema_state.read().schema);
+            if cached.epoch == disk_epoch {
+                return Ok((ro, cached));
+            }
+            if disk_epoch < cached.epoch {
+                let (historical, _) = load_schema_and_pool(&ro, &self.dbs)?;
+                return Ok((ro, Arc::new(historical)));
+            }
+            // Cross-process schema advance (`disk_epoch > cached.epoch`): refresh shared cache monotonically
+            // and pre-open any newly-created index sub-DBs into LMDB's `MDB_env` before re-opening `RoTxn`
+            // so the returned `RoTxn`'s `mt_numdbs` table covers every slot in the updated schema!
             let (schema, pool) = load_schema_and_pool(&ro, &self.dbs)?;
-            state.schema = Arc::new(schema);
-            state.pool = pool;
-            return Ok((ro, Arc::clone(&state.schema)));
+            for idx in &schema.indexes {
+                let _ = self.gate.open_subdb_ro(&ro, &idx.subdb_slot().name(), DbFlags::DEFAULT)?;
+            }
+            {
+                let mut state = self.schema_state.write();
+                if disk_epoch > state.schema.epoch {
+                    state.schema = Arc::new(schema);
+                    state.pool = pool;
+                }
+            }
+            drop(ro);
+            // Next iteration opens a fresh `RoTxn` whose LMDB `mt_numdbs` includes all pre-opened DBIs!
         }
-        if disk_epoch == state.schema.epoch {
-            return Ok((ro, Arc::clone(&state.schema)));
-        }
-        drop(state);
-        let (historical, _) = load_schema_and_pool(&ro, &self.dbs)?;
-        Ok((ro, Arc::new(historical)))
     }
 
     fn next_commit_seq<R: KvRead>(&self, txn: &R) -> Result<u64> {
@@ -2376,7 +2399,11 @@ pub fn scan_adj_out_raw<R: KvRead>(
             entry = cur.next()?;
         }
     } else {
+        let mut seen_kinds: BTreeSet<RelKindId> = BTreeSet::new();
         for &kind in kinds {
+            if !seen_kinds.insert(kind) {
+                continue;
+            }
             let mut prefix = [0u8; 11];
             prefix[0] = TAG_ADJ_OUT;
             prefix[1..9].copy_from_slice(&src.to_be_bytes());
@@ -2425,7 +2452,11 @@ pub fn scan_adj_in_raw<R: KvRead>(
             entry = cur.next()?;
         }
     } else {
+        let mut seen_kinds: BTreeSet<RelKindId> = BTreeSet::new();
         for &kind in kinds {
+            if !seen_kinds.insert(kind) {
+                continue;
+            }
             let mut prefix = [0u8; 11];
             prefix[0] = TAG_ADJ_IN;
             prefix[1..9].copy_from_slice(&dst.to_be_bytes());

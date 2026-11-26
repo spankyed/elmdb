@@ -134,12 +134,12 @@ fn hnsw_sq8_f16_f32_read_your_writes_bounded_drain_and_recall() {
 
         // Drain in bounded batches of 48 (never starving interactive writes!).
         let first_batch = drain_pending_batch(&engine, idx_id, DEFAULT_DRAIN_BATCH).unwrap();
-        assert_eq!(first_batch, DEFAULT_DRAIN_BATCH);
+        assert_eq!(first_batch.processed, DEFAULT_DRAIN_BATCH);
         assert!(reg.check(&engine, Some(idx_id)).unwrap().is_ok());
 
         // Drain remainder via `flush()`.
         let rest = flush(&engine, idx_id).unwrap();
-        assert_eq!(first_batch + rest, n);
+        assert_eq!(first_batch.processed + rest, n);
         let st_after = stats(&engine, idx_id).unwrap();
         assert_eq!(st_after.pending_count, 0);
         assert_eq!(st_after.live_nodes, n as u64);
@@ -453,4 +453,213 @@ fn push_pagerank_preserves_zlg_invariant_across_dynamic_mutations_and_matches_re
     let reb_map: BTreeMap<EntityKey, f64> = reb_scores.into_iter().collect();
     let l1_diff: f64 = inc_map.iter().map(|(k, v)| (v - reb_map[k]).abs()).sum();
     assert!(l1_diff < 1e-4, "incremental vs rebuild PageRank L1 diff too large: {l1_diff}");
+}
+
+#[test]
+fn review_regression_rank_duplicate_rel_and_extreme_weights_and_wrong_index_kind() {
+    let (engine, reg) = open_sim(BuildPolicy::DeferredWatermark);
+    let mut schema = vec_and_rank_schema("sq8", 4);
+    // P0 #1: Duplicate relation name in Rank index must be deduplicated cleanly!
+    schema.types.get_mut("Doc").unwrap().indexes.insert(
+        "pagerank".into(),
+        RawIndex { kind: RawIndexKind::Rank { relations: vec!["CITES".into(), "CITES".into()], weighted: true } },
+    );
+    engine.set_schema(&schema).unwrap();
+    let rank_id = engine.schema().indexes.iter().find(|i| i.name == "pagerank").unwrap().id;
+    let vec_id = engine.schema().indexes.iter().find(|i| i.name == "emb").unwrap().id;
+
+    // P1 #7: Passing wrong index kind rejects cleanly with InvalidArgument!
+    assert_eq!(
+        elmdb_vec::delete_entity_embeddings(&engine, rank_id, EntityKey(1)).unwrap_err().code,
+        elmdb_wire::ErrorCode::InvalidArgument
+    );
+    assert_eq!(drain_pending_batch(&engine, rank_id, 10).unwrap_err().code, elmdb_wire::ErrorCode::InvalidArgument);
+    assert_eq!(rank::drain_rank_chunk(&engine, vec_id, 10).unwrap_err().code, elmdb_wire::ErrorCode::InvalidArgument);
+
+    // P0 #2: Subnormal (1e-315) AND huge (1e308) parallel weights must never overflow/underflow to Inf/NaN!
+    engine
+        .execute_batch(&[
+            WireOp::Create { type_name: "Doc".into(), external_id: Some("a".into()), fields: vec![] },
+            WireOp::Create { type_name: "Doc".into(), external_id: Some("b".into()), fields: vec![] },
+            WireOp::Create { type_name: "Doc".into(), external_id: Some("c".into()), fields: vec![] },
+            WireOp::Link {
+                source: EntityTarget::ExternalId("a".into()),
+                rel_kind: "CITES".into(),
+                target: EntityTarget::ExternalId("b".into()),
+                weight: Some(1e-315f64.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                source: EntityTarget::ExternalId("b".into()),
+                rel_kind: "CITES".into(),
+                target: EntityTarget::ExternalId("c".into()),
+                weight: Some(1e308f64.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                source: EntityTarget::ExternalId("b".into()),
+                rel_kind: "CITES".into(),
+                target: EntityTarget::ExternalId("a".into()),
+                weight: Some(1e308f64.to_bits()),
+                info: None,
+            },
+        ])
+        .unwrap();
+    rank::flush_rank(&engine, rank_id).unwrap();
+    assert!(reg.check(&engine, Some(rank_id)).unwrap().is_ok());
+
+    // Add another edge after flush to verify duplicate relation dedup holds on incremental edge delta!
+    engine
+        .execute_batch(&[WireOp::Link {
+            source: EntityTarget::ExternalId("a".into()),
+            rel_kind: "CITES".into(),
+            target: EntityTarget::ExternalId("c".into()),
+            weight: Some(1e-315f64.to_bits()),
+            info: None,
+        }])
+        .unwrap();
+    assert!(reg.check(&engine, Some(rank_id)).unwrap().is_ok());
+    rank::flush_rank(&engine, rank_id).unwrap();
+    assert!(reg.check(&engine, Some(rank_id)).unwrap().is_ok());
+}
+
+#[test]
+fn review_regression_vec_tombstone_dominance_trash_restore_and_drop_purge() {
+    use elmdb_storage::KvRead;
+
+    let (engine, reg) = open_sim(BuildPolicy::EagerInSchemaChange);
+    engine.set_schema(&vec_and_rank_schema("sq8", 8)).unwrap();
+    let idx_id = engine.schema().indexes.iter().find(|i| i.name == "emb").unwrap().id;
+
+    // Create 180 docs with vectors clustered near [1,0,...]; flush into HNSW; then destroy 160 of them
+    // (leaving 160 tombstones > default ef=64!). Inline filtered beam MUST still find the 20 survivors!
+    let mut ops = Vec::with_capacity(180);
+    for i in 0..180 {
+        ops.push(WireOp::Create { type_name: "Doc".into(), external_id: Some(format!("v-{i}")), fields: vec![] });
+    }
+    engine.execute_batch(&ops).unwrap();
+    for i in 0..180 {
+        let k = engine.get_row(&format!("v-{i}")).unwrap().unwrap().key;
+        let v = vec![1.0, (i as f32) * 0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        set_entity_embeddings(&engine, idx_id, k, std::slice::from_ref(&v)).unwrap();
+    }
+    flush(&engine, idx_id).unwrap();
+
+    // Destroy the closest 160 vectors (v-0..v-160), leaving only v-160..v-180 live!
+    let dels: Vec<WireOp> =
+        (0..160).map(|i| WireOp::Destroy { target: EntityTarget::ExternalId(format!("v-{i}")) }).collect();
+    engine.execute_batch(&dels).unwrap();
+    {
+        let (txn, schema) = engine.begin_read_pinned().unwrap();
+        let def = schema.index_by_id(idx_id).unwrap();
+        let db = engine.gate().open_subdb_ro(&txn, &def.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        let hits = search_near(
+            &txn,
+            &engine.dbs(),
+            def,
+            db,
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            SearchNearOpts::new(5),
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 5, "tombstone dominance must not starve filtered HNSW beam!");
+    }
+
+    // P1 #8: Trash preserves primary embeddings and hides entity; Restore recovers embeddings cleanly!
+    let k160 = engine.get_row("v-160").unwrap().unwrap().key;
+    engine.execute_batch(&[WireOp::Trash { target: EntityTarget::ExternalId("v-160".into()) }]).unwrap();
+    assert!(reg.check(&engine, Some(idx_id)).unwrap().is_ok());
+    {
+        let (txn, schema) = engine.begin_read_pinned().unwrap();
+        let def = schema.index_by_id(idx_id).unwrap();
+        let db = engine.gate().open_subdb_ro(&txn, &def.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        // Also verify exact_scan_allowed skips trashed entity!
+        let mut only_160 = FxHashSet::default();
+        only_160.insert(k160);
+        let hits = search_near(
+            &txn,
+            &engine.dbs(),
+            def,
+            db,
+            &[1.0, 0.16, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            SearchNearOpts { top_k: 1, candidates: Some(&only_160), best_chunk_per_entity: true },
+        )
+        .unwrap();
+        assert!(hits.is_empty(), "exact_scan_allowed must not return trashed entity!");
+    }
+    engine.execute_batch(&[WireOp::Restore { target: EntityTarget::ExternalId("v-160".into()) }]).unwrap();
+    flush(&engine, idx_id).unwrap();
+    assert!(reg.check(&engine, Some(idx_id)).unwrap().is_ok());
+    {
+        let (txn, schema) = engine.begin_read_pinned().unwrap();
+        let def = schema.index_by_id(idx_id).unwrap();
+        let db = engine.gate().open_subdb_ro(&txn, &def.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+        let mut only_160 = FxHashSet::default();
+        only_160.insert(k160);
+        let hits = search_near(
+            &txn,
+            &engine.dbs(),
+            def,
+            db,
+            &[1.0, 0.16, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            SearchNearOpts { top_k: 1, candidates: Some(&only_160), best_chunk_per_entity: true },
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1, "restored entity must recover its primary embeddings!");
+    }
+
+    // P0 #5: Dropping the vector index in set_schema must purge all entries from `dbs.embeddings`!
+    let mut dropped = vec_and_rank_schema("sq8", 8);
+    dropped.types.get_mut("Doc").unwrap().indexes.remove("emb");
+    engine.set_schema(&dropped).unwrap();
+    {
+        let (txn, _) = engine.begin_read_pinned().unwrap();
+        assert_eq!(txn.entries(engine.dbs().embeddings).unwrap(), 0, "dropped vector index leaked primary embeddings!");
+    }
+}
+
+#[test]
+fn review_regression_lmdb_cross_handle_sees_newly_allocated_compaction_slot() {
+    // P0 #3: Reader handle opened BEFORE compaction creates `p_002` must still see `p_002` after swap_index_slot!
+    let dir = tempfile::tempdir().unwrap();
+    let store_writer = LmdbStore::open(dir.path(), LmdbConfig::default()).unwrap();
+    let reg_w =
+        Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)));
+    let (writer, _) = Engine::open_with_projections(
+        store_writer,
+        OsVfs,
+        SystemClock::new(),
+        dir.path(),
+        DurabilityMode::Strict,
+        Arc::clone(&reg_w) as _,
+    )
+    .unwrap();
+    writer.set_schema(&vec_and_rank_schema("sq8", 4)).unwrap();
+    let idx_id = writer.schema().indexes.iter().find(|i| i.name == "emb").unwrap().id;
+    writer
+        .execute_batch(&[WireOp::Create { type_name: "Doc".into(), external_id: Some("x1".into()), fields: vec![] }])
+        .unwrap();
+    let k1 = writer.get_row("x1").unwrap().unwrap().key;
+    set_entity_embeddings(&writer, idx_id, k1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    flush(&writer, idx_id).unwrap();
+
+    // Open second independent `LmdbStore` handle BEFORE ping-pong compaction allocates a brand-new slot!
+    let store_reader = LmdbStore::open(dir.path(), LmdbConfig::default()).unwrap();
+    let (reader, _) =
+        Engine::open(store_reader, OsVfs, SystemClock::new(), dir.path(), DurabilityMode::Strict).unwrap();
+
+    // Writer compacts -> allocates a brand-new `SubDbSlot` never seen by `store_reader`'s initial DbiCache!
+    compact_now(&writer, idx_id).unwrap();
+
+    // Reader MUST observe the new slot cleanly (never silently returning Ok(None))!
+    let (ro, schema) = reader.begin_read_pinned().unwrap();
+    let def = schema.index_by_id(idx_id).unwrap();
+    let db = reader
+        .gate()
+        .open_subdb_ro(&ro, &def.subdb_slot().name(), DbFlags::DEFAULT)
+        .unwrap()
+        .expect("cross-handle reader must resolve newly allocated compaction SubDbSlot!");
+    let hits = search_near(&ro, &reader.dbs(), def, db, &[1.0, 0.0, 0.0, 0.0], SearchNearOpts::new(1)).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].key, k1);
 }

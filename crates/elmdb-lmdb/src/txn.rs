@@ -295,13 +295,21 @@ impl KvWrite for LmdbRwTxn<'_> {
             return Err(StorageError::SavepointMismatch { expected: 0, actual: depth });
         }
         let root = self.stack.pop().expect("root txn present");
-        // SAFETY: `root` is the sole remaining live `MDB_txn`; `mdb_txn_commit` consumes it.
-        let rc = unsafe { ffi::mdb_txn_commit(root.as_ptr()) };
-        if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
-        }
-        if !self.pending_dbis.is_empty() {
+        if self.pending_dbis.is_empty() {
+            // SAFETY: `root` is the sole remaining live `MDB_txn`; `mdb_txn_commit` consumes it.
+            let rc = unsafe { ffi::mdb_txn_commit(root.as_ptr()) };
+            if rc != ffi::MDB_SUCCESS {
+                return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
+            }
+        } else {
+            // Acquire L4 (`dbis`) *before* `mdb_txn_commit` (strict L3 -> L4 order) so no concurrent
+            // reader observing the newly committed snapshot can miss the newly created DBI handle!
             let mut cache = self.inner.dbis.lock();
+            // SAFETY: `root` is the sole remaining live `MDB_txn`; `mdb_txn_commit` consumes it.
+            let rc = unsafe { ffi::mdb_txn_commit(root.as_ptr()) };
+            if rc != ffi::MDB_SUCCESS {
+                return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
+            }
             for (name, dbi, flags) in self.pending_dbis.drain(..) {
                 cache.by_name.insert(name, (dbi, flags));
                 cache.by_id.insert(dbi, flags);

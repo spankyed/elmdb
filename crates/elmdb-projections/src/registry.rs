@@ -269,7 +269,7 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                 if let Some(ext) = self.find_external(&def.kind) {
                     ext.rebuild_index(txn, schema, dbs, def, db)?;
                 } else if let IndexKind::Rank { relations, weighted } = &def.kind {
-                    rank::rebuild_in_txn(txn, dbs, db, def.type_id, relations, *weighted)?;
+                    rank::rebuild_in_txn(txn, dbs, db, def.type_id, relations, *weighted, true)?;
                 } else {
                     if let IndexKind::Order { locale, .. } = &def.kind {
                         let cached = self.collators.get_or_build(locale)?;
@@ -534,7 +534,8 @@ impl<S: KvStore, V: Vfs> ProjectionSink<S, V> for ProjectionRegistry<S, V> {
                 continue;
             }
             if let IndexKind::Rank { relations, weighted } = &def.kind {
-                rank::rebuild_in_txn(txn, dbs, db, def.type_id, relations, *weighted)?;
+                let converge_now = self.build_policy == BuildPolicy::EagerInSchemaChange;
+                rank::rebuild_in_txn(txn, dbs, db, def.type_id, relations, *weighted, converge_now)?;
                 write_build_state(txn, dbs, def.id, &BuildState::Ready)?;
                 continue;
             }

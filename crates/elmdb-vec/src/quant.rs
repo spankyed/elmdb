@@ -3,6 +3,8 @@
 //! Per-vector SQ8 stores `(min: f32, scale: f32, data: Vec<u8>)`:
 //! - A 1536-dim SQ8 vector is 1,544 bytes -> full HNSW node + neighbors fits in `< 2 KiB`
 //!   (2 nodes per 4 KiB LMDB leaf page, zero overflow pages, zero global calibration drift!).
+//! - Both `Sq8` and `F16` unit-normalize finite non-zero inputs in `f64` before quantization so
+//!   cosine distance stays exact and overflow/underflow-free across the entire finite `f32` range.
 
 use elmdb_wire::{ElmdbError, ErrorCode, Result};
 use serde::{Deserialize, Serialize};
@@ -54,36 +56,64 @@ pub enum QuantVec {
     F32(Vec<f32>),
 }
 
+/// Unit-normalizes a finite `f32` slice in `f64` (immune to `f32` norm overflow/underflow).
+fn normalize_f64(vec: &[f32]) -> Vec<f64> {
+    let max_abs = vec.iter().map(|&x| (x as f64).abs()).fold(0.0f64, f64::max);
+    if max_abs <= 0.0 || !max_abs.is_finite() {
+        return vec![0.0; vec.len()];
+    }
+    let mut sum_sq = 0.0f64;
+    for &x in vec {
+        let s = (x as f64) / max_abs;
+        sum_sq += s * s;
+    }
+    let scaled_norm = sum_sq.sqrt();
+    if scaled_norm <= 0.0 || !scaled_norm.is_finite() {
+        return vec![0.0; vec.len()];
+    }
+    let inv = 1.0 / (scaled_norm * max_abs);
+    if inv.is_finite() {
+        vec.iter().map(|&x| (x as f64) * inv).collect()
+    } else {
+        vec.iter().map(|&x| ((x as f64) / max_abs) / scaled_norm).collect()
+    }
+}
+
 impl QuantVec {
     pub fn from_f32(vec: &[f32], mode: Quantization) -> Self {
         match mode {
             Quantization::Sq8 => {
-                if vec.is_empty() {
-                    return Self::Sq8 { min: 0.0, scale: 0.0, data: Vec::new() };
+                if vec.is_empty() || vec.iter().any(|x| !x.is_finite()) {
+                    return Self::Sq8 { min: 0.0, scale: 0.0, data: vec![0u8; vec.len()] };
                 }
-                let mut min = f32::INFINITY;
-                let mut max = f32::NEG_INFINITY;
-                for &v in vec {
+                let unit = normalize_f64(vec);
+                let mut min = f64::INFINITY;
+                let mut max = f64::NEG_INFINITY;
+                for &v in &unit {
                     min = min.min(v);
                     max = max.max(v);
                 }
                 let span = max - min;
                 if span <= 0.0 || !span.is_finite() {
-                    return Self::Sq8 { min, scale: 0.0, data: vec![0u8; vec.len()] };
+                    return Self::Sq8 { min: min as f32, scale: 0.0, data: vec![0u8; vec.len()] };
                 }
                 let scale = span / 255.0;
                 let inv_scale = 255.0 / span;
                 let mut data = Vec::with_capacity(vec.len());
-                for &v in vec {
+                for &v in &unit {
                     let q = ((v - min) * inv_scale).round().clamp(0.0, 255.0) as u8;
                     data.push(q);
                 }
-                Self::Sq8 { min, scale, data }
+                Self::Sq8 { min: min as f32, scale: scale as f32, data }
             }
             Quantization::F16 => {
+                if vec.iter().any(|x| !x.is_finite()) {
+                    return Self::F16(vec![0u16; vec.len()]);
+                }
+                let unit = normalize_f64(vec);
                 let mut out = Vec::with_capacity(vec.len());
-                for &v in vec {
-                    out.push(f32_to_f16(v));
+                for &v in &unit {
+                    out.push(f32_to_f16(v as f32));
                 }
                 Self::F16(out)
             }
@@ -172,7 +202,11 @@ impl QuantVec {
                 }
                 let mut vals = Vec::with_capacity(dims);
                 for &chunk in raw[*pos..end].as_chunks::<2>().0 {
-                    vals.push(u16::from_le_bytes(chunk));
+                    let h = u16::from_le_bytes(chunk);
+                    if (h & 0x7C00) == 0x7C00 {
+                        return Err(ElmdbError::new(ErrorCode::Corrupted, "non-finite f16 in vector"));
+                    }
+                    vals.push(h);
                 }
                 *pos = end;
                 Ok(Self::F16(vals))
@@ -217,20 +251,22 @@ impl QuantVec {
     }
 }
 
-/// Exact cosine similarity in `[-1.0, 1.0]` between two `f32` vectors (`0.0` if either norm is 0).
+/// Exact cosine similarity in `[-1.0, 1.0]` accumulated in `f64` (immune to `f32` overflow/underflow).
 #[inline]
 pub fn cosine_similarity_f32(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    let mut dot = 0.0f32;
-    let mut na = 0.0f32;
-    let mut nb = 0.0f32;
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
     for (&x, &y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
+        let xf = x as f64;
+        let yf = y as f64;
+        dot += xf * yf;
+        na += xf * xf;
+        nb += yf * yf;
     }
-    let denom = (na * nb).sqrt();
-    if denom <= 0.0 || !denom.is_finite() { 0.0 } else { (dot / denom).clamp(-1.0, 1.0) }
+    let denom = na.sqrt() * nb.sqrt();
+    if denom <= 0.0 || !denom.is_finite() { 0.0 } else { (dot / denom).clamp(-1.0, 1.0) as f32 }
 }
 
 /// Cosine distance in `[0.0, 2.0]` (`1.0 - cosine_similarity`).
@@ -239,43 +275,43 @@ pub fn cosine_distance_f32(a: &[f32], b: &[f32]) -> f32 {
     (1.0 - cosine_similarity_f32(a, b)).clamp(0.0, 2.0)
 }
 
-/// Fast cosine distance between an `f32` query vector (with precomputed `q_norm`) and a `QuantVec`.
+/// Fast cosine distance between an `f32` query vector (with precomputed `f64` `q_norm`) and a `QuantVec`.
 #[inline]
-pub fn cosine_distance_query_vs_quant(query: &[f32], q_norm: f32, target: &QuantVec) -> f32 {
-    if q_norm <= 0.0 {
+pub fn cosine_distance_query_vs_quant(query: &[f32], q_norm: f64, target: &QuantVec) -> f32 {
+    if q_norm <= 0.0 || !q_norm.is_finite() {
         return 1.0;
     }
     match target {
         QuantVec::Sq8 { min, scale, data } => {
-            let mut dot = 0.0f32;
-            let mut nt = 0.0f32;
-            let m = *min;
-            let s = *scale;
+            let mut dot = 0.0f64;
+            let mut nt = 0.0f64;
+            let m = *min as f64;
+            let s = *scale as f64;
             for (&qx, &tb) in query.iter().zip(data.iter()) {
-                let tv = m + s * (tb as f32);
-                dot += qx * tv;
+                let tv = m + s * (tb as f64);
+                dot += (qx as f64) * tv;
                 nt += tv * tv;
             }
             let denom = q_norm * nt.sqrt();
             if denom <= 0.0 || !denom.is_finite() {
                 1.0
             } else {
-                (1.0 - (dot / denom).clamp(-1.0, 1.0)).clamp(0.0, 2.0)
+                (1.0 - (dot / denom).clamp(-1.0, 1.0)).clamp(0.0, 2.0) as f32
             }
         }
         QuantVec::F16(vals) => {
-            let mut dot = 0.0f32;
-            let mut nt = 0.0f32;
+            let mut dot = 0.0f64;
+            let mut nt = 0.0f64;
             for (&qx, &th) in query.iter().zip(vals.iter()) {
-                let tv = f16_to_f32(th);
-                dot += qx * tv;
+                let tv = f16_to_f32(th) as f64;
+                dot += (qx as f64) * tv;
                 nt += tv * tv;
             }
             let denom = q_norm * nt.sqrt();
             if denom <= 0.0 || !denom.is_finite() {
                 1.0
             } else {
-                (1.0 - (dot / denom).clamp(-1.0, 1.0)).clamp(0.0, 2.0)
+                (1.0 - (dot / denom).clamp(-1.0, 1.0)).clamp(0.0, 2.0) as f32
             }
         }
         QuantVec::F32(vals) => cosine_distance_f32(query, vals),
@@ -289,12 +325,24 @@ pub fn cosine_distance_quant(a: &QuantVec, b: &QuantVec) -> f32 {
     cosine_distance_query_vs_quant(&af, norm, b)
 }
 
+/// Overflow- and underflow-safe `f64` L2 norm of an `f32` vector.
 #[inline]
-pub fn l2_norm(v: &[f32]) -> f32 {
-    v.iter().map(|&x| x * x).sum::<f32>().sqrt()
+pub fn l2_norm(v: &[f32]) -> f64 {
+    let max_abs = v.iter().map(|&x| (x as f64).abs()).fold(0.0f64, f64::max);
+    if max_abs <= 0.0 || !max_abs.is_finite() {
+        return 0.0;
+    }
+    let sum_sq: f64 = v
+        .iter()
+        .map(|&x| {
+            let s = (x as f64) / max_abs;
+            s * s
+        })
+        .sum();
+    max_abs * sum_sq.sqrt()
 }
 
-/// Pure-Rust IEEE-754 binary32 -> binary16 conversion (round-to-nearest-even).
+/// Pure-Rust IEEE-754 binary32 -> binary16 conversion (exact round-to-nearest-even).
 pub fn f32_to_f16(val: f32) -> u16 {
     let bits = val.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
@@ -312,16 +360,18 @@ pub fn f32_to_f16(val: f32) -> u16 {
     if unbiased > 15 {
         return sign | 0x7C00; // overflow -> +/- Inf
     }
-    if unbiased < -24 {
-        return sign; // underflow -> +/- 0
+    if unbiased < -25 {
+        return sign; // strictly below half of smallest subnormal (2^-25) -> +/- 0
     }
     if unbiased < -14 {
-        // Subnormal f16
+        // Subnormal f16 (includes -25 where mant != 0 rounds up to 0x0001!)
         let shift = (-14 - unbiased) as u32;
         let full_mant = mant | 0x0080_0000;
-        let half_mant = full_mant >> (shift + 13);
-        let round_bit = (full_mant >> (shift + 12)) & 1;
-        let sticky = (full_mant & ((1u32 << (shift + 12)) - 1)) != 0;
+        let rshift = shift + 13;
+        let half_mant = if rshift >= 32 { 0 } else { full_mant >> rshift };
+        let round_bit = if rshift > 32 { 0 } else { (full_mant >> (rshift - 1)) & 1 };
+        let sticky_mask = if rshift > 32 { u32::MAX } else { (1u32 << (rshift - 1)) - 1 };
+        let sticky = (full_mant & sticky_mask) != 0;
         let rounded = half_mant + u32::from(round_bit != 0 && (sticky || (half_mant & 1) != 0));
         return sign | (rounded as u16);
     }
@@ -344,7 +394,6 @@ pub fn f16_to_f32(h: u16) -> f32 {
         if mant == 0 {
             return f32::from_bits(sign);
         }
-        // Normalize subnormal
         let mut m = mant;
         let mut e = -14i32;
         while (m & 0x0400) == 0 {
@@ -370,11 +419,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn f16_roundtrip_and_sq8_1536_dim_fits_under_2kb() {
+    fn f16_roundtrip_extreme_scales_and_sq8_1536_dim_fits_under_2kb() {
         for &v in &[0.0f32, -0.0, 1.0, -1.0, 0.5, -0.125, 3.25, 1e-4, 65504.0] {
             let h = f32_to_f16(v);
             let back = f16_to_f32(h);
             assert!((back - v).abs() <= v.abs() * 1e-3 + 1e-4, "v={v} back={back}");
+        }
+        // Round-to-nearest-even subnormal above 2^-25 rounds to 0x0001!
+        assert_eq!(f32_to_f16(2.0f32.powi(-25) * 1.5), 0x0001);
+
+        // Extreme scale vectors (1e25 and 1e-25) must NOT overflow/underflow in F16, SQ8, or F32 cosine!
+        for scale in [1e25f32, 1e-25f32] {
+            let v = vec![scale, 2.0 * scale, -scale, 0.5 * scale];
+            assert!((cosine_similarity_f32(&v, &v) - 1.0).abs() < 1e-5);
+            for mode in [Quantization::Sq8, Quantization::F16, Quantization::F32] {
+                let q = QuantVec::from_f32(&v, mode);
+                assert!(cosine_distance_query_vs_quant(&v, l2_norm(&v), &q) < 1e-2, "scale={scale} mode={mode:?}");
+            }
         }
 
         // Verify 1536-dim SQ8 vector payload is strictly < 1.6 KiB (so node + neighbors < 2 KiB!).
@@ -387,5 +448,12 @@ mod tests {
         let dec = QuantVec::decode(&buf, &mut pos, 1536).unwrap();
         assert_eq!(dec, q);
         assert!(cosine_distance_query_vs_quant(&v, l2_norm(&v), &dec) < 1e-3);
+
+        // Malformed F16 NaN/Inf bit patterns must be rejected on decode!
+        let mut bad_f16 = vec![Quantization::F16.tag()];
+        bad_f16.extend_from_slice(&1u32.to_le_bytes());
+        bad_f16.extend_from_slice(&0x7C00u16.to_le_bytes()); // +Inf
+        let mut p = 0;
+        assert_eq!(QuantVec::decode(&bad_f16, &mut p, 1).unwrap_err().code, ErrorCode::Corrupted);
     }
 }

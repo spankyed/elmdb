@@ -123,6 +123,9 @@ impl HnswMeta {
         let live_nodes = u64::from_le_bytes(raw[31..39].try_into().expect("8"));
         let dead_nodes = u64::from_le_bytes(raw[39..47].try_into().expect("8"));
         let pending_count = u64::from_le_bytes(raw[47..55].try_into().expect("8"));
+        if dims == 0 || dims > 16_384 || max_level > HNSW_MAX_LEVEL || next_vec_gen == 0 {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "hnsw meta bounds check failed"));
+        }
         Ok(Self {
             dims,
             quantization,
@@ -174,6 +177,9 @@ impl PackedHnswNode {
         let chunk = u32::from_le_bytes(raw[8..12].try_into().expect("4"));
         let vec_gen = u64::from_le_bytes(raw[12..20].try_into().expect("8"));
         let level = raw[20];
+        if level > HNSW_MAX_LEVEL {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "hnsw node level exceeds max"));
+        }
         let mut pos = 21usize;
         let vec = QuantVec::decode(raw, &mut pos, expected_dims)?;
         if pos >= raw.len() {
@@ -181,8 +187,8 @@ impl PackedHnswNode {
         }
         let layer_count = raw[pos] as usize;
         pos += 1;
-        if layer_count > (HNSW_MAX_LEVEL as usize + 1) {
-            return Err(ElmdbError::new(ErrorCode::Corrupted, "hnsw layer count exceeds max"));
+        if layer_count != (level as usize) + 1 {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "hnsw layer count does not match node level"));
         }
         let mut neighbors = Vec::with_capacity(layer_count);
         for _ in 0..layer_count {
@@ -343,7 +349,11 @@ fn decode_primary_emb(raw: &[u8], expected_dims: usize) -> Result<(u64, Vec<f32>
     }
     let vec_gen = u64::from_le_bytes(raw[0..8].try_into().expect("8"));
     let dims = u32::from_le_bytes(raw[8..12].try_into().expect("4")) as usize;
-    if dims != expected_dims || raw.len() != 12 + dims * 4 {
+    let expected_bytes = dims
+        .checked_mul(4)
+        .and_then(|b| b.checked_add(12))
+        .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "primary embedding byte size overflow"))?;
+    if dims != expected_dims || raw.len() != expected_bytes {
         return Err(ElmdbError::new(ErrorCode::Corrupted, "primary embedding length/dims mismatch"));
     }
     let mut vec = Vec::with_capacity(dims);
@@ -371,14 +381,18 @@ fn validate_vector(vec: &[f32], expected_dims: u32) -> Result<()> {
 }
 
 fn load_meta_or_init<R: KvRead>(txn: &R, db: SubDbHandle, def: &IndexDef) -> Result<HnswMeta> {
-    if let Some(raw) = txn.get(db, &[TAG_META])? {
-        return HnswMeta::decode(raw);
-    }
     let IndexKind::Vector { dims, quantization, .. } = &def.kind else {
         return Err(ElmdbError::new(ErrorCode::InvalidArgument, "index is not a Vector index"));
     };
-    let q = Quantization::parse(quantization)?;
-    Ok(HnswMeta::new(*dims, q, 0xE1ED_B200_0000_0000 ^ (def.id.0 as u64)))
+    let expected_q = Quantization::parse(quantization)?;
+    if let Some(raw) = txn.get(db, &[TAG_META])? {
+        let meta = HnswMeta::decode(raw)?;
+        if meta.dims != *dims || meta.quantization != expected_q {
+            return Err(ElmdbError::new(ErrorCode::Corrupted, "hnsw meta does not match index definition"));
+        }
+        return Ok(meta);
+    }
+    Ok(HnswMeta::new(*dims, expected_q, 0xE1ED_B200_0000_0000 ^ (def.id.0 as u64)))
 }
 
 /// Returned by embedding writes so callers can apply adaptive backpressure when `pending_count > 1024`.
@@ -448,7 +462,10 @@ pub fn set_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(
         for (chunk_idx, vec) in chunks.iter().enumerate() {
             let chunk = chunk_idx as u32;
             let vec_gen = meta.next_vec_gen;
-            meta.next_vec_gen = meta.next_vec_gen.saturating_add(1);
+            meta.next_vec_gen = meta
+                .next_vec_gen
+                .checked_add(1)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::StorageFull, "vector generation counter exhausted"))?;
 
             // Persist exact F32 vector in primary `dbs.embeddings`.
             txn.put(dbs.embeddings, &primary_emb_key(index_id, entity, chunk), &encode_primary_emb(vec_gen, vec))?;
@@ -477,7 +494,7 @@ pub fn set_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(
         let new_len = chunks.len() as u32;
         for (old_chunk, old_map) in old_chunks {
             if old_chunk >= new_len {
-                remove_single_chunk(txn, dbs, db, (index_id, entity, old_chunk), old_map, &mut meta)?;
+                remove_single_chunk(txn, dbs, db, (index_id, entity, old_chunk), old_map, &mut meta, true)?;
             }
         }
 
@@ -490,7 +507,7 @@ pub fn set_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(
     Ok(hint)
 }
 
-/// Removes all embeddings for `entity` in `index_id` cleanly.
+/// Removes all embeddings for `entity` in `index_id` cleanly (both primary and derived).
 pub fn delete_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(
     engine: &Engine<S, V, C>,
     index_id: IndexId,
@@ -500,8 +517,11 @@ pub fn delete_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(
         let def = schema
             .index_by_id(index_id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0)))?;
+        if !matches!(def.kind, IndexKind::Vector { .. }) {
+            return Err(ElmdbError::new(ErrorCode::InvalidArgument, "index is not a Vector index"));
+        }
         let db = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
-        remove_all_chunks_for_entity(txn, dbs, db, def, entity)
+        remove_all_chunks_for_entity(txn, dbs, db, def, entity, true)
     })?;
     Ok(())
 }
@@ -535,9 +555,12 @@ fn remove_single_chunk<S: KvStore, V: Vfs>(
     target: (IndexId, EntityKey, u32),
     old_map: LiveMapping,
     meta: &mut HnswMeta,
+    delete_primary: bool,
 ) -> Result<()> {
     let (index_id, entity, chunk) = target;
-    txn.del(dbs.embeddings, &primary_emb_key(index_id, entity, chunk))?;
+    if delete_primary {
+        txn.del(dbs.embeddings, &primary_emb_key(index_id, entity, chunk))?;
+    }
     txn.del(db, &live_map_key(entity, chunk))?;
     if old_map.node_id.is_some() {
         meta.live_nodes = meta.live_nodes.saturating_sub(1);
@@ -556,14 +579,86 @@ fn remove_all_chunks_for_entity<S: KvStore, V: Vfs>(
     db: SubDbHandle,
     def: &IndexDef,
     entity: EntityKey,
+    delete_primary: bool,
 ) -> Result<()> {
     let chunks = list_live_chunks_for_entity(txn, db, entity)?;
-    if chunks.is_empty() {
+    let mut meta = load_meta_or_init(txn, db, def)?;
+    let mut touched = false;
+    for (chunk, map) in chunks {
+        remove_single_chunk(txn, dbs, db, (def.id, entity, chunk), map, &mut meta, delete_primary)?;
+        touched = true;
+    }
+    if delete_primary {
+        // Also purge any primary embeddings preserved while entity was trashed!
+        let mut prefix = [0u8; 12];
+        prefix[0..4].copy_from_slice(&def.id.0.to_be_bytes());
+        prefix[4..12].copy_from_slice(&entity.to_be_bytes());
+        let mut to_del = Vec::new();
+        {
+            let mut cur = txn.cursor(dbs.embeddings)?;
+            let mut step = cur.seek_ge(&prefix)?;
+            while let Some((k, _)) = step {
+                if k.len() != 16 || !k.starts_with(&prefix) {
+                    break;
+                }
+                to_del.push(k.to_vec());
+                step = cur.next()?;
+            }
+        }
+        for k in to_del {
+            txn.del(dbs.embeddings, &k)?;
+        }
+    }
+    if touched {
+        txn.put(db, &[TAG_META], &meta.encode())?;
+    }
+    Ok(())
+}
+
+/// Re-enqueues preserved primary embeddings for a restored entity back into `TAG_LIVE_MAP` + `TAG_PENDING`.
+fn restore_chunks_for_entity<S: KvStore, V: Vfs>(
+    txn: &mut GatedWriteTxn<'_, S, V>,
+    dbs: &SystemDbs,
+    db: SubDbHandle,
+    def: &IndexDef,
+    entity: EntityKey,
+) -> Result<()> {
+    let mut meta = load_meta_or_init(txn, db, def)?;
+    let dims = meta.dims as usize;
+    let mut prefix = [0u8; 12];
+    prefix[0..4].copy_from_slice(&def.id.0.to_be_bytes());
+    prefix[4..12].copy_from_slice(&entity.to_be_bytes());
+    let mut restored: Vec<(u32, Vec<f32>)> = Vec::new();
+    {
+        let mut cur = txn.cursor(dbs.embeddings)?;
+        let mut step = cur.seek_ge(&prefix)?;
+        while let Some((k, v)) = step {
+            if k.len() != 16 || !k.starts_with(&prefix) {
+                break;
+            }
+            let chunk = u32::from_be_bytes(k[12..16].try_into().expect("4"));
+            let (_, vec) = decode_primary_emb(v, dims)?;
+            restored.push((chunk, vec));
+            step = cur.next()?;
+        }
+    }
+    if restored.is_empty() {
         return Ok(());
     }
-    let mut meta = load_meta_or_init(txn, db, def)?;
-    for (chunk, map) in chunks {
-        remove_single_chunk(txn, dbs, db, (def.id, entity, chunk), map, &mut meta)?;
+    for (chunk, vec) in restored {
+        let vec_gen = meta.next_vec_gen;
+        meta.next_vec_gen = meta
+            .next_vec_gen
+            .checked_add(1)
+            .ok_or_else(|| ElmdbError::new(ErrorCode::StorageFull, "vector generation counter exhausted"))?;
+        txn.put(dbs.embeddings, &primary_emb_key(def.id, entity, chunk), &encode_primary_emb(vec_gen, &vec))?;
+        txn.put(db, &live_map_key(entity, chunk), &LiveMapping { node_id: None, vec_gen }.encode())?;
+        let pk = pending_key(entity, chunk);
+        let existed = txn.get(db, &pk)?.is_some();
+        txn.put(db, &pk, &PendingOp::Upsert(vec_gen).encode())?;
+        if !existed {
+            meta.pending_count = meta.pending_count.saturating_add(1);
+        }
     }
     txn.put(db, &[TAG_META], &meta.encode())?;
     Ok(())
@@ -623,7 +718,7 @@ fn load_node<R: KvRead>(txn: &R, db: SubDbHandle, id: u32, dims: usize) -> Resul
 #[derive(Clone, Copy)]
 struct QueryVec<'a> {
     vec: &'a [f32],
-    norm: f32,
+    norm: f64,
 }
 
 fn greedy_search_layer<R: KvRead>(
@@ -706,6 +801,94 @@ fn search_layer_beam<R: KvRead>(
 
     let mut out = results.into_vec();
     out.sort_by(|a, b| a.dist.total_cmp(&b.dist).then_with(|| a.id.cmp(&b.id)));
+    Ok(out)
+}
+
+/// Layer-0 HNSW beam search with **inline tombstone & predicate filtering**:
+/// - Traverses tombstoned and predicate-unmatched nodes transparently as graph bridges (bounded by
+///   `max_visits`) so tombstones or selective predicates (`|allowed| > 2048`) never starve `ef`!
+/// - Counts ONLY live, candidate-matching nodes toward `results.len() < ef` and `worst` termination!
+fn search_layer_beam_filtered<R: KvRead>(
+    txn: &R,
+    db: SubDbHandle,
+    q: QueryVec<'_>,
+    entry_id: u32,
+    ef: usize,
+    allowed: Option<&FxHashSet<EntityKey>>,
+) -> Result<Vec<(EntityKey, u32, f32)>> {
+    let dims = q.vec.len();
+    let ef = ef.max(1);
+    let max_visits = ef.saturating_mul(32).max(4096);
+
+    let ep_node = load_node(txn, db, entry_id, dims)?;
+    let ep_dist = cosine_distance_query_vs_quant(q.vec, q.norm, &ep_node.vec);
+
+    let mut visited: FxHashSet<u32> = FxHashSet::default();
+    visited.insert(entry_id);
+
+    let mut candidates: BinaryHeap<MinDistNode> = BinaryHeap::new();
+    let mut results: BinaryHeap<DistNode> = BinaryHeap::new();
+    let mut accepted: FxHashMap<u32, (EntityKey, u32, f32)> = FxHashMap::default();
+
+    let is_live_match = |node: &PackedHnswNode| -> Result<bool> {
+        if allowed.is_some_and(|set| !set.contains(&node.entity)) {
+            return Ok(false);
+        }
+        let Some(lm_raw) = txn.get(db, &live_map_key(node.entity, node.chunk))? else {
+            return Ok(false);
+        };
+        let lm = LiveMapping::decode(lm_raw)?;
+        Ok(lm.vec_gen == node.vec_gen)
+    };
+
+    let ep = DistNode { dist: ep_dist, id: entry_id };
+    candidates.push(MinDistNode(ep));
+    if is_live_match(&ep_node)? {
+        results.push(ep);
+        accepted.insert(entry_id, (ep_node.entity, ep_node.chunk, ep_dist));
+    }
+
+    while let Some(MinDistNode(curr)) = candidates.pop() {
+        let worst = results.peek().map_or(f32::INFINITY, |r| r.dist);
+        if results.len() >= ef && curr.dist > worst {
+            break;
+        }
+        if visited.len() >= max_visits {
+            break;
+        }
+        let node = load_node(txn, db, curr.id, dims)?;
+        let Some(neighs) = node.neighbors.first() else {
+            continue;
+        };
+        for &nid in neighs {
+            if !visited.insert(nid) {
+                continue;
+            }
+            let n = load_node(txn, db, nid, dims)?;
+            let d = cosine_distance_query_vs_quant(q.vec, q.norm, &n.vec);
+            let worst_now = results.peek().map_or(f32::INFINITY, |r| r.dist);
+            if results.len() < ef || d < worst_now {
+                let dn = DistNode { dist: d, id: nid };
+                candidates.push(MinDistNode(dn));
+                if is_live_match(&n)? {
+                    results.push(dn);
+                    accepted.insert(nid, (n.entity, n.chunk, d));
+                    if results.len() > ef
+                        && let Some(evicted) = results.pop()
+                    {
+                        accepted.remove(&evicted.id);
+                    }
+                }
+            }
+            if visited.len() >= max_visits {
+                break;
+            }
+        }
+    }
+
+    let mut out: Vec<(EntityKey, u32, f32)> =
+        results.into_vec().into_iter().filter_map(|dn| accepted.get(&dn.id).copied()).collect();
+    out.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)).then_with(|| a.1.cmp(&b.1)));
     Ok(out)
 }
 
@@ -841,32 +1024,44 @@ fn insert_hnsw_node<S: KvStore, V: Vfs>(
 // Bounded-Batch Drain, Flush, and Ping-Pong Compaction
 // ---------------------------------------------------------------------------
 
+/// Result of one bounded `drain_pending_batch` step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DrainResult {
+    pub processed: usize,
+    pub needs_compaction: bool,
+}
+
 /// Drains up to `batch_size` (default `DEFAULT_DRAIN_BATCH = 48`) entries from `TAG_PENDING`
-/// into the HNSW graph in one bounded commit so interactive writes are never starved.
-/// Returns the number of pending entries processed (`0` when fully drained).
+/// into the HNSW graph in **one strictly bounded commit** so interactive writes are never starved.
+/// Does NOT synchronously run full-index compaction inside this commit; inspect `needs_compaction`
+/// or call `compact_now` / `flush` separately!
 pub fn drain_pending_batch<S: KvStore, V: Vfs, C: Clock>(
     engine: &Engine<S, V, C>,
     index_id: IndexId,
     batch_size: usize,
-) -> Result<usize> {
+) -> Result<DrainResult> {
     let limit = batch_size.max(1);
-    // Fast RO pre-check so idle drains never take the write lock!
+    // Fast RO pre-check validating IndexKind::Vector and inspecting both pending queue and compaction state.
     {
         let (ro, schema) = engine.begin_read_pinned()?;
         let def = schema
             .index_by_id(index_id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0)))?;
+        if !matches!(def.kind, IndexKind::Vector { .. }) {
+            return Err(ElmdbError::new(ErrorCode::InvalidArgument, "index is not a Vector index"));
+        }
         let Some(db) = engine.gate().open_subdb_ro(&ro, &def.subdb_slot().name(), DbFlags::DEFAULT)? else {
-            return Ok(0);
+            return Ok(DrainResult { processed: 0, needs_compaction: false });
         };
+        let meta = load_meta_or_init(&ro, db, def)?;
         let mut cur = ro.cursor(db)?;
         let has_pending = cur.seek_ge(&[TAG_PENDING])?.is_some_and(|(k, _)| k.first() == Some(&TAG_PENDING));
         if !has_pending {
-            return Ok(0);
+            return Ok(DrainResult { processed: 0, needs_compaction: meta.should_compact() });
         }
     }
 
-    let ((drained, should_compact), _) = engine.run_maintenance_write(|txn, schema, dbs| {
+    let (result, _) = engine.run_maintenance_write(|txn, schema, dbs| {
         let def = schema
             .index_by_id(index_id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0)))?;
@@ -896,7 +1091,7 @@ pub fn drain_pending_batch<S: KvStore, V: Vfs, C: Clock>(
         if items.is_empty() {
             meta.pending_count = 0;
             txn.put(db, &[TAG_META], &meta.encode())?;
-            return Ok((0, meta.should_compact()));
+            return Ok(DrainResult { processed: 0, needs_compaction: meta.should_compact() });
         }
 
         let dims = meta.dims as usize;
@@ -927,25 +1122,24 @@ pub fn drain_pending_batch<S: KvStore, V: Vfs, C: Clock>(
         }
 
         txn.put(db, &[TAG_META], &meta.encode())?;
-        Ok((items.len(), meta.should_compact()))
+        Ok(DrainResult { processed: items.len(), needs_compaction: meta.should_compact() })
     })?;
-
-    // Lazy 25% ping-pong compaction into a fresh staging SubDbSlot when tombstones cross threshold!
-    if should_compact {
-        compact_now(engine, index_id)?;
-    }
-    Ok(drained)
+    Ok(result)
 }
 
-/// Drains ALL pending vectors in bounded `DEFAULT_DRAIN_BATCH` commits (exposed for tests/CLI).
+/// Drains ALL pending vectors in bounded `DEFAULT_DRAIN_BATCH` commits and compacts via ping-pong
+/// slot swap if the tombstone ratio exceeds 25% (> 1,024 total nodes) — including delete-only workloads!
 pub fn flush<S: KvStore, V: Vfs, C: Clock>(engine: &Engine<S, V, C>, index_id: IndexId) -> Result<usize> {
     let mut total = 0usize;
-    loop {
-        let n = drain_pending_batch(engine, index_id, DEFAULT_DRAIN_BATCH)?;
-        total += n;
-        if n == 0 {
-            break;
+    let should_compact = loop {
+        let res = drain_pending_batch(engine, index_id, DEFAULT_DRAIN_BATCH)?;
+        total += res.processed;
+        if res.processed == 0 {
+            break res.needs_compaction;
         }
+    };
+    if should_compact {
+        let _ = compact_now(engine, index_id)?;
     }
     Ok(total)
 }
@@ -1088,13 +1282,13 @@ pub fn search_near<R: KvRead>(
     if let Some(allowed) = candidates
         && allowed.len() <= EXACT_SCAN_THRESHOLD
     {
-        return exact_scan_allowed(txn, dbs, def.id, query, allowed, opts);
+        return exact_scan_allowed(txn, dbs, db, def.id, query, allowed, opts);
     }
 
     let rerank_k = (top_k.saturating_mul(4)).max(64);
     let mut pool: FxHashMap<(EntityKey, u32), f32> = FxHashMap::default();
 
-    // 1. HNSW search (when graph has an entry point).
+    // 1. HNSW search with inline tombstone & predicate filtering inside layer-0 beam!
     if let Some(ep_id) = meta.entry_point {
         let ep_node = load_node(txn, db, ep_id, dims)?;
         let mut curr_id = ep_id;
@@ -1104,32 +1298,15 @@ pub fn search_near<R: KvRead>(
             curr_id = nid;
             curr_dist = nd;
         }
-        // Expand `ef` slightly when predicate filtering or tombstones exist to preserve high recall!
-        let base_ef = rerank_k;
-        let ef =
-            if candidates.is_some() || meta.dead_nodes > 0 { base_ef.saturating_mul(2).min(1024) } else { base_ef };
-        let beam = search_layer_beam(txn, db, q, curr_id, ef, 0)?;
-
-        // Pre-rerank generation & tombstone filter via `TAG_LIVE_MAP`!
-        for dn in beam {
-            let node = load_node(txn, db, dn.id, dims)?;
-            if candidates.is_some_and(|set| !set.contains(&node.entity)) {
-                continue;
-            }
-            let Some(lm_raw) = txn.get(db, &live_map_key(node.entity, node.chunk))? else {
-                continue;
-            };
-            let lm = LiveMapping::decode(lm_raw)?;
-            if lm.vec_gen != node.vec_gen {
-                continue; // Stale HNSW node superseded by newer update -> filtered BEFORE F32 rerank!
-            }
-            pool.entry((node.entity, node.chunk))
+        let beam = search_layer_beam_filtered(txn, db, q, curr_id, rerank_k, candidates)?;
+        for (entity, chunk, dist) in beam {
+            pool.entry((entity, chunk))
                 .and_modify(|d| {
-                    if dn.dist < *d {
-                        *d = dn.dist;
+                    if dist < *d {
+                        *d = dist;
                     }
                 })
-                .or_insert(dn.dist);
+                .or_insert(dist);
         }
     }
 
@@ -1170,7 +1347,25 @@ pub fn search_near<R: KvRead>(
     }
 
     // 3. Exact F32 rerank of top `rerank_k` HNSW candidates directly from `dbs.embeddings`!
-    let mut hnsw_cands: Vec<((EntityKey, u32), f32)> = pool.into_iter().collect();
+    // When `best_chunk_per_entity == true`, collapse to best chunk per entity BEFORE truncating to `rerank_k`
+    // so a single multi-chunk document can never monopolize the rerank budget!
+    let mut hnsw_cands: Vec<((EntityKey, u32), f32)> = if best_chunk_per_entity {
+        let mut by_entity: FxHashMap<EntityKey, (u32, f32)> = FxHashMap::default();
+        for ((ek, chunk), dist) in pool {
+            by_entity
+                .entry(ek)
+                .and_modify(|(bc, bd)| {
+                    if dist < *bd || (dist.to_bits() == bd.to_bits() && chunk < *bc) {
+                        *bc = chunk;
+                        *bd = dist;
+                    }
+                })
+                .or_insert((chunk, dist));
+        }
+        by_entity.into_iter().map(|(ek, (chunk, dist))| ((ek, chunk), dist)).collect()
+    } else {
+        pool.into_iter().collect()
+    };
     hnsw_cands.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
     hnsw_cands.truncate(rerank_k);
 
@@ -1197,11 +1392,21 @@ pub fn search_like<R: KvRead>(
     top_k: usize,
     candidates: Option<&FxHashSet<EntityKey>>,
 ) -> Result<Vec<VectorHit>> {
+    if top_k == 0 {
+        return Ok(Vec::new());
+    }
     let meta = load_meta_or_init(txn, db, def)?;
+    let Some(lm_raw) = txn.get(db, &live_map_key(seed_entity, 0))? else {
+        return Ok(Vec::new());
+    };
+    let lm = LiveMapping::decode(lm_raw)?;
     let Some(emb_raw) = txn.get(dbs.embeddings, &primary_emb_key(def.id, seed_entity, 0))? else {
         return Ok(Vec::new());
     };
-    let (_, seed_vec) = decode_primary_emb(emb_raw, meta.dims as usize)?;
+    let (emb_gen, seed_vec) = decode_primary_emb(emb_raw, meta.dims as usize)?;
+    if emb_gen != lm.vec_gen {
+        return Ok(Vec::new());
+    }
     let mut hits = search_near(
         txn,
         dbs,
@@ -1218,6 +1423,7 @@ pub fn search_like<R: KvRead>(
 fn exact_scan_allowed<R: KvRead>(
     txn: &R,
     dbs: &SystemDbs,
+    db: SubDbHandle,
     index_id: IndexId,
     query: &[f32],
     allowed: &FxHashSet<EntityKey>,
@@ -1236,9 +1442,14 @@ fn exact_scan_allowed<R: KvRead>(
                 break;
             }
             let chunk = u32::from_be_bytes(k[12..16].try_into().expect("4"));
-            let (_, vec) = decode_primary_emb(v, dims)?;
-            let sim = 1.0 - cosine_distance_f32(query, &vec);
-            hits.push(VectorHit { key: ek, chunk, score: sim });
+            if let Some(lm_raw) = txn.get(db, &live_map_key(ek, chunk))? {
+                let lm = LiveMapping::decode(lm_raw)?;
+                let (emb_gen, vec) = decode_primary_emb(v, dims)?;
+                if emb_gen == lm.vec_gen {
+                    let sim = 1.0 - cosine_distance_f32(query, &vec);
+                    hits.push(VectorHit { key: ek, chunk, score: sim });
+                }
+            }
             step = cur.next()?;
         }
     }
@@ -1279,10 +1490,21 @@ impl<S: KvStore, V: Vfs> ExternalProjection<S, V> for VectorProjection {
         db: SubDbHandle,
         delta: &EntityDelta,
     ) -> Result<()> {
-        let is_live = delta.after.as_ref().is_some_and(|r| !r.header.is_trashed());
-        if !is_live {
-            // Entity trashed or destroyed -> atomically tombstone all its chunks!
-            remove_all_chunks_for_entity(txn, dbs, db, def, delta.key)?;
+        let was_live = delta.before.as_ref().is_some_and(|r| !r.header.is_trashed());
+        match &delta.after {
+            None => {
+                // Entity permanently destroyed -> delete both primary embeddings and derived HNSW entries.
+                remove_all_chunks_for_entity(txn, dbs, db, def, delta.key, true)?;
+            }
+            Some(row) if row.header.is_trashed() => {
+                // Entity soft-trashed -> tombstone HNSW/live_map while PRESERVING `dbs.embeddings` for Restore!
+                remove_all_chunks_for_entity(txn, dbs, db, def, delta.key, false)?;
+            }
+            Some(_) if !was_live && delta.before.is_some() => {
+                // Entity restored from trash -> re-enqueue preserved primary embeddings!
+                restore_chunks_for_entity(txn, dbs, db, def, delta.key)?;
+            }
+            Some(_) => {}
         }
         Ok(())
     }
@@ -1326,9 +1548,10 @@ impl<S: KvStore, V: Vfs> ExternalProjection<S, V> for VectorProjection {
         let q = Quantization::parse(quantization)?;
         let mut meta = HnswMeta::new(*dims, q, 0xE1ED_B200_0000_0000 ^ (def.id.0 as u64));
 
-        // Scan all primary embeddings belonging to `def.id` for live entities of `def.type_id`.
+        // Scan all primary embeddings belonging to `def.id`: index live entities, keep trashed, purge destroyed orphans.
         let prefix = def.id.0.to_be_bytes();
         let mut entries: Vec<(EntityKey, u32, u64, Vec<f32>)> = Vec::new();
+        let mut orphans: Vec<Vec<u8>> = Vec::new();
         let mut max_gen = 0u64;
         {
             let mut cur = txn.cursor(dbs.embeddings)?;
@@ -1341,14 +1564,19 @@ impl<S: KvStore, V: Vfs> ExternalProjection<S, V> for VectorProjection {
                 let chunk = u32::from_be_bytes(k[12..16].try_into().expect("4"));
                 let (gen_id, vec) = decode_primary_emb(v, *dims as usize)?;
                 max_gen = max_gen.max(gen_id);
-                if let Some(row) = read_packed_row(txn, dbs, ek)?
-                    && !row.header.is_trashed()
-                    && row.header.type_id == def.type_id
-                {
-                    entries.push((ek, chunk, gen_id, vec));
+                match read_packed_row(txn, dbs, ek)? {
+                    Some(row) if row.header.type_id == def.type_id => {
+                        if !row.header.is_trashed() {
+                            entries.push((ek, chunk, gen_id, vec));
+                        }
+                    }
+                    _ => orphans.push(k.to_vec()),
                 }
                 step = cur.next()?;
             }
+        }
+        for ok in orphans {
+            txn.del(dbs.embeddings, &ok)?;
         }
         meta.next_vec_gen = max_gen.saturating_add(1);
 
@@ -1381,7 +1609,7 @@ impl<S: KvStore, V: Vfs> ExternalProjection<S, V> for VectorProjection {
         let meta = load_meta_or_init(txn, db, def)?;
         let dims = meta.dims as usize;
 
-        // 1. Collect all primary embeddings for `def.id`.
+        // 1. Collect all primary embeddings for LIVE entities of `def.type_id` under `def.id`.
         let prefix = def.id.0.to_be_bytes();
         let mut primary: FxHashMap<(EntityKey, u32), u64> = FxHashMap::default();
         {
@@ -1394,7 +1622,12 @@ impl<S: KvStore, V: Vfs> ExternalProjection<S, V> for VectorProjection {
                 let ek = EntityKey::from_be_bytes(k[4..12].try_into().expect("8"));
                 let chunk = u32::from_be_bytes(k[12..16].try_into().expect("4"));
                 let (gen_id, _) = decode_primary_emb(v, dims)?;
-                primary.insert((ek, chunk), gen_id);
+                if let Some(row) = read_packed_row(txn, dbs, ek)?
+                    && !row.header.is_trashed()
+                    && row.header.type_id == def.type_id
+                {
+                    primary.insert((ek, chunk), gen_id);
+                }
                 step = cur.next()?;
             }
         }

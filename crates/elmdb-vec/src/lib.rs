@@ -12,9 +12,9 @@ pub mod hnsw;
 pub mod quant;
 
 pub use hnsw::{
-    BackpressureHint, COMPACT_MIN_NODES, DEFAULT_DRAIN_BATCH, EXACT_SCAN_THRESHOLD, HNSW_EF_CONSTRUCTION, HNSW_M,
-    HNSW_M0, HNSW_MAX_LEVEL, HnswMeta, PENDING_BACKPRESSURE_THRESHOLD, SearchNearOpts, VectorHit, VectorProjection,
-    VectorStats, compact_now, delete_entity_embeddings, deterministic_level, drain_pending_batch, flush, search_like,
-    search_near, set_entity_embeddings, stats,
+    BackpressureHint, COMPACT_MIN_NODES, DEFAULT_DRAIN_BATCH, DrainResult, EXACT_SCAN_THRESHOLD, HNSW_EF_CONSTRUCTION,
+    HNSW_M, HNSW_M0, HNSW_MAX_LEVEL, HnswMeta, PENDING_BACKPRESSURE_THRESHOLD, SearchNearOpts, VectorHit,
+    VectorProjection, VectorStats, compact_now, delete_entity_embeddings, deterministic_level, drain_pending_batch,
+    flush, search_like, search_near, set_entity_embeddings, stats,
 };
 pub use quant::{QuantVec, Quantization, cosine_distance_f32, cosine_similarity_f32, f16_to_f32, f32_to_f16};

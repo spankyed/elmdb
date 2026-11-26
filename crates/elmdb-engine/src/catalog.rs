@@ -295,6 +295,7 @@ pub struct RelKindDef {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchemaDiff {
     pub added_indexes: Vec<IndexId>,
+    pub removed_indexes: Vec<IndexId>,
     pub retired_slots: Vec<SubDbSlot>,
 }
 
@@ -637,9 +638,14 @@ impl CompiledSchema {
                             continue;
                         }
                         let mut rids = Vec::with_capacity(rel_names.len());
+                        let mut seen = BTreeSet::new();
                         for rn in rel_names {
                             match rel_name_to_id.get(rn) {
-                                Some(&rid) => rids.push(rid),
+                                Some(&rid) => {
+                                    if seen.insert(rid) {
+                                        rids.push(rid);
+                                    }
+                                }
                                 None => errors.push(format!("{path}: unknown relation '{rn}'")),
                             }
                         }
@@ -678,6 +684,7 @@ impl CompiledSchema {
                 if !kept_prev_ids.contains(&old.id) {
                     let slot = old.subdb_slot();
                     working_pool.recycle(slot)?;
+                    diff.removed_indexes.push(old.id);
                     diff.retired_slots.push(slot);
                 }
             }

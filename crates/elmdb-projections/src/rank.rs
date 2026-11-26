@@ -161,6 +161,9 @@ fn save_node<W: KvMut>(
     node: RankNode,
     epsilon: f64,
 ) -> Result<()> {
+    if !node.x.is_finite() || !node.r.is_finite() || !node.out_weight.is_finite() || node.out_weight < 0.0 {
+        return Err(ElmdbError::new(ErrorCode::Internal, "non-finite Push PageRank node state"));
+    }
     if let Some(ox) = old_x
         && ox.to_bits() != node.x.to_bits()
     {
@@ -176,6 +179,24 @@ fn save_node<W: KvMut>(
         txn.del(db, &dirty_key(key))?;
     }
     Ok(())
+}
+
+/// Computes overflow- and underflow-proof normalized transition probabilities `(dst, prob)` summing to `1.0`,
+/// plus the normalized out-weight sum (`0.0` if no edges, else in `[1.0, edges.len()]`).
+fn normalized_transitions(edges: &[(EntityKey, f64)]) -> (Vec<(EntityKey, f64)>, f64) {
+    let max_w = edges.iter().map(|(_, w)| *w).fold(0.0f64, f64::max);
+    if max_w <= 0.0 || !max_w.is_finite() {
+        return (Vec::new(), 0.0);
+    }
+    let mut norm_sum = 0.0f64;
+    for &(_, w) in edges {
+        norm_sum += w / max_w;
+    }
+    if norm_sum <= 0.0 || !norm_sum.is_finite() {
+        return (Vec::new(), 0.0);
+    }
+    let probs = edges.iter().map(|&(dst, w)| (dst, (w / max_w) / norm_sum)).collect();
+    (probs, norm_sum)
 }
 
 fn live_out_edges<R: KvRead>(
@@ -246,11 +267,14 @@ pub fn apply_deltas<W: KvMut>(
         if !rel_set.is_empty() && !rel_set.contains(&ed.kind) {
             continue;
         }
-        if let Some(ref b) = ed.before {
-            edges_by_src.entry(b.src).or_default().push(ed);
-            touched_sources.insert(b.src);
+        let before_src = ed.before.as_ref().map(|b| b.src);
+        if let Some(src) = before_src {
+            edges_by_src.entry(src).or_default().push(ed);
+            touched_sources.insert(src);
         }
-        if let Some(ref a) = ed.after {
+        if let Some(ref a) = ed.after
+            && before_src != Some(a.src)
+        {
             edges_by_src.entry(a.src).or_default().push(ed);
             touched_sources.insert(a.src);
         }
@@ -332,16 +356,16 @@ pub fn apply_deltas<W: KvMut>(
         if let Some(old_node) = load_node(txn, db, k)? {
             // Subtract outgoing mass `k` was contributing to surviving neighbors!
             if old_node.x != 0.0
-                && old_node.out_weight > 0.0
                 && let Some((_, old_edges)) = old_state.get(&k)
             {
-                let scale = alpha * old_node.x / old_node.out_weight;
-                for &(dst, w) in old_edges {
+                let (old_probs, _) = normalized_transitions(old_edges);
+                let mass = alpha * old_node.x;
+                for (dst, prob) in old_probs {
                     if dst == k || dead_set.contains(&dst) {
                         continue;
                     }
                     if let Some(mut dn) = load_node(txn, db, dst)? {
-                        dn.r -= scale * w;
+                        dn.r -= mass * prob;
                         save_node(txn, db, dst, Some(dn.x), dn, meta.epsilon)?;
                     }
                 }
@@ -363,26 +387,22 @@ pub fn apply_deltas<W: KvMut>(
             continue;
         };
         let new_edges = live_out_edges(txn, dbs, db, src, relations, weighted)?;
-        let new_out_w: f64 = new_edges.iter().map(|(_, w)| *w).sum();
+        let (new_probs, new_out_w) = normalized_transitions(&new_edges);
 
         // Only nodes that existed pre-delta with non-zero x could have pushed mass along old/new edges!
         if !live_set.contains(&src)
             && node.x != 0.0
-            && let Some((old_node, old_edges)) = old_state.get(&src)
+            && let Some((_, old_edges)) = old_state.get(&src)
         {
-            if old_node.out_weight > 0.0 {
-                let old_scale = alpha * old_node.x / old_node.out_weight;
-                for &(dst, w) in old_edges {
-                    if !dead_set.contains(&dst) {
-                        *residual_adjust.entry(dst).or_insert(0.0) -= old_scale * w;
-                    }
+            let (old_probs, _) = normalized_transitions(old_edges);
+            let mass = alpha * node.x;
+            for (dst, prob) in old_probs {
+                if !dead_set.contains(&dst) {
+                    *residual_adjust.entry(dst).or_insert(0.0) -= mass * prob;
                 }
             }
-            if new_out_w > 0.0 {
-                let new_scale = alpha * node.x / new_out_w;
-                for &(dst, w) in &new_edges {
-                    *residual_adjust.entry(dst).or_insert(0.0) += new_scale * w;
-                }
+            for (dst, prob) in &new_probs {
+                *residual_adjust.entry(*dst).or_insert(0.0) += mass * prob;
             }
         }
 
@@ -446,7 +466,6 @@ pub fn drain_pushes_in_txn<W: KvMut>(
             break;
         }
 
-        let mut progressed = false;
         for u in dirty_batch {
             let Some(mut unode) = load_node(txn, db, u)? else {
                 txn.del(db, &dirty_key(u))?;
@@ -462,14 +481,14 @@ pub fn drain_pushes_in_txn<W: KvMut>(
             unode.r = 0.0;
             save_node(txn, db, u, Some(old_x), unode, eps)?;
             pushes += 1;
-            progressed = true;
 
             if unode.out_weight > 0.0 {
                 let edges = live_out_edges(txn, dbs, db, u, relations, weighted)?;
-                let scale = alpha * delta / unode.out_weight;
-                for (v, w) in edges {
+                let (probs, _) = normalized_transitions(&edges);
+                let mass = alpha * delta;
+                for (v, prob) in probs {
                     if let Some(mut vnode) = load_node(txn, db, v)? {
-                        vnode.r += scale * w;
+                        vnode.r += mass * prob;
                         save_node(txn, db, v, Some(vnode.x), vnode, eps)?;
                     }
                 }
@@ -477,9 +496,6 @@ pub fn drain_pushes_in_txn<W: KvMut>(
             if pushes >= max_pushes {
                 break;
             }
-        }
-        if !progressed {
-            break;
         }
     }
     Ok(pushes)
@@ -497,6 +513,9 @@ pub fn drain_rank_chunk<S: KvStore, V: Vfs, C: Clock>(
         let def = schema
             .index_by_id(index_id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0)))?;
+        if !matches!(def.kind, IndexKind::Rank { .. }) {
+            return Err(ElmdbError::new(ErrorCode::InvalidArgument, "index is not a Rank index"));
+        }
         if let Some(db) = engine.gate().open_subdb_ro(&ro, &def.subdb_slot().name(), DbFlags::DEFAULT)? {
             let mut cur = ro.cursor(db)?;
             let has_dirty = cur.seek_ge(&[TAG_DIRTY])?.is_some_and(|(k, _)| k.first() == Some(&TAG_DIRTY));
@@ -534,7 +553,8 @@ pub fn flush_rank<S: KvStore, V: Vfs, C: Clock>(engine: &Engine<S, V, C>, index_
     Ok(total)
 }
 
-/// Rebuilds a Push PageRank index from scratch from primary entities + adjacency and converges it.
+/// Initializes a Push PageRank index from primary entities + adjacency (exact ZLG invariant holds immediately!).
+/// When `converge_now == true`, also runs ZLG pushes to convergence synchronously.
 pub fn rebuild_in_txn<W: KvMut>(
     txn: &mut W,
     dbs: &SystemDbs,
@@ -542,6 +562,7 @@ pub fn rebuild_in_txn<W: KvMut>(
     type_id: TypeId,
     relations: &[RelKindId],
     weighted: bool,
+    converge_now: bool,
 ) -> Result<()> {
     txn.truncate(db)?;
     let mut meta = RankMeta::default();
@@ -565,19 +586,20 @@ pub fn rebuild_in_txn<W: KvMut>(
     meta.node_count = live_keys.len() as u64;
     txn.put(db, &[TAG_META], &meta.encode())?;
 
-    // Pass 2: Populate exact `out_weight` for each live node.
+    // Pass 2: Populate exact normalized `out_weight` for each live node.
     for &ek in &live_keys {
         let edges = live_out_edges(txn, dbs, db, ek, relations, weighted)?;
-        let ow: f64 = edges.iter().map(|(_, w)| *w).sum();
+        let (_, ow) = normalized_transitions(&edges);
         if ow > 0.0 {
             let n = RankNode { x: 0.0, r: teleport, out_weight: ow };
             save_node(txn, db, ek, Some(0.0), n, meta.epsilon)?;
         }
     }
 
-    // Pass 3: Converge via ZLG pushes (bounded safety cap for pathological graphs).
-    let max_total = (live_keys.len().max(1) * 500).min(1_000_000);
-    let _ = drain_pushes_in_txn(txn, dbs, db, relations, weighted, max_total)?;
+    if converge_now {
+        let max_total = live_keys.len().max(1).saturating_mul(500).min(1_000_000);
+        let _ = drain_pushes_in_txn(txn, dbs, db, relations, weighted, max_total)?;
+    }
     Ok(())
 }
 
@@ -627,7 +649,9 @@ pub fn scan_ranked<R: KvRead>(
             return Err(ElmdbError::new(ErrorCode::Corrupted, "corrupt rank order key"));
         }
         let ek = EntityKey::from_be_bytes(k[9..17].try_into().expect("8"));
-        let x = load_node(txn, db, ek)?.map_or(0.0, |n| n.x);
+        let x = load_node(txn, db, ek)?
+            .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, format!("rank order points to missing node {ek:?}")))?
+            .x;
         out.push((ek, x));
         if out.len() >= cap {
             break;
@@ -659,13 +683,17 @@ pub fn check_rank<R: KvRead>(
     let weighted = spec.weighted;
     let mut mismatches = Vec::new();
     let Some(db) = db else {
-        let live = scan_type_keys(txn, dbs, type_id)?;
-        if !live.is_empty() {
-            mismatches.push(IndexMismatch {
-                index_id,
-                index_name: index_name.to_owned(),
-                detail: "rank sub-DB missing".into(),
-            });
+        for ek in scan_type_keys(txn, dbs, type_id)? {
+            if let Some(row) = read_packed_row(txn, dbs, ek)?
+                && !row.header.is_trashed()
+            {
+                mismatches.push(IndexMismatch {
+                    index_id,
+                    index_name: index_name.to_owned(),
+                    detail: "rank sub-DB missing".into(),
+                });
+                break;
+            }
         }
         return Ok(mismatches);
     };
@@ -760,11 +788,19 @@ pub fn check_rank<R: KvRead>(
         });
     }
 
-    // 3. Recompute exact `out_weight` and exact ZLG residual `expected_r(v) = teleport + alpha * Σ P^T x - x(v)`!
+    if meta.node_count != nodes.len() as u64 {
+        mismatches.push(IndexMismatch {
+            index_id,
+            index_name: index_name.to_owned(),
+            detail: format!("rank meta.node_count {} != actual nodes {}", meta.node_count, nodes.len()),
+        });
+    }
+
+    // 3. Recompute exact normalized `out_weight`, `TAG_DIRTY` coverage, and exact ZLG residual!
     let mut incoming_mass: FxHashMap<EntityKey, f64> = FxHashMap::default();
     for (&u, unode) in &nodes {
         let edges = live_out_edges(txn, dbs, db, u, relations, weighted)?;
-        let ow: f64 = edges.iter().map(|(_, w)| *w).sum();
+        let (probs, ow) = normalized_transitions(&edges);
         if (ow - unode.out_weight).abs() > 1e-9 * ow.max(1.0) {
             mismatches.push(IndexMismatch {
                 index_id,
@@ -775,10 +811,20 @@ pub fn check_rank<R: KvRead>(
                 return Ok(mismatches);
             }
         }
+        if unode.r.abs() > meta.epsilon && txn.get(db, &dirty_key(u))?.is_none() {
+            mismatches.push(IndexMismatch {
+                index_id,
+                index_name: index_name.to_owned(),
+                detail: format!("dirty node {u:?} (|r|={}) missing from TAG_DIRTY", unode.r.abs()),
+            });
+            if mismatches.len() >= 16 {
+                return Ok(mismatches);
+            }
+        }
         if ow > 0.0 && unode.x != 0.0 {
-            let scale = alpha * unode.x / ow;
-            for (v, w) in edges {
-                *incoming_mass.entry(v).or_insert(0.0) += scale * w;
+            let mass = alpha * unode.x;
+            for (v, prob) in probs {
+                *incoming_mass.entry(v).or_insert(0.0) += mass * prob;
             }
         }
     }
