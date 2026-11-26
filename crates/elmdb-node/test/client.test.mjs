@@ -1,6 +1,5 @@
 // @ts-check
-// `npm run typecheck` checks this file against the client's declarations, and `npm test` runs it: the client's calls
-// take and answer the protocol's generated types, and an answer that may hold `__proto__` keeps it as a key
+// Verifies elmdb/client zero-dependency binary wire batch encoder (`elmdb-wire` EWB2).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -12,106 +11,109 @@ const require = createRequire(import.meta.url);
 /** @type {typeof import('../index.js')} */
 const { Database } = require('../index.js');
 /** @type {typeof import('../client.js')} */
-const { Client } = require('../client.js');
-/** @type {{ Packr: new (options: object) => { pack(value: unknown): Uint8Array, unpack(bytes: Uint8Array): unknown } }} */
-const { Packr } = require('msgpackr');
+const { BatchSlot, WireBatchBuilder, buildWireBatch } = require('../client.js');
 
-// As `Codec` asks: plain msgpack, and a 64-bit integer a number where one holds it exactly. msgpackr's declarations
-// leave out the `'auto'` its decoder takes, so the options are passed as a plain object
-/** @type {object} */
-const exactly = { useRecords: false, int64AsType: 'auto' };
-const objects = new Packr({ ...exactly, mapsAsObjects: true });
-const maps = new Packr({ ...exactly, mapsAsObjects: false });
-/** @type {import('../client.js').Codec} */
-const codec = {
-  pack: (value) => objects.pack(value),
-  unpack: (bytes) => objects.unpack(bytes),
-  unpackMaps: (bytes) => maps.unpack(bytes),
+/** @type {import('../protocol/Schema.js').Schema} */
+const schema = {
+  types: {
+    Item: {
+      fields: {
+        title: { type: 'string' },
+        count: { type: 'integer', optional: true },
+        score: { type: 'number', optional: true },
+        when: { type: 'timestamp', optional: true },
+        raw: { type: 'bytes', optional: true },
+        meta: { type: 'object', optional: true },
+        tags: { type: 'list', of: { type: 'string' }, optional: true },
+      },
+      indexes: {
+        byTitle: { kind: 'value', fields: ['title'] },
+      },
+    },
+  },
+  relations: {
+    links: {
+      endpoints: [{ source: 'Item', target: 'Item' }],
+      weighted: true,
+    },
+  },
 };
 
-/** @param {import('node:test').TestContext} t */
-function open(t) {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  const db = Database.open(dir, {
-    syncs: false,
-    schema: {
-      $schema: 'https://elmdb.dev/schema/1.json',
-      types: { Note: { fields: { title: { type: 'string' }, meta: { type: 'any', optional: true } } } },
-    },
-  });
-  // Closed before its directory is removed: Windows won't remove a file that is mapped
-  t.after(() => {
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  return new Client(db, codec);
-}
+test('WireBatchBuilder encodes all value types, BatchSlot refs, and executes in one crossing', (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'elmdb-client-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const db = Database.open(dir, { schema, durability: 'unsafe', buildPolicy: 'eager' });
+  t.after(() => db.close());
 
-/** @type {import('../index.js').Start} */
-const notes = { from: 'types', types: ['Note'] };
+  const frame = buildWireBatch((b) => {
+    const a = b.create('Item', {
+      title: 'Alpha',
+      count: 42,
+      score: 3.14,
+      when: new Date(1700000000000),
+      raw: new Uint8Array([1, 2, 3, 255]),
+      // Unsorted keys test UTF-8 byte sorting parity with Rust
+      meta: { z: 1, a: 'ok', nested: { b: true, a: null } },
+      tags: ['rust', 'lmdb'],
+    }, 'item-a');
+    assert.ok(a instanceof BatchSlot);
+    const c = b.create('Item', { title: 'Beta', count: 7 }, 'item-b');
+    b.link(a, 'links', c, { weight: 2.5, info: { note: 'intra-batch' } });
+    b.patch(c, { count: 9 });
+  });
 
-test('a write and a read take and answer the generated types', async (t) => {
-  const client = open(t);
-  const written = client.write({ ops: [{ op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } }], now: 1000 });
-  assert.deepEqual(written.results, [{ kind: 'entity', id: 'Note-1', shortCode: null, created: true }]);
-  /** @type {import('../index.js').Reads} */
-  const reads = { reads: [
-    { read: 'query', plan: { start: notes, terminal: { answer: 'rows', fields: ['title'] } } },
-    { read: 'query', plan: { start: notes, terminal: { answer: 'count' } } },
-  ] };
-  const [rows, count] = client.read(reads);
-  assert.ok(rows.kind === 'rows' && count.kind === 'count');
-  // Read through its type: a row's id is a string, and `n` a number
-  assert.deepEqual(rows.rows.map((row) => row.id), ['Note-1']);
-  assert.deepEqual(rows, { kind: 'rows', rows: [{ id: 'Note-1', title: 'one' }], plainObjects: true });
-  assert.equal(count.n + 1, 2);
-  assert.deepEqual(await client.readAsync(reads), [rows, count]);
+  assert.equal(frame[0], 0x45); // 'E'
+  assert.equal(frame[1], 0x57); // 'W'
+  assert.equal(frame[2], 0x42); // 'B'
+  assert.equal(frame[3], 0x32); // '2'
+
+  const res = db.executeWireBatch(frame);
+  assert.deepEqual(res.createdIds, ['item-a', 'item-b']);
+
+  const rowA = db.get('item-a');
+  assert.ok(rowA);
+  assert.equal(rowA.fields.title, 'Alpha');
+  assert.equal(rowA.fields.count, 42);
+
+  const rowB = db.get('item-b');
+  assert.ok(rowB);
+  assert.equal(rowB.fields.count, 9);
+
+  const edges = db.getEdges('item-a', 'links', 'out');
+  assert.equal(edges.length, 1);
+  assert.equal(edges[0].targetId, 'item-b');
+  assert.equal(edges[0].weight, 2.5);
 });
 
-test('an answer that may hold `__proto__` keeps it as a key, in objects with no prototype', (t) => {
-  const client = open(t);
-  // A Map, as an object literal's `__proto__` would set its prototype rather than hold the key
-  const meta = new Map([['__proto__', 1], ['other', 2]]);
-  client.write({ ops: [{ op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one', meta } }] });
-  const [visited] = client.read({ reads: [{ read: 'query', visits: true, plan: { start: notes, terminal: { answer: 'rows' } } }] });
-  // The answer a `visits` wraps says it isn't plain, and the whole call is decoded exactly
-  assert.ok(visited.kind === 'visited' && visited.answer.kind === 'rows', String(visited.kind));
-  assert.equal(Object.getPrototypeOf(visited), null);
-  const { rows, plainObjects } = visited.answer;
-  assert.equal(plainObjects, false);
-  const held = /** @type {Record<string, unknown>} */ (rows[0].meta);
-  assert.equal(Object.getPrototypeOf(held), null);
-  assert.deepEqual(Object.keys(held), ['__proto__', 'other']);
-  assert.equal(held['__proto__'], 1);
-  assert.equal(rows[0].title, 'one');
-  // A field's value says it as rows do
-  const [field] = client.read({ reads: [{ read: 'field', id: 'Note-1', field: 'meta' }] });
-  assert.ok(field.kind === 'field' && field.plainObjects === false);
-  assert.deepEqual(Object.keys(/** @type {object} */ (field.value)), ['__proto__', 'other']);
-  // An `explain`, alone in its call, is decoded through the answer it wraps
-  const [explained] = client.read({ reads: [
-    { read: 'query', explain: true, plan: { start: notes, terminal: { answer: 'firstRow', fields: ['meta'] } } },
-  ] });
-  assert.ok(explained.kind === 'explained' && explained.answer.kind === 'row');
-  assert.deepEqual(Object.keys(/** @type {object} */ (explained.answer.row?.meta)), ['__proto__', 'other']);
-  // One answer that may hold `__proto__` decodes the whole call exactly, a plain answer beside it too
-  const [count, mixed] = client.read({ reads: [
-    { read: 'query', plan: { start: notes, terminal: { answer: 'count' } } },
-    { read: 'field', id: 'Note-1', field: 'meta' },
-  ] });
-  assert.ok(count.kind === 'count' && count.n === 1 && mixed.kind === 'field');
-  assert.deepEqual(Object.keys(/** @type {object} */ (mixed.value)), ['__proto__', 'other']);
-});
+test('buildWireBatch rejects async/thenable callbacks, __proto__, non-plain objects, BatchSlot values, and bad flags', () => {
+  assert.throws(
+    () => buildWireBatch(/** @type {any} */ (async () => {})),
+    /synchronous/,
+  );
+  const b = new WireBatchBuilder();
+  b.create('Item', { title: 'bad', score: Number.NaN });
+  assert.throws(() => b.encode(), /Non-finite/);
 
-test('a unit writes, reads its own writes, and commits through the client', (t) => {
-  const client = open(t);
-  const unit = client.begin();
-  const result = unit.write({ ops: [{ op: 'create', type: 'Note', id: 'Note-1', fields: { title: 'one' } }] });
-  assert.deepEqual(result.results, [{ kind: 'entity', id: 'Note-1', shortCode: null, created: true }]);
-  const [count] = unit.read({ reads: [{ read: 'query', plan: { start: notes, terminal: { answer: 'count' } } }] });
-  assert.deepEqual(count, { kind: 'count', n: 1 });
-  assert.deepEqual(unit.pendingChanges().types, ['Note']);
-  const committed = unit.commit();
-  assert.deepEqual(Object.keys(committed.entities), ['Note-1']);
-  assert.deepEqual(client.read({ reads: [{ read: 'row', id: 'Note-9' }] }), [{ kind: 'row', row: null, plainObjects: true }]);
+  // __proto__ rejected in both top-level fields and nested objects
+  const protoField = Object.create(null);
+  protoField['__proto__'] = { x: 1 };
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', protoField); }), /__proto__/);
+  const nestedProto = Object.create(null);
+  nestedProto['__proto__'] = 1;
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'ok', meta: nestedProto }); }), /__proto__/);
+
+  // BatchSlot rejected inside field value
+  assert.throws(() => buildWireBatch((x) => {
+    const s = x.create('Item', { title: 'a' });
+    x.create('Item', { title: 'b', meta: s });
+  }), /BatchSlot/);
+
+  // Non-plain objects (Map, Float32Array) rejected
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'm', meta: new Map() }); }), /Unsupported/);
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'f', raw: /** @type {any} */ (new Float32Array(2)) }); }), /Unsupported/);
+
+  // Invalid BatchSlot index and invalid returnFlags rejected
+  assert.throws(() => new BatchSlot(-1), RangeError);
+  const b2 = new WireBatchBuilder();
+  assert.throws(() => b2.encode(0xff), RangeError);
 });

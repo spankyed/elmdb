@@ -15,6 +15,11 @@ libc.workspace = true
 lmdb-master-sys.workspace = true
 sha2.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS App Sandbox forbids SysV semaphores (`semget`) and `kern.sysv.semmni` defaults to 10;
+# POSIX named semaphores avoid both limits and are released cleanly on `mdb_env_close`.
+lmdb-master-sys = { workspace = true, features = ["posix-sem"] }
+
 [dev-dependencies]
 elmdb-sim.workspace = true
 proptest.workspace = true

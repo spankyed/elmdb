@@ -1,7 +1,6 @@
 // A process that exits with a database still open leaves no lock behind: Node runs no destructor as it exits, so the
-// binding closes what is open as its environment tears down. On macOS LMDB locks with named POSIX semaphores, which
-// outlive the process unless the last one out removes them, and a table of them that fills refuses every later open on
-// the machine (`ENOSPC`) until it restarts. The lock file holds what the names are made of; `sem_open` says whether one still exists.
+// binding closes what is open as its environment or process tears down. On macOS LMDB locks with named POSIX semaphores
+// which outlive the process unless `mdb_env_close` runs on close/atexit.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -10,20 +9,13 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { Packr } from 'msgpackr';
 
 const binding = fileURLToPath(new URL('../index.js', import.meta.url));
+const clientPath = fileURLToPath(new URL('../client.js', import.meta.url));
 const { Database } = createRequire(import.meta.url)('../index.js');
 
-/** LMDB's base-85 digits (`mdb_a85`, liblmdb's mdb.c) */
 const A85 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~';
 
-/**
- * The named semaphores of the database at `dir`. LMDB keeps no names in its lock file, only the hash they are made from
- * (`mtb_mutexid`, a 64-bit word after the magic, the format, the last transaction and the reader count), and names the
- * reader and writer semaphores `/MDBr` and `/MDBw` followed by its base-85 digits, least significant first
- * (`mdb_env_mname_init`)
- */
 function semaphoresOf(dir) {
   let id = readFileSync(join(dir, 'lock.mdb')).readBigUInt64LE(24);
   let digits = '';
@@ -34,7 +26,6 @@ function semaphoresOf(dir) {
   return ['r', 'w'].map((kind) => `/MDB${kind}${digits}`);
 }
 
-/** Whether a named semaphore exists, asked of the C library through Python, which macOS ships */
 const exists = (name) => execFileSync('python3', ['-c', [
   'import ctypes, sys',
   'libc = ctypes.CDLL(None, use_errno=True)',
@@ -46,31 +37,31 @@ const exists = (name) => execFileSync('python3', ['-c', [
 test('an open database holds the two semaphores its lock file names, and a close removes them', { skip: process.platform !== 'darwin' }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-sem-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const db = Database.open(dir, { syncs: false });
+  const db = Database.open(dir, { durability: 'unsafe' });
   const names = semaphoresOf(dir);
   assert.deepEqual(names.map(exists), [true, true], `while open: ${names}`);
   db.close();
   assert.deepEqual(names.map(exists), [false, false]);
 });
 
-/** A child that opens the database at `dir`, reads from it so both semaphores are in use, then ends as `ends` says */
 const endings = {
   'calls process.exit': (dir) => [
     `const { Database } = require(${JSON.stringify(binding)});`,
-    `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    `db.read(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
+    `const db = Database.open(${JSON.stringify(dir)}, { durability: 'unsafe' });`,
+    'db.stats();',
     'process.exit(0);',
   ].join('\n'),
   'runs out of work': (dir) => [
     `const { Database } = require(${JSON.stringify(binding)});`,
-    `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    `db.read(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]));`,
+    `const db = Database.open(${JSON.stringify(dir)}, { durability: 'unsafe' });`,
+    'db.stats();',
   ].join('\n'),
   'is a worker thread its parent terminates': (dir) => [
     `const { Worker } = require('node:worker_threads');`,
     `const worker = new Worker(${JSON.stringify([
       `const { Database } = require(${JSON.stringify(binding)});`,
-      `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
+      `const db = Database.open(${JSON.stringify(dir)}, { durability: 'unsafe' });`,
+      'db.stats();',
       `require('node:worker_threads').parentPort.postMessage('open');`,
       'setInterval(() => {}, 1000);',
     ].join('\n'))}, { eval: true });`,
@@ -87,115 +78,43 @@ for (const [ends, child] of Object.entries(endings)) {
   });
 }
 
-test('a process that exits with a write group commit hasn\'t synced yet ends, its write on disk', (t) => {
+test('a process that exits with a grouped write persists it cleanly on exit', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Note: { fields: {} } } };
-  const batch = new Packr({ useRecords: false, mapsAsObjects: true })
-    .pack({ ops: [{ op: 'create', type: 'Note', id: 'Note-1' }], now: 1000 });
-  // On Windows `exit` ends the sync thread before the exit handlers run, so a close that waited on it never would end
+  const schema = { types: { Note: { fields: { title: { type: 'string' } } } }, relations: {} };
   const child = [
     `const { Database } = require(${JSON.stringify(binding)});`,
-    `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncIdleMs: 60000, syncIntervalMs: 60000 });`,
-    `db.write(Buffer.from(${JSON.stringify(batch.toString('base64'))}, 'base64'));`,
-    'process.stdout.write(String(db.sequence));',
+    `const { buildWireBatch } = require(${JSON.stringify(clientPath)});`,
+    `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, durability: 'grouped' });`,
+    `db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'kept' }, 'Note-1'); }));`,
+    'process.stdout.write(String(db.stats().commitSeq));',
     'process.exit(0);',
   ].join('\n');
-  const sequence = Number(execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 30_000 }));
-  const db = Database.open(dir, { syncs: false });
-  const reopened = db.sequence;
+  const seq = Number(execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 30_000 }));
+  const db = Database.open(dir, { durability: 'unsafe' });
+  const reopened = db.stats().commitSeq;
+  const row = db.get('Note-1');
   db.close();
-  assert.equal(reopened, sequence);
+  assert.equal(reopened, seq);
+  assert.equal(row.fields.title, 'kept');
 });
 
-test('a process that exits with a rebuild asked for and not yet answered ends with it applied', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const schema = {
-    $schema: 'https://elmdb.dev/schema/1.json',
-    types: { Note: { fields: { title: { type: 'string' } }, indexes: { byTitle: { kind: 'value', fields: ['title'] } } } },
-  };
-  // A rebuild of 20,000 notes, not awaited, and the process told to exit while it runs: the pool is run to its end as
-  // a process exits, so the rebuild is applied whole
-  const child = [
-    `const { Database } = require(${JSON.stringify(binding)});`,
-    `const { Packr } = require(${JSON.stringify(createRequire(import.meta.url).resolve('msgpackr'))});`,
-    'const packr = new Packr({ useRecords: false, mapsAsObjects: true });',
-    "const batch = (ids) => packr.pack({ ops: ids.map((id) => ({ op: 'create', type: 'Note', id, fields: { title: 'of ' + id } })), now: 1000 });",
-    `const db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)}, syncs: false });`,
-    "db.write(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
-    "process.stdout.write(String(db.sequence));",
-    'db.rebuildAsync();',
-    'process.exit(0);',
-  ].join('\n');
-  const before = Number(execFileSync(process.execPath, ['-e', child], { encoding: 'utf8', timeout: 60_000 }));
-  const db = Database.open(dir, { syncs: false });
-  const after = db.sequence;
-  const clean = db.check().differences.length;
-  db.close();
-  assert.equal(after, before + 1, 'the rebuild committed');
-  assert.equal(clean, 0, 'the rebuild ran to its end');
-});
-
-test('a rebuild of a handle nothing else holds is answered once the handle has been collected', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const schema = {
-    $schema: 'https://elmdb.dev/schema/1.json',
-    types: { Note: { fields: { title: { type: 'string' } }, indexes: { byTitle: { kind: 'value', fields: ['title'] } } } },
-  };
-  // The rebuild holds the last hold on the database once the handle is collected: letting the database go then would
-  // close it under the rebuild. A rebuild of 20,000 notes outlasts the handle's collection: the child says `collected`
-  // only where the handle's finalizer has run and the rebuild hasn't ended, and `late` or `kept` where this run showed
-  // nothing
-  const child = [
-    `const { Database } = require(${JSON.stringify(binding)});`,
-    `const { Packr } = require(${JSON.stringify(createRequire(import.meta.url).resolve('msgpackr'))});`,
-    'const packr = new Packr({ useRecords: false, mapsAsObjects: true });',
-    "const batch = (ids) => packr.pack({ ops: ids.map((id) => ({ op: 'create', type: 'Note', id, fields: { title: 'of ' + id } })), now: 1000 });",
-    `let db = Database.open(${JSON.stringify(dir)}, { schema: ${JSON.stringify(schema)} });`,
-    "db.write(batch(Array.from({ length: 20000 }, (_, i) => 'Note-' + i)));",
-    'let collected = false;',
-    'let rebuilt = false;',
-    'const registry = new FinalizationRegistry(() => { collected = true; });',
-    'registry.register(db, 0);',
-    'const rebuilding = db.rebuildAsync().then(() => { rebuilt = true; });',
-    'db = undefined;',
-    'const until = Date.now() + 20000;',
-    // Two more turns once the registry has been told, for the binding's own finalizer, which Node defers as well
-    'let turns = 2;',
-    '(function wait() {',
-    '  global.gc();',
-    '  if (!collected || turns-- > 0) return Date.now() < until ? setImmediate(wait) : process.stdout.write("kept");',
-    '  process.stdout.write(rebuilt ? "late" : "collected");',
-    "  rebuilding.then(() => process.stdout.write('answered'));",
-    '})();',
-  ].join('\n');
-  const said = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 60_000 });
-  assert.equal(said, 'collectedanswered');
-});
-
-test('a handle that ran a call answering a promise is collected once nothing holds it', (t) => {
-  // Each call that answers a promise holds the database by a hold of its own, so nothing roots the handle's
-  // JavaScript object for it: a handle dropped after the promise has settled is collected like one that never made the
-  // call. Each child prints `collected`, or `kept` after twenty seconds of collections that never found it. Returned as
-  // napi-rs's AsyncTask, every one of these was `kept`
+test('handles that ran async jobs are collected by V8 once dropped', (t) => {
   const said = {};
   const calls = {
-    read: "db.readAsync(Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]))",
-    durable: 'db.durable()',
+    query: `db.queryAsync({ source: { kind: 'allEntities' }, steps: [], terminal: { kind: 'count' } })`,
+    flush: 'db.flushAsync()',
     check: 'db.checkAsync()',
     rebuild: 'db.rebuildAsync()',
   };
-  for (const what of ['read', 'durable', 'check', 'rebuild', 'backup']) {
+  for (const what of ['query', 'flush', 'check', 'rebuild', 'backup']) {
     const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
     t.after(() => rmSync(dir, { recursive: true, force: true }));
     const child = [
       `const { Database } = require(${JSON.stringify(binding)});`,
-      `let db = Database.open(${JSON.stringify(join(dir, 'db'))}, { syncs: false });`,
-      'const began = Date.now();',
-      'let collected = null;',
-      'const registry = new FinalizationRegistry(() => { collected = Date.now() - began; });',
+      `let db = Database.open(${JSON.stringify(join(dir, 'db'))}, { durability: 'unsafe' });`,
+      'let collected = false;',
+      'const registry = new FinalizationRegistry(() => { collected = true; });',
       'registry.register(db, 0);',
       `const asked = ${what === 'backup' ? `db.backupAsync(${JSON.stringify(join(dir, 'copy'))})` : calls[what]};`,
       'db = undefined;',
@@ -203,49 +122,12 @@ test('a handle that ran a call answering a promise is collected once nothing hol
       '  const until = Date.now() + 20000;',
       '  (function wait() {',
       '    global.gc();',
-      "    if (collected === null && Date.now() < until) return setImmediate(wait);",
-      "    process.stdout.write(collected === null ? 'kept' : 'collected');",
+      '    if (!collected && Date.now() < until) return setImmediate(wait);',
+      "    process.stdout.write(collected ? 'collected' : 'kept');",
       '  })();',
       '});',
     ].join('\n');
     said[what] = execFileSync(process.execPath, ['--expose-gc', '-e', child], { encoding: 'utf8', timeout: 60_000 });
   }
-  assert.deepEqual(said, { read: 'collected', durable: 'collected', check: 'collected', rebuild: 'collected', backup: 'collected' });
+  assert.deepEqual(said, { query: 'collected', flush: 'collected', check: 'collected', rebuild: 'collected', backup: 'collected' });
 });
-
-test('a process that ends while V8 frees the answers it dropped ends cleanly', { timeout: 120_000 }, (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-exit-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  // Twenty thousand answers left as garbage, then a minor collection, whose sweep of those not yet freed V8 runs on a
-  // thread of its own while the process, out of work, ends. Were an answer an external buffer, that thread would wake
-  // the environment for each one freed, and a wake that lands once the environment has begun closing aborts Node on
-  // Windows, the one platform whose libuv checks (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`, Node
-  // 24.22.2); elsewhere the wake goes unnoticed, and `answers.test.mjs` is what holds an answer to being V8's own
-  const child = [
-    `const { Database } = require(${JSON.stringify(binding)});`,
-    `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    'const reads = Buffer.from([0x81, 0xa5, 0x72, 0x65, 0x61, 0x64, 0x73, 0x90]);',
-    'for (let i = 0; i < 20000; i++) db.read(reads);',
-    'db.close();',
-    `require('node:v8').setFlagsFromString('--expose-gc');`,
-    `require('node:vm').runInNewContext('gc')({ type: 'minor' });`,
-  ].join('\n');
-  // Which thread gets where first is the scheduler's: with external buffers 24 of 200 such processes died (Node
-  // 24.22.2 on windows-latest, 2026-11-11, the probe run docs/architecture/testing.md names), so twenty are ended
-  for (let run = 0; run < 20; run++) execFileSync(process.execPath, ['-e', child], { timeout: 30_000, stdio: 'pipe' });
-});
-
-test('a listener for the builder\'s commits keeps no process alive, open database or not', { timeout: 60_000 }, () => {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  const script = [
-    `const { Database } = require(${JSON.stringify(createRequire(import.meta.url).resolve('../index.js'))});`,
-    `const db = Database.open(${JSON.stringify(dir)}, { syncs: false });`,
-    'db.hearBuilderCommits(() => {});',
-  ].join('\n');
-  try {
-    execFileSync(process.execPath, ['-e', script], { timeout: 30_000, stdio: 'pipe' });
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-

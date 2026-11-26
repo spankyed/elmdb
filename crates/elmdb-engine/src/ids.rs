@@ -66,9 +66,12 @@ pub struct RoleId(pub u16);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct IndexId(pub u32);
 
-/// Compact set of `TypeId`s with fast inline bitmask for `TypeId < 128` and overflow set beyond.
+/// Compact set of `TypeId`s with fast inline bitmask for `TypeId < 128`, overflow set beyond,
+/// and an explicit `all` wildcard flag so `TypeMask::all()` matches every present and future `TypeId`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypeMask {
+    #[serde(default)]
+    all: bool,
     low: u128,
     high: BTreeSet<u16>,
 }
@@ -78,7 +81,18 @@ impl TypeMask {
         Self::default()
     }
 
+    pub fn all() -> Self {
+        Self { all: true, low: 0, high: BTreeSet::new() }
+    }
+
+    pub fn is_all(&self) -> bool {
+        self.all
+    }
+
     pub fn insert(&mut self, id: TypeId) {
+        if self.all {
+            return;
+        }
         if id.0 < 128 {
             self.low |= 1u128 << id.0;
         } else {
@@ -87,10 +101,19 @@ impl TypeMask {
     }
 
     pub fn contains(&self, id: TypeId) -> bool {
+        if self.all {
+            return true;
+        }
         if id.0 < 128 { (self.low & (1u128 << id.0)) != 0 } else { self.high.contains(&id.0) }
     }
 
     pub fn intersects(&self, other: &Self) -> bool {
+        if self.is_empty() || other.is_empty() {
+            return false;
+        }
+        if self.all || other.all {
+            return true;
+        }
         if (self.low & other.low) != 0 {
             return true;
         }
@@ -98,12 +121,21 @@ impl TypeMask {
     }
 
     pub fn union_with(&mut self, other: &Self) {
+        if other.all {
+            self.all = true;
+            self.low = 0;
+            self.high.clear();
+            return;
+        }
+        if self.all {
+            return;
+        }
         self.low |= other.low;
         self.high.extend(other.high.iter().copied());
     }
 
     pub fn is_empty(&self) -> bool {
-        self.low == 0 && self.high.is_empty()
+        !self.all && self.low == 0 && self.high.is_empty()
     }
 
     pub fn iter(&self) -> Vec<TypeId> {

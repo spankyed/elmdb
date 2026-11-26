@@ -109,34 +109,8 @@ fn main() -> ExitCode {
 /// listed here goes through it, so the models can run it on their own threads. A model of one of these is how it
 /// leaves the list
 const UNMODELLED: &[(&str, &str)] = &[
-    (
-        "database.rs",
-        "the open store, the schema and the index builder behind the handle, and the rebuild turn, a parking_lot \
-         ReentrantMutex no model provides: no model of opening yet",
-    ),
-    ("diagnostics/collector.rs", "a collector an embedding program installs, outside the engine's own concurrency"),
-    ("engine/derive/sorted.rs", "a test-only scratch budget per thread, no shared state"),
-    ("engine/mod.rs", "the schema read lock, a parking_lot RwLock no model provides"),
-    ("engine/order.rs", "a per-thread cache of each collation's collator and its stamp, no shared state"),
-    ("engine/values.rs", "a per-thread decompression buffer, no shared state"),
-    ("engine/watch.rs", "the schema read lock; the tracks and their delivery go through crate::sync"),
-    ("failpoints.rs", "test-only failure points, armed per thread"),
-    ("store/idle_reads.rs", "idle read snapshot release and its waiters: no model yet"),
-    (
-        "store/kept.rs",
-        "the writer gate, a parking_lot RecursiveRwLock no model provides, held as the pin is moved and ended; the \
-         order of its steps between processes is modelled in store/synced_model.rs, and killed processes test it",
-    ),
-    (
-        "store/mod.rs",
-        "the writer gate, a parking_lot RecursiveRwLock no model provides, and the paths open in the process",
-    ),
-    ("store/sync.rs", "the group commit sync worker, tested by its own deterministic harness (store/sync/tests.rs)"),
-    (
-        "store/writers.rs",
-        "a writer's turn, a mutex across this process's threads, tested with real threads \
-         (engine/tests/lifecycle.rs), and on macOS a file lock across processes, tested with real killed processes",
-    ),
+    ("db.rs", "handle lifecycle RwLock dropping LmdbStore deterministically on close/atexit"),
+    ("diagnostics.rs", "optional tracing span collector installed by host program, outside engine concurrency"),
 ];
 
 /// Fails on an engine file that locks outside `crate::sync` and isn't in `UNMODELLED`, on a listed file that no
@@ -748,38 +722,42 @@ fn modelled_sync_violations(source: &str) -> Vec<&'static str> {
     found
 }
 
-/// The engine's one module that commits a write transaction, relative to its source
-const COMMITS: &str = "store/commits.rs";
+/// The sole module allowed to call `commit_raw()`, relative to `crates/`.
+const COMMITS: &str = "elmdb-storage/src/durability.rs";
 
-/// Fails on engine code outside `COMMITS` that commits a write transaction, naming each line: a commit made
-/// elsewhere is one the store's rule for every commit never sees
+/// Files implementing or declaring `KvWrite::commit_raw` itself (not call sites).
+const COMMIT_RAW_DECLS: &[&str] =
+    &["elmdb-storage/src/durability.rs", "elmdb-storage/src/kv.rs", "elmdb-lmdb/src/txn.rs", "elmdb-sim/src/store.rs"];
+
+/// Fails on engine code outside `COMMITS` that calls `.commit_raw()`, naming each line:
+/// every write transaction in elmdb v2 must commit exclusively through `DurabilityGate::commit`.
 fn check_commits(root: &Path) -> Result<(), String> {
-    let found = commits_outside(&root.join("crates/elmdb/src"))?;
+    let crates_dir = root.join("crates");
+    let found = commits_outside(&crates_dir)?;
     if found.is_empty() {
         return Ok(());
     }
-    Err(format!(
-        "these commit a write transaction outside crates/elmdb/src/{COMMITS}: {found:?}; commit through that \
-         module's functions, which are where every commit is held to the store's rule"
-    ))
+    Err(format!("these call commit_raw() outside crates/{COMMITS}: {found:?}; commit through DurabilityGate::commit"))
 }
 
-/// The lines of the engine's source, tests aside, that commit a write transaction outside `COMMITS`, as
-/// `file:line`
-fn commits_outside(source: &Path) -> Result<Vec<String>, String> {
+/// Lines across `crates/` (tests aside) that invoke `.commit_raw()` outside `COMMIT_RAW_DECLS`.
+fn commits_outside(crates_dir: &Path) -> Result<Vec<String>, String> {
     let mut found = Vec::new();
-    let mut pending = vec![source.to_path_buf()];
+    let mut pending = vec![crates_dir.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
             let path = entry.map_err(|e| e.to_string())?.path();
-            let relative = path.strip_prefix(source).expect("under source").to_string_lossy().replace('\\', "/");
+            let relative = path.strip_prefix(crates_dir).expect("under crates").to_string_lossy().replace('\\', "/");
             if path.is_dir() {
-                if !relative.ends_with("tests") {
+                if !relative.ends_with("/tests") && relative != "tests" {
                     pending.push(path);
                 }
                 continue;
             }
-            if !relative.ends_with(".rs") || relative.ends_with("tests.rs") || relative == COMMITS {
+            if !relative.ends_with(".rs")
+                || relative.ends_with("tests.rs")
+                || COMMIT_RAW_DECLS.contains(&relative.as_str())
+            {
                 continue;
             }
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -792,13 +770,12 @@ fn commits_outside(source: &Path) -> Result<Vec<String>, String> {
     Ok(found)
 }
 
-/// 1-based line numbers in `source` that commit a write transaction: heed's own `.commit()` (taking no arguments,
-/// whether on one line or split across lines) or `create_databases_and_commit(...)`
+/// 1-based line numbers in `source` that invoke `.commit_raw()`.
 fn commit_lines(source: &str) -> Vec<usize> {
     let code = strip_comments_and_strings(source);
-    let re = regex::Regex::new(r"\.\s*(commit)\s*\(\s*\)|\b(create_databases_and_commit)\s*\(").expect("valid regex");
+    let re = regex::Regex::new(r"\.\s*(commit_raw)\s*\(\s*\)").expect("valid regex");
     re.captures_iter(&code)
-        .filter_map(|cap| cap.get(1).or_else(|| cap.get(2)))
+        .filter_map(|cap| cap.get(1))
         .map(|m| 1 + code[..m.start()].bytes().filter(|&b| b == b'\n').count())
         .collect()
 }
@@ -1392,10 +1369,9 @@ fn check_one_lmdb(root: &Path) -> Result<(), String> {
 }
 
 /// The crates besides ICU's whose output an index stores: charabia's tokens and rust-stemmers' stems in a text index's
-/// terms, with what charabia normalizes, detects a language and segments by, which it requires only as ranges, and
-/// hannoy's graph in a vector index's databases. A version that splits, stems or lays out differently would leave a
-/// stored index that a query no longer matches and `check()` reports as differing, or a graph read as another layout
-const INDEXED: [&str; 6] = ["charabia", "finl_unicode", "hannoy", "rust-stemmers", "unicode-normalization", "whatlang"];
+/// terms, with what charabia normalizes, detects a language and segments by, which it requires only as ranges.
+/// A version that splits or stems differently would leave a stored index that a query no longer matches.
+const INDEXED: [&str; 5] = ["charabia", "finl_unicode", "rust-stemmers", "unicode-normalization", "whatlang"];
 
 /// Every ICU crate the lockfile holds, and each of `INDEXED`, required by the workspace at exactly its locked version
 /// and named among `elmdb`'s dependencies. A sort key is the collator's output: one stored under the stamp of these
@@ -1549,7 +1525,7 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 mod tests {
     use super::{Skip, exclude_res, skips_in, stale_exclusions, with_skips};
     use super::{
-        UNMODELLED, commit_lines, direct_dependencies, is_modelled_file, lmdb_sys_crates, locks_outside_sync,
+        UNMODELLED, direct_dependencies, is_modelled_file, lmdb_sys_crates, locks_outside_sync,
         modelled_sync_violations, unmodelled_files, unmodelled_in_modelled_files,
     };
     use super::{
@@ -1843,33 +1819,28 @@ mod model { fn m() {} }
     #[test]
     fn a_commit_outside_the_one_module_is_found_and_one_in_it_or_in_a_test_is_not() {
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("crates/elmdb/src");
-        std::fs::create_dir_all(src.join("store")).unwrap();
-        std::fs::create_dir_all(src.join("engine/tests")).unwrap();
-        std::fs::write(src.join("store/commits.rs"), "fn commit(txn: RwTxn) { txn.commit() }\n").unwrap();
-        std::fs::write(src.join("store/tests.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
-        std::fs::write(src.join("engine/tests/uses.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
-        // A unit's commit takes whether it is durable, the mirror's its sequences, and comments/strings commit nothing
-        let unit = "fn f(unit: Unit) {\n    // txn.commit() is the store's\n    /* txn\n        .commit() */\n    let _ = \"txn.commit()\";\n    unit.commit(false);\n    mirror.commit(1, 2, None);\n}\n";
-        std::fs::write(src.join("engine/unit.rs"), unit).unwrap();
+        let storage_src = dir.path().join("crates/elmdb-storage/src");
+        let engine_src = dir.path().join("crates/elmdb-engine/src");
+        std::fs::create_dir_all(&storage_src).unwrap();
+        std::fs::create_dir_all(engine_src.join("tests")).unwrap();
+        std::fs::write(storage_src.join("durability.rs"), "fn commit(txn: RwTxn) { txn.commit_raw() }\n").unwrap();
+        std::fs::write(engine_src.join("tests.rs"), "fn t(txn: RwTxn) { txn.commit_raw().unwrap(); }\n").unwrap();
+        std::fs::write(engine_src.join("tests/uses.rs"), "fn t(txn: RwTxn) { txn.commit_raw().unwrap(); }\n").unwrap();
+        let ok = "fn f(txn: GatedWriteTxn) {\n    // txn.commit_raw() is gated\n    let _ = \"txn.commit_raw()\";\n    txn.commit();\n}\n";
+        std::fs::write(engine_src.join("commit.rs"), ok).unwrap();
         assert_eq!(super::check_commits(dir.path()), Ok(()));
-        std::fs::write(src.join("store/mod.rs"), "fn f(txn: RwTxn) {\n\n    txn.commit()?;\n}\n").unwrap();
-        let made = "fn f(env: &Env, wtxn: RwTxn) {\n    env.create_databases_and_commit(wtxn, |_, _| todo!());\n}\n";
-        std::fs::write(src.join("engine/made.rs"), made).unwrap();
-        let multi = "fn f(txn: RwTxn) {\n    txn\n        .commit()?;\n    txn\n        .\n        commit(\n            /* none */\n        )?;\n}\n";
-        std::fs::write(src.join("engine/multi.rs"), multi).unwrap();
+
+        std::fs::write(engine_src.join("bad.rs"), "fn f(txn: RwTxn) {\n\n    txn.commit_raw()?;\n}\n").unwrap();
+        let multi = "fn f(txn: RwTxn) {\n    txn\n        .commit_raw()?;\n    txn\n        .\n        commit_raw(\n            /* none */\n        )?;\n}\n";
+        std::fs::write(engine_src.join("multi.rs"), multi).unwrap();
         let refused = super::check_commits(dir.path()).unwrap_err();
         assert!(
-            refused.contains(r#"["engine/made.rs:2", "engine/multi.rs:3", "engine/multi.rs:6", "store/mod.rs:3"]"#),
+            refused.contains(
+                r#"["elmdb-engine/src/bad.rs:3", "elmdb-engine/src/multi.rs:3", "elmdb-engine/src/multi.rs:6"]"#
+            ),
             "{refused}"
         );
-        assert!(refused.contains("crates/elmdb/src/store/commits.rs"), "{refused}");
-        assert_eq!(
-            commit_lines(
-                "fn f(env: &Env, w: RwTxn) {\n    env.create_databases_and_commit\n        (w, |_, _| {});\n}"
-            ),
-            [2]
-        );
+        assert!(refused.contains("crates/elmdb-storage/src/durability.rs"), "{refused}");
     }
 
     #[test]
@@ -1951,7 +1922,7 @@ jobs:
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("crates/elmdb/src")).unwrap();
         let refused = super::check_sync(dir.path()).unwrap_err();
-        assert!(refused.contains("no longer lock") && refused.contains("store/sync.rs"), "{refused}");
+        assert!(refused.contains("no longer lock") && refused.contains("db.rs"), "{refused}");
     }
 
     #[test]

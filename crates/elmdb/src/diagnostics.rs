@@ -1,271 +1,70 @@
-//! What the engine reports about its slow operations while they run, as [`tracing`](https://docs.rs/tracing) spans
-//! (`docs/architecture/testing.md`, Diagnostics).
-//!
-//! Spans are coarse — one per operation or phase, never one per row — and carry phases, counts, durations and outcomes:
-//! schema names, never entity values, ids, query payloads or paths. The engine never installs a collector; the
-//! program embedding it does — [`Collector`] is one — or nothing is collected.
-//!
-//! Without the `diagnostics` feature, which is off by default, `tracing` is not a dependency and an [`Op`] is empty, so
-//! every call here compiles to nothing. With it and no collector, an [`Op`] is `None` after one check of its callsite,
-//! and no clock is read and no field computed: `scripts/diagnostics-overhead.py` holds that cost to a declared bound.
+//! Optional span collector behind the `diagnostics` feature (off by default).
 
-#[cfg(feature = "diagnostics")]
-use std::time::Instant;
-
-#[cfg(feature = "diagnostics")]
-mod collector;
-#[cfg(feature = "diagnostics")]
-pub use collector::{Collector, Taken};
-
-use crate::error::{Error, Result};
-
-/// The spans' names and fields, which the tests and `docs/architecture/testing.md` name too
-pub mod names {
-    /// A rebuild of derived data: every index, or the one named by `entity_type` and `index` (both empty for every
-    /// index)
-    pub const REBUILD: &str = "rebuild";
-    /// One write transaction, from asking for the writer to the commit and its sync
-    pub const WRITE: &str = "write";
-    /// Opening a unit, which holds the writer across calls
-    pub const BEGIN: &str = "begin";
-    /// Waiting for an open unit to end
-    pub const UNIT_WAIT: &str = "unit_wait";
-    /// Sorting derived entries, in memory and in runs spilled to scratch files
-    pub const SORT: &str = "sort";
-
-    /// What every span records as it ends: `committed`, `durable` or `not_durable` (committed, its sync failed) for a
-    /// write or a rebuild, `begun` for a unit, `returned` for a wait, `sorted` for a sort, `failed`, or `abandoned` for
-    /// one dropped before it could say, by an error returned past it or a panic
-    pub const OUTCOME: &str = "outcome";
-    /// A failed operation's `ErrorCode`, as JavaScript's `error.code` names it
-    pub const ERROR: &str = "error";
-    /// Microseconds from the span's start to its end
-    pub const ELAPSED_US: &str = "elapsed_us";
-    /// Microseconds from the span's start until it held the writer
-    pub const WAITED_US: &str = "waited_us";
-    /// Times a write grew the map after filling it, and ran again
-    pub const GROWTHS: &str = "growths";
-    /// Entries a sort was given
-    pub const ROWS: &str = "rows";
-    /// Runs a sort wrote to scratch files, the last one at its finish included, and the bytes they held then
-    pub const RUNS: &str = "runs";
-    pub const SPILLED_BYTES: &str = "spilled_bytes";
+#[derive(Debug, Clone, Default)]
+pub struct Taken {
+    pub spans: Vec<String>,
+    pub dropped: u64,
 }
 
-/// The target every span is reported under, for a collector to filter on
-pub const TARGET: &str = "elmdb";
-
-/// One operation being reported: empty without the feature, `None` inside when nothing collects it
-pub(crate) struct Op {
-    #[cfg(feature = "diagnostics")]
-    live: Option<(tracing::Span, Instant)>,
-}
-
-impl Op {
-    #[cfg(feature = "diagnostics")]
-    fn live(span: tracing::Span) -> Self {
-        // A span nobody collects is disabled after its callsite's cached check: no clock is read for it
-        Self { live: (!span.is_disabled()).then(|| (span, Instant::now())) }
-    }
-
-    #[inline(always)]
-    pub fn rebuild(index: Option<(&str, &str)>) -> Self {
-        #[cfg(feature = "diagnostics")]
-        {
-            use tracing::field::Empty;
-            let (entity_type, index) = index.unwrap_or(("", ""));
-            Self::live(tracing::info_span!(
-                target: TARGET, "rebuild", entity_type, index, outcome = Empty, error = Empty,
-                elapsed_us = Empty
-            ))
-        }
-        #[cfg(not(feature = "diagnostics"))]
-        {
-            let _ = index;
-            Self {}
-        }
-    }
-
-    #[inline(always)]
-    pub fn write(durable: bool) -> Self {
-        #[cfg(feature = "diagnostics")]
-        {
-            use tracing::field::Empty;
-            Self::live(tracing::info_span!(
-                target: TARGET, "write", durable, waited_us = Empty, growths = Empty,
-                outcome = Empty, error = Empty, elapsed_us = Empty
-            ))
-        }
-        #[cfg(not(feature = "diagnostics"))]
-        {
-            let _ = durable;
-            Self {}
-        }
-    }
-
-    #[inline(always)]
-    pub fn begin() -> Self {
-        #[cfg(feature = "diagnostics")]
-        {
-            use tracing::field::Empty;
-            Self::live(tracing::info_span!(
-                target: TARGET, "begin", waited_us = Empty, outcome = Empty, error = Empty,
-                elapsed_us = Empty
-            ))
-        }
-        #[cfg(not(feature = "diagnostics"))]
-        Self {}
-    }
-
-    #[inline(always)]
-    pub fn unit_wait() -> Self {
-        #[cfg(feature = "diagnostics")]
-        {
-            use tracing::field::Empty;
-            Self::live(tracing::info_span!(target: TARGET, "unit_wait", outcome = Empty, elapsed_us = Empty))
-        }
-        #[cfg(not(feature = "diagnostics"))]
-        Self {}
-    }
-
-    #[inline(always)]
-    pub fn sort() -> Self {
-        #[cfg(feature = "diagnostics")]
-        {
-            use tracing::field::Empty;
-            Self::live(tracing::info_span!(
-                target: TARGET, "sort", rows = Empty, runs = Empty, spilled_bytes = Empty, outcome = Empty,
-                error = Empty, elapsed_us = Empty
-            ))
-        }
-        #[cfg(not(feature = "diagnostics"))]
-        Self {}
-    }
-
-    /// An operation reported nowhere, standing in for one already ended
-    #[inline(always)]
-    pub fn none() -> Self {
-        Self {
-            #[cfg(feature = "diagnostics")]
-            live: None,
-        }
-    }
-
-    /// Runs `f` inside the span, so the spans `f` starts are its children
-    #[inline(always)]
-    pub fn in_scope<T>(&self, f: impl FnOnce() -> T) -> T {
-        #[cfg(feature = "diagnostics")]
-        if let Some((span, _)) = &self.live {
-            return span.in_scope(f);
-        }
-        f()
-    }
-
-    /// Records `field`, computing it only when the span is collected
-    #[inline(always)]
-    pub fn record(&self, field: &'static str, value: impl FnOnce() -> u64) {
-        #[cfg(feature = "diagnostics")]
-        if let Some((span, _)) = &self.live {
-            span.record(field, value());
-        }
-        #[cfg(not(feature = "diagnostics"))]
-        let _ = (field, value);
-    }
-
-    /// Records the microseconds since the span started as `field`
-    #[inline(always)]
-    pub fn record_elapsed(&self, field: &'static str) {
-        #[cfg(feature = "diagnostics")]
-        if let Some((span, started)) = &self.live {
-            span.record(field, micros(started));
-        }
-        #[cfg(not(feature = "diagnostics"))]
-        let _ = field;
-    }
-
-    /// Ends the span with `outcome`, its elapsed time and, for a failure, its error's code
-    #[inline(always)]
-    #[allow(unused_mut)]
-    pub fn end(mut self, outcome: std::result::Result<&'static str, &Error>) {
-        #[cfg(feature = "diagnostics")]
-        if let Some((span, started)) = self.live.take() {
-            match outcome {
-                Ok(outcome) => span.record(names::OUTCOME, outcome),
-                Err(error) => {
-                    span.record(names::OUTCOME, "failed");
-                    span.record(names::ERROR, error.code.as_str())
-                }
-            };
-            span.record(names::ELAPSED_US, micros(&started));
-        }
-        #[cfg(not(feature = "diagnostics"))]
-        let _ = outcome;
-    }
-
-    /// Ends the span with `outcome`, or the error `result` holds, answering `result`
-    #[inline(always)]
-    pub fn ended<T>(self, result: Result<T>, outcome: &'static str) -> Result<T> {
-        self.end(result.as_ref().map(|_| outcome));
-        result
-    }
-}
-
-/// A span still live when its operation is dropped ended by no path that could say how: an error returned past it, as
-/// a sort's scratch dropped when its rebuild fails, or a panic. It says so, with its time, rather than closing silent
 #[cfg(feature = "diagnostics")]
-impl Drop for Op {
-    fn drop(&mut self) {
-        if let Some((span, started)) = self.live.take() {
-            span.record(names::OUTCOME, "abandoned");
-            span.record(names::ELAPSED_US, micros(&started));
+mod active {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    use tracing::Subscriber;
+    use tracing::span::{Attributes, Id, Record};
+
+    use super::Taken;
+
+    struct State {
+        spans: VecDeque<String>,
+        dropped: u64,
+        next_id: u64,
+    }
+
+    pub struct Collector {
+        cap: usize,
+        state: Mutex<State>,
+    }
+
+    impl Collector {
+        pub fn new(cap: usize) -> Self {
+            Self { cap: cap.max(1), state: Mutex::new(State { spans: VecDeque::new(), dropped: 0, next_id: 1 }) }
         }
+
+        pub fn take(&self) -> Taken {
+            let mut g = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let spans = g.spans.drain(..).collect();
+            let dropped = std::mem::take(&mut g.dropped);
+            Taken { spans, dropped }
+        }
+    }
+
+    impl Subscriber for Collector {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, attrs: &Attributes<'_>) -> Id {
+            let mut g = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let id = g.next_id;
+            g.next_id = g.next_id.saturating_add(1).max(1);
+            let entry = serde_json::json!({ "span": attrs.metadata().name(), "id": id }).to_string();
+            if g.spans.len() >= self.cap {
+                g.spans.pop_front();
+                g.dropped += 1;
+            }
+            g.spans.push_back(entry);
+            Id::from_u64(id)
+        }
+
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &Id) {}
+        fn exit(&self, _span: &Id) {}
     }
 }
 
 #[cfg(feature = "diagnostics")]
-fn micros(started: &Instant) -> u64 {
-    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
-}
-
-#[cfg(all(test, feature = "diagnostics"))]
-mod tests {
-    use std::sync::Arc;
-
-    use serde_json::Value;
-
-    use super::{Collector, Op, names};
-    use crate::error::{Error, ErrorCode};
-
-    fn heard(collector: &Collector) -> Vec<Value> {
-        collector.take().spans.iter().map(|s| serde_json::from_str(s).unwrap()).collect()
-    }
-
-    #[test]
-    fn an_operation_dropped_before_it_ends_says_it_was_abandoned_and_how_long_it_ran() {
-        let collector = Arc::new(Collector::new(10));
-        tracing::subscriber::with_default(Arc::clone(&collector), || {
-            let sort = Op::sort();
-            sort.record(names::ROWS, || 3);
-            drop(sort);
-        });
-        let spans = heard(&collector);
-        assert_eq!(spans.len(), 1);
-        assert_eq!((&spans[0][names::OUTCOME], &spans[0][names::ROWS]), (&Value::from("abandoned"), &Value::from(3)));
-        assert!(spans[0][names::ELAPSED_US].is_u64(), "{}", spans[0]);
-    }
-
-    #[test]
-    fn an_operation_that_ended_is_not_abandoned_on_drop() {
-        let collector = Arc::new(Collector::new(10));
-        tracing::subscriber::with_default(Arc::clone(&collector), || {
-            Op::write(false).end(Ok("committed"));
-            Op::begin().end(Err(&Error::new(ErrorCode::UnitOpen, "a unit is open")));
-        });
-        let spans = heard(&collector);
-        assert_eq!(spans[0][names::OUTCOME], "committed");
-        assert_eq!(
-            (&spans[1][names::OUTCOME], &spans[1][names::ERROR]),
-            (&Value::from("failed"), &Value::from("UNIT_OPEN"))
-        );
-    }
-}
+pub use active::Collector;

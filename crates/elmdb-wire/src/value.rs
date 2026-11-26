@@ -153,6 +153,14 @@ impl CanonicalValue {
                 Ok(())
             }
             Self::Object(entries) => {
+                for (k, _) in entries {
+                    if k == "__proto__" {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ValidationFailed,
+                            "reserved key '__proto__' is not permitted",
+                        ));
+                    }
+                }
                 for pair in entries.windows(2) {
                     if pair[0].0 >= pair[1].0 {
                         return Err(ElmdbError::new(

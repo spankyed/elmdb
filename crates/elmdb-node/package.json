@@ -25,7 +25,7 @@
       "types": "./client.d.ts",
       "default": "./client.js"
     },
-    "./protocol/schema-1.json": "./protocol/schema-1.json",
+    "./protocol/schema-2.json": "./protocol/schema-2.json",
     "./protocol/*.js": {
       "types": "./protocol/*.d.ts"
     },
@@ -40,7 +40,7 @@
     "client.js",
     "client.d.ts",
     "protocol/*.d.ts",
-    "protocol/schema-1.json",
+    "protocol/schema-2.json",
     "LICENSE-MIT",
     "LICENSE-APACHE",
     "LICENSE-OPENLDAP",
@@ -71,6 +71,6 @@
       "aarch64-unknown-linux-musl",
       "x86_64-pc-windows-msvc"
     ],
-    "dtsHeader": "import type { Schema } from './protocol/Schema.js'\nimport type { SchemaChange } from './protocol/SchemaChange.js'\nimport type { CheckReport } from './protocol/CheckReport.js'\nimport type { IndexStatus } from './protocol/IndexStatus.js'\nimport type { Stats } from './protocol/Stats.js'\nimport type { OpenReport } from './protocol/OpenReport.js'\nimport type { Restore } from './protocol/Restore.js'\nexport type { ErrorCode } from './protocol/ErrorCode.js'\nexport type { Written } from './protocol/Written.js'\nexport type { BatchResult } from './protocol/BatchResult.js'\nexport type { OpResult } from './protocol/OpResult.js'\nexport type { ChangeSet } from './protocol/ChangeSet.js'\nexport type { Reads } from './protocol/Reads.js'\nexport type { ReadOp } from './protocol/ReadOp.js'\nexport type { Plan } from './protocol/Plan.js'\nexport type { Start } from './protocol/Start.js'\nexport type { Step } from './protocol/Step.js'\nexport type { Terminal } from './protocol/Terminal.js'\nexport type { Batch } from './protocol/Batch.js'\nexport type { Op } from './protocol/Op.js'\nexport type { Answers } from './protocol/Answers.js'\nexport type { Answer } from './protocol/Answer.js'\nexport type { Row } from './protocol/Row.js'\nexport type { RelationRow } from './protocol/RelationRow.js'\nexport type { Hit } from './protocol/Hit.js'\nexport type { Stage } from './protocol/Stage.js'\nexport type { Schema, SchemaChange, CheckReport, IndexStatus, Stats, OpenReport, Restore }\n"
+    "dtsHeader": "import type { Schema } from './protocol/Schema.js'\nimport type { SchemaChange } from './protocol/SchemaChange.js'\nimport type { OpenReport } from './protocol/OpenReport.js'\nimport type { BatchResult } from './protocol/BatchResult.js'\nimport type { CheckReport } from './protocol/CheckReport.js'\nimport type { IndexStatus } from './protocol/IndexStatus.js'\nimport type { DatabaseStats } from './protocol/DatabaseStats.js'\nimport type { DumpReport } from './protocol/DumpReport.js'\nimport type { WatchTick } from './protocol/WatchTick.js'\nimport type { Row } from './protocol/Row.js'\nimport type { RelationRow } from './protocol/RelationRow.js'\nimport type { QuerySpec } from './protocol/QuerySpec.js'\nimport type { QueryAnswer } from './protocol/QueryAnswer.js'\nexport type { ErrorCode } from './protocol/ErrorCode.js'\nexport type { Schema, SchemaChange, OpenReport, BatchResult, CheckReport, IndexStatus, DatabaseStats, DumpReport, WatchTick, Row, RelationRow, QuerySpec, QueryAnswer }\n"
   }
 }

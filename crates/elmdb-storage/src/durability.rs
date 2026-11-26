@@ -176,6 +176,24 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         self.store.page_size()
     }
 
+    /// Creates a consistent compacted copy of the store in `target_dir` and writes + fsyncs
+    /// a verified `synced.v2` sidecar matching the copied `data.mdb` active meta page.
+    pub fn copy_compacted(&self, target_dir: &Path) -> Result<(), StorageError> {
+        self.check_poisoned()?;
+        let receipt = self.store.copy_compacted(target_dir)?;
+        let slot =
+            SyncSlot { seq: 1, txnid: receipt.txnid, boot_id: self.vfs.boot_id(), roots_sha256: receipt.roots_sha256 };
+        let encoded = slot.encode();
+        let mut sidecar = vec![0u8; SYNC_FILE_BYTES];
+        sidecar[0..SYNC_SLOT_BYTES].copy_from_slice(&encoded);
+        sidecar[SYNC_SLOT_BYTES..SYNC_FILE_BYTES].copy_from_slice(&encoded);
+        let sidecar_path = target_dir.join(SYNC_SIDECAR_NAME);
+        self.vfs.write_at(&sidecar_path, 0, &sidecar)?;
+        self.vfs.sync_file(&sidecar_path)?;
+        self.vfs.sync_dir(target_dir)?;
+        Ok(())
+    }
+
     pub fn last_txnid(&self) -> Result<u64, StorageError> {
         self.check_poisoned()?;
         self.store.last_txnid()

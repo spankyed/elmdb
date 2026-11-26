@@ -836,6 +836,14 @@ impl InvalidationIndex {
         self.all_watch_ids()
     }
 
+    /// Notifies a full maintenance rebuild that may not bump `commit_seq` or `schema_epoch`,
+    /// recording a same-seq invalidation barrier so concurrent readers at `read_at_seq == seq` never miss it.
+    pub fn notify_full_rebuild(&mut self, seq: u64, schema_epoch: u64) -> Vec<WatchId> {
+        self.ring_dropped_subdb_up_to = Some(self.ring_dropped_subdb_up_to.map_or(seq, |prev| prev.max(seq)));
+        self.push_ring(seq, schema_epoch, CommitRingPayload::FullInvalidation);
+        self.all_watch_ids()
+    }
+
     /// Selective cross-process catch-up via persisted `commit_log` (last 4,096 commits),
     /// executed atomically inside **ONE single pinned MVCC `RoTxn`** (zero TOCTOU race!)
     /// AND checking LMDB `last_txnid()` to catch cross-process maintenance writes (`set_entity_embeddings`,

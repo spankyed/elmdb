@@ -1,13 +1,13 @@
-//! The TypeScript declarations generated from the protocol's Rust types. The Rust types are the definition; nothing
-//! here is written by hand. They are written as `.d.ts`, types only: a consumer's compiler checks a `.ts` file under
-//! its own options, which `skipLibCheck` doesn't skip, and API Extractor refuses a program holding one.
+//! TypeScript declarations and JSON Schema generated from elmdb v2's authoritative Rust protocol types.
+//!
+//! Single source of truth: every exported protocol type and `ErrorCode` is generated from `elmdb` here.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
 use ts_rs::{Config, TS};
 
-/// Writes every exported type's declaration into `dir`, replacing what is there
+/// Writes every exported elmdb v2 protocol declaration + `ErrorCode.d.ts` + `schema-2.json` into `dir`.
 pub fn write(dir: &Path) -> Result<(), String> {
     if dir.exists() {
         std::fs::remove_dir_all(dir).map_err(|e| format!("couldn't clear {}: {e}", dir.display()))?;
@@ -15,34 +15,40 @@ pub fn write(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("couldn't create {}: {e}", dir.display()))?;
     let config = Config::new()
         .with_out_dir(dir)
-        // Every integer the protocol carries is within ±2^53, so a JavaScript number holds it exactly
+        // Every protocol integer fits within JS's safe ±2^53 range.
         .with_large_int("number")
-        // ESM resolution needs the extension on a relative import
+        // ESM resolution requires explicit `.js` extension on relative imports.
         .with_import_extension(Some("js"));
-    elmdb::ErrorCode::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::schema::Schema::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::schema::SchemaChange::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::OpenReport::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::Batch::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::BatchResult::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::engine::Written::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::ChangeSet::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::Changed::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::engine::plan::Reads::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::engine::answer::Answers::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::engine::maintenance::Load::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::engine::maintenance::Stats::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::engine::derive::CheckReport::export_all(&config).map_err(|e| e.to_string())?;
-    elmdb::engine::IndexStatus::export_all(&config).map_err(|e| e.to_string())?;
+
+    elmdb::protocol::Schema::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::SchemaChange::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::OpenReport::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::BatchResult::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::CheckReport::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::IndexStatus::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::DatabaseStats::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::DumpReport::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::WatchTick::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::Row::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::RelationRow::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::QuerySpec::export_all(&config).map_err(|e| e.to_string())?;
+    elmdb::protocol::QueryAnswer::export_all(&config).map_err(|e| e.to_string())?;
+
     declarations(dir)?;
+
+    // Single source of truth for `ErrorCode` (generated directly from `elmdb_wire::ErrorCode::ALL`).
+    let error_code_dts = format!(
+        "// This file was generated from elmdb_wire::ErrorCode. Do not edit manually.\n\n{}\n",
+        elmdb::ErrorCode::ts_type_definition()
+    );
+    std::fs::write(dir.join("ErrorCode.d.ts"), error_code_dts).map_err(|e| e.to_string())?;
+
     let text = serde_json::to_string_pretty(&json_schema()?).map_err(|e| e.to_string())? + "\n";
     std::fs::write(dir.join(JSON_SCHEMA), text).map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Renames each `.ts` file ts-rs wrote in `dir` to `.d.ts`, which ts-rs has no setting for. ts-rs writes only `export
-/// type` declarations, which a declaration file holds as they are, and an import of `./Name.js` resolves to
-/// `Name.d.ts` as it did to `Name.ts`, so no file's text changes
+/// Renames each `.ts` file ts-rs emitted to `.d.ts`.
 fn declarations(dir: &Path) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("couldn't read {}: {e}", dir.display()))?;
     for entry in entries {
@@ -57,14 +63,11 @@ fn declarations(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The JSON Schema's file among the generated ones: the 1 is the schema language's version
-const JSON_SCHEMA: &str = "schema-1.json";
+/// JSON Schema file name for elmdb v2 (`SCHEMA_LANGUAGE = https://elmdb.dev/schema/2.json`).
+const JSON_SCHEMA: &str = "schema-2.json";
 
-/// The JSON Schema a schema's `$schema` names, for editors and for checking a schema before opening a database. Its
-/// `$id` is that name, `SCHEMA_LANGUAGE`, the URL it is meant to be served at, written after the `$schema` that names
-/// its own dialect
 fn json_schema() -> Result<serde_json::Value, String> {
-    let generated = serde_json::to_value(schemars::schema_for!(elmdb::schema::Schema)).map_err(|e| e.to_string())?;
+    let generated = serde_json::to_value(schemars::schema_for!(elmdb::protocol::Schema)).map_err(|e| e.to_string())?;
     let serde_json::Value::Object(generated) = generated else {
         return Err("the schema's JSON Schema isn't an object".to_owned());
     };
@@ -73,7 +76,7 @@ fn json_schema() -> Result<serde_json::Value, String> {
         let dialect = key == "$schema";
         with_id.insert(key, value);
         if dialect {
-            with_id.insert("$id".to_owned(), elmdb::schema::SCHEMA_LANGUAGE.into());
+            with_id.insert("$id".to_owned(), elmdb::protocol::SCHEMA_LANGUAGE.into());
         }
     }
     if !with_id.contains_key("$id") {
@@ -82,7 +85,7 @@ fn json_schema() -> Result<serde_json::Value, String> {
     Ok(serde_json::Value::Object(with_id))
 }
 
-/// The files that differ between two generated directories: added, removed or changed
+/// The files that differ between two generated directories: added, removed or changed.
 pub fn differences(fresh: &Path, committed: &Path) -> Result<Vec<String>, String> {
     let names = |dir: &Path| -> Result<BTreeSet<String>, String> {
         if !dir.exists() {
@@ -118,13 +121,11 @@ mod tests {
         write(committed.path()).unwrap();
         let text = std::fs::read_to_string(fresh.path().join(JSON_SCHEMA)).unwrap();
         let schema: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(schema["$id"], elmdb::schema::SCHEMA_LANGUAGE);
-        // The dialect's URL stays the JSON Schema's own, and the two are told apart
+        assert_eq!(schema["$id"], elmdb::protocol::SCHEMA_LANGUAGE);
         assert_eq!(schema["$schema"], "https://json-schema.org/draft/2020-12/schema");
         assert_eq!(differences(fresh.path(), committed.path()).unwrap(), Vec::<String>::new());
 
-        // One byte of the committed `$id` changed is what `check-generated` fails on
-        let moved = text.replace(elmdb::schema::SCHEMA_LANGUAGE, "https://elmdb.dev/schema/2.json");
+        let moved = text.replace(elmdb::protocol::SCHEMA_LANGUAGE, "https://elmdb.dev/schema/99.json");
         assert_ne!(moved, text);
         std::fs::write(committed.path().join(JSON_SCHEMA), moved).unwrap();
         assert_eq!(differences(fresh.path(), committed.path()).unwrap(), [format!("{JSON_SCHEMA}: changed")]);
@@ -140,16 +141,13 @@ mod tests {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
-        // Every file but the JSON Schema is a declaration, and the imports between them name `.js`, which resolves to
-        // the declaration
         assert!(names.iter().any(|name| name == "Schema.d.ts"), "{names:?}");
+        assert!(names.iter().any(|name| name == "ErrorCode.d.ts"), "{names:?}");
+        assert!(names.iter().any(|name| name == "QuerySpec.d.ts"), "{names:?}");
         let sources: Vec<&String> =
             names.iter().filter(|name| *name != JSON_SCHEMA && !name.ends_with(".d.ts")).collect();
         assert_eq!(sources, Vec::<&String>::new());
-        let batch = std::fs::read_to_string(fresh.path().join("Batch.d.ts")).unwrap();
-        assert!(batch.contains("from \"./Op.js\""), "{batch}");
 
-        // A `.ts` committed where its declaration belongs is what `check-generated` fails on
         std::fs::rename(committed.path().join("Schema.d.ts"), committed.path().join("Schema.ts")).unwrap();
         assert_eq!(
             differences(fresh.path(), committed.path()).unwrap(),

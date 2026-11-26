@@ -425,6 +425,31 @@ pub struct VectorStats {
 // O(1) Commit-Time Embedding Writes (Zero Commit-Time HNSW Graph Stall!)
 // ---------------------------------------------------------------------------
 
+/// Reads all primary exact F32 embedding chunks stored for `(index_id, entity)` inside `ro`.
+pub fn read_entity_embeddings<R: KvRead>(
+    txn: &R,
+    dbs: &SystemDbs,
+    index_id: IndexId,
+    entity: EntityKey,
+    dims: usize,
+) -> Result<Vec<Vec<f32>>> {
+    let mut prefix = [0u8; 12];
+    prefix[0..4].copy_from_slice(&index_id.0.to_be_bytes());
+    prefix[4..12].copy_from_slice(&entity.to_be_bytes());
+    let mut cur = txn.cursor(dbs.embeddings)?;
+    let mut item = cur.seek_ge(&prefix)?;
+    let mut out = Vec::new();
+    while let Some((k, v)) = item {
+        if k.len() != 16 || !k.starts_with(&prefix) {
+            break;
+        }
+        let (_, vec) = decode_primary_emb(v, dims)?;
+        out.push(vec);
+        item = cur.next()?;
+    }
+    Ok(out)
+}
+
 /// Atomically stores exact F32 embedding chunk(s) for `entity` in `dbs.embeddings` and enqueues them
 /// into `TAG_PENDING` in O(chunks) — zero HNSW graph mutation on the commit critical path!
 pub fn set_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(

@@ -1,109 +1,435 @@
 // @ts-check
-// The thin client: the binding's reads and writes taking and answering the protocol's generated types (`client.d.ts`),
-// over the caller's own msgpack codec. Encoding and decoding values stays the caller's (`docs/architecture/design.md`,
-// The boundary with apack); the client only picks the decode an answer needs, from what the answer says of itself.
+// Clean-room elmdb v2 zero-dependency binary wire batch encoder (`elmdb-wire` EWB2).
+// Speaks directly to `Database.executeWireBatch` with zero MsgPack or JSON overhead.
 'use strict';
 
-/**
- * Whether an answer decodes exactly with maps as objects: its own `plainObjects`, or the one of the answer it wraps
- * @param {{ kind: string, plainObjects?: boolean, answer?: any }} answer
- * @returns {boolean}
- */
-function plain(answer) {
-  if (answer.kind === 'visited' || answer.kind === 'explained') return plain(answer.answer);
-  return answer.plainObjects !== false;
+const TEXT_ENCODER = new TextEncoder();
+
+/** Branded intra-batch reference returned by `WireBatchBuilder.create(...)`. */
+class BatchSlot {
+  /** @param {number} index */
+  constructor(index) {
+    if (typeof index !== 'number' || !Number.isInteger(index) || index < 0 || index > 0xffffffff) {
+      throw new RangeError(`BatchSlot index must be an integer in [0, 4294967295], got ${String(index)}`);
+    }
+    /** @readonly */
+    this.slot = index;
+  }
+}
+
+/** @param {unknown} v */
+function isPlainObject(v) {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+class WireWriter {
+  constructor(initialCapacity = 256) {
+    this.buf = new Uint8Array(initialCapacity);
+    this.view = new DataView(this.buf.buffer);
+    this.len = 0;
+  }
+
+  /** @param {number} extra */
+  ensure(extra) {
+    if (this.len + extra <= this.buf.length) return;
+    let next = this.buf.length * 2;
+    while (next < this.len + extra) next *= 2;
+    const grown = new Uint8Array(next);
+    grown.set(this.buf.subarray(0, this.len));
+    this.buf = grown;
+    this.view = new DataView(this.buf.buffer);
+  }
+
+  /** @param {number} b */
+  u8(b) {
+    this.ensure(1);
+    this.buf[this.len++] = b & 0xff;
+  }
+
+  /** @param {number} n */
+  u32(n) {
+    this.ensure(4);
+    this.view.setUint32(this.len, n >>> 0, true);
+    this.len += 4;
+  }
+
+  /** @param {bigint} n */
+  i64(n) {
+    this.ensure(8);
+    this.view.setBigInt64(this.len, n, true);
+    this.len += 8;
+  }
+
+  /** @param {number} n */
+  f64(n) {
+    this.ensure(8);
+    this.view.setFloat64(this.len, n, true);
+    this.len += 8;
+  }
+
+  /** @param {Uint8Array} bytes */
+  raw(bytes) {
+    this.ensure(bytes.length);
+    this.buf.set(bytes, this.len);
+    this.len += bytes.length;
+  }
+
+  /** @param {string} s */
+  str(s) {
+    if (typeof s !== 'string') {
+      throw new TypeError(`Expected string, got ${typeof s}`);
+    }
+    const bytes = TEXT_ENCODER.encode(s);
+    this.u32(bytes.length);
+    this.raw(bytes);
+  }
+
+  /** @param {string | BatchSlot} target */
+  target(target) {
+    if (target instanceof BatchSlot) {
+      this.u8(1);
+      this.u32(target.slot);
+    } else if (typeof target === 'string') {
+      this.u8(0);
+      this.str(target);
+    } else {
+      throw new TypeError('Entity target must be a string external ID or a BatchSlot');
+    }
+  }
+
+  /** @param {unknown} value @param {number} depth */
+  value(value, depth = 0) {
+    if (depth > 64) {
+      throw new RangeError('Value nesting depth exceeds 64');
+    }
+    if (value === null || value === undefined) {
+      this.u8(0); // Null
+      return;
+    }
+    if (typeof value === 'boolean') {
+      this.u8(value ? 2 : 1);
+      return;
+    }
+    if (typeof value === 'bigint') {
+      if (value < -9223372036854775808n || value > 9223372036854775807n) {
+        throw new RangeError('BigInt outside signed 64-bit range');
+      }
+      this.u8(3); // Int
+      this.i64(value);
+      return;
+    }
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) {
+        throw new RangeError('Non-finite numbers (NaN, Infinity) are not permitted');
+      }
+      const norm = value === 0 ? 0 : value;
+      if (Number.isInteger(norm) && Number.isSafeInteger(norm)) {
+        this.u8(3); // Int
+        this.i64(BigInt(norm));
+      } else {
+        this.u8(4); // Float
+        this.f64(norm);
+      }
+      return;
+    }
+    if (typeof value === 'string') {
+      this.u8(8); // String
+      this.str(value);
+      return;
+    }
+    if (value instanceof BatchSlot) {
+      throw new TypeError('BatchSlot cannot be passed as a field value; use link() or an explicit externalId');
+    }
+    if (value instanceof Date) {
+      const ms = value.getTime();
+      if (!Number.isFinite(ms)) {
+        throw new RangeError('Invalid Date timestamp');
+      }
+      this.u8(5); // Timestamp
+      this.i64(BigInt(Math.trunc(ms)));
+      this.u32(0);
+      return;
+    }
+    if (value instanceof Uint8Array) {
+      this.u8(9); // Bytes
+      this.u32(value.byteLength);
+      this.raw(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      this.u8(10); // Array
+      const lenPos = this.len;
+      this.u32(0);
+      this.u32(value.length);
+      const start = this.len;
+      for (let i = 0; i < value.length; i++) {
+        this.value(value[i], depth + 1);
+      }
+      this.view.setUint32(lenPos, (this.len - start + 4) >>> 0, true);
+      return;
+    }
+    if (isPlainObject(value)) {
+      this.u8(11); // Object
+      const lenPos = this.len;
+      this.u32(0);
+      /** @type {Array<[Uint8Array, unknown]>} */
+      const entries = [];
+      const obj = /** @type {Record<string, unknown>} */ (value);
+      for (const key of Object.keys(obj)) {
+        if (key === '__proto__') {
+          throw new TypeError("Reserved key '__proto__' is not permitted");
+        }
+        const v = obj[key];
+        if (v !== undefined) {
+          entries.push([TEXT_ENCODER.encode(key), v]);
+        }
+      }
+      // Strictly sort keys in UTF-8 byte order to match Rust `str::cmp`.
+      entries.sort((a, b) => compareBytes(a[0], b[0]));
+      this.u32(entries.length);
+      const start = this.len;
+      for (let i = 0; i < entries.length; i++) {
+        const [kBytes, v] = entries[i];
+        this.u32(kBytes.length);
+        this.raw(kBytes);
+        this.value(v, depth + 1);
+      }
+      this.view.setUint32(lenPos, (this.len - start + 4) >>> 0, true);
+      return;
+    }
+    throw new TypeError(`Unsupported value type: ${Object.prototype.toString.call(value)}`);
+  }
+
+  /** @param {Record<string, unknown>} fields */
+  fieldPairs(fields) {
+    if (!isPlainObject(fields)) {
+      throw new TypeError('Fields must be a plain object');
+    }
+    /** @type {Array<[string, unknown]>} */
+    const pairs = [];
+    for (const key of Object.keys(fields)) {
+      if (key === '__proto__') {
+        throw new TypeError("Reserved field name '__proto__' is not permitted");
+      }
+      const val = fields[key];
+      if (val !== undefined) pairs.push([key, val]);
+    }
+    this.u32(pairs.length);
+    for (let i = 0; i < pairs.length; i++) {
+      this.str(pairs[i][0]);
+      this.value(pairs[i][1], 0);
+    }
+  }
+
+  finish() {
+    return this.buf.subarray(0, this.len);
+  }
 }
 
 /**
- * A value decoded with maps as `Map`s, each map made an object with no prototype, which holds a key `__proto__` as its
- * own. Every key is a string: elmdb refuses a stored map keyed by anything else (`format.md`, values)
- * @param {unknown} value
- * @returns {unknown}
+ * Unsigned lexicographical byte comparison (matches Rust `str::cmp` / UTF-8 order).
+ * @param {Uint8Array} a
+ * @param {Uint8Array} b
+ * @returns {number}
  */
-function objects(value) {
-  if (Array.isArray(value)) return value.map(objects);
-  if (!(value instanceof Map)) return value;
-  const object = Object.create(null);
-  for (const [key, item] of value) object[key] = objects(item);
-  return object;
+function compareBytes(a, b) {
+  const min = Math.min(a.length, b.length);
+  for (let i = 0; i < min; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return a.length - b.length;
 }
 
 /**
- * A call's answers: decoded with maps as objects where every answer says that is exact, and otherwise decoded with
- * maps as `Map`s and made objects that hold `__proto__` as a key
- * @param {import('./client').Codec} codec
- * @param {Uint8Array} bytes
+ * Builder for constructing an atomic `elmdb-wire` v2 binary write batch.
+ * Supports intra-batch references via `BatchSlot` handles returned by `create(...)`.
  */
-function answers(codec, bytes) {
-  const decoded = /** @type {any[]} */ (codec.unpack(bytes));
-  return decoded.every(plain) ? decoded : objects(codec.unpackMaps(bytes));
-}
-
-class Client {
-  /**
-   * @param {import('./index').Database} db
-   * @param {import('./client').Codec} codec
-   */
-  constructor(db, codec) {
-    this.db = db;
-    this.codec = codec;
-  }
-
-  /** @param {import('./index').Reads} reads */
-  read(reads) {
-    return answers(this.codec, this.db.read(this.codec.pack(reads)));
-  }
-
-  /** @param {import('./index').Reads} reads */
-  async readAsync(reads) {
-    return answers(this.codec, await this.db.readAsync(this.codec.pack(reads)));
+class WireBatchBuilder {
+  constructor() {
+    /** @type {Array<any>} */
+    this._ops = [];
+    this._nextSlot = 0;
   }
 
   /**
-   * @param {import('./protocol/Batch').Batch} batch
-   * @param {boolean} [durable]
+   * @param {string} typeName
+   * @param {Record<string, unknown>} fields
+   * @param {string} [externalId]
+   * @returns {BatchSlot}
    */
-  write(batch, durable) {
-    return this.codec.unpack(this.db.write(this.codec.pack(batch), durable));
+  create(typeName, fields, externalId) {
+    const slot = new BatchSlot(this._nextSlot++);
+    this._ops.push({ tag: 1, typeName, externalId, fields: fields === undefined ? {} : fields });
+    return slot;
   }
 
-  begin() {
-    return new ClientUnit(this.db.begin(), this.codec);
-  }
-}
-
-class ClientUnit {
   /**
-   * @param {import('./index').Unit} unit
-   * @param {import('./client').Codec} codec
+   * @param {string | BatchSlot} target
+   * @param {Record<string, unknown>} fields
    */
-  constructor(unit, codec) {
-    this.unit = unit;
-    this.codec = codec;
+  patch(target, fields) {
+    this._ops.push({ tag: 2, target, fields: fields === undefined ? {} : fields });
+    return this;
   }
 
-  /** @param {import('./index').Reads} reads */
-  read(reads) {
-    return answers(this.codec, this.unit.read(this.codec.pack(reads)));
+  /**
+   * @param {string | BatchSlot} target
+   * @param {string[]} fields
+   */
+  unset(target, fields) {
+    if (!Array.isArray(fields)) {
+      throw new TypeError('unset fields must be an array of field names');
+    }
+    this._ops.push({ tag: 3, target, fields });
+    return this;
   }
 
-  /** @param {import('./protocol/Batch').Batch} batch */
-  write(batch) {
-    return this.codec.unpack(this.unit.write(this.codec.pack(batch)));
+  /** @param {string | BatchSlot} target */
+  trash(target) {
+    this._ops.push({ tag: 4, target });
+    return this;
   }
 
-  pendingChanges() {
-    return this.codec.unpack(this.unit.pendingChanges());
+  /** @param {string | BatchSlot} target */
+  restore(target) {
+    this._ops.push({ tag: 5, target });
+    return this;
   }
 
-  /** @param {boolean} [durable] */
-  commit(durable) {
-    return this.codec.unpack(this.unit.commit(durable));
+  /** @param {string | BatchSlot} target */
+  destroy(target) {
+    this._ops.push({ tag: 6, target });
+    return this;
   }
 
-  abort() {
-    this.unit.abort();
+  /**
+   * @param {string | BatchSlot} source
+   * @param {string} relKind
+   * @param {string | BatchSlot} target
+   * @param {{ weight?: number, info?: unknown }} [opts]
+   */
+  link(source, relKind, target, opts) {
+    this._ops.push({ tag: 7, source, relKind, target, weight: opts?.weight, info: opts?.info });
+    return this;
+  }
+
+  /**
+   * @param {string | BatchSlot} source
+   * @param {string} [relKind]
+   * @param {string | BatchSlot} [target]
+   */
+  unlink(source, relKind, target) {
+    this._ops.push({ tag: 8, source, relKind, target });
+    return this;
+  }
+
+  /** @returns {number} */
+  get length() {
+    return this._ops.length;
+  }
+
+  /**
+   * Encodes all queued ops into a contiguous `elmdb-wire` (`EWB2`) `Uint8Array`.
+   * @param {number} [returnFlags]
+   * @returns {Uint8Array}
+   */
+  encode(returnFlags = 0) {
+    if (typeof returnFlags !== 'number' || !Number.isInteger(returnFlags) || returnFlags < 0 || returnFlags > 0x07) {
+      throw new RangeError(`returnFlags must be an integer in [0, 7], got ${String(returnFlags)}`);
+    }
+    const w = new WireWriter(64 + this._ops.length * 32);
+    // Magic "EWB2"
+    w.u8(0x45);
+    w.u8(0x57);
+    w.u8(0x42);
+    w.u8(0x32);
+    w.u8(returnFlags);
+    w.u32(this._ops.length);
+
+    for (let i = 0; i < this._ops.length; i++) {
+      const op = this._ops[i];
+      w.u8(op.tag);
+      switch (op.tag) {
+        case 1:
+          w.str(op.typeName);
+          if (op.externalId !== undefined && op.externalId !== null) {
+            w.u8(1);
+            w.str(op.externalId);
+          } else {
+            w.u8(0);
+          }
+          w.fieldPairs(op.fields);
+          break;
+        case 2:
+          w.target(op.target);
+          w.fieldPairs(op.fields);
+          break;
+        case 3:
+          w.target(op.target);
+          w.u32(op.fields.length);
+          for (const f of op.fields) w.str(f);
+          break;
+        case 4:
+        case 5:
+        case 6:
+          w.target(op.target);
+          break;
+        case 7:
+          w.target(op.source);
+          w.str(op.relKind);
+          w.target(op.target);
+          if (op.weight !== undefined && op.weight !== null) {
+            if (typeof op.weight !== 'number' || !Number.isFinite(op.weight)) {
+              throw new RangeError('Link weight must be a finite number');
+            }
+            w.u8(1);
+            w.f64(op.weight);
+          } else {
+            w.u8(0);
+          }
+          if (op.info !== undefined) {
+            w.u8(1);
+            w.value(op.info, 0);
+          } else {
+            w.u8(0);
+          }
+          break;
+        case 8:
+          w.target(op.source);
+          if (op.relKind !== undefined && op.relKind !== null) {
+            w.u8(1);
+            w.str(op.relKind);
+          } else {
+            w.u8(0);
+          }
+          if (op.target !== undefined && op.target !== null) {
+            w.u8(1);
+            w.target(op.target);
+          } else {
+            w.u8(0);
+          }
+          break;
+      }
+    }
+    return w.finish();
   }
 }
 
-module.exports = { Client, ClientUnit };
+/**
+ * Convenience helper: constructs and encodes a wire batch via callback.
+ * Rejects async callbacks (Promises/thenables) synchronously to prevent misused batches.
+ * @param {(b: WireBatchBuilder) => void} fn
+ * @returns {Uint8Array}
+ */
+function buildWireBatch(fn) {
+  const b = new WireBatchBuilder();
+  const ret = fn(b);
+  if (ret !== null && (typeof ret === 'object' || typeof ret === 'function') && typeof /** @type {any} */ (ret).then === 'function') {
+    throw new TypeError('Batch callbacks must be synchronous (Promises/async callbacks are not allowed)');
+  }
+  return b.encode();
+}
+
+module.exports = { BatchSlot, WireBatchBuilder, buildWireBatch };

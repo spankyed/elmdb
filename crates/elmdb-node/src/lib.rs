@@ -1,8 +1,24 @@
-//! The Node binding: elmdb's API for JavaScript, over N-API. Every failure elmdb reports throws an `Error` whose `code`
-//! is an `ErrorCode`; an argument of the wrong JavaScript type is refused by N-API before elmdb sees it, with N-API's
-//! own code (`InvalidArg`, `NumberExpected`, …). Every export runs its work where a panic is caught, so a panic in
-//! elmdb is thrown as `PANICKED`, and the handle it was raised through refuses calls after it (`panics.rs`).
+//! Clean-room elmdb v2 Node.js N-API binding.
+//!
+//! - Every engine failure surfaces as a JS `Error` with `error.code` drawn from the single `elmdb::ErrorCode` taxonomy.
+//! - Every export is panic-guarded (`panics.rs`): a Rust panic never unwinds into Node C++, instead throwing `PANICKED`
+//!   and poisoning that handle until closed.
+//! - Kernel-enforced single-binary-per-process claim (`process.rs`) and clean env/process exit teardown (`exit.rs`).
+//! - Zero MsgPack: binary write batches speak `elmdb-wire` directly via `executeWireBatch`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::ThreadId;
+
+use elmdb::protocol::{QuerySpec, Schema};
+use elmdb::{
+    BackupInto, BeforeCommitHook, BuildPolicy, DurabilityMode, EdgeDir, ExecBudgets, TypeMask, WatchId, WatchMode,
+    WatchPolicy,
+};
+use elmdb_wire::{ElmdbError, ErrorCode, decode_batch};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -16,7 +32,7 @@ mod process;
 use jobs::Job;
 use panics::{Health, Held, guarded};
 
-/// An elmdb code as the status of a JavaScript error, which N-API hands JavaScript as `error.code`
+/// An elmdb error code exposed as `error.code` in JavaScript.
 pub struct Code(&'static str);
 
 impl AsRef<str> for Code {
@@ -25,897 +41,908 @@ impl AsRef<str> for Code {
     }
 }
 
-/// A number that must be a whole number of at least `least`, refused otherwise (`VALUE_INVALID`) rather than cast
-fn whole(name: &str, value: Option<f64>, least: f64) -> Result<Option<u64>, Code> {
-    match value {
-        None => Ok(None),
-        Some(n) if n.is_finite() && n.fract() == 0.0 && n >= least && n <= 2f64.powi(53) => Ok(Some(n as u64)),
-        Some(n) => Err(napi::Error::new(
-            Code("VALUE_INVALID"),
-            format!("{name} must be a whole number of at least {least}, and is {n}"),
-        )),
-    }
-}
-
-/// An elmdb failure as JavaScript sees it: `error.code` is the elmdb code, `error.message` its message
 fn to_js(error: elmdb::Error) -> napi::Error<Code> {
     napi::Error::new(Code(error.code.as_str()), error.message)
 }
 
-/// `bytes` copied into a Buffer whose memory V8 allocates and frees itself, which is how every answer in bytes reaches
-/// JavaScript. A `Buffer` made from a `Vec` is an external buffer: the bytes stay the `Vec`'s, and V8's collector frees
-/// them on a thread of its own, where Node wakes a handle of the environment to have the JavaScript thread run the
-/// finalizer. An environment that is ending closes that handle before it stops waking it, and libuv on Windows aborts
-/// the process on a wake of a closing handle (`Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`), so a process
-/// that ends while answers it dropped are being collected would die there. Freeing a copy calls nothing
-fn copied<'env>(env: &Env, bytes: &[u8]) -> napi::Result<BufferSlice<'env>> {
-    BufferSlice::copy_from(env, bytes)
+fn bad_arg(msg: impl Into<String>) -> napi::Error<Code> {
+    napi::Error::new(Code(ErrorCode::InvalidArgument.as_str()), msg.into())
 }
 
-/// `copied`, for an export whose failures are elmdb's. N-API failing to make the Buffer is none of elmdb's: where Node
-/// left an exception of its own pending, that one is thrown, and otherwise an error with N-API's `GenericFailure`
-fn answer<'env>(env: &Env, bytes: &[u8]) -> Result<BufferSlice<'env>, Code> {
-    copied(env, bytes).map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))
+const MAX_SAFE_JS_INT: f64 = 9_007_199_254_740_991.0;
+
+fn whole(name: &str, value: Option<f64>, least: f64) -> Result<Option<u64>, Code> {
+    whole_bounded(name, value, least, MAX_SAFE_JS_INT)
 }
 
+fn whole_bounded(name: &str, value: Option<f64>, least: f64, most: f64) -> Result<Option<u64>, Code> {
+    match value {
+        None => Ok(None),
+        Some(n) if n.is_finite() && n.fract() == 0.0 && n >= least && n <= most => Ok(Some(n as u64)),
+        Some(n) => Err(bad_arg(format!("{name} must be a whole number in [{least}, {most}], got {n}"))),
+    }
+}
+
+fn parse_durability(s: Option<&str>) -> Result<DurabilityMode, Code> {
+    match s {
+        None | Some("strict") => Ok(DurabilityMode::Strict),
+        Some("grouped") => Ok(DurabilityMode::Grouped),
+        Some("unsafe") => Ok(DurabilityMode::Unsafe),
+        Some(other) => Err(bad_arg(format!("unknown durability mode '{other}' (expected strict|grouped|unsafe)"))),
+    }
+}
+
+fn parse_build_policy(s: Option<&str>) -> Result<BuildPolicy, Code> {
+    match s {
+        None | Some("deferred") => Ok(BuildPolicy::DeferredWatermark),
+        Some("eager") => Ok(BuildPolicy::EagerInSchemaChange),
+        Some(other) => Err(bad_arg(format!("unknown buildPolicy '{other}' (expected deferred|eager)"))),
+    }
+}
+
+fn parse_edge_dir(s: Option<&str>) -> Result<EdgeDir, Code> {
+    match s {
+        None | Some("out") => Ok(EdgeDir::Out),
+        Some("in") => Ok(EdgeDir::In),
+        Some("both") => Ok(EdgeDir::Both),
+        Some(other) => Err(bad_arg(format!("unknown edge dir '{other}' (expected out|in|both)"))),
+    }
+}
+
+fn now_unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn to_js_json(env: &Env, v: &impl serde::Serialize) -> Result<Unknown<'static>, Code> {
+    let val = serde_json::to_value(v)
+        .map_err(|e| napi::Error::new(Code(ErrorCode::Internal.as_str()), format!("serialize failed: {e}")))?;
+    env.to_js_value(&val).map_err(|e| napi::Error::new(Code("GenericFailure"), e.reason.clone()))
+}
+
+// ---------------------------------------------------------------------------
+// Thread-local registry for synchronous JS `beforeCommit` hooks (zero unsafe)
+// ---------------------------------------------------------------------------
+
+type JsHookEntry = (napi::sys::napi_env, FunctionRef<serde_json::Value, Unknown<'static>>);
+
+static NEXT_JS_HOOK_KEY: AtomicU64 = AtomicU64::new(1);
+
+thread_local! {
+    static JS_HOOKS: RefCell<HashMap<u64, JsHookEntry>> = RefCell::new(HashMap::new());
+    /// Tracks which `napi_env` pointers already have an env cleanup hook registered to drain `JS_HOOKS`
+    /// BEFORE Node destroys `napi_env` (preventing `FunctionRef::drop` UAF at worker/process teardown).
+    static CLEANUP_REGISTERED: RefCell<std::collections::HashSet<usize>> = RefCell::new(std::collections::HashSet::new());
+}
+
+fn ensure_js_hook_env_cleanup(env: &Env) -> Result<(), Code> {
+    let raw_key = env.raw() as usize;
+    let already = CLEANUP_REGISTERED.with(|s| s.borrow().contains(&raw_key));
+    if already {
+        return Ok(());
+    }
+    env.add_env_cleanup_hook(raw_key, |env_addr| {
+        let _ = panics::caught("draining JS beforeCommit hooks at env teardown", || {
+            let _ = JS_HOOKS.try_with(|m| {
+                let mut map = m.borrow_mut();
+                map.retain(|_, (hook_env, _)| (*hook_env as usize) != env_addr);
+            });
+            let _ = CLEANUP_REGISTERED.try_with(|s| {
+                s.borrow_mut().remove(&env_addr);
+            });
+        });
+    })
+    .map_err(|e| napi::Error::new(Code("GenericFailure"), e.reason.clone()))?;
+    CLEANUP_REGISTERED.with(|s| s.borrow_mut().insert(raw_key));
+    Ok(())
+}
+
+/// Options for `Database.open` / `Database.openAsync`.
 #[napi(object)]
 pub struct OpenOptions {
-    /// Opens existing files and refuses every write (`READ_ONLY`). The stored schema is used, and a `schema` that
-    /// differs from it is refused (`SCHEMA_CHANGE_REFUSED`). Of the database's data it writes only to make a restore a
-    /// power loss or a failed sync left owed, and is refused (`RESTORE_PENDING`) where it can't
     pub read_only: Option<bool>,
-    /// The schema, as the canonical JSON `docs/architecture/schema.md` describes; a schema that differs from the stored one
-    /// changes it
     #[napi(ts_type = "Schema")]
     pub schema: Option<serde_json::Value>,
-    /// Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory. With
-    /// `syncEachCommit` it chooses the mode the database is written in, and a writable open in another mode than a
-    /// process that has the database open for writing is refused (`MODE_MISMATCH`)
-    pub syncs: Option<bool>,
-    /// Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
-    /// sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default, where
-    /// commits are synced in groups, a moment after they return
-    pub sync_each_commit: Option<bool>,
-    /// Group commit syncs once writes have paused for this many milliseconds: 100 by default. A whole number, as the
-    /// next is, or refused (`VALUE_INVALID`)
-    pub sync_idle_ms: Option<f64>,
-    /// Group commit syncs no later than this many milliseconds after the first commit not yet synced: 1000 by default
-    pub sync_interval_ms: Option<f64>,
-    /// The map's size at open: by default twice the data file, and 64 MiB at least. A whole number of 1 at least, or
-    /// refused (`VALUE_INVALID`), and a multiple of the system's page size, or refused by LMDB's binding (`IO`)
+    /// `"strict"` (default), `"grouped"`, or `"unsafe"` (tests).
+    pub durability: Option<String>,
+    /// `"deferred"` (default, watermarked background builds) or `"eager"` (build inline on setSchema).
+    pub build_policy: Option<String>,
     pub map_size_bytes: Option<f64>,
+    pub max_dbs: Option<f64>,
+    pub max_readers: Option<f64>,
+    pub plan_cache_capacity: Option<f64>,
+    pub watch_turn_slice_ms: Option<f64>,
 }
 
-/// What `purge` deletes: one of a type's entities, a field of a type, a relation kind's relations, or a role
+/// Watch throttling & delivery mode policy for `registerWatch`.
 #[napi(object)]
-pub struct PurgeTarget {
-    /// The removed type whose entities go, or with `field` the type the field is of
-    #[napi(js_name = "type")]
-    pub entity_type: Option<String>,
-    /// The removed field, of `type`
-    pub field: Option<String>,
-    /// The removed relation kind whose relations go
-    pub relation_kind: Option<String>,
-    /// The removed role, which goes from every entity holding it
-    pub role: Option<String>,
+pub struct WatchPolicyOptions {
+    /// `"declarative"` (default, 128-bit result dedup) or `"imperative"` (always deliver on invalidation).
+    pub mode: Option<String>,
+    pub min_gap_ms: Option<f64>,
+    pub adaptive_multiplier: Option<f64>,
 }
 
-/// A commit that wrote into tracked reads, as the listener of `hearBuilderCommits` hears it: its sequence and those
-/// reads' tokens
+/// Return value of `registerWatch`.
 #[napi(object)]
-pub struct BuilderCommit {
-    pub sequence: f64,
-    pub touched: Vec<u32>,
+pub struct WatchRegistration {
+    pub watch_id: f64,
+    #[napi(ts_type = "QueryAnswer")]
+    pub answer: serde_json::Value,
 }
 
-/// An open database: one directory holding one LMDB environment
+/// Return value of `rerunWatch`.
+#[napi(object)]
+pub struct WatchRerun {
+    #[napi(ts_type = "QueryAnswer")]
+    pub answer: serde_json::Value,
+    pub changed: bool,
+}
+
+/// Return value of `nextDueWatch`.
+#[napi(object)]
+pub struct NextDueWatch {
+    pub watch_id: Option<f64>,
+    pub next_wake_delay_ms: Option<f64>,
+    pub settled: bool,
+}
+
+fn parse_open_options(opts: Option<OpenOptions>) -> Result<(elmdb::OpenOptions, Option<Schema>), Code> {
+    let mut out = elmdb::OpenOptions::default();
+    let mut schema = None;
+    if let Some(o) = opts {
+        if let Some(ro) = o.read_only {
+            out.read_only = ro;
+        }
+        out.durability = parse_durability(o.durability.as_deref())?;
+        out.build_policy = parse_build_policy(o.build_policy.as_deref())?;
+        if let Some(ms) = whole_bounded("mapSizeBytes", o.map_size_bytes, 4096.0, usize::MAX as f64)? {
+            out.map_size = Some(ms as usize);
+        }
+        if let Some(md) = whole_bounded("maxDbs", o.max_dbs, 16.0, u32::MAX as f64)? {
+            out.max_dbs = Some(md as u32);
+        }
+        if let Some(mr) = whole_bounded("maxReaders", o.max_readers, 16.0, u32::MAX as f64)? {
+            out.max_readers = Some(mr as u32);
+        }
+        if let Some(pc) = whole_bounded("planCacheCapacity", o.plan_cache_capacity, 1.0, usize::MAX as f64)? {
+            out.plan_cache_capacity = pc as usize;
+        }
+        if let Some(ts) = whole("watchTurnSliceMs", o.watch_turn_slice_ms, 1.0)? {
+            out.watch_turn_slice_ms = ts;
+        }
+        if let Some(s) = o.schema {
+            if out.read_only {
+                return Err(to_js(ElmdbError::new(ErrorCode::ReadOnly, "cannot apply schema when opening read-only")));
+            }
+            let parsed: Schema = serde_json::from_value(s).map_err(|e| bad_arg(format!("invalid schema JSON: {e}")))?;
+            schema = Some(parsed);
+        }
+    }
+    Ok((out, schema))
+}
+
+fn parse_watch_policy(opts: Option<WatchPolicyOptions>) -> Result<WatchPolicy, Code> {
+    let mut p = WatchPolicy::default();
+    if let Some(o) = opts {
+        match o.mode.as_deref() {
+            None | Some("declarative") => p.mode = WatchMode::Declarative,
+            Some("imperative") => p.mode = WatchMode::Imperative,
+            Some(other) => {
+                return Err(bad_arg(format!("unknown watch mode '{other}' (expected declarative|imperative)")));
+            }
+        }
+        if let Some(v) = whole("minGapMs", o.min_gap_ms, 0.0)? {
+            p.min_gap_ms = v;
+        }
+        if let Some(v) = whole("adaptiveMultiplier", o.adaptive_multiplier, 0.0)? {
+            p.adaptive_multiplier = v;
+        }
+    }
+    Ok(p)
+}
+
+/// Handle to an open elmdb v2 database directory.
 #[napi]
 pub struct Database {
     inner: Held,
-    /// Whether a call through this handle has panicked, after which it refuses calls (`panics.rs`)
     health: Health,
-    /// The unit this handle began last, which a panic of the handle ends: the JavaScript object of it holds it too
-    unit: std::cell::RefCell<Option<UnitSlot>>,
+    /// Tracks `(engine_hook_id, js_hook_key)` registered on this JS thread so `close()`/`Drop` cleans them up.
+    js_hooks: RefCell<Vec<(u64, u64)>>,
 }
 
-/// A unit as its JavaScript object and the handle that began it share it, on the thread that began it: empty once
-/// it has ended
-type UnitSlot = std::rc::Rc<std::cell::RefCell<Option<elmdb::Unit>>>;
-
-/// The type and index a rebuild names: both, or neither for every index
-fn rebuild_target(entity_type: Option<String>, index: Option<String>) -> Result<Option<(String, String)>, Code> {
-    match (entity_type, index) {
-        (Some(entity_type), Some(index)) => Ok(Some((entity_type, index))),
-        (None, None) => Ok(None),
-        _ => Err(napi::Error::new(
-            Code("BATCH_INVALID"),
-            "rebuild takes both a type and an index, or neither for every index".to_owned(),
-        )),
+impl Drop for Database {
+    fn drop(&mut self) {
+        let hooks = std::mem::take(&mut *self.js_hooks.borrow_mut());
+        if !hooks.is_empty() {
+            for (engine_id, js_key) in hooks {
+                let _ = self.inner.unregister_before_commit(engine_id);
+                let _ = JS_HOOKS.try_with(|m| m.borrow_mut().remove(&js_key));
+            }
+        }
     }
 }
 
-/// Ends the unit in a slot, keeping none of its writes, where a panic in ending it is caught
-fn end_unit(slot: &UnitSlot) {
-    // Nothing borrows the slot as this runs: an export's borrow ends with its work, panicking or not, and no
-    // export calls back into JavaScript. A slot found borrowed is left, as a drop mustn't panic
-    let unit = slot.try_borrow_mut().ok().and_then(|mut unit| unit.take());
-    if let Some(unit) = unit {
-        let _ = panics::caught("ending a unit", move || drop(unit));
-    }
+/// Async open task executed on Node's libuv worker pool.
+pub struct OpenTask {
+    dir: PathBuf,
+    opts: elmdb::OpenOptions,
+    schema: Option<Schema>,
+    failed: Option<elmdb::Error>,
 }
 
-/// `task` on a thread of the pool, answering its promise. Spawned, never returned as an `AsyncTask`: napi-rs roots the
-/// JavaScript object of a method that returns one, for the task's sake, and a handle that had answered one was never
-/// collected after (`exit.test.mjs` drops a handle after each call that answers a promise and waits for its
-/// collection). Each task holds the database by a hold of its own (`Held`), so it needs no root
-fn spawned<'env, T>(env: &'env Env, task: T) -> Result<Unknown<'env>, Code>
-where
-    T: Task,
-    T::JsValue: 'env,
-{
-    let work = env.spawn(task).map_err(|error| napi::Error::new(Code("GenericFailure"), error.reason.clone()))?;
-    Ok(work.promise_object().to_unknown())
-}
+impl Task for OpenTask {
+    type Output = Arc<elmdb::Database>;
+    type JsValue = Database;
 
-impl Database {
-    /// Runs an export's work, refused once the handle has panicked. A panic in it ends the unit the handle has
-    /// open: what the panic left in memory is not known, and the unit's transaction is part of it
-    fn guarded<T>(&self, export: &'static str, work: impl FnOnce() -> Result<T, Code>) -> Result<T, Code> {
-        let ran = self.health.guarded(export, work);
-        self.end_unit_once_panicked();
-        ran
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let ran = panics::caught("Database.openAsync", || {
+            let db = elmdb::Database::open(&self.dir, self.opts.clone())?;
+            if let Some(ref s) = self.schema {
+                if self.opts.read_only {
+                    return Err(ElmdbError::new(ErrorCode::ReadOnly, "cannot apply schema when opening read-only"));
+                }
+                db.set_schema(s)?;
+            }
+            Ok(Arc::new(db))
+        });
+        ran.and_then(|res| res).map_err(|err| {
+            let reason = err.message.clone();
+            self.failed = Some(err);
+            napi::Error::from_reason(reason)
+        })
     }
 
-    /// `guarded`, for what runs whatever the handle has been through: a close, which the unit of a handle that
-    /// panicked is ended for first
-    fn unrefused<T>(&self, export: &'static str, work: impl FnOnce() -> Result<T, Code>) -> Result<T, Code> {
-        self.end_unit_once_panicked();
-        let ran = self.health.unrefused(export, work);
-        self.end_unit_once_panicked();
-        ran
+    fn resolve(&mut self, env: Env, db: Self::Output) -> napi::Result<Self::JsValue> {
+        exit::close_at_exit(&env, &db)?;
+        Ok(Database { inner: Held::new(db), health: Health::default(), js_hooks: RefCell::new(Vec::new()) })
     }
 
-    /// A job on the database, on a thread of the pool, answering a promise of what `work` answers as `convert` makes
-    /// it (`spawned`)
-    fn job<'env, T, V>(
-        &self,
-        env: &'env Env,
-        export: &'static str,
-        work: impl FnOnce(&elmdb::Database) -> elmdb::Result<T> + Send + 'static,
-        convert: fn(&Env, T) -> napi::Result<V>,
-    ) -> Result<Unknown<'env>, Code>
-    where
-        T: Send + 'static,
-        V: ToNapiValue + TypeName + 'static,
-    {
-        spawned(env, Job::new(self.inner.again(), self.health.clone(), export, work, convert))
-    }
-
-    fn end_unit_once_panicked(&self) {
-        if self.health.panicked()
-            && let Some(slot) = self.unit.try_borrow_mut().ok().and_then(|mut unit| unit.take())
-        {
-            end_unit(&slot);
+    fn reject(&mut self, env: Env, err: napi::Error) -> napi::Result<Self::JsValue> {
+        match self.failed.take() {
+            Some(failed) => Err(napi::Error::from(JsError::from(to_js(failed)).into_unknown(env))),
+            None => Err(err),
         }
     }
 }
 
 #[napi]
 impl Database {
-    /// Opens the database at `path`, creating it unless `readOnly`. Refused where the path is open in this process
-    /// already (`ALREADY_OPEN`), in a process another copy of the binding has opened a database in
-    /// (`ALREADY_LOADED`), read-only where there is no database (`NO_DATABASE`), in another mode than a process that
-    /// has it open for writing (`MODE_MISMATCH`), and where a restore is owed that this open can't make
-    /// (`RESTORE_PENDING`)
+    /// Opens an existing elmdb v2 database or creates a new one in `dir`.
     #[napi(factory)]
-    pub fn open(env: Env, path: String, options: Option<OpenOptions>) -> Result<Self, Code> {
+    pub fn open(env: Env, dir: String, options: Option<OpenOptions>) -> Result<Database, Code> {
         guarded("Database.open", || {
             process::claim()?;
-            let options = options.unwrap_or(OpenOptions {
-                read_only: None,
-                schema: None,
-                syncs: None,
-                sync_each_commit: None,
-                sync_idle_ms: None,
-                sync_interval_ms: None,
-                map_size_bytes: None,
-            });
-            let schema = match &options.schema {
-                Some(json) => Some(elmdb::schema::Schema::from_json(json).map_err(to_js)?),
-                None => None,
-            };
-            let defaults = elmdb::OpenOptions::default();
-            let options = elmdb::OpenOptions {
-                read_only: options.read_only.unwrap_or(false),
-                schema,
-                syncs: options.syncs.unwrap_or(true),
-                sync_each_commit: options.sync_each_commit.unwrap_or(false),
-                sync_idle_ms: whole("syncIdleMs", options.sync_idle_ms, 0.0)?.unwrap_or(defaults.sync_idle_ms),
-                sync_interval_ms: whole("syncIntervalMs", options.sync_interval_ms, 0.0)?
-                    .unwrap_or(defaults.sync_interval_ms),
-                map_size_bytes: whole("mapSizeBytes", options.map_size_bytes, 1.0)?.map(|n| n as usize),
-            };
-            let inner = std::sync::Arc::new(elmdb::Database::open(path, options).map_err(to_js)?);
-            exit::close_at_exit(&env, &inner).map_err(|e| napi::Error::new(Code("LMDB"), e.reason.clone()))?;
-            Ok(Self { inner: Held::new(inner), health: Health::default(), unit: std::cell::RefCell::default() })
+            let (opts, schema) = parse_open_options(options)?;
+            let db = Arc::new(elmdb::Database::open(&dir, opts.clone()).map_err(to_js)?);
+            if let Some(s) = schema {
+                if opts.read_only {
+                    return Err(to_js(ElmdbError::new(
+                        ErrorCode::ReadOnly,
+                        "cannot apply schema when opening read-only",
+                    )));
+                }
+                db.set_schema(&s).map_err(to_js)?;
+            }
+            exit::close_at_exit(&env, &db).map_err(|e| napi::Error::new(Code("GenericFailure"), e.reason.clone()))?;
+            Ok(Database { inner: Held::new(db), health: Health::default(), js_hooks: RefCell::new(Vec::new()) })
         })
     }
 
-    /// The directory the database was opened at
+    /// Opens an elmdb v2 database asynchronously on Node's worker pool.
+    #[napi(ts_return_type = "Promise<Database>")]
+    pub fn open_async(dir: String, options: Option<OpenOptions>) -> Result<AsyncTask<OpenTask>, Code> {
+        guarded("Database.openAsync", || {
+            process::claim()?;
+            let (opts, schema) = parse_open_options(options)?;
+            Ok(AsyncTask::new(OpenTask { dir: PathBuf::from(dir), opts, schema, failed: None }))
+        })
+    }
+
+    /// Loads a portable v2 JSON dump file into a brand-new database directory.
+    #[napi(ts_return_type = "DumpReport")]
+    pub fn load(env: Env, dump_file: String, target_dir: String) -> Result<Unknown<'static>, Code> {
+        guarded("Database.load", || {
+            process::claim()?;
+            let report = elmdb::dump::load(&dump_file, &target_dir).map_err(to_js)?;
+            to_js_json(&env, &report)
+        })
+    }
+
     #[napi(getter)]
     pub fn path(&self) -> Result<String, Code> {
-        self.unrefused("Database.path", || Ok(self.inner.path().display().to_string()))
+        self.health.unrefused("Database.path", || Ok(self.inner.dir().to_string_lossy().into_owned()))
     }
 
-    /// Whether the database was opened read-only
     #[napi(getter)]
     pub fn read_only(&self) -> Result<bool, Code> {
-        self.unrefused("Database.readOnly", || Ok(self.inner.is_read_only()))
+        self.health.unrefused("Database.readOnly", || Ok(self.inner.is_read_only()))
     }
 
-    /// Whether the database is still open: false once `close` has closed it
-    #[napi(getter)]
-    pub fn is_open(&self) -> Result<bool, Code> {
-        self.unrefused("Database.isOpen", || Ok(self.inner.is_open()))
+    #[napi(ts_return_type = "OpenReport")]
+    pub fn open_report(&self, env: Env) -> Result<Unknown<'static>, Code> {
+        self.health.unrefused("Database.openReport", || to_js_json(&env, self.inner.open_report()))
     }
 
-    /// The schema the database holds, in its canonical form, or `null` when none was ever given
-    #[napi(getter, ts_return_type = "Schema | null")]
-    pub fn schema(&self) -> Result<Option<serde_json::Value>, Code> {
-        self.guarded("Database.schema", || {
-            Ok({
-                self.inner.schema().map(|s| serde_json::from_str(&s.canonical()).expect("a canonical schema is JSON"))
-            })
-        })
-    }
-
-    /// Changes the open database's schema as opening with it would, answering each change and what was done about it.
-    /// Refused while a unit is open (`UNIT_OPEN`), and with `SCHEMA_CHANGE_REFUSED` for a schema that differs from
-    /// the stored one in a read-only database, and for a change opening refuses
-    #[napi(ts_args_type = "schema: Schema", ts_return_type = "SchemaChange[]")]
-    pub fn set_schema(&self, schema: serde_json::Value) -> Result<serde_json::Value, Code> {
-        self.guarded("Database.setSchema", || {
-            let schema = elmdb::schema::Schema::from_json(&schema).map_err(to_js)?;
-            let changes = self.inner.set_schema(schema).map_err(to_js)?;
-            Ok(serde_json::to_value(changes).expect("schema changes serialize"))
-        })
-    }
-
-    /// What opening did: `{ schemaChanges: [{ path, change, effect }], restored, notBorneOut }`. `restored` is a
-    /// restore this open or an earlier one made, a power loss or a failed sync having taken the database back to its
-    /// last synced commit, with the sequence it opened at; every open reports it until `acknowledgeRestore()`.
-    /// `notBorneOut` says the record beside the data file named another file than this one, which was opened as it is
-    #[napi(getter, ts_return_type = "OpenReport")]
-    pub fn open_report(&self) -> Result<serde_json::Value, Code> {
-        self.guarded("Database.openReport", || {
-            Ok(serde_json::to_value(self.inner.open_report()).expect("an open's report serializes"))
-        })
-    }
-
-    /// Says the restore an open reported was read, so that no open reports it after; refused on a read-only handle
     #[napi]
     pub fn acknowledge_restore(&self) -> Result<(), Code> {
-        self.guarded("Database.acknowledgeRestore", || self.inner.acknowledge_restore().map_err(to_js))
+        self.health.guarded("Database.acknowledgeRestore", || self.inner.acknowledge_restore().map_err(to_js))
     }
 
-    /// Group commit's syncs so far
-    #[napi(getter)]
-    pub fn syncs(&self) -> Result<f64, Code> {
-        self.guarded("Database.syncs", || self.inner.syncs().map(|n| n as f64).map_err(to_js))
-    }
-
-    /// Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
-    /// once it has committed. `durable` commits it with a sync, and where that sync fails throws `NOT_DURABLE`: the
-    /// commit has landed, so the batch isn't to be written again. Refused while a unit is open (`UNIT_OPEN`): writes
-    /// go through the unit then
-    #[napi(ts_return_type = "Uint8Array")]
-    pub fn write<'env>(
+    #[napi(ts_return_type = "SchemaChange")]
+    pub fn set_schema(
         &self,
-        env: &'env Env,
-        batch: Uint8Array,
-        durable: Option<bool>,
-    ) -> Result<BufferSlice<'env>, Code> {
-        self.guarded("Database.write", || {
-            answer(env, &self.inner.write_bytes(&batch, durable.unwrap_or(false)).map_err(to_js)?)
+        env: Env,
+        #[napi(ts_arg_type = "Schema")] schema: serde_json::Value,
+    ) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.setSchema", || {
+            let parsed: Schema =
+                serde_json::from_value(schema).map_err(|e| bad_arg(format!("invalid schema JSON: {e}")))?;
+            let change = self.inner.set_schema(&parsed).map_err(to_js)?;
+            to_js_json(&env, &change)
         })
     }
 
-    /// Answers reads (msgpack bytes of a `Reads`) from one snapshot, on this thread, as msgpack bytes of its `Answers`:
-    /// an `Answer` per read, in the order asked
-    #[napi(ts_return_type = "Uint8Array")]
-    pub fn read<'env>(&self, env: &'env Env, reads: Uint8Array) -> Result<BufferSlice<'env>, Code> {
-        self.guarded("Database.read", || answer(env, &self.inner.read_bytes(&reads).map_err(to_js)?))
-    }
-
-    /// `read` on a thread of the pool, so a large read doesn't hold up the event loop: msgpack bytes of a `Reads`, and
-    /// a promise of msgpack bytes of its `Answers`, what `read` would have answered at the call. Its snapshot is the
-    /// last commit as it is at the call, and a write made after the call is never in its answer. A tracked read that a
-    /// commit wrote into before it was filed is told to the listener of `hearBuilderCommits`, once its promise has
-    /// settled. elmdb's refusals of the read reject the promise: `NO_LISTENER` for a tracked read asked while there is
-    /// no such listener, and `CLOSED` when the database closes before it runs. Once sixteen snapshots are held for
-    /// reads still waiting, a read asked at a commit that holds none runs at the call, on this thread
-    #[napi(ts_return_type = "Promise<Uint8Array>")]
-    pub fn read_async<'env>(&self, env: &'env Env, reads: Uint8Array) -> Result<Unknown<'env>, Code> {
-        self.guarded("Database.readAsync", || {
-            let read = self.inner.read_at_call_bytes(&reads);
-            let task = ReadTask {
-                db: self.inner.again(),
-                health: self.health.clone(),
-                read: Some(read),
-                touched: None,
-                failed: None,
-            };
-            spawned(env, task)
+    #[napi(ts_return_type = "Schema")]
+    pub fn get_schema(&self, env: Env) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.getSchema", || {
+            let schema = self.inner.schema().map_err(to_js)?;
+            let proto = elmdb::protocol::compiled_to_protocol_schema(&schema, false);
+            to_js_json(&env, &proto)
         })
     }
 
-    /// Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after
     #[napi]
-    pub fn untrack(&self, token: f64) -> Result<(), Code> {
-        self.guarded("Database.untrack", || {
-            // A token is a u32, which a JS number holds exactly; any other number names no token
-            if !(token.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&token)) {
-                return Err(napi::Error::new(
-                    Code("BATCH_INVALID"),
-                    format!("A tracking token is a whole number from 0 to {}, which {token} isn't", u32::MAX),
-                ));
+    pub fn rename_type(&self, old_type: String, new_type: String, rewrite_ids: Option<bool>) -> Result<f64, Code> {
+        self.health.guarded("Database.renameType", || {
+            let epoch = self.inner.rename_type(&old_type, &new_type, rewrite_ids.unwrap_or(false)).map_err(to_js)?;
+            Ok(epoch as f64)
+        })
+    }
+
+    #[napi]
+    pub fn rename_field(&self, type_name: String, old_field: String, new_field: String) -> Result<f64, Code> {
+        self.health.guarded("Database.renameField", || {
+            let epoch = self.inner.rename_field(&type_name, &old_field, &new_field).map_err(to_js)?;
+            Ok(epoch as f64)
+        })
+    }
+
+    #[napi]
+    pub fn rename_relation(&self, old_rel: String, new_rel: String) -> Result<f64, Code> {
+        self.health.guarded("Database.renameRelation", || {
+            let epoch = self.inner.rename_relation(&old_rel, &new_rel).map_err(to_js)?;
+            Ok(epoch as f64)
+        })
+    }
+
+    /// Executes an atomic `elmdb-wire` binary batch directly (single FFI crossing, zero MsgPack/JSON).
+    #[napi(ts_return_type = "BatchResult")]
+    pub fn execute_wire_batch(&self, env: Env, payload: Uint8Array) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.executeWireBatch", || {
+            let res = self.inner.execute_wire_batch(payload.as_ref()).map_err(to_js)?;
+            to_js_json(&env, &res)
+        })
+    }
+
+    /// Sets primary vector embeddings for `extId` on `indexName`.
+    #[napi]
+    pub fn set_embeddings(&self, index_name: String, ext_id: String, vectors: Vec<Vec<f64>>) -> Result<(), Code> {
+        self.health.guarded("Database.setEmbeddings", || {
+            let mut f32_vecs = Vec::with_capacity(vectors.len());
+            for v in vectors {
+                let mut out = Vec::with_capacity(v.len());
+                for x in v {
+                    if !x.is_finite() {
+                        return Err(bad_arg("embedding components must be finite numbers"));
+                    }
+                    out.push(x as f32);
+                }
+                f32_vecs.push(out);
             }
-            self.inner.untrack(token as u32);
-            Ok(())
+            self.inner.set_embeddings(&index_name, &ext_id, &f32_vecs).map_err(to_js)
         })
     }
 
-    /// Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
-    /// those reads' tokens: a write's result names its own, and nothing else tells of a builder's. It is called too once
-    /// a tracked `readAsync` has settled, for the last commit since its call that wrote into what it read, which no
-    /// commit's result could name, the read not being filed yet. There is one listener, a second being refused
-    /// (`ALREADY_LISTENING`), which keeps no process alive, and closing the database drops it
-    #[napi(ts_args_type = "listener: (commit: { sequence: number; touched: number[] }) => void")]
-    pub fn hear_builder_commits(
+    /// Permanently destroys all entities belonging to an archived type.
+    #[napi]
+    pub fn purge_archived(&self, type_name: String) -> Result<f64, Code> {
+        self.health.guarded("Database.purgeArchived", || {
+            let count = self.inner.purge_archived(&type_name).map_err(to_js)?;
+            Ok(count as f64)
+        })
+    }
+
+    /// Registers a synchronous same-thread JS `beforeCommit` hook.
+    ///
+    /// The callback receives `{ entities, edges }` inside a native LMDB nested savepoint:
+    /// - Throwing an error aborts the commit cleanly with `HOOK_ABORTED`.
+    /// - Returning a `Uint8Array`/`Buffer` containing an `elmdb-wire` batch applies those derived writes
+    ///   in the same savepoint cascade (up to `MAX_HOOK_ROUNDS`).
+    #[napi]
+    pub fn register_before_commit(
         &self,
-        listener: napi::bindgen_prelude::Function<'_, BuilderCommit, ()>,
-    ) -> Result<(), Code> {
-        self.guarded("Database.hearBuilderCommits", || {
-            let tell = listener
-                .build_threadsafe_function()
-                .callee_handled::<false>()
-                .weak::<true>()
-                .build()
-                .map_err(|error| napi::Error::new(Code("IO"), error.to_string()))?;
-            self.inner
-                .hear_builder_commits(Some(std::sync::Arc::new(move |sequence, touched| {
-                    tell.call(
-                        BuilderCommit { sequence: sequence as f64, touched },
-                        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-                    );
-                })))
-                .map_err(to_js)
+        env: Env,
+        type_names: Option<Vec<String>>,
+        callback: Function<serde_json::Value, Unknown<'static>>,
+    ) -> Result<f64, Code> {
+        self.health.guarded("Database.registerBeforeCommit", || {
+            ensure_js_hook_env_cleanup(&env)?;
+            let schema = self.inner.schema().map_err(to_js)?;
+            let wants = match type_names {
+                None => TypeMask::all(),
+                Some(names) => {
+                    let mut m = TypeMask::empty();
+                    for name in names {
+                        let td = schema.type_by_name(&name).ok_or_else(|| {
+                            to_js(ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{name}'")))
+                        })?;
+                        m.insert(td.id);
+                    }
+                    m
+                }
+            };
+
+            let func_ref =
+                callback.create_ref().map_err(|e| napi::Error::new(Code("GenericFailure"), e.reason.clone()))?;
+            let js_key = NEXT_JS_HOOK_KEY.fetch_add(1, Ordering::Relaxed);
+            JS_HOOKS.with(|m| m.borrow_mut().insert(js_key, (env.raw(), func_ref)));
+            let expected_thread: ThreadId = std::thread::current().id();
+
+            let register_res = self.inner.register_before_commit(BeforeCommitHook {
+                wants,
+                callback: Arc::new(move |ctx| {
+                    if std::thread::current().id() != expected_thread {
+                        return Err(ElmdbError::new(
+                            ErrorCode::HookAborted,
+                            "JS beforeCommit hook cannot run from an off-thread write",
+                        ));
+                    }
+                    let sc = ctx.schema().clone();
+                    let entities: Vec<serde_json::Value> = ctx
+                        .entity_deltas()
+                        .into_iter()
+                        .map(|d| {
+                            let type_name = sc.type_by_id(d.type_id).map(|t| t.name.as_str()).unwrap_or("");
+                            let ext_id =
+                                d.after.as_ref().or(d.before.as_ref()).map(|r| r.header.ext_id.as_str()).unwrap_or("");
+                            let op = match (&d.before, &d.after) {
+                                (None, Some(_)) => "create",
+                                (Some(_), None) => "destroy",
+                                (Some(b), Some(a)) if b.header.is_trashed() != a.header.is_trashed() => {
+                                    if a.header.is_trashed() { "trash" } else { "restore" }
+                                }
+                                _ => "update",
+                            };
+                            serde_json::json!({
+                                "id": ext_id,
+                                "typeName": type_name,
+                                "op": op,
+                            })
+                        })
+                        .collect();
+                    let raw_edges: Vec<_> = ctx
+                        .edge_deltas()
+                        .into_iter()
+                        .map(|e| {
+                            let rel_kind = sc.relation_by_id(e.kind).map(|r| r.name.clone()).unwrap_or_default();
+                            let op = match (&e.before, &e.after) {
+                                (None, Some(_)) => "link",
+                                (Some(_), None) => "unlink",
+                                _ => "update",
+                            };
+                            let endpoints = e.after.as_ref().or(e.before.as_ref()).map(|pe| (pe.src, pe.dst));
+                            (rel_kind, op, endpoints)
+                        })
+                        .collect();
+                    let mut edges = Vec::with_capacity(raw_edges.len());
+                    for (rel_kind, op, endpoints) in raw_edges {
+                        let (source_id, target_id) = match endpoints {
+                            Some((src_key, dst_key)) => (
+                                ctx.resolve_ext_id(src_key)?.unwrap_or_else(|| format!("__deleted:{}", src_key.0)),
+                                ctx.resolve_ext_id(dst_key)?.unwrap_or_else(|| format!("__deleted:{}", dst_key.0)),
+                            ),
+                            None => (String::new(), String::new()),
+                        };
+                        edges.push(serde_json::json!({
+                            "relKind": rel_kind,
+                            "op": op,
+                            "sourceId": source_id,
+                            "targetId": target_id,
+                        }));
+                    }
+                    let payload = serde_json::json!({ "entities": entities, "edges": edges });
+
+                    // Extract `raw_env`, then borrow the local `Function` and DROP the `RefCell` borrow BEFORE
+                    // calling into JS so re-entrant `registerBeforeCommit` / `unregisterBeforeCommit` / `close` never panics!
+                    let maybe_raw_env: Option<napi::sys::napi_env> =
+                        JS_HOOKS.with(|m| m.borrow().get(&js_key).map(|(e, _)| *e));
+                    let maybe_frame: elmdb::Result<Option<Vec<u8>>> = match maybe_raw_env {
+                        None => Ok(None),
+                        Some(raw_env) => {
+                            let js_env = Env::from_raw(raw_env);
+                            let maybe_func: elmdb::Result<Option<Function<'_, serde_json::Value, Unknown<'static>>>> =
+                                JS_HOOKS.with(|m| {
+                                    let map = m.borrow();
+                                    let Some((_, fref)) = map.get(&js_key) else {
+                                        return Ok(None);
+                                    };
+                                    let func = fref
+                                        .borrow_back(&js_env)
+                                        .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                    Ok(Some(func))
+                                });
+                            match maybe_func? {
+                                None => Ok(None),
+                                Some(func) => {
+                                    let ret = func
+                                        .call(payload)
+                                        .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                    let vtype = ret
+                                        .get_type()
+                                        .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                    if matches!(vtype, ValueType::Undefined | ValueType::Null) {
+                                        Ok(None)
+                                    } else {
+                                        let bytes = Uint8Array::from_unknown(ret).map_err(|e| {
+                                            ElmdbError::new(
+                                                ErrorCode::HookAborted,
+                                                format!(
+                                                    "beforeCommit hook must return void/null or Uint8Array wire batch: {e}"
+                                                ),
+                                            )
+                                        })?;
+                                        Ok(Some(bytes.as_ref().to_vec()))
+                                    }
+                                }
+                            }
+                        }
+                    };
+
+                    if let Some(frame) = maybe_frame? {
+                        let decoded = decode_batch(&frame)?;
+                        ctx.exec_batch(&decoded.ops)?;
+                    }
+                    Ok(())
+                }),
+            });
+
+            let engine_hook_id = match register_res {
+                Ok(id) => id,
+                Err(err) => {
+                    let _ = JS_HOOKS.try_with(|m| m.borrow_mut().remove(&js_key));
+                    return Err(to_js(err));
+                }
+            };
+
+            self.js_hooks.borrow_mut().push((engine_hook_id, js_key));
+            Ok(engine_hook_id as f64)
         })
     }
 
-    /// Tells `listener` of commits other processes make as soon as each lands, which `committedElsewhere` then answers, a
-    /// second being refused (`ALREADY_LISTENING`). It keeps no process alive, and closing the database drops it
-    #[napi(ts_args_type = "listener: () => void")]
-    pub fn hear_commits_elsewhere(&self, listener: napi::bindgen_prelude::Function<'_, (), ()>) -> Result<(), Code> {
-        self.guarded("Database.hearCommitsElsewhere", || {
-            let tell = listener
-                .build_threadsafe_function()
-                .callee_handled::<false>()
-                .weak::<true>()
-                .build()
-                .map_err(|error| napi::Error::new(Code("IO"), error.to_string()))?;
-            self.inner
-                .hear_commits_elsewhere(std::sync::Arc::new(move || {
-                    tell.call((), napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
-                }))
-                .map_err(to_js)
-        })
-    }
-
-    /// The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it:
-    /// until it does (`adoptReplacement`), its commits are refused (`DATA_REPLACED`)
     #[napi]
-    pub fn replaced_elsewhere(&self) -> Result<Option<f64>, Code> {
-        self.guarded("Database.replacedElsewhere", || {
-            Ok(self.inner.replaced_elsewhere().map_err(to_js)?.map(|epoch| epoch as f64))
+    pub fn unregister_before_commit(&self, hook_id: f64) -> Result<bool, Code> {
+        self.health.guarded("Database.unregisterBeforeCommit", || {
+            let id = whole("hookId", Some(hook_id), 1.0)?.expect("present");
+            let removed = self.inner.unregister_before_commit(id);
+            let mut hooks = self.js_hooks.borrow_mut();
+            if let Some(pos) = hooks.iter().position(|(eid, _)| *eid == id) {
+                let (_, js_key) = hooks.remove(pos);
+                let _ = JS_HOOKS.try_with(|m| m.borrow_mut().remove(&js_key));
+            }
+            Ok(removed)
         })
     }
 
-    /// Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again; false, adopting
-    /// nothing, when another has landed since
+    /// Reads one entity row by external ID with all `EntityRef`s resolved in a single pinned MVCC snapshot.
+    #[napi(ts_return_type = "Row | null")]
+    pub fn get(&self, env: Env, ext_id: String) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.get", || {
+            let row = self.inner.get_row_resolved(&ext_id).map_err(to_js)?;
+            to_js_json(&env, &row)
+        })
+    }
+
+    /// Lists outgoing, incoming, or both-direction relations for `extId`.
+    #[napi(ts_return_type = "Array<RelationRow>")]
+    pub fn get_edges(
+        &self,
+        env: Env,
+        ext_id: String,
+        rel_kind: Option<String>,
+        dir: Option<String>,
+    ) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.getEdges", || {
+            let d = parse_edge_dir(dir.as_deref())?;
+            let out = self.inner.get_edges_resolved(&ext_id, rel_kind.as_deref(), d).map_err(to_js)?;
+            to_js_json(&env, &out)
+        })
+    }
+
+    /// Executes a `QuerySpec` synchronously on a pinned lock-free MVCC read snapshot.
+    #[napi(ts_return_type = "QueryAnswer")]
+    pub fn query(
+        &self,
+        env: Env,
+        #[napi(ts_arg_type = "QuerySpec")] spec: serde_json::Value,
+    ) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.query", || {
+            let parsed: QuerySpec =
+                serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))?;
+            let answer = self.inner.execute_query_spec(&parsed, ExecBudgets::default()).map_err(to_js)?;
+            to_js_json(&env, &answer)
+        })
+    }
+
+    /// Executes a `QuerySpec` off-thread on Node's libuv worker pool.
+    #[napi(ts_return_type = "Promise<QueryAnswer>")]
+    pub fn query_async(
+        &self,
+        #[napi(ts_arg_type = "QuerySpec")] spec: serde_json::Value,
+    ) -> Result<AsyncTask<Job<serde_json::Value, Unknown<'static>>>, Code> {
+        self.health.guarded("Database.queryAsync", || {
+            let parsed: QuerySpec =
+                serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))?;
+            Ok(AsyncTask::new(Job::new(
+                self.inner.again(),
+                self.health.clone(),
+                "Database.queryAsync",
+                move |db| {
+                    let ans = db.execute_query_spec(&parsed, ExecBudgets::default())?;
+                    serde_json::to_value(&ans)
+                        .map_err(|e| ElmdbError::new(ErrorCode::Internal, format!("serialize answer: {e}")))
+                },
+                jobs::value,
+            )))
+        })
+    }
+
+    // -----------------------------------------------------------------------
+    // Sans-I/O Live Query Watch Hub
+    // -----------------------------------------------------------------------
+
     #[napi]
-    pub fn adopt_replacement(&self, epoch: f64) -> Result<bool, Code> {
-        self.guarded("Database.adoptReplacement", || {
-            let epoch = whole("epoch", Some(epoch), 0.0)?.expect("Some returns Some");
-            self.inner.adopt_replacement(epoch).map_err(to_js)
+    pub fn register_watch(
+        &self,
+        #[napi(ts_arg_type = "QuerySpec")] spec: serde_json::Value,
+        policy: Option<WatchPolicyOptions>,
+        now_ms: Option<f64>,
+    ) -> Result<WatchRegistration, Code> {
+        self.health.guarded("Database.registerWatch", || {
+            let parsed: QuerySpec =
+                serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))?;
+            let pol = parse_watch_policy(policy)?;
+            let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
+            let (wid, ans) = self.inner.register_query_watch(&parsed, pol, now).map_err(to_js)?;
+            let ans_val = serde_json::to_value(&ans)
+                .map_err(|e| napi::Error::new(Code(ErrorCode::Internal.as_str()), e.to_string()))?;
+            Ok(WatchRegistration { watch_id: wid.0 as f64, answer: ans_val })
         })
     }
 
-    /// How many tokens have tracked reads filed, and how many keys and ranges they hold
-    #[napi(ts_return_type = "{ owners: number; keys: number; ranges: number }")]
-    pub fn track_stats(&self) -> Result<serde_json::Value, Code> {
-        self.guarded("Database.trackStats", || {
-            Ok({
-                let (owners, keys, ranges) = self.inner.track_stats();
-                serde_json::json!({ "owners": owners, "keys": keys, "ranges": ranges })
+    #[napi]
+    pub fn rerun_watch(
+        &self,
+        watch_id: f64,
+        #[napi(ts_arg_type = "QuerySpec")] spec: serde_json::Value,
+        now_ms: Option<f64>,
+        cost_ms: Option<f64>,
+    ) -> Result<WatchRerun, Code> {
+        self.health.guarded("Database.rerunWatch", || {
+            let id = WatchId(whole("watchId", Some(watch_id), 1.0)?.expect("present"));
+            let parsed: QuerySpec =
+                serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))?;
+            let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
+            let cost = whole("costMs", cost_ms, 0.0)?.unwrap_or(1);
+            let (ans, changed) = self.inner.rerun_query_watch(id, &parsed, now, cost).map_err(to_js)?;
+            let ans_val = serde_json::to_value(&ans)
+                .map_err(|e| napi::Error::new(Code(ErrorCode::Internal.as_str()), e.to_string()))?;
+            Ok(WatchRerun { answer: ans_val, changed })
+        })
+    }
+
+    #[napi]
+    pub fn unregister_watch(&self, watch_id: f64) -> Result<bool, Code> {
+        self.health.guarded("Database.unregisterWatch", || {
+            let id = WatchId(whole("watchId", Some(watch_id), 1.0)?.expect("present"));
+            Ok(self.inner.unregister_watch(id))
+        })
+    }
+
+    #[napi]
+    pub fn catch_up_cross_process(&self, now_ms: Option<f64>) -> Result<Vec<f64>, Code> {
+        self.health.guarded("Database.catchUpCrossProcess", || {
+            let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
+            let dirty = self.inner.catch_up_cross_process(now).map_err(to_js)?;
+            Ok(dirty.into_iter().map(|id| id.0 as f64).collect())
+        })
+    }
+
+    #[napi(ts_return_type = "WatchTick")]
+    pub fn tick_watches(&self, env: Env, now_ms: Option<f64>) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.tickWatches", || {
+            let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
+            let t = self.inner.tick_watches(now);
+            let wire = elmdb::protocol::WatchTick {
+                due_ids: t.due_ids.into_iter().map(|id| id.0).collect(),
+                next_wake_delay_ms: t.next_wake_delay_ms,
+                settled: t.settled,
+            };
+            to_js_json(&env, &wire)
+        })
+    }
+
+    #[napi]
+    pub fn next_due_watch(&self, now_ms: Option<f64>, elapsed_turn_ms: Option<f64>) -> Result<NextDueWatch, Code> {
+        self.health.guarded("Database.nextDueWatch", || {
+            let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
+            let elapsed = whole("elapsedTurnMs", elapsed_turn_ms, 0.0)?.unwrap_or(0);
+            let nd = self.inner.next_due_watch(now, elapsed);
+            Ok(NextDueWatch {
+                watch_id: nd.watch_id.map(|id| id.0 as f64),
+                next_wake_delay_ms: nd.next_wake_delay_ms.map(|d| d as f64),
+                settled: nd.settled,
             })
         })
     }
 
-    /// The last commit's sequence, or 0 before the first: a number that only increases for as long as the database
-    /// exists
-    #[napi(getter)]
-    pub fn sequence(&self) -> Result<f64, Code> {
-        self.guarded("Database.sequence", || self.inner.sequence().map(|n| n as f64).map_err(to_js))
-    }
-
-    /// Opens a unit that stays open across calls until it is committed or aborted, and writes go through it. While it
-    /// is open, what would write or wait outside it is refused (`UNIT_OPEN`): a write, a rebuild, a second `begin`,
-    /// `setSchema`, `purge`, a rename, `reset`, `replaceWith`, `bulkLoad`, `close`, and `waitForIndexBuilds` once the
-    /// index builder has started
     #[napi]
-    pub fn begin(&self) -> Result<Unit, Code> {
-        self.guarded("Database.begin", || {
-            let inner: UnitSlot = std::rc::Rc::new(std::cell::RefCell::new(Some(self.inner.begin().map_err(to_js)?)));
-            *self.unit.borrow_mut() = Some(std::rc::Rc::clone(&inner));
-            Ok(Unit { inner, health: self.health.clone() })
+    pub fn caught_up(&self, now_ms: Option<f64>, soon: Option<bool>) -> Result<bool, Code> {
+        self.health.guarded("Database.caughtUp", || {
+            let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
+            Ok(self.inner.caught_up(now, soon.unwrap_or(false)))
         })
     }
 
-    /// Compares derived data with primary data and every row with the schema's rules
-    #[napi(ts_return_type = "CheckReport")]
-    pub fn check(&self) -> Result<serde_json::Value, Code> {
-        self.guarded("Database.check", || {
-            let report = self.inner.check().map_err(to_js)?;
-            Ok(serde_json::to_value(report).expect("a report serializes"))
-        })
-    }
-
-    /// `check` on a thread of the pool, in a snapshot of its own: the database's writes go on beside it
-    #[napi(ts_return_type = "Promise<CheckReport>")]
-    pub fn check_async<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
-        self.guarded("Database.checkAsync", || {
-            self.job(
-                env,
-                "Database.checkAsync, on a thread of the pool,",
-                |db| db.check().map(|report| serde_json::to_value(report).expect("a report serializes")),
-                jobs::value,
-            )
-        })
-    }
-
-    /// Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's, in
-    /// one unit of its own. Refused while a unit is open (`UNIT_OPEN`)
     #[napi]
-    pub fn rebuild(&self, entity_type: Option<String>, index: Option<String>) -> Result<(), Code> {
-        self.guarded("Database.rebuild", || {
-            let one = rebuild_target(entity_type, index)?;
-            self.inner
-                .rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str())))
-                .map_err(to_js)
-        })
+    pub fn watches_settled(&self) -> Result<bool, Code> {
+        self.health.guarded("Database.watchesSettled", || Ok(self.inner.watches_settled()))
     }
 
-    /// `rebuild` on a thread of the pool: a write made on this thread while it runs waits for it to commit
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn rebuild_async<'env>(
-        &self,
-        env: &'env Env,
-        entity_type: Option<String>,
-        index: Option<String>,
-    ) -> Result<Unknown<'env>, Code> {
-        self.guarded("Database.rebuildAsync", || {
-            let one = rebuild_target(entity_type, index)?;
-            self.job(
-                env,
-                "Database.rebuildAsync, on a thread of the pool,",
-                move |db| db.rebuild(one.as_ref().map(|(entity_type, index)| (entity_type.as_str(), index.as_str()))),
-                jobs::nothing,
-            )
-        })
-    }
-
-    /// Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when
-    /// a build failed
-    #[napi(ts_return_type = "IndexStatus[]")]
-    pub fn index_status(&self) -> Result<serde_json::Value, Code> {
-        self.guarded("Database.indexStatus", || {
-            let status = self.inner.index_status().map_err(to_js)?;
-            Ok(serde_json::to_value(status).expect("a status serializes"))
-        })
-    }
-
-    /// Whether another handle has committed since this one last asked, or since it opened; never for this handle's own
     #[napi]
-    pub fn committed_elsewhere(&self) -> Result<bool, Code> {
-        self.guarded("Database.committedElsewhere", || self.inner.committed_elsewhere().map_err(to_js))
-    }
-
-    /// The checkpoint named `name`, as the latest commit left it
-    #[napi(ts_return_type = "Uint8Array | null")]
-    pub fn checkpoint<'env>(&self, env: &'env Env, name: String) -> Result<Option<BufferSlice<'env>>, Code> {
-        self.guarded("Database.checkpoint", || {
-            self.inner.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
-        })
-    }
-
-    /// The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
-    /// its `Changed`
-    #[napi(ts_return_type = "Uint8Array")]
-    pub fn changed_since<'env>(
-        &self,
-        env: &'env Env,
-        types: Vec<String>,
-        from: Uint8Array,
-        limit: u32,
-    ) -> Result<BufferSlice<'env>, Code> {
-        self.guarded("Database.changedSince", || {
-            answer(env, &self.inner.changed_since_bytes(&types, &from, limit as usize).map_err(to_js)?)
-        })
-    }
-
-    /// Blocks until every index waiting to be built is built, as the database says once the builder is idle, throwing
-    /// `INDEX_BUILD_FAILED` when a build failed, `BUILDS_STOPPED` where a close at exit gave up and left builds,
-    /// `THREAD_REFUSED` where the system won't start the builder's thread (call it again to start it), or
-    /// throws what holds a build up while the builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again
-    /// after a pause to wait on. Refused with a unit open while there is something to build (`UNIT_OPEN`): commit
-    /// or abort it, then wait. Throws `CLOSED` on a closed database, and `DATA_REPLACED` while
-    /// another process's replacement of every row is not adopted. It doesn't wait for the order of an index's
-    /// strings where another elmdb's writes ended its build: reads sort meanwhile, and `indexStatus` answers
-    /// `ordered: false`
-    #[napi]
-    pub fn wait_for_index_builds(&self) -> Result<(), Code> {
-        self.guarded("Database.waitForIndexBuilds", || self.inner.wait_for_index_builds().map_err(to_js))
-    }
-
-    /// Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }`. A
-    /// name the schema still declares is refused (`SCHEMA_CHANGE_REFUSED`), as the call is while a unit is open
-    /// (`UNIT_OPEN`)
-    #[napi]
-    pub fn purge(&self, what: PurgeTarget) -> Result<(), Code> {
-        self.guarded("Database.purge", || {
-            use elmdb::engine::admin::Purge;
-            let target = match (what.entity_type, what.field, what.relation_kind, what.role) {
-                (Some(entity_type), Some(field), None, None) => Purge::Field { entity_type, field },
-                (Some(entity_type), None, None, None) => Purge::Type(entity_type),
-                (None, None, Some(kind), None) => Purge::RelationKind(kind),
-                (None, None, None, Some(role)) => Purge::Role(role),
-                _ => {
-                    return Err(napi::Error::new(
-                        Code("BATCH_INVALID"),
-                        "purge takes { type }, { type, field }, { relationKind } or { role }".to_owned(),
-                    ));
-                }
-            };
-            self.inner.purge(&target).map_err(to_js)
-        })
-    }
-
-    /// Renames a type to one the schema declares, rewriting its entities' ids and the relations and declared `ref`
-    /// fields naming them, in one durable unit. Refused while a unit is open (`UNIT_OPEN`)
-    #[napi]
-    pub fn rename_type(&self, from: String, to: String) -> Result<(), Code> {
-        self.guarded("Database.renameType", || self.inner.rename_type(&from, &to).map_err(to_js))
-    }
-
-    /// Moves a field's values, on every entity of a type, to another name the type declares, in one durable unit.
-    /// Refused while a unit is open (`UNIT_OPEN`)
-    #[napi]
-    pub fn rename_field(&self, entity_type: String, from: String, to: String) -> Result<(), Code> {
-        self.guarded("Database.renameField", || self.inner.rename_field(&entity_type, &from, &to).map_err(to_js))
-    }
-
-    /// Moves every relation of a kind to another kind the schema declares, in one durable unit. Refused while a unit
-    /// is open (`UNIT_OPEN`)
-    #[napi]
-    pub fn rename_relation(&self, from: String, to: String) -> Result<(), Code> {
-        self.guarded("Database.renameRelation", || self.inner.rename_relation(&from, &to).map_err(to_js))
-    }
-
-    /// A compacted copy of one moment of the database into `target`, which opens as a database of its own
-    #[napi]
-    pub fn backup(&self, target: String) -> Result<(), Code> {
-        self.guarded("Database.backup", || self.inner.backup(target).map_err(to_js))
-    }
-
-    /// `backup` on a thread of the pool, copying a snapshot: the database's writes go on beside it
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn backup_async<'env>(&self, env: &'env Env, target: String) -> Result<Unknown<'env>, Code> {
-        self.guarded("Database.backupAsync", || {
-            self.job(env, "Database.backupAsync, on a thread of the pool,", move |db| db.backup(target), jobs::nothing)
-        })
-    }
-
-    /// Every entry replaced by another database's primary data, derived data rebuilt under this schema
-    #[napi]
-    pub fn replace_with(&self, source: String) -> Result<(), Code> {
-        self.guarded("Database.replaceWith", || self.inner.replace_with(source).map_err(to_js))
-    }
-
-    /// Every entry removed but the database's format and schema
-    #[napi]
-    pub fn reset(&self) -> Result<(), Code> {
-        self.guarded("Database.reset", || self.inner.reset().map_err(to_js))
-    }
-
-    /// What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
-    /// each value index, and its sizes
-    #[napi(ts_return_type = "Stats")]
-    pub fn stats(&self) -> Result<serde_json::Value, Code> {
-        self.guarded("Database.stats", || {
-            let stats = self.inner.stats().map_err(to_js)?;
-            Ok(serde_json::to_value(stats).expect("stats serialize"))
-        })
-    }
-
-    /// Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a
-    /// value outside the value spec is refused all the same
-    #[napi]
-    pub fn bulk_load(&self, loads: Uint8Array) -> Result<(), Code> {
-        self.guarded("Database.bulkLoad", || self.inner.bulk_load_bytes(&loads).map_err(to_js))
-    }
-
-    /// Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
-    /// the database is closed. It resolves at once where nothing is owed: with `syncs: false`, under `syncEachCommit`,
-    /// and in a read-only database
-    #[napi(ts_return_type = "Promise<void>")]
-    pub fn durable<'env>(&self, env: &'env Env) -> Result<Unknown<'env>, Code> {
-        self.guarded("Database.durable", || {
-            let task = match self.inner.durable() {
-                Ok(durable) => DurableTask { durable: Some(durable), health: self.health.clone(), failed: None },
-                Err(error) => DurableTask { durable: None, health: self.health.clone(), failed: Some(error) },
-            };
-            spawned(env, task)
-        })
-    }
-
-    /// Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a
-    /// unit is open (`UNIT_OPEN`): commit or abort it, then close
-    #[napi]
-    pub fn close(&self) -> Result<(), Code> {
-        self.unrefused("Database.close", || self.inner.close().map_err(to_js))
-    }
-}
-
-/// `readAsync()`'s promise, answered on a thread of the pool; a failure becomes an error with elmdb's code on the JS thread
-pub struct ReadTask {
-    db: Held,
-    health: Health,
-    /// The read as asked at the call, its snapshot held
-    read: Option<elmdb::engine::CallRead>,
-    /// A commit that wrote into the tracked read before it was filed, told once the promise settles
-    touched: Option<(u64, u32)>,
-    failed: Option<elmdb::Error>,
-}
-
-impl ReadTask {
-    /// Tells the listener of `hearBuilderCommits` of a commit that wrote into the read before it was filed. Told as the
-    /// promise settles, through the listener's queue, so it is heard after whatever awaited the answer has it
-    fn tell(&mut self) {
-        if let Some((sequence, token)) = self.touched.take() {
-            self.db.tell_touched(sequence, token);
-        }
-    }
-}
-
-impl Task for ReadTask {
-    type Output = Vec<u8>;
-    type JsValue = BufferSlice<'static>;
-
-    fn compute(&mut self) -> napi::Result<Vec<u8>> {
-        let Some(read) = self.read.take() else {
-            return Err(napi::Error::from_reason("This read has already run".to_owned()));
-        };
-        let db = &self.db;
-        let answered = self.health.caught("Database.readAsync, on a thread of the pool,", || db.answer_call_read(read));
-        let answer = answered.and_then(|answered| {
-            self.touched = answered.touched;
-            answered.answer
-        });
-        answer.map_err(|error| {
-            let reason = error.message.clone();
-            self.failed = Some(error);
-            napi::Error::from_reason(reason)
-        })
-    }
-
-    fn resolve(&mut self, env: Env, answer: Vec<u8>) -> napi::Result<BufferSlice<'static>> {
-        self.tell();
-        copied(&env, &answer)
-    }
-
-    fn reject(&mut self, env: Env, error: napi::Error) -> napi::Result<BufferSlice<'static>> {
-        self.tell();
-        match self.failed.take() {
-            Some(failed) => Err(napi::Error::from(JsError::from(to_js(failed)).into_unknown(env))),
-            None => Err(error),
-        }
-    }
-}
-
-/// `durable()`'s promise. A task's errors carry napi's own status, so a failure is kept here and turned into an error
-/// with elmdb's code on the JS thread, in `reject`
-pub struct DurableTask {
-    durable: Option<elmdb::Durable>,
-    health: Health,
-    failed: Option<elmdb::Error>,
-}
-
-impl Task for DurableTask {
-    type Output = ();
-    type JsValue = ();
-
-    fn compute(&mut self) -> napi::Result<()> {
-        if let Some(failed) = &self.failed {
-            return Err(napi::Error::from_reason(failed.message.clone()));
-        }
-        let Some(durable) = self.durable.take() else { return Ok(()) };
-        let waited = self.health.caught("Database.durable, on a thread of the pool,", || durable.wait());
-        waited.and_then(|waited| waited).map_err(|error| {
-            let reason = error.message.clone();
-            self.failed = Some(error);
-            napi::Error::from_reason(reason)
-        })
-    }
-
-    fn resolve(&mut self, _env: Env, (): ()) -> napi::Result<()> {
-        Ok(())
-    }
-
-    fn reject(&mut self, env: Env, error: napi::Error) -> napi::Result<()> {
-        match self.failed.take() {
-            Some(failed) => Err(napi::Error::from(JsError::from(to_js(failed)).into_unknown(env))),
-            None => Err(error),
-        }
-    }
-}
-
-/// A unit open across calls, on the thread that began it
-#[napi]
-pub struct Unit {
-    inner: UnitSlot,
-    /// Its database handle's, which a panic in the unit is a panic of
-    health: Health,
-}
-
-impl Unit {
-    fn open(&self) -> Result<std::cell::RefMut<'_, elmdb::Unit>, Code> {
-        std::cell::RefMut::filter_map(self.inner.borrow_mut(), Option::as_mut)
-            .map_err(|_| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))
-    }
-
-    /// The unit taken out of its slot, to end it: by a commit, or keeping nothing
-    fn take(&self) -> Option<elmdb::Unit> {
-        self.inner.borrow_mut().take()
-    }
-
-    /// Runs an export's work on the unit. Once its handle has panicked, in this call or another, the unit is ended,
-    /// keeping none of its writes: what a panic interrupted may be half of a batch
-    fn run<T>(&mut self, export: &'static str, work: impl FnOnce(&mut Self) -> Result<T, Code>) -> Result<T, Code> {
-        let health = self.health.clone();
-        let ran = health.guarded(export, || work(self));
-        if health.panicked() {
-            end_unit(&self.inner);
-        }
-        ran
-    }
-}
-
-impl Drop for Unit {
-    /// A unit V8 collects while it is open is aborted, in a finalizer a panic would unwind out of into Node
-    fn drop(&mut self) {
-        end_unit(&self.inner);
-    }
-}
-
-#[napi]
-impl Unit {
-    /// Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
-    /// bytes of a `BatchResult`
-    #[napi(ts_return_type = "Uint8Array")]
-    pub fn write<'env>(&mut self, env: &'env Env, batch: Uint8Array) -> Result<BufferSlice<'env>, Code> {
-        self.run("Unit.write", |unit| answer(env, &unit.open()?.write_bytes(&batch).map_err(to_js)?))
-    }
-
-    /// Records `value` as the checkpoint `name`, committing with this unit or not at all
-    #[napi]
-    pub fn set_checkpoint(&mut self, name: String, value: Uint8Array) -> Result<(), Code> {
-        self.run("Unit.setCheckpoint", |unit| unit.open()?.set_checkpoint(&name, &value).map_err(to_js))
-    }
-
-    /// The checkpoint named `name`, as this unit sees it
-    #[napi(ts_return_type = "Uint8Array | null")]
-    pub fn checkpoint<'env>(&mut self, env: &'env Env, name: String) -> Result<Option<BufferSlice<'env>>, Code> {
-        self.run("Unit.checkpoint", |unit| {
-            unit.open()?.checkpoint(&name).map_err(to_js)?.map(|value| answer(env, &value)).transpose()
-        })
-    }
-
-    /// What the unit has changed so far: msgpack bytes of its `ChangeSet`
-    #[napi(ts_return_type = "Uint8Array")]
-    pub fn pending_changes<'env>(&mut self, env: &'env Env) -> Result<BufferSlice<'env>, Code> {
-        self.run("Unit.pendingChanges", |unit| answer(env, &unit.open()?.pending_changes_bytes().map_err(to_js)?))
-    }
-
-    /// `Database.changedSince` read in the unit, before its own writes are stamped
-    #[napi(ts_return_type = "Uint8Array")]
-    pub fn changed_since<'env>(
-        &mut self,
-        env: &'env Env,
-        types: Vec<String>,
-        from: Uint8Array,
-        limit: u32,
-    ) -> Result<BufferSlice<'env>, Code> {
-        self.run("Unit.changedSince", |unit| {
-            answer(env, &unit.open()?.changed_since_bytes(&types, &from, limit as usize).map_err(to_js)?)
-        })
-    }
-
-    /// The sequence this unit commits as, which what it writes is stamped with
-    #[napi]
-    pub fn next_sequence(&mut self) -> Result<f64, Code> {
-        self.run("Unit.nextSequence", |unit| Ok(unit.open()?.next_sequence().map_err(to_js)? as f64))
-    }
-
-    /// Answers reads (msgpack bytes of a `Reads`) from the unit's transaction, which sees the unit's own writes, as
-    /// msgpack bytes of its `Answers`
-    #[napi(ts_return_type = "Uint8Array")]
-    pub fn read<'env>(&mut self, env: &'env Env, reads: Uint8Array) -> Result<BufferSlice<'env>, Code> {
-        self.run("Unit.read", |unit| answer(env, &unit.open()?.read_bytes(&reads).map_err(to_js)?))
-    }
-
-    /// Opens a savepoint, answering its depth
-    #[napi]
-    pub fn savepoint(&mut self) -> Result<u32, Code> {
-        self.run("Unit.savepoint", |unit| unit.open()?.savepoint().map(|d| d as u32).map_err(to_js))
-    }
-
-    /// Undoes everything since the savepoint at `depth`, closing it
-    #[napi]
-    pub fn rollback_to(&mut self, depth: u32) -> Result<(), Code> {
-        self.run("Unit.rollbackTo", |unit| unit.open()?.rollback_to(depth as usize).map_err(to_js))
-    }
-
-    /// Closes the savepoint at `depth`, keeping its writes
-    #[napi]
-    pub fn release(&mut self, depth: u32) -> Result<(), Code> {
-        self.run("Unit.release", |unit| unit.open()?.release(depth as usize).map_err(to_js))
-    }
-
-    /// Commits the unit, answering msgpack bytes of its `ChangeSet`
-    #[napi(ts_return_type = "Uint8Array")]
-    pub fn commit<'env>(&mut self, env: &'env Env, durable: Option<bool>) -> Result<BufferSlice<'env>, Code> {
-        self.run("Unit.commit", |unit| {
-            let unit = unit.take().ok_or_else(|| napi::Error::new(Code("CLOSED"), "The unit has ended".to_owned()))?;
-            let changes = unit.commit(durable.unwrap_or(false)).map_err(to_js)?;
-            answer(env, &rmp_serde::to_vec_named(&changes).expect("a change set serializes"))
-        })
-    }
-
-    /// Ends the unit, keeping nothing of it
-    #[napi]
-    pub fn abort(&mut self) -> Result<(), Code> {
-        self.run("Unit.abort", |unit| {
-            if let Some(mut unit) = unit.take() {
-                unit.abort();
-            }
+    pub fn stop_watches(&self) -> Result<(), Code> {
+        self.health.unrefused("Database.stopWatches", || {
+            self.inner.stop_watches();
             Ok(())
         })
     }
 
-    /// Whether the unit is still open: false once it has committed, aborted, or been ended by a panic
-    #[napi(getter)]
-    pub fn is_open(&self) -> Result<bool, Code> {
-        // A unit of a handle that panicked has ended, whether or not a call has reached it since
-        if self.health.panicked() {
-            end_unit(&self.inner);
-        }
-        let open =
-            self.health.unrefused("Unit.isOpen", || Ok(self.inner.borrow().as_ref().is_some_and(elmdb::Unit::is_open)));
-        // And when this is the call that panicked
-        if self.health.panicked() {
-            end_unit(&self.inner);
-        }
-        open
+    // -----------------------------------------------------------------------
+    // Maintenance, Integrity, Backup, Dump, Close
+    // -----------------------------------------------------------------------
+
+    #[napi]
+    pub fn drive_background_work(&self, max_entities: Option<f64>) -> Result<bool, Code> {
+        self.health.guarded("Database.driveBackgroundWork", || {
+            let max = whole("maxEntities", max_entities, 1.0)?.unwrap_or(1024) as usize;
+            self.inner.drive_background_work(max).map_err(to_js)
+        })
+    }
+
+    #[napi]
+    pub fn flush(&self) -> Result<(), Code> {
+        self.health.guarded("Database.flush", || self.inner.flush().map_err(to_js))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn flush_async(&self) -> Result<AsyncTask<Job<(), ()>>, Code> {
+        self.health.guarded("Database.flushAsync", || {
+            Ok(AsyncTask::new(Job::new(
+                self.inner.again(),
+                self.health.clone(),
+                "Database.flushAsync",
+                |db| db.flush(),
+                jobs::nothing,
+            )))
+        })
+    }
+
+    #[napi(ts_return_type = "CheckReport")]
+    pub fn check(&self, env: Env, index_name: Option<String>) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.check", || {
+            let rep = self.inner.check(index_name.as_deref()).map_err(to_js)?;
+            to_js_json(&env, &rep)
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<CheckReport>")]
+    pub fn check_async(
+        &self,
+        index_name: Option<String>,
+    ) -> Result<AsyncTask<Job<serde_json::Value, Unknown<'static>>>, Code> {
+        self.health.guarded("Database.checkAsync", || {
+            Ok(AsyncTask::new(Job::new(
+                self.inner.again(),
+                self.health.clone(),
+                "Database.checkAsync",
+                move |db| {
+                    let rep = db.check(index_name.as_deref())?;
+                    serde_json::to_value(&rep)
+                        .map_err(|e| ElmdbError::new(ErrorCode::Internal, format!("serialize check report: {e}")))
+                },
+                jobs::value,
+            )))
+        })
+    }
+
+    #[napi]
+    pub fn rebuild(&self, index_name: Option<String>) -> Result<(), Code> {
+        self.health.guarded("Database.rebuild", || self.inner.rebuild(index_name.as_deref()).map_err(to_js))
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn rebuild_async(&self, index_name: Option<String>) -> Result<AsyncTask<Job<(), ()>>, Code> {
+        self.health.guarded("Database.rebuildAsync", || {
+            Ok(AsyncTask::new(Job::new(
+                self.inner.again(),
+                self.health.clone(),
+                "Database.rebuildAsync",
+                move |db| db.rebuild(index_name.as_deref()),
+                jobs::nothing,
+            )))
+        })
+    }
+
+    #[napi(ts_return_type = "DatabaseStats")]
+    pub fn stats(&self, env: Env) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.stats", || {
+            let st = self.inner.stats().map_err(to_js)?;
+            to_js_json(&env, &st)
+        })
+    }
+
+    #[napi(ts_return_type = "Array<IndexStatus>")]
+    pub fn index_status(&self, env: Env) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.indexStatus", || {
+            let st = self.inner.index_status().map_err(to_js)?;
+            to_js_json(&env, &st)
+        })
+    }
+
+    #[napi]
+    pub fn backup(&self, target_dir: String, overwrite_backup: Option<bool>) -> Result<(), Code> {
+        self.health.guarded("Database.backup", || {
+            let mode = if overwrite_backup.unwrap_or(false) { BackupInto::Backups } else { BackupInto::New };
+            self.inner.backup_into(&target_dir, mode).map_err(to_js)
+        })
+    }
+
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn backup_async(
+        &self,
+        target_dir: String,
+        overwrite_backup: Option<bool>,
+    ) -> Result<AsyncTask<Job<(), ()>>, Code> {
+        self.health.guarded("Database.backupAsync", || {
+            let mode = if overwrite_backup.unwrap_or(false) { BackupInto::Backups } else { BackupInto::New };
+            Ok(AsyncTask::new(Job::new(
+                self.inner.again(),
+                self.health.clone(),
+                "Database.backupAsync",
+                move |db| db.backup_into(&target_dir, mode),
+                jobs::nothing,
+            )))
+        })
+    }
+
+    #[napi(ts_return_type = "DumpReport")]
+    pub fn dump(&self, env: Env, target_file: String) -> Result<Unknown<'static>, Code> {
+        self.health.guarded("Database.dump", || {
+            let rep = elmdb::dump::dump(&self.inner, &target_file).map_err(to_js)?;
+            to_js_json(&env, &rep)
+        })
+    }
+
+    #[napi]
+    pub fn close(&self) -> Result<(), Code> {
+        self.health.unrefused("Database.close", || {
+            let hooks = std::mem::take(&mut *self.js_hooks.borrow_mut());
+            for (engine_id, js_key) in hooks {
+                let _ = self.inner.unregister_before_commit(engine_id);
+                let _ = JS_HOOKS.try_with(|m| m.borrow_mut().remove(&js_key));
+            }
+            self.inner.close().map_err(to_js)
+        })
     }
 }

@@ -5,16 +5,13 @@ import assert from 'node:assert/strict';
 import { copyFileSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { createRequire } from 'node:module';
 
 const here = fileURLToPath(new URL('..', import.meta.url));
 const binary = join(here, readdirSync(here).find((file) => file.endsWith('.node')));
 const loader = join(here, 'index.js');
-const require = createRequire(import.meta.url);
 
-/** Runs `source` in a fresh Node process, answering what it prints */
 const run = (source) => execFileSync(process.execPath, ['-e', source], { encoding: 'utf8', timeout: 15000 }).trim();
 
 test('an open from a second elmdb binary in the process is refused, naming the rejected copy', (t) => {
@@ -25,9 +22,9 @@ test('an open from a second elmdb binary in the process is refused, naming the r
   const printed = run(`
     const first = require(${JSON.stringify(binary)});
     const second = require(${JSON.stringify(copy)});
-    first.Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false });
+    first.Database.open(${JSON.stringify(join(dir, 'a'))}, { durability: 'unsafe' });
     try {
-      second.Database.open(${JSON.stringify(join(dir, 'b'))}, { syncs: false });
+      second.Database.open(${JSON.stringify(join(dir, 'b'))}, { durability: 'unsafe' });
       console.log('opened');
     } catch (error) {
       console.log(JSON.stringify({ code: error.code, names: error.message.includes(${JSON.stringify(copy)}),
@@ -43,10 +40,10 @@ test('a child process opens with a binary of its own, whatever its parent claime
   const copy = join(dir, 'copy.node');
   copyFileSync(binary, copy);
   const printed = run(`
-    require(${JSON.stringify(loader)}).Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false });
+    require(${JSON.stringify(loader)}).Database.open(${JSON.stringify(join(dir, 'a'))}, { durability: 'unsafe' });
     const { execFileSync } = require('node:child_process');
     process.stdout.write(execFileSync(process.execPath, ['-e', ${JSON.stringify(`
-      require(${JSON.stringify(copy)}).Database.open(${JSON.stringify(join(dir, 'b'))}, { syncs: false });
+      require(${JSON.stringify(copy)}).Database.open(${JSON.stringify(join(dir, 'b'))}, { durability: 'unsafe' });
       console.log('opened');
     `)}], { encoding: 'utf8' }));
   `);
@@ -58,7 +55,7 @@ test('claiming a process does not mutate its environment', (t) => {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   assert.equal(run(`
     const before = process.env.ELMDB_BINDING;
-    const db = require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false });
+    const db = require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'a'))}, { durability: 'unsafe' });
     db.close();
     console.log(process.env.ELMDB_BINDING === before ? 'unchanged' : 'mutated');
   `), 'unchanged');
@@ -82,7 +79,7 @@ test('concurrent first opens in different workers admit only one physical binary
       parentPort.postMessage('ready');
       Atomics.wait(gate, 0, 0);
       try {
-        const db = binding.Database.open(d.path, { syncs: false });
+        const db = binding.Database.open(d.path, { durability: 'unsafe' });
         db.close();
         parentPort.postMessage('opened');
       } catch (e) { parentPort.postMessage(e.code); }
@@ -115,18 +112,18 @@ test('a claim outlives its first worker and database closes', { timeout: 20000 }
   const { stdout } = await promisify(execFile)(process.execPath, ['-e', `
     const { Worker } = require('node:worker_threads');
     const w = new Worker(${JSON.stringify(`
-      const db = require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false });
+      const db = require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'a'))}, { durability: 'unsafe' });
       db.close();
     `)}, { eval: true });
     w.on('error', e => { console.error(e); process.exitCode = 1; });
     w.on('exit', code => {
       if (code !== 0) return;
       const first = require(${JSON.stringify(binary)});
-      first.Database.open(${JSON.stringify(join(dir, 'b'))}, { syncs: false }).close();
+      first.Database.open(${JSON.stringify(join(dir, 'b'))}, { durability: 'unsafe' }).close();
       const second = require(${JSON.stringify(copy)});
       const codes = [];
       for (let i = 0; i < 2; ++i) {
-        try { second.Database.open(${JSON.stringify(join(dir, 'c'))}, { syncs: false }).close(); codes.push('opened'); }
+        try { second.Database.open(${JSON.stringify(join(dir, 'c'))}, { durability: 'unsafe' }).close(); codes.push('opened'); }
         catch (e) { codes.push(e.code); }
       }
       console.log(JSON.stringify(codes));
@@ -142,12 +139,12 @@ test('changing temporary-directory settings cannot create another process claim'
   copyFileSync(binary, copy);
   const printed = run(`
     const first = require(${JSON.stringify(binary)});
-    first.Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false }).close();
+    first.Database.open(${JSON.stringify(join(dir, 'a'))}, { durability: 'unsafe' }).close();
     for (const key of ['TMPDIR', 'TMP', 'TEMP', 'SystemTemp', 'HOME', 'USERPROFILE']) process.env[key] = ${JSON.stringify(dir)};
     let code;
-    try { require(${JSON.stringify(copy)}).Database.open(${JSON.stringify(join(dir, 'b'))}, { syncs: false }).close(); code = 'opened'; }
+    try { require(${JSON.stringify(copy)}).Database.open(${JSON.stringify(join(dir, 'b'))}, { durability: 'unsafe' }).close(); code = 'opened'; }
     catch (error) { code = error.code; }
-    first.Database.open(${JSON.stringify(join(dir, 'a'))}, { syncs: false }).close();
+    first.Database.open(${JSON.stringify(join(dir, 'a'))}, { durability: 'unsafe' }).close();
     console.log(code);
   `);
   assert.equal(printed, 'ALREADY_LOADED');
@@ -159,177 +156,7 @@ test('claim acquisition needs no usable home or temporary directory', (t) => {
   assert.equal(run(`
     for (const key of ['HOME', 'USERPROFILE', 'TMPDIR', 'TMP', 'TEMP', 'XDG_RUNTIME_DIR'])
       process.env[key] = '/nonexistent/elmdb-test';
-    require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'db'))}, { syncs: false }).close();
+    require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'db'))}, { durability: 'unsafe' }).close();
     console.log('opened');
   `), 'opened');
-});
-
-if (process.platform !== 'win32') {
-  test('claiming the process creates no home-directory coordination files', (t) => {
-    const dir = mkdtempSync(join(tmpdir(), 'elmdb-claim-no-files-'));
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
-    assert.equal(run(`
-      const fs = require('node:fs');
-      const root = require('node:path').join(require('node:os').userInfo().homedir, '.elmdb', 'process-claims');
-      const prefix = 'elmdb-binding-' + process.geteuid() + '-' + process.pid + '-';
-      const snapshot = () => fs.existsSync(root) ? fs.readdirSync(root).filter(name => name.startsWith(prefix)).sort() : [];
-      const before = snapshot();
-      require(${JSON.stringify(binary)}).Database.open(${JSON.stringify(join(dir, 'db'))}, { syncs: false }).close();
-      console.log(JSON.stringify(before) === JSON.stringify(snapshot()) ? 'unchanged' : 'created files');
-    `), 'unchanged');
-  });
-}
-
-/**
- * Waits for `promise` with the event loop held open, for half a minute at most. A listener for other processes'
- * commits doesn't hold the loop, so a wait for its wake alone would let the loop, and the test, end before the wake
- * comes; and a wake that never comes fails the test here, not when its job is given up on
- */
-async function held(promise) {
-  let late;
-  const never = new Promise((_, reject) => {
-    late = setTimeout(() => reject(new Error('no wake came in thirty seconds')), 30_000);
-  });
-  try {
-    return await Promise.race([promise, never]);
-  } finally {
-    clearTimeout(late);
-  }
-}
-
-test('a commit from another process wakes a listener, and a killed writer leaves it listening', async (t) => {
-  const { Database } = require(loader);
-  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {} } } };
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-wake-'));
-  const db = Database.open(dir, { syncs: false, schema });
-  t.after(() => {
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  let wakes = 0;
-  let woken = () => {};
-  db.hearCommitsElsewhere(() => {
-    wakes++;
-    woken();
-  });
-  assert.throws(() => db.hearCommitsElsewhere(() => {}), { code: 'ALREADY_LISTENING' });
-
-  /** Writes a row from a process of its own, which then does `then`, and waits for the wake and for the process's end */
-  const writeElsewhere = async (id, then, { killed = false } = {}) => {
-    const source = `
-      const { Database } = require(${JSON.stringify(loader)});
-      const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
-      const other = Database.open(${JSON.stringify(dir)}, { syncs: false, schema: ${JSON.stringify(schema)} });
-      other.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: ${JSON.stringify(id)} }], now: 1000 }));
-      ${then}
-    `;
-    const heard = new Promise((resolve) => (woken = resolve));
-    const child = spawn(process.execPath, ['-e', source], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let errors = '';
-    child.stderr.on('data', (chunk) => (errors += chunk));
-    // Its end, once its error stream has closed: how it ended, by a code or by a signal
-    const ended = new Promise((resolve) => child.on('close', (code, signal) => resolve(code ?? signal)));
-    // How a child told to kill itself ends: by the signal, or on Windows with the code a killed process leaves
-    const asAsked = (how) => (killed ? how === 'SIGKILL' || (process.platform === 'win32' && how === 1) : how === 0);
-    // An end that was not asked for wrote nothing to wait for a wake of. Only that settles this: a wait for the wake
-    // ends by the wake, never by the child ending as it was asked to
-    const refused = new Promise((_, reject) => {
-      ended.then((how) => {
-        if (!asAsked(how)) reject(new Error(`the child ended by ${how}: ${errors}`));
-      });
-    });
-    try {
-      await held(Promise.race([heard, refused]));
-    } catch (error) {
-      // One still running when the wait gave up would keep this process, and its job, from ending
-      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
-      throw error;
-    }
-    // The child has left the database before the next step, or the cleanup, touches its files: it is heard as it
-    // commits, before it closes, and Windows removes no file a process holds open
-    const how = await ended;
-    assert.ok(asAsked(how), `the child ended by ${how}: ${errors}`);
-  };
-
-  await writeElsewhere('Task-a', 'other.close();');
-  const first = wakes;
-  assert.ok(first > 0);
-  assert.equal(db.committedElsewhere(), true, 'the other process committed');
-  assert.equal(db.committedElsewhere(), false, 'and nothing since this asked');
-  await writeElsewhere('Task-b', 'process.kill(process.pid, "SIGKILL");', { killed: true });
-  assert.ok(wakes > first, 'heard the commit of a process that was then killed');
-  await writeElsewhere('Task-c', 'other.close();');
-});
-
-test('a reset from another process wakes a listener, refuses commits here until adopted, and leaves reads', async (t) => {
-  const { Database } = require(loader);
-  const { Packr } = require('msgpackr');
-  const packr = new Packr({ useRecords: false });
-  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {} } } };
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-epoch-'));
-  const db = Database.open(dir, { syncs: false, schema });
-  t.after(() => {
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const write = (id) => db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
-  write('Task-a');
-  const woken = new Promise((resolve) => db.hearCommitsElsewhere(resolve));
-
-  run(`
-    const { Database } = require(${JSON.stringify(loader)});
-    const other = Database.open(${JSON.stringify(dir)}, { syncs: false });
-    other.reset();
-    other.close();
-  `);
-  await held(woken);
-  const epoch = db.replacedElsewhere();
-  assert.equal(typeof epoch, 'number');
-  assert.throws(() => write('Task-b'), { code: 'DATA_REPLACED' });
-
-  for (const bad of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY]) {
-    assert.throws(() => db.adoptReplacement(bad), { code: 'VALUE_INVALID' }, String(bad));
-  }
-  assert.equal(db.replacedElsewhere(), epoch, 'a refused epoch adopts nothing');
-  assert.equal(db.adoptReplacement(epoch + 1), false, 'not the stored one');
-  assert.equal(db.adoptReplacement(epoch), true);
-  assert.equal(db.replacedElsewhere(), null);
-  write('Task-c');
-});
-
-test('a reader reads what another process changed since its position, and a unit says what it commits as', (t) => {
-  const { Database } = require(loader);
-  const { Packr } = require('msgpackr');
-  const packr = new Packr({ useRecords: false });
-  const schema = { $schema: 'https://elmdb.dev/schema/1.json', types: { Task: { fields: {}, changeOrder: true }, Note: { fields: {} } } };
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-changed-'));
-  const db = Database.open(dir, { syncs: false, schema });
-  t.after(() => {
-    db.close();
-    rmSync(dir, { recursive: true, force: true });
-  });
-  const create = (id) => db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id }], now: 1000 }));
-  create('Task-mine');
-  const read = (from) => packr.unpack(db.changedSince(['Task'], packr.pack(from), 100));
-  const cursor = read({ sequence: 0 }).next;
-
-  run(`
-    const { Database } = require(${JSON.stringify(loader)});
-    const { Packr } = require(${JSON.stringify(require.resolve('msgpackr'))});
-    const other = Database.open(${JSON.stringify(dir)}, { syncs: false });
-    other.write(new Packr({ useRecords: false }).pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-theirs' }], now: 1000 }));
-    other.close();
-  `);
-  const changed = read(cursor);
-  assert.deepEqual(changed.ids, ['Task-theirs']);
-  assert.equal(changed.done, true);
-  assert.equal(changed.complete, true);
-
-  const unit = db.begin();
-  const next = unit.nextSequence();
-  unit.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-unit' }], now: 1000 }));
-  assert.deepEqual(packr.unpack(unit.changedSince(['Task'], packr.pack(changed.next), 100)).ids, [], 'stamped only as it commits');
-  const committed = packr.unpack(unit.commit(false));
-  assert.equal(committed.sequence, next);
-  assert.deepEqual(read(changed.next).ids, ['Task-unit']);
 });

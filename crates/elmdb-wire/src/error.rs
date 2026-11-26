@@ -43,6 +43,12 @@ pub enum ErrorCode {
     Poisoned = 32,
     Io = 33,
     Internal = 34,
+    Closed = 35,
+    ReadOnly = 36,
+    NoDatabase = 37,
+    DatabaseLocked = 38,
+    AlreadyExists = 39,
+    Panicked = 40,
 }
 
 impl ErrorCode {
@@ -81,6 +87,12 @@ impl ErrorCode {
         Self::Poisoned,
         Self::Io,
         Self::Internal,
+        Self::Closed,
+        Self::ReadOnly,
+        Self::NoDatabase,
+        Self::DatabaseLocked,
+        Self::AlreadyExists,
+        Self::Panicked,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -119,6 +131,12 @@ impl ErrorCode {
             Self::Poisoned => "POISONED",
             Self::Io => "IO",
             Self::Internal => "INTERNAL",
+            Self::Closed => "CLOSED",
+            Self::ReadOnly => "READ_ONLY",
+            Self::NoDatabase => "NO_DATABASE",
+            Self::DatabaseLocked => "DATABASE_LOCKED",
+            Self::AlreadyExists => "ALREADY_EXISTS",
+            Self::Panicked => "PANICKED",
         }
     }
 

@@ -30,6 +30,7 @@ pub struct LmdbConfig {
     pub max_readers: u32,
     pub no_sync: bool,
     pub no_readahead: bool,
+    pub read_only: bool,
 }
 
 impl Default for LmdbConfig {
@@ -40,6 +41,7 @@ impl Default for LmdbConfig {
             max_readers: DEFAULT_MAX_READERS,
             no_sync: true,
             no_readahead: true,
+            read_only: false,
         }
     }
 }
@@ -90,7 +92,9 @@ impl LmdbStore {
     /// and pre-opening all existing named sub-DBs in a single committed read transaction.
     pub fn open(dir: impl AsRef<Path>, config: LmdbConfig) -> Result<Self, StorageError> {
         let dir = dir.as_ref();
-        fs::create_dir_all(dir)?;
+        if !config.read_only {
+            fs::create_dir_all(dir)?;
+        }
         let data_mdb = dir.join("data.mdb");
         verify_data_file_headers(&data_mdb)?;
 
@@ -122,6 +126,9 @@ impl LmdbStore {
             }
 
             let mut flags = ffi::MDB_NOTLS;
+            if config.read_only {
+                flags |= ffi::MDB_RDONLY;
+            }
             if config.no_sync {
                 flags |= ffi::MDB_NOSYNC;
             }
@@ -195,6 +202,27 @@ impl LmdbStore {
 
     pub fn data_mdb_path(&self) -> &Path {
         &self.inner.data_mdb
+    }
+
+    /// Creates a consistent, live, compacted copy of the LMDB environment into `target_dir`
+    /// using `mdb_env_copy2(..., MDB_CP_COMPACT)` without blocking concurrent readers, fsyncs
+    /// the copied `data.mdb`, and returns its active meta page's `CommitReceipt`.
+    pub fn copy_compacted(&self, target_dir: impl AsRef<Path>) -> Result<elmdb_storage::CommitReceipt, StorageError> {
+        let target_dir = target_dir.as_ref();
+        fs::create_dir_all(target_dir)?;
+        let c_path = path_to_cstring(target_dir)?;
+        // SAFETY: `self.inner.env` is an open `MDB_env` and `c_path` is a valid NUL-terminated path.
+        let rc = unsafe { ffi::mdb_env_copy2(self.inner.env.as_ptr(), c_path.as_ptr(), ffi::MDB_CP_COMPACT) };
+        if rc != ffi::MDB_SUCCESS {
+            return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
+        }
+        let copied_data = target_dir.join("data.mdb");
+        {
+            let f = fs::File::open(&copied_data)?;
+            f.sync_all()?;
+        }
+        let meta = read_active_meta_page(&copied_data)?;
+        Ok(elmdb_storage::CommitReceipt { txnid: meta.txnid, roots_sha256: meta.roots_sha256 })
     }
 
     pub(crate) fn inner(&self) -> &Arc<LmdbEnvInner> {
@@ -419,6 +447,10 @@ impl KvStore for LmdbStore {
 
     fn page_size(&self) -> usize {
         self.inner.page_size
+    }
+
+    fn copy_compacted(&self, target_dir: &Path) -> Result<elmdb_storage::CommitReceipt, StorageError> {
+        LmdbStore::copy_compacted(self, target_dir)
     }
 }
 
