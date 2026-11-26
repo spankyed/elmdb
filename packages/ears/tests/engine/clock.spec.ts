@@ -1,6 +1,6 @@
 // Injectable clock contract: when `EARSRuntimeDeps.clock` is provided, every wall timestamp, generated id prefix,
 // call duration, recency query, watch gap, and slice-deferral yield advances strictly on virtual clock ticks.
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import { createEarsEngine, defineEars, type EARS, type EarsClock, type EarsDatabase, type UntypedSchema, type WatchSchedule } from '../../src/index.ts';
 import { newId } from '../../src/ids.ts';
 import { createTemporaryDatabases } from '../../src/lmdb/index.ts';
@@ -587,5 +587,24 @@ describe('injectable EarsClock', () => {
     await flushMicrotasks();
     expect(delivered).toEqual([0, 1]);
     watching.stop();
+  });
+
+  it('reads Date.now dynamically when no clock is supplied so vi.useFakeTimers enabled after createEarsEngine works', () => {
+    const { database } = databases.open({
+      types: { Task: { required: [] } },
+      relations: {},
+      roles: [],
+    });
+    const engine = createEarsEngine({ database });
+    vi.useFakeTimers({ now: 1_000, toFake: ['Date'] });
+    try {
+      const id = engine.create('Task', { title: 'before' }).id();
+      expect(engine.getRow(id)).toMatchObject({ createdAt: 1_000, updatedAt: 1_000 });
+      vi.setSystemTime(2_000);
+      engine.write(id).set('title', 'after');
+      expect(engine.getRow(id)).toMatchObject({ createdAt: 1_000, updatedAt: 2_000 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

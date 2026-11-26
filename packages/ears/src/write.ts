@@ -67,7 +67,7 @@ function refuseShortCode(via: string, type: string, shortCode: unknown): asserts
   throw new EarsError('INVALID_SHORT_CODE', `${via}(${JSON.stringify(type)}, { shortCode: ${JSON.stringify(shortCode)} }): a short code is a string, <prefix>-<n>`);
 }
 
-export function createWrites({ write: send, exists, getRow, names, isEntityType, now = Date.now }: WriteScope) {
+export function createWrites({ write: send, exists, getRow, names, isEntityType, now = () => Date.now() }: WriteScope) {
   const one = (op: Op, at?: number) => send([op], at)[0]!;
 
   /**
