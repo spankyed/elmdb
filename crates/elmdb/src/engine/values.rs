@@ -33,7 +33,9 @@ pub const COMPRESS_FROM: usize = 256;
 const ZSTD_LEVEL: i32 = 3;
 
 /// A field's value as it is stored: its msgpack, compressed from `COMPRESS_FROM` bytes when that is smaller. A value
-/// past `MAX_VALUE_BYTES` of msgpack is refused (`VALUE_TOO_LARGE`), so every value stored reads back
+/// past `MAX_VALUE_BYTES` of msgpack is refused (`VALUE_TOO_LARGE`), so every value stored reads back. A write stores
+/// through `stored_for`, whose refusal names the field
+#[cfg(test)]
 pub fn stored(value: &Value) -> Result<Vec<u8>> {
     stored_named(value, || "A value".to_owned())
 }
