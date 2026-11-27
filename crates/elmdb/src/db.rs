@@ -228,7 +228,11 @@ impl Database {
             ));
         }
 
-        let mut lmdb_cfg = LmdbConfig { read_only: opts.read_only, ..Default::default() };
+        let mut lmdb_cfg = LmdbConfig {
+            read_only: opts.read_only,
+            no_sync: opts.durability != DurabilityMode::Strict,
+            ..Default::default()
+        };
         if let Some(ms) = opts.map_size {
             lmdb_cfg.map_size = ms;
         }
@@ -1747,4 +1751,22 @@ fn lookup_key_ext_id_in_txn<R: KvRead>(
     };
     let (hdr, _) = decode_row_header(raw)?;
     Ok(Some(hdr.ext_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_mode_clears_mdb_nosync_while_grouped_and_unsafe_set_it() {
+        for (mode, expect_no_sync) in
+            [(DurabilityMode::Strict, false), (DurabilityMode::Grouped, true), (DurabilityMode::Unsafe, true)]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Database::open(dir.path(), OpenOptions { durability: mode, ..Default::default() }).unwrap();
+            let is_no_sync = db.engine.read().unwrap().as_ref().unwrap().gate().store().is_no_sync();
+            assert_eq!(is_no_sync, expect_no_sync, "unexpected MDB_NOSYNC state for {mode:?}");
+            db.close().unwrap();
+        }
+    }
 }

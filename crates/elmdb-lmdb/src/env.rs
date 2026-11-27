@@ -457,6 +457,15 @@ impl LmdbStore {
         &self.inner.data_mdb
     }
 
+    /// Returns whether this LMDB environment was opened with `MDB_NOSYNC`.
+    pub fn is_no_sync(&self) -> bool {
+        let _map_guard = self.inner.map_gate.read();
+        let mut flags: libc::c_uint = 0;
+        // SAFETY: `self.inner.env` is an open `MDB_env` and `flags` is a valid out-pointer.
+        let rc = unsafe { ffi::mdb_env_get_flags(self.inner.env.as_ptr(), &mut flags) };
+        rc == ffi::MDB_SUCCESS && (flags & ffi::MDB_NOSYNC) != 0
+    }
+
     /// Creates a consistent, live, compacted copy of the LMDB environment into `target_dir`
     /// using `mdb_env_copy2(..., MDB_CP_COMPACT)` without blocking concurrent readers, fsyncs
     /// the copied `data.mdb`, and returns its active meta page's `CommitReceipt`.

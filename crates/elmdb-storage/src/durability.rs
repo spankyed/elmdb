@@ -169,6 +169,10 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         self.mode
     }
 
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
     pub fn is_poisoned(&self) -> bool {
         self.poisoned.load(Ordering::Acquire)
     }
