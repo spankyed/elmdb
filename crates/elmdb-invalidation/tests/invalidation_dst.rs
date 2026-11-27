@@ -1273,4 +1273,63 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         elmdb_engine::read_maint_seq(&ro, &engine.dbs()).unwrap()
     };
     assert_eq!(maint_after, maint_before, "0-work run_maintenance_write_opt must NOT bump maint_seq");
+
+    // Exhaustive `InvalidationIndex` & `LiveQueryHub` logical-clock boundary assertions:
+    // 1. `new_with_maint_seq` initializes all clocks & drop watermarks; `stats()` reports them accurately.
+    let schema_now = engine.schema();
+    let e_now = schema_now.epoch;
+    let mut idx_clk = InvalidationIndex::new_with_maint_seq(10, e_now, 5);
+    let st = idx_clk.stats();
+    assert_eq!(st.latest_seq, 10);
+    assert_eq!(st.latest_schema_epoch, e_now);
+    assert_eq!(st.latest_maint_seq, 5);
+    // Older `read_at_seq < ring_dropped_seq_up_to` (with current maint) AND older `read_at_maint_seq < ring_dropped_maint_up_to`
+    // (with current seq) must BOTH independently report stale!
+    assert!(idx_clk.register_after_read_with_maint(WatchId(200), 9, 5, e_now, &rs4, &schema_now));
+    assert!(idx_clk.register_after_read_with_maint(WatchId(200), 10, 4, e_now, &rs4, &schema_now));
+    // Reader whose `read_schema_epoch == latest_schema_epoch` while `schema.epoch` differs must report stale!
+    let mut idx_ep = InvalidationIndex::new_with_maint_seq(10, e_now + 1, 5);
+    assert!(idx_ep.register_after_read_with_maint(WatchId(201), 10, 5, e_now + 1, &rs4, &schema_now));
+    // Reader at `read_at_seq > ring_dropped_seq_up_to` (after 1 unrelated commit + 1 unrelated maint write in ring)
+    // must NOT be falsely marked stale!
+    let cp_author = elmdb_engine::CrossProcCommitSummary {
+        seq: 11,
+        schema_epoch: e_now,
+        touched_types: vec![ids.author_type],
+        touched_entities: Some(vec![]),
+        touched_rel_kinds: vec![],
+    };
+    assert!(idx_clk.apply_cross_proc_summary(&schema_now, &cp_author).is_empty());
+    assert!(idx_clk.notify_subdb_write_at_maint(11, e_now, 6, ids.idx_vec_slot, &[0x01]).is_empty());
+    assert!(!idx_clk.register_after_read_with_maint(WatchId(200), 11, 5, e_now, &rs4, &schema_now));
+    // Direct `apply_cross_proc_summary` touching Note invalidates WatchId(200).
+    let cp_note = elmdb_engine::CrossProcCommitSummary {
+        seq: 12,
+        schema_epoch: e_now,
+        touched_types: vec![ids.note_type],
+        touched_entities: Some(vec![]),
+        touched_rel_kinds: vec![],
+    };
+    assert_eq!(idx_clk.apply_cross_proc_summary(&schema_now, &cp_note), vec![WatchId(200)]);
+
+    // 2. `notify_full_rebuild_at_maint` stale-receipt guard & fresh-receipt invalidation.
+    // Stale (maint_seq <= 6, seq <= 12, epoch <= e_now) is ignored:
+    assert!(idx_clk.notify_full_rebuild_at_maint(12, e_now, 6).is_empty());
+    // Fresh maint_seq > 6 invalidates:
+    assert_eq!(idx_clk.notify_full_rebuild_at_maint(12, e_now, 7), vec![WatchId(200)]);
+    // Same maint_seq == 7 with advanced seq > 12 invalidates:
+    assert_eq!(idx_clk.notify_full_rebuild_at_maint(13, e_now, 7), vec![WatchId(200)]);
+    // Same maint_seq == 7 & seq == 13 with advanced epoch > e_now invalidates:
+    assert_eq!(idx_clk.notify_full_rebuild_at_maint(13, e_now + 1, 7), vec![WatchId(200)]);
+    // `notify_schema_change` invalidates active watches and advances epoch:
+    assert_eq!(idx_clk.notify_schema_change(13, e_now + 2), vec![WatchId(200)]);
+    assert_eq!(idx_clk.latest_schema_epoch(), e_now + 2);
+
+    // 3. `LiveQueryHub::notify_schema_change_with_maint` returns invalidated WatchIds.
+    let hub_sc = LiveQueryHub::from_engine(&engine, 8).unwrap();
+    let (w_sc, _) = hub_sc
+        .register_query_watch(&engine, &qe, &note_plan, ExecBudgets::default(), WatchPolicy::default(), 0, 1, |_| None)
+        .unwrap();
+    let dirty_sc = hub_sc.notify_schema_change_with_maint(s4, e_now + 1, m4, 10);
+    assert_eq!(dirty_sc, vec![w_sc]);
 }

@@ -214,3 +214,19 @@ impl From<StorageError> for ElmdbError {
 }
 
 pub type Result<T> = std::result::Result<T, ElmdbError>;
+
+#[cfg(test)]
+mod tests {
+    use super::ErrorCode;
+
+    #[test]
+    fn error_code_as_str_matches_protocol_names() {
+        assert_eq!(ErrorCode::InvalidArgument.as_str(), "INVALID_ARGUMENT");
+        assert_eq!(ErrorCode::AlreadyLoaded.as_str(), "ALREADY_LOADED");
+        let ts = ErrorCode::ts_type_definition();
+        for code in ErrorCode::ALL {
+            assert!(!code.as_str().is_empty());
+            assert!(ts.contains(&format!("'{}'", code.as_str())));
+        }
+    }
+}

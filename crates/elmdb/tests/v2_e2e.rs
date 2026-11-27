@@ -2381,5 +2381,99 @@ fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_a
     );
     db.unregister_watch(note_wid);
 
+    // 10. PR #261 coverage: `drive_background_work` (idle, Vector, Rank), `flush` (Rank), and
+    //     `rename_type` / `rename_field` / `rename_relation` epoch advancement & watch invalidation.
+    let mut rank_schema = schema.clone();
+    rank_schema
+        .types
+        .get_mut("Node")
+        .unwrap()
+        .indexes
+        .insert("pr".into(), IndexDefinition::Rank { relations: vec!["link".into()], weighted: false });
+    db.set_schema(&rank_schema).unwrap();
+    db.flush().unwrap();
+    assert!(!db.drive_background_work(64).unwrap(), "idle drive_background_work must return false");
+
+    // Vector pending -> drive_background_work drains it and returns true, then false when idle.
+    db.set_embeddings("emb", "n1", &[vec![0.0, 1.0, 0.0, 0.0]]).unwrap();
+    assert!(db.drive_background_work(64).unwrap(), "pending vector embedding must be drained by drive_background_work");
+    assert!(!db.drive_background_work(64).unwrap(), "second drive_background_work after vector drain must be idle");
+
+    // Rank dirty -> drive_background_work drains it and returns true, then false when converged.
+    db.execute_batch(&[
+        WireOp::Create {
+            type_name: "Node".into(),
+            external_id: Some("rk1".into()),
+            fields: vec![("label".into(), CanonicalValue::String("RK1".into()))],
+        },
+        WireOp::Create {
+            type_name: "Node".into(),
+            external_id: Some("rk2".into()),
+            fields: vec![("label".into(), CanonicalValue::String("RK2".into()))],
+        },
+        WireOp::Link {
+            source: EntityTarget::ExternalId("rk1".into()),
+            rel_kind: "link".into(),
+            target: EntityTarget::ExternalId("rk2".into()),
+            weight: None,
+            info: None,
+        },
+    ])
+    .unwrap();
+    assert!(db.drive_background_work(64).unwrap(), "dirty Rank index must be drained by drive_background_work");
+    assert!(!db.drive_background_work(64).unwrap(), "converged Rank index must return false");
+
+    // Rank dirty + settled Rank watch -> `db.flush()` drains Rank and dirties the Rank watch!
+    let rank_spec = QuerySpec {
+        source: QuerySource::Type { type_name: "Node".into(), include_trashed: false },
+        steps: vec![QueryStep::Score { spec: QueryScore::RankIndex { index: "pr".into() } }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let (rk_wid, _) = db
+        .register_query_watch(
+            &rank_spec,
+            WatchPolicy { min_gap_ms: 0, adaptive_multiplier: 0, ..Default::default() },
+            5300,
+        )
+        .unwrap();
+    assert!(db.watches_settled());
+    db.execute_batch(&[WireOp::Link {
+        source: EntityTarget::ExternalId("rk2".into()),
+        rel_kind: "link".into(),
+        target: EntityTarget::ExternalId("A".into()),
+        weight: None,
+        info: None,
+    }])
+    .unwrap();
+    // Settle the watch before flush() so only Rank push drain in flush() can re-dirty it!
+    let _ = db.rerun_query_watch(rk_wid, &rank_spec, 5350, 1).unwrap();
+    assert!(db.watches_settled());
+    db.flush().unwrap();
+    assert!(!db.watches_settled(), "flush() draining Rank pushes must dirty Rank watch");
+    let _ = db.rerun_query_watch(rk_wid, &rank_spec, 5400, 1).unwrap();
+    assert!(db.watches_settled());
+
+    // O(1) rename_type / rename_field / rename_relation advance schema epoch & invalidate active watches!
+    let e0 = db.schema().unwrap().epoch;
+    let e1 = db.rename_type("Author", "Writer", false).unwrap();
+    assert!(e1 > e0, "rename_type must advance schema epoch");
+    assert!(!db.watches_settled(), "rename_type must invalidate active watches");
+    let _ = db.rerun_query_watch(rk_wid, &rank_spec, 5450, 1).unwrap();
+    assert!(db.watches_settled());
+
+    let e2 = db.rename_field("Writer", "name", "fullName").unwrap();
+    assert!(e2 > e1, "rename_field must advance schema epoch");
+    assert!(!db.watches_settled(), "rename_field must invalidate active watches");
+    let _ = db.rerun_query_watch(rk_wid, &rank_spec, 5500, 1).unwrap();
+    assert!(db.watches_settled());
+
+    let e3 = db.rename_relation("link", "linksTo").unwrap();
+    assert!(e3 > e2, "rename_relation must advance schema epoch");
+    assert!(!db.watches_settled(), "rename_relation must invalidate active watches");
+    assert!(db.schema().unwrap().types.iter().any(|t| t.name == "Writer"));
+    assert!(db.schema().unwrap().relations.iter().any(|r| r.name == "linksTo"));
+    db.unregister_watch(rk_wid);
+
     db.close().unwrap();
 }

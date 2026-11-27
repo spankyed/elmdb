@@ -1298,14 +1298,9 @@ pub fn drain_pending_batch_with_receipt<S: KvStore, V: Vfs, C: Clock>(
             }
         }
         if items.is_empty() {
+            // Concurrent drainer already emptied `TAG_PENDING`: abort cleanly without bumping `maint_seq`.
             empty_needs_compaction = meta.should_compact();
-            if meta.pending_count == 0 {
-                // Concurrent drainer already emptied `TAG_PENDING`: abort cleanly without bumping `maint_seq`.
-                return Ok(None);
-            }
-            meta.pending_count = 0;
-            txn.put(db, &[TAG_META], &meta.encode())?;
-            return Ok(Some((DrainResult { processed: 0, needs_compaction: meta.should_compact() }, slot)));
+            return Ok(None);
         }
 
         let dims = meta.dims as usize;
