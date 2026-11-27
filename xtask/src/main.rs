@@ -20,11 +20,11 @@
 //!   which only its `diagnostics` feature may make it do.
 //! - `check-leiden-serial`: fails when the workspace builds `leiden-rs` with any feature, `rayon` among them, whose
 //!   parallel moves would make a partition depend on the threads' timing rather than on its seed alone.
-//! - `check-sync`: fails when engine code outside `src/sync/` locks, waits or keeps per-thread state through `std` or
-//!   parking_lot directly, rather than through `crate::sync`, which the concurrency models swap for Loom's and
-//!   Shuttle's, unless the file is listed in `UNMODELLED` with its reason; a listed file that no longer does is stale.
-//! - `check-commits`: fails when engine code outside `src/store/commits.rs` commits a write transaction, so every
-//!   commit passes the one module that holds what must be true of each.
+//! - `check-sync`: fails when v2 engine crate code outside `elmdb-storage/src/locks.rs` locks, waits or keeps per-thread
+//!   state through `std` or `parking_lot` directly rather than through `elmdb-storage::locks`, unless the file is listed
+//!   in `UNMODELLED` with its reason; a listed file that no longer does is stale.
+//! - `check-commits`: fails when engine code outside `elmdb-storage` / `elmdb-lmdb` commits a write transaction directly,
+//!   so every commit passes through the `DurabilityGate`.
 //! - `mutant-exclusions`: writes `target/mutants.toml`, the configuration a mutation run reads with `--config`, and
 //!   prints its path: `.cargo/mutants.toml` with an `exclude_re` for each `// mutant-skip:` comment in the source, which
 //!   sits above the line it excuses and holds the reason. Nothing it writes is committed, so the comment is the one
@@ -83,7 +83,7 @@ fn main() -> ExitCode {
                     ("exact crates", &|| check_exact(&root)),
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
                     ("serial Leiden", &|| check_leiden_serial(&root)),
-                    ("crate::sync", &|| check_sync(&root)),
+                    ("elmdb-storage::locks", &|| check_sync(&root)),
                     ("one place commits", &|| check_commits(&root)),
                     ("third-party notices", &|| check_notices(&root)),
                     ("bans, sources and advisories", &|| check_deny(env!("CARGO"), &root)),
@@ -106,8 +106,17 @@ fn main() -> ExitCode {
 }
 
 /// v2 engine crates scanned by `check-sync` to keep direct locking outside `elmdb-storage::locks` explicit and audited.
-const SYNC_CHECKED_CRATES: &[&str] =
-    &["elmdb", "elmdb-engine", "elmdb-invalidation", "elmdb-query", "elmdb-projections", "elmdb-vec"];
+const SYNC_CHECKED_CRATES: &[&str] = &[
+    "elmdb",
+    "elmdb-engine",
+    "elmdb-invalidation",
+    "elmdb-lmdb",
+    "elmdb-projections",
+    "elmdb-query",
+    "elmdb-storage",
+    "elmdb-vec",
+    "elmdb-wire",
+];
 
 /// The engine's files (prefixed `<crate>/src/<rel>`) that lock, wait or keep per-thread state outside
 /// `elmdb-storage::locks`, each with why. A listed file that no longer locks is flagged as stale.
@@ -124,6 +133,10 @@ const UNMODELLED: &[(&str, &str)] = &[
         "elmdb-invalidation/src/lib.rs",
         "LiveQueryHub Mutex protecting in-memory InvalidationIndex and sans-I/O WatchScheduler",
     ),
+    (
+        "elmdb-lmdb/src/env.rs",
+        "process-wide OPEN_ENVS Mutex preventing same-process duplicate LMDB opens (POSIX fcntl lock hazard)",
+    ),
 ];
 
 /// Fails on a v2 engine file that locks outside `elmdb-storage::locks` and isn't in `UNMODELLED`, on a listed file
@@ -137,10 +150,18 @@ fn check_sync(root: &Path) -> Result<(), String> {
             continue;
         }
         for rel in unmodelled_files(&source)? {
-            found.insert(format!("{crate_name}/src/{rel}"));
+            let full = format!("{crate_name}/src/{rel}");
+            if full == "elmdb-storage/src/locks.rs" {
+                continue;
+            }
+            found.insert(full);
         }
         for (rel, violations) in unmodelled_in_modelled_files(&source)? {
-            modelled.push((format!("{crate_name}/src/{rel}"), violations));
+            let full = format!("{crate_name}/src/{rel}");
+            if full == "elmdb-storage/src/locks.rs" {
+                continue;
+            }
+            modelled.push((full, violations));
         }
     }
     let listed: std::collections::BTreeSet<String> = UNMODELLED.iter().map(|(file, _)| (*file).to_owned()).collect();

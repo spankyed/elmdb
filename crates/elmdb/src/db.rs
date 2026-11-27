@@ -228,7 +228,11 @@ impl Database {
             ));
         }
 
-        let mut lmdb_cfg = LmdbConfig { read_only: opts.read_only, ..Default::default() };
+        let mut lmdb_cfg = LmdbConfig {
+            read_only: opts.read_only,
+            no_sync: opts.durability != DurabilityMode::Strict,
+            ..Default::default()
+        };
         if let Some(ms) = opts.map_size {
             lmdb_cfg.map_size = ms;
         }

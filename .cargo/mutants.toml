@@ -50,5 +50,5 @@ exclude_re = [
     "elmdb-node/src/exit.rs:.*replace (close_at_process_exit|close_at_exit|opened) ",
     # An export's answer made of a caught panic: a napi error, which a test binary can't link the dropping of
     # without Node (`napi_delete_reference`). `test/panics.test.mjs` holds each through every export
-    "elmdb-node/src/panics.rs:.*replace (guarded|Health::guarded|Health::unrefused) -> ",
+    "elmdb-node/src/panics.rs:.*replace (guarded|Health::guarded|Health::guarded_raw|Health::unrefused) -> ",
 ]

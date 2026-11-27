@@ -719,6 +719,26 @@ mod tests {
     }
 
     #[test]
+    fn result_encoder_rolls_back_dict_and_body_on_error() {
+        let mut enc = ResultEncoder::new();
+        let n = CanonicalValue::Int(42);
+        enc.push_row("row-0", "Item", &[("count", &n)], |_| unreachable!()).unwrap();
+        let bad_ref = CanonicalValue::EntityRef(999);
+        let err = enc
+            .push_row("row-bad", "BadType", &[("brand_new_field", &bad_ref)], |_| {
+                Err(ElmdbError::new(ErrorCode::EntityNotFound, "missing"))
+            })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::EntityNotFound);
+
+        let frame = enc.finish();
+        let decoded = ResultDecoder::decode(&frame).unwrap();
+        assert_eq!(decoded.rows.len(), 1);
+        assert_eq!(decoded.rows[0].id, "row-0");
+        assert!(!decoded.dict.iter().any(|s| s == "BadType" || s == "brand_new_field"));
+    }
+
+    #[test]
     fn result_encoder_exceeds_65535_rows_and_rolls_back_dict_on_error() {
         let mut enc = ResultEncoder::new();
         let n = CanonicalValue::Int(1);

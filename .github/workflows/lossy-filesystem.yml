@@ -1,10 +1,10 @@
 # The engine over a filesystem that loses what wasn't synced (docs/roadmap/synced-commit.md, phase 5): LazyFS keeps what
 # a process writes in a cache of its own until it is synced, and drops it on a command, as a power loss would. A writer
 # dies part way through its syncs, what it didn't sync is dropped, and the database opened after must hold what its last
-# finished sync held (engine/tests/power_loss.rs, a_filesystem_that_drops_what_was_not_synced_...). Run again with the
-# writer's pin turned off, the test must fail: so each run shows it can. Then LazyFS tears a write in the middle, part of
+# finished sync held (`crates/elmdb/tests/power_loss.rs`, a_filesystem_that_drops_what_was_not_synced_...). Run again with the
+# writer's durability turned off, the test must fail: so each run shows it can. Then LazyFS tears a write in the middle, part of
 # it persisted, and crashes, and the same holds (a_filesystem_that_tears_a_write_...). Each night, on a dispatch, and on
-# a pull request that changes this job or the test it runs.
+# a pull request that changes this job, the test, or durability/LMDB storage code.
 name: lossy filesystem
 
 on:
@@ -15,6 +15,9 @@ on:
     paths:
       - .github/workflows/lossy-filesystem.yml
       - crates/elmdb/tests/power_loss.rs
+      - crates/elmdb-storage/src/durability.rs
+      - crates/elmdb-lmdb/src/**
+      - crates/elmdb/src/db.rs
 
 permissions:
   contents: read

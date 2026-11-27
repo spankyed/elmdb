@@ -1,10 +1,10 @@
 """Mutate what a change touches, each crate against its own suite, and fail on a survivor.
 
 `python3 scripts/mutants-in-diff.py BASE [JOBS] [--shard K/N] [--windows-only] [--resume] [--file GLOB ...] [--re PATTERN ...] [--test-filter EXPR]`:
-cargo-mutants over `git diff BASE...HEAD`, what HEAD changed since it left BASE, once per workspace crate, since
-`.cargo/mutants.toml` tests every mutant against the engine's suite and a binding's or the CLI's mutant is tested by
-its own. Exits nonzero when a mutant is missed, or when cargo-mutants itself fails (a bad diff, a baseline that doesn't
-pass): a survivor is a test missing, or an equivalent mutant a `// mutant-skip:` names with why. A timeout is listed
+cargo-mutants over `git diff BASE...HEAD`, what HEAD changed since it left BASE, once per workspace crate, testing each
+crate against its own suite (plus downstream integration/DST test packages for internal v2 layered crates). Exits
+nonzero when a mutant is missed, or when cargo-mutants itself fails (a bad diff, a baseline that doesn't pass): a
+survivor is a test missing, or an equivalent mutant a `// mutant-skip:` names with why. A timeout is listed
 and doesn't fail the run, since load alone can cause one. In GitHub Actions each is annotated on its line and written
 to the step summary.
 
@@ -55,17 +55,17 @@ except ImportError:
 TESTED = {0, 2, 3}
 # Optional per-crate extra nextest arguments when no explicit --test-filter is provided
 SUITE_ARGS = {}
-# Internal v2 layered crates whose mutants are tested against BOTH their own crate suite AND downstream `elmdb` E2E tests
-LAYERED_ENGINE_CRATES = frozenset({
-    "elmdb-storage",
-    "elmdb-lmdb",
-    "elmdb-wire",
-    "elmdb-engine",
-    "elmdb-projections",
-    "elmdb-vec",
-    "elmdb-query",
-    "elmdb-invalidation",
-})
+# Internal v2 layered crates whose mutants are tested against BOTH their own crate suite AND downstream DST/E2E suites
+LAYERED_TEST_PACKAGES = {
+    "elmdb-storage": ("elmdb-sim", "elmdb-lmdb", "elmdb"),
+    "elmdb-lmdb": ("elmdb",),
+    "elmdb-wire": ("elmdb",),
+    "elmdb-engine": ("elmdb",),
+    "elmdb-projections": ("elmdb-query", "elmdb"),
+    "elmdb-vec": ("elmdb",),
+    "elmdb-query": ("elmdb",),
+    "elmdb-invalidation": ("elmdb",),
+}
 # Each job's copy builds the workspace from cold in the system's temporary directory: below the floor `cargo xtask
 # pre-push` holds a run to (`xtask/src/build_dir.rs`, FLOOR) the disk would fill part way through, and the copies with
 # it, and whatever else the machine runs. Nothing is run when nothing is in scope, so nothing is asked of the disk then.
@@ -687,8 +687,8 @@ def build_mutants_command(jobs, out_dir, selection, chosen, crate_name, with_fea
     """Assemble the `cargo mutants` argv for one crate."""
     suite_args = ["--", "-E", test_filter] if test_filter is not None else SUITE_ARGS.get(crate_name, [])
     test_packages = ["--test-package", crate_name]
-    if crate_name in LAYERED_ENGINE_CRATES:
-        test_packages.extend(["--test-package", "elmdb"])
+    for extra_pkg in LAYERED_TEST_PACKAGES.get(crate_name, ()):
+        test_packages.extend(["--test-package", extra_pkg])
     return [
         "cargo", "mutants", "-j", jobs, "-o", str(out_dir),
         *selection, *chosen,

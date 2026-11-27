@@ -185,6 +185,19 @@ class CommandAndArgsTests(unittest.TestCase):
         )
         self.assertEqual(layered_cmd[-4:], ["--test-package", "elmdb-query", "--test-package", "elmdb"])
 
+        storage_cmd = mid.build_mutants_command(
+            "2", Path("out/elmdb-storage"), ["--in-diff", "branch.diff"], [], "elmdb-storage", []
+        )
+        self.assertEqual(
+            storage_cmd[-8:],
+            [
+                "--test-package", "elmdb-storage",
+                "--test-package", "elmdb-sim",
+                "--test-package", "elmdb-lmdb",
+                "--test-package", "elmdb",
+            ],
+        )
+
         filtered_cmd = mid.build_mutants_command(
             "2", Path("out/elmdb"), ["--in-diff", "branch.diff"], ["--re", "ranks\\.rs:42:"],
             "elmdb", ["--features", "diagnostics"], test_filter="binary(rank_default)",

@@ -14,14 +14,15 @@
 //!    - After remounting LazyFS, reopened DB MUST pass `check(None)` and hold `model_after(synced)`
 //!      (or `model_after(synced + 1)` if the tear happened after LMDB finished committing the next txn).
 //! 3. `torn_sidecar_slot_falls_back_to_intact_ping_pong_slot` (always-on unit test, no FUSE required):
-//!    - Tears slot 0 or slot 1 of `synced.v2` and verifies dual-slot CRC32 ping-pong recovery.
+//!    - Tears the older slot, newer slot, or both slots of `synced.v2` and verifies dual-slot SHA-256
+//!      ping-pong recovery and fail-closed rejection when neither slot is intact.
 
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 
-use elmdb::protocol::{FieldDefinition, FieldSpec, IndexDefinition, Schema, TypeDefinition};
-use elmdb::{BuildPolicy, CanonicalValue, Database, DurabilityMode, EntityTarget, OpenOptions, WireOp};
+use elmdb::protocol::{FieldDefinition, FieldSpec, IndexDefinition, OpenReport, Schema, TypeDefinition};
+use elmdb::{BuildPolicy, CanonicalValue, Database, DurabilityMode, EntityTarget, ErrorCode, OpenOptions, WireOp};
 
 const COMMITS: usize = 24;
 const SYNC_EVERY: usize = 6;
@@ -87,7 +88,7 @@ fn model_after(count: usize) -> Model {
     model
 }
 
-fn held_at(dir: &Path, ids: usize) -> Result<Model, String> {
+fn held_at(dir: &Path, ids: usize) -> Result<(Model, OpenReport), String> {
     let db = Database::open(
         dir,
         OpenOptions {
@@ -97,6 +98,7 @@ fn held_at(dir: &Path, ids: usize) -> Result<Model, String> {
         },
     )
     .map_err(|e| format!("open: {e}"))?;
+    let open_report = db.open_report().clone();
     let report = db.check(None).map_err(|e| format!("check: {e}"))?;
     if !report.clean {
         return Err(format!("check not clean: {report:?}"));
@@ -114,7 +116,7 @@ fn held_at(dir: &Path, ids: usize) -> Result<Model, String> {
         }
     }
     db.close().map_err(|e| format!("close: {e}"))?;
-    Ok(model)
+    Ok((model, open_report))
 }
 
 #[test]
@@ -134,23 +136,75 @@ fn torn_sidecar_slot_falls_back_to_intact_ping_pong_slot() {
     for n in 0..4 {
         commit(&db, &mut model, n);
     }
+    // Snapshot `synced.v2` right after commit 3 (before `db.close()` writes an extra shutdown sync
+    // at the same txnid), so the two ping-pong slots hold distinct consecutive txnids (older < newer),
+    // matching a real crash right as the newer slot is being written.
+    let sidecar = dir.path().join("synced.v2");
+    let original = std::fs::read(&sidecar).unwrap();
     db.close().unwrap();
 
-    // Corrupt slot 1 (second 4 KiB ping-pong slot of synced.v2) while leaving slot 0 intact,
-    // or corrupt whichever slot has the lower sequence? Wait: after 5 strict writes (schema + 4 commits),
-    // both slots hold valid CRC32-verified slots (slot 0 = seq 5, slot 1 = seq 4).
-    // Tearing the OLDER slot (slot 1) MUST leave slot 0 active and recover cleanly at seq 5!
-    let sidecar = dir.path().join("synced.v2");
-    let mut bytes = std::fs::read(&sidecar).unwrap();
-    assert_eq!(bytes.len(), 8192);
-    // Corrupt bytes in slot 1 (offset 4096..4160) to simulate a torn write to the alternate slot.
-    for b in &mut bytes[4096..4160] {
+    // Read both 4 KiB ping-pong slots from `synced.v2` and identify the older vs newer slot by seq
+    // (header layout: 8-byte magic `"ELMDBV2S"`, 4-byte LE version, 8-byte LE `seq` at 12..20, `txnid` at 20..28).
+    assert_eq!(original.len(), 8192);
+    let slot_meta = |slot: usize| -> (u64, u64) {
+        let off = slot * 4096;
+        assert_eq!(&original[off..off + 8], b"ELMDBV2S");
+        let seq = u64::from_le_bytes(original[off + 12..off + 20].try_into().unwrap());
+        let txnid = u64::from_le_bytes(original[off + 20..off + 28].try_into().unwrap());
+        (seq, txnid)
+    };
+    let ((seq0, txnid0), (seq1, txnid1)) = (slot_meta(0), slot_meta(1));
+    assert_ne!(seq0, seq1);
+    let (older_slot, newer_slot, older_txnid, newer_txnid) =
+        if seq0 < seq1 { (0, 1, txnid0, txnid1) } else { (1, 0, txnid1, txnid0) };
+    assert!(older_txnid < newer_txnid);
+
+    // 1. Tearing the OLDER slot leaves the newest slot intact -> clean recovery at observed_txnid.
+    let mut tear_older = original.clone();
+    let older_off = older_slot * 4096;
+    for b in &mut tear_older[older_off..older_off + 64] {
         *b ^= 0xFF;
     }
-    std::fs::write(&sidecar, &bytes).unwrap();
-
-    let recovered = held_at(dir.path(), 4).unwrap();
+    std::fs::write(&sidecar, &tear_older).unwrap();
+    let (recovered, report) = held_at(dir.path(), 4).unwrap();
     assert_eq!(recovered, model);
+    assert_eq!(report.status, "clean");
+    assert_eq!(report.valid_slots, 1);
+    assert_eq!(report.durable_txnid, Some(report.observed_txnid));
+
+    // 2. Tearing the NEWER slot falls back to the intact older slot -> valid_slots == 1, durable_txnid < observed_txnid.
+    let mut tear_newer = original.clone();
+    let newer_off = newer_slot * 4096;
+    for b in &mut tear_newer[newer_off..newer_off + 64] {
+        *b ^= 0xFF;
+    }
+    std::fs::write(&sidecar, &tear_newer).unwrap();
+    let (recovered, report) = held_at(dir.path(), 4).unwrap();
+    assert_eq!(recovered, model);
+    assert_eq!(report.status, "sameBootUnsyncedTail");
+    assert_eq!(report.valid_slots, 1);
+    assert!(report.durable_txnid.is_some_and(|d| d < report.observed_txnid));
+
+    // 3. Tearing BOTH slots fails closed with ErrorCode::Corrupted.
+    let mut tear_both = original;
+    for b in &mut tear_both[0..64] {
+        *b ^= 0xFF;
+    }
+    for b in &mut tear_both[4096..4160] {
+        *b ^= 0xFF;
+    }
+    std::fs::write(&sidecar, &tear_both).unwrap();
+    let err = Database::open(
+        dir.path(),
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .err()
+    .expect("corrupting both sidecar slots must fail closed");
+    assert_eq!(err.code, ErrorCode::Corrupted);
 }
 
 /// Child writer invoked by the LazyFS lossy-filesystem tests below.
@@ -239,7 +293,15 @@ fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_
         let dropped = std::process::Command::new("sh").arg(&lose).status().unwrap();
         assert!(dropped.success(), "round {round}: lose.sh failed");
 
-        assert_eq!(held_at(&path, COMMITS).as_ref(), Ok(&model_after(synced)), "round {round}, synced at {synced}");
+        let (actual, open_report) = held_at(&path, COMMITS).unwrap_or_else(|e| {
+            panic!("round {round}, synced at {synced}: failed to reopen/check after cache drop: {e}")
+        });
+        assert_eq!(actual, model_after(synced), "round {round}, synced at {synced}");
+        if !unpinned {
+            assert_eq!(open_report.status, "clean", "round {round}: unexpected open_report {open_report:?}");
+            assert_eq!(open_report.durable_txnid, Some(open_report.observed_txnid));
+            assert!(open_report.valid_slots >= 1);
+        }
     }
 }
 
@@ -282,9 +344,13 @@ fn a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync() {
         let healed = std::process::Command::new("sh").arg(&heal).status().unwrap();
         assert!(healed.success(), "round {round}: heal.sh failed");
 
-        let actual = held_at(&path, COMMITS).unwrap_or_else(|e| {
+        let (actual, open_report) = held_at(&path, COMMITS).unwrap_or_else(|e| {
             panic!("round {round}, synced at {synced}: failed to reopen/check after torn write {write}: {e}")
         });
+        assert!(
+            synced == 0 || open_report.valid_slots >= 1,
+            "round {round}: sidecar missing after torn write at synced={synced}: {open_report:?}"
+        );
         let expected_synced = model_after(synced);
         let expected_next = model_after((synced + 1).min(COMMITS));
         assert!(
