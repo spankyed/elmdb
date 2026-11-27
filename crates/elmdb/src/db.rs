@@ -20,7 +20,7 @@ use elmdb_invalidation::{LiveQueryHub, NextDue, TickResult, WatchId, WatchPolicy
 use elmdb_lmdb::{LmdbConfig, LmdbStore};
 use elmdb_projections::{BuildPolicy, ProjectionRegistry, rank};
 use elmdb_query::{EdgeDir, ExecBudgets, LogicalPlan, QueryEngine, QueryOutput};
-use elmdb_storage::{Clock, DurabilityMode, KvCursor, KvRead, OsVfs, SystemClock, Vfs};
+use elmdb_storage::{Clock, DurabilityMode, KvCursor, KvRead, OsVfs, SystemClock};
 use elmdb_vec::{DEFAULT_DRAIN_BATCH, VectorProjection, drain_pending_batch_with_receipt, read_entity_embeddings};
 use elmdb_wire::{ElmdbError, EntityTarget, ErrorCode, Result, WireOp, decode_batch};
 
@@ -142,6 +142,7 @@ pub enum BackupInto {
 #[derive(Default)]
 struct CloseSync {
     done: bool,
+    outcome: Option<(ErrorCode, String)>,
 }
 
 /// Unified embedded elmdb v2 database handle (thread-safe, MVCC lock-free reads, serialized writes).
@@ -390,7 +391,7 @@ impl Database {
         let eng = self.enter_op()?;
         self.require_writable()?;
         self.forbid_inside_txn("acknowledgeRestore")?;
-        eng.sync()?;
+        eng.acknowledge_restore()?;
         Ok(())
     }
 
@@ -1319,8 +1320,9 @@ impl Database {
         let eng = self.enter_op()?;
         self.forbid_inside_txn("backup")?;
         let target = target.as_ref();
-        let target_existed = target.exists();
-        if target_existed {
+        crate::fs_publish::ensure_not_self_or_descendant(&self.dir, target)?;
+
+        if target.exists() {
             let mut entries = fs::read_dir(target)
                 .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot read backup target: {e}")))?;
             let is_empty = entries.next().is_none();
@@ -1347,10 +1349,7 @@ impl Database {
             }
         }
 
-        let parent = match target.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
+        let parent = crate::fs_publish::parent_dir(target);
         fs::create_dir_all(parent)
             .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot create backup parent: {e}")))?;
 
@@ -1368,53 +1367,16 @@ impl Database {
                 .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot write backup marker: {e}")))?;
             marker.sync_all().map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot sync backup marker: {e}")))?;
         }
-        let vfs = OsVfs::new();
-        vfs.sync_dir(&staging)?;
 
-        if target.exists() {
-            // Re-validate overwrite policy right before swapping so a concurrent creation during
-            // `copy_compacted` cannot bypass `BackupInto::New` or the `.elmdb-backup` marker check.
-            let mut entries = fs::read_dir(target)
-                .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot read backup target: {e}")))?;
-            let is_empty = entries.next().is_none();
-            if !is_empty {
-                match into {
-                    BackupInto::New => {
-                        return Err(ElmdbError::new(
-                            ErrorCode::AlreadyExists,
-                            format!("backup target '{}' is not empty", target.display()),
-                        ));
-                    }
-                    BackupInto::Backups => {
-                        if !target.join(BACKUP_MARKER).exists() {
-                            return Err(ElmdbError::new(
-                                ErrorCode::AlreadyExists,
-                                format!(
-                                    "refusing to overwrite non-backup directory '{}' (missing {BACKUP_MARKER})",
-                                    target.display()
-                                ),
-                            ));
-                        }
-                    }
-                }
+        // Re-validate self-overwrite right before publishing so a concurrent symlink/mount race cannot bypass it.
+        crate::fs_publish::ensure_not_self_or_descendant(&self.dir, target)?;
+        match into {
+            BackupInto::New => crate::fs_publish::atomic_publish_dir_new(&staging, target)?,
+            BackupInto::Backups => {
+                crate::fs_publish::atomic_publish_dir_replace(&staging, target, BACKUP_MARKER, nonce)?;
             }
-            // Atomic swap: move old target aside, move staging into place (rolling back if rename fails), then delete old.
-            let old_aside = parent.join(format!(".elmdb-backup-old-{}-{nonce}", std::process::id()));
-            fs::rename(target, &old_aside)
-                .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot stage old backup for swap: {e}")))?;
-            if let Err(e) = fs::rename(&staging, target) {
-                let _ = fs::rename(&old_aside, target);
-                return Err(ElmdbError::new(ErrorCode::Io, format!("cannot move backup into place: {e}")));
-            }
-            cleanup.disarm();
-            vfs.sync_dir(parent)?;
-            let _ = fs::remove_dir_all(&old_aside);
-        } else {
-            fs::rename(&staging, target)
-                .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot move backup into place: {e}")))?;
-            cleanup.disarm();
-            vfs.sync_dir(parent)?;
         }
+        cleanup.disarm();
         Ok(())
     }
 
@@ -1452,18 +1414,25 @@ impl Database {
             while !st.done {
                 st = self.close_cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
             }
+            if propagate_sync_err && let Some((code, msg)) = &st.outcome {
+                return Err(ElmdbError::new(*code, msg.clone()));
+            }
             return Ok(());
         }
 
-        struct MarkCloseDone<'a>(&'a Database);
+        struct MarkCloseDone<'a> {
+            db: &'a Database,
+            outcome: Option<(ErrorCode, String)>,
+        }
         impl Drop for MarkCloseDone<'_> {
             fn drop(&mut self) {
-                let mut st = self.0.close_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let mut st = self.db.close_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                st.outcome = self.outcome.take();
                 st.done = true;
-                self.0.close_cv.notify_all();
+                self.db.close_cv.notify_all();
             }
         }
-        let _mark_done = MarkCloseDone(self);
+        let mut mark_done = MarkCloseDone { db: self, outcome: None };
 
         self.hub.stop_watches();
 
@@ -1501,14 +1470,32 @@ impl Database {
             }
         };
 
-        let mut sync_res = Ok(());
-        if let Some(eng) = taken {
-            if !self.read_only && drained {
-                sync_res = eng.sync();
+        let outcome = if !drained {
+            drop(taken);
+            if self.read_only {
+                Err(ElmdbError::new(
+                    ErrorCode::DatabaseLocked,
+                    "database close timed out waiting for active operations to drain",
+                ))
+            } else {
+                Err(ElmdbError::new(
+                    ErrorCode::DurabilityFailed,
+                    "database close timed out waiting for active operations to drain; durability sync skipped",
+                ))
             }
+        } else if let Some(eng) = taken {
+            let sync_res = if self.read_only { Ok(()) } else { eng.sync() };
             drop(eng);
+            sync_res
+        } else {
+            Ok(())
+        };
+
+        if let Err(ref err) = outcome {
+            mark_done.outcome = Some((err.code, err.message.clone()));
         }
-        if propagate_sync_err { sync_res } else { Ok(()) }
+        drop(mark_done);
+        if propagate_sync_err { outcome } else { Ok(()) }
     }
 
     /// Restores persisted entity and relation timestamps during lossless `dump::load`.
@@ -1766,5 +1753,127 @@ mod tests {
             assert_eq!(is_no_sync, expect_no_sync, "unexpected MDB_NOSYNC state for {mode:?}");
             db.close().unwrap();
         }
+    }
+
+    #[test]
+    fn batch_b_close_within_timeout_reports_error_for_writable_readonly_and_concurrent_waiters() {
+        // 1. Writable DB: active op blocks drain -> `close_within` returns DurabilityFailed,
+        //    concurrent waiter sees DurabilityFailed, and `close_at_exit` returns Ok(()).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::open(dir.path(), OpenOptions::default()).unwrap());
+            let held_op = db.enter_op().unwrap();
+
+            let db_waiter = Arc::clone(&db);
+            let db_closer = Arc::clone(&db);
+            let (tx_started, rx_started) = std::sync::mpsc::channel();
+            let closer = std::thread::spawn(move || {
+                tx_started.send(()).unwrap();
+                db_closer.close_within(Some(Duration::from_millis(40)))
+            });
+            rx_started.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(10));
+            let waiter = std::thread::spawn(move || db_waiter.close());
+
+            let err1 = closer.join().unwrap().unwrap_err();
+            assert_eq!(err1.code, ErrorCode::DurabilityFailed);
+            let err2 = waiter.join().unwrap().unwrap_err();
+            assert_eq!(err2.code, ErrorCode::DurabilityFailed);
+            // Subsequent `close_at_exit` never propagates sync/drain error.
+            db.close_at_exit(Duration::from_millis(10)).unwrap();
+            drop(held_op);
+        }
+
+        // 2. Read-only DB: active op blocks drain -> `close_within` returns DatabaseLocked.
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let rw = Database::open(dir.path(), OpenOptions::default()).unwrap();
+            rw.close().unwrap();
+
+            let ro = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+            let held_op = ro.enter_op().unwrap();
+            let err = ro.close_within(Some(Duration::from_millis(20))).unwrap_err();
+            assert_eq!(err.code, ErrorCode::DatabaseLocked);
+            // Idempotent close on an already-failed close still reports the error (when propagate_sync_err).
+            assert_eq!(ro.close().unwrap_err().code, ErrorCode::DatabaseLocked);
+            drop(held_op);
+        }
+
+        // 3. Clean drain on writable DB succeeds and second `close()` is idempotent Ok(()).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Database::open(dir.path(), OpenOptions::default()).unwrap();
+            db.close().unwrap();
+            db.close().unwrap();
+        }
+    }
+
+    #[test]
+    fn batch_b_fs_publish_guards_self_descendant_and_atomic_file_no_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src_db");
+        let sibling = dir.path().join("sibling_backup");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&sibling).unwrap();
+
+        // Self and descendant rejected; sibling on same filesystem allowed.
+        assert_eq!(
+            crate::fs_publish::ensure_not_self_or_descendant(&src, &src).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            crate::fs_publish::ensure_not_self_or_descendant(&src, &src.join("nested/sub")).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        crate::fs_publish::ensure_not_self_or_descendant(&src, &sibling).unwrap();
+        crate::fs_publish::ensure_not_self_or_descendant(&src, &dir.path().join("nonexistent_sibling")).unwrap();
+
+        // `atomic_publish_file_no_overwrite` publishes into new path and refuses to overwrite existing file.
+        let tmp1 = dir.path().join(".tmp1");
+        let target = dir.path().join("out.json");
+        fs::write(&tmp1, b"first").unwrap();
+        crate::fs_publish::atomic_publish_file_no_overwrite(&tmp1, &target).unwrap();
+        assert!(!tmp1.exists());
+        assert_eq!(fs::read(&target).unwrap(), b"first");
+
+        let tmp2 = dir.path().join(".tmp2");
+        fs::write(&tmp2, b"second").unwrap();
+        let err = crate::fs_publish::atomic_publish_file_no_overwrite(&tmp2, &target).unwrap_err();
+        assert_eq!(err.code, ErrorCode::AlreadyExists);
+        assert_eq!(fs::read(&target).unwrap(), b"first", "existing target file must remain intact");
+        let _ = fs::remove_file(&tmp2);
+
+        // Non-AlreadyExists errors (missing source) map to Io, not AlreadyExists.
+        assert_eq!(
+            crate::fs_publish::atomic_publish_file_no_overwrite(&dir.path().join("no_such_tmp"), &dir.path().join("x"))
+                .unwrap_err()
+                .code,
+            ErrorCode::Io
+        );
+        assert_eq!(
+            crate::fs_publish::atomic_publish_dir_new(&dir.path().join("no_such_stage"), &dir.path().join("y"))
+                .unwrap_err()
+                .code,
+            ErrorCode::Io
+        );
+
+        // `atomic_publish_dir_new` directly rejects non-empty target dir with AlreadyExists,
+        // and `atomic_publish_dir_replace` publishes into non-existent target dir cleanly.
+        let non_empty = dir.path().join("non_empty_dir");
+        fs::create_dir_all(&non_empty).unwrap();
+        fs::write(non_empty.join("f.txt"), b"x").unwrap();
+        let stage_ne = dir.path().join("stage_ne");
+        fs::create_dir_all(&stage_ne).unwrap();
+        assert_eq!(
+            crate::fs_publish::atomic_publish_dir_new(&stage_ne, &non_empty).unwrap_err().code,
+            ErrorCode::AlreadyExists
+        );
+        let fresh_target = dir.path().join("fresh_replace_target");
+        crate::fs_publish::atomic_publish_dir_replace(&stage_ne, &fresh_target, BACKUP_MARKER, 1).unwrap();
+        assert!(fresh_target.exists());
+
+        // `parent_dir` returns `.` for bare filenames and real parent for nested paths.
+        assert_eq!(crate::fs_publish::parent_dir(Path::new("dump.json")), Path::new("."));
+        assert_eq!(crate::fs_publish::parent_dir(&target), dir.path());
     }
 }

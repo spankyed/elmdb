@@ -309,13 +309,75 @@ fn dst_zero_byte_sidecar_recovers_as_unsynced_and_grouped_sync_failure_poisons()
     let (reopened, report) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
     assert_eq!(report.status, RecoveryStatus::UnsyncedAfterReboot);
     assert_eq!(report.valid_slots, 0);
+    assert!(reopened.has_unacked_reboot());
 
-    // Calling `sync()` atomically heals the sidecar so the next open is Clean!
-    reopened.sync().unwrap();
+    // B1: Routine `sync()` MUST NOT overwrite `synced.v2` while `unacked_reboot` is set!
+    assert_eq!(reopened.sync().unwrap(), None);
+    assert!(reopened.has_unacked_reboot());
     drop(reopened);
+    let (still_unacked, report_still) =
+        DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Strict).unwrap();
+    assert_eq!(report_still.status, RecoveryStatus::UnsyncedAfterReboot);
+    assert!(still_unacked.has_unacked_reboot());
+
+    // B1: Even a Strict commit while `unacked_reboot` is set flushes `data.mdb` without sealing `synced.v2`.
+    {
+        let mut txn = still_unacked.begin_write().unwrap();
+        txn.put(db, b"k_unacked", b"v_unacked").unwrap();
+        txn.commit().unwrap();
+    }
+    assert!(still_unacked.has_unacked_reboot());
+    // Injecting a sync failure on a Strict commit while unacked_reboot is set must still poison the gate!
+    {
+        let (re_strict, rep_s) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Strict).unwrap();
+        assert_eq!(rep_s.status, RecoveryStatus::UnsyncedAfterReboot);
+        let mut txn = re_strict.begin_write().unwrap();
+        txn.put(db, b"k_fail_strict", b"v").unwrap();
+        store.inject_sync_failures(1);
+        assert!(matches!(txn.commit(), Err(StorageError::DurabilityFailed(_))));
+        assert!(re_strict.is_poisoned());
+    }
+
+    // B1: Injecting a sync failure during `acknowledge_restore()` must keep `unacked_reboot` true and poison the gate!
+    {
+        let (re_ack_fail, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
+        assert!(re_ack_fail.has_unacked_reboot());
+        store.inject_sync_failures(1);
+        assert!(matches!(re_ack_fail.acknowledge_restore(), Err(StorageError::DurabilityFailed(_))));
+        assert!(re_ack_fail.has_unacked_reboot());
+        assert!(re_ack_fail.is_poisoned());
+    }
+
+    // B1: Explicit `acknowledge_restore()` seals `synced.v2` and clears `unacked_reboot` so next open is Clean!
+    assert!(still_unacked.acknowledge_restore().unwrap().is_some());
+    assert!(!still_unacked.has_unacked_reboot());
+    drop(still_unacked);
     let (healed, report2) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
     assert_eq!(report2.status, RecoveryStatus::Clean);
     assert_eq!(report2.valid_slots, 1);
+    assert!(!healed.has_unacked_reboot());
+    assert!(!healed.is_read_only());
+
+    // B3: Read-only gate refuses writes, sync, and acknowledge_restore with `StorageError::ReadOnly`.
+    let (ro_gate, ro_rep) =
+        DurabilityGate::open_with_options(store.clone(), vfs.clone(), dir, DurabilityMode::Strict, true).unwrap();
+    assert!(ro_gate.is_read_only());
+    assert_eq!(ro_rep.status, RecoveryStatus::Clean);
+    assert!(matches!(ro_gate.begin_write(), Err(StorageError::ReadOnly)));
+    let ro_arc = std::sync::Arc::new(ro_gate);
+    assert!(matches!(ro_arc.begin_write_owned(), Err(StorageError::ReadOnly)));
+    assert!(matches!(ro_arc.sync(), Err(StorageError::ReadOnly)));
+    assert!(matches!(ro_arc.acknowledge_restore(), Err(StorageError::ReadOnly)));
+    drop(ro_arc);
+
+    // B1: Unsafe mode `acknowledge_restore()` clears `unacked_reboot` and returns `Ok(None)`.
+    let (unsafe_gate, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Unsafe).unwrap();
+    assert_eq!(unsafe_gate.acknowledge_restore().unwrap(), None);
+    assert!(!unsafe_gate.has_unacked_reboot());
+
+    // B1: Calling `acknowledge_restore()` on an unrecovered gate fails with InvalidState.
+    let unrec = DurabilityGate::new_unrecovered(store.clone(), vfs.clone(), dir, DurabilityMode::Strict);
+    assert!(matches!(unrec.acknowledge_restore(), Err(StorageError::InvalidState(_))));
 
     // P2-3: Post-commit I/O failure in Grouped `sync()` permanently poisons the gate!
     let mut txn = healed.begin_write().unwrap();

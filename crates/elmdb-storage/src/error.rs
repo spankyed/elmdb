@@ -20,6 +20,9 @@ pub enum StorageError {
     #[error("database directory '{0}' is already open in this process")]
     DatabaseLocked(String),
 
+    #[error("storage was opened read-only")]
+    ReadOnly,
+
     #[error("maximum number of sub-databases reached (max_dbs={max_dbs})")]
     DbsFull { max_dbs: u32 },
 

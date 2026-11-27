@@ -198,6 +198,7 @@ impl From<StorageError> for ElmdbError {
                 ErrorCode::StorageFull
             }
             StorageError::DatabaseLocked(_) => ErrorCode::DatabaseLocked,
+            StorageError::ReadOnly => ErrorCode::ReadOnly,
             StorageError::ReadersFull => ErrorCode::ResourceLimit,
             StorageError::BadValSize { .. } => ErrorCode::InvalidArgument,
             StorageError::Corrupted(_) => ErrorCode::Corrupted,

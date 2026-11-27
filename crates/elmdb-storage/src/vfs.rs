@@ -49,6 +49,11 @@ pub trait Vfs: Send + Sync {
     fn lock_file(&self, _path: &Path) -> Result<VfsLockGuard, StorageError> {
         Ok(VfsLockGuard::noop())
     }
+    /// Acquires a shared advisory OS file lock on `path` ONLY if `path` already exists; never creates
+    /// the file. Used by read-only opens so inspecting a directory never mutates filesystem state.
+    fn lock_file_shared_if_exists(&self, _path: &Path) -> Result<Option<VfsLockGuard>, StorageError> {
+        Ok(None)
+    }
 }
 
 /// Production filesystem implementation backed by `std::fs`.
@@ -191,5 +196,51 @@ impl Vfs for OsVfs {
         let file = OpenOptions::new().create(true).truncate(false).read(true).write(true).open(path)?;
         file.lock()?;
         Ok(VfsLockGuard::from_locked_file(file))
+    }
+
+    fn lock_file_shared_if_exists(&self, path: &Path) -> Result<Option<VfsLockGuard>, StorageError> {
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        file.lock_shared()?;
+        Ok(Some(VfsLockGuard::from_locked_file(file)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn os_vfs_lock_file_shared_if_exists_never_creates_and_blocks_exclusive_lock() {
+        let base = std::env::temp_dir().join(format!("elmdb_vfs_lock_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let vfs = OsVfs::new();
+
+        // Missing file -> Ok(None) and file is NOT created.
+        let missing = base.join("synced.v2.lock");
+        assert!(vfs.lock_file_shared_if_exists(&missing).unwrap().is_none());
+        assert!(!missing.exists());
+
+        // Existing file -> Ok(Some(guard)) holding a real OS shared lock (blocks exclusive try_lock).
+        fs::write(&missing, b"").unwrap();
+        let guard = vfs.lock_file_shared_if_exists(&missing).unwrap().expect("shared lock guard");
+        let probe = OpenOptions::new().read(true).write(true).open(&missing).unwrap();
+        assert!(probe.try_lock().is_err(), "shared lock must block concurrent exclusive lock");
+        drop(guard);
+        probe.try_lock().expect("exclusive lock must succeed after shared guard drops");
+        probe.unlock().unwrap();
+
+        // Non-NotFound error (traversing a regular file as a directory -> ENOTDIR on Unix) propagates as Err(Io).
+        #[cfg(unix)]
+        {
+            let bad_path = missing.join("child");
+            assert!(matches!(vfs.lock_file_shared_if_exists(&bad_path), Err(StorageError::Io(_))));
+        }
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

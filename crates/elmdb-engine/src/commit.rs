@@ -468,7 +468,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         projections: Arc<dyn ProjectionSink<S, V>>,
         read_only: bool,
     ) -> Result<(Self, RecoveryReport)> {
-        let (gate, report) = DurabilityGate::open(store, vfs, dir, mode)?;
+        let (gate, report) = DurabilityGate::open_with_options(store, vfs, dir, mode, read_only)?;
 
         // Try read-only fast path first so reopening an existing DB never performs an
         // unnecessary write transaction / Strict-mode fsync on startup.
@@ -581,6 +581,12 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// Flushes LMDB and writes the verified 4 KiB durability sidecar slot.
     pub fn sync(&self) -> Result<()> {
         self.gate.sync()?;
+        Ok(())
+    }
+
+    /// Explicitly acknowledges an `UnsyncedAfterReboot` state and seals `synced.v2`.
+    pub fn acknowledge_restore(&self) -> Result<()> {
+        self.gate.acknowledge_restore()?;
         Ok(())
     }
 
