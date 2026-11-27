@@ -251,20 +251,20 @@ export class WatchPump implements WatchController {
 
   stopAll(): void {
     this.#clearTimer();
-    for (const entry of this.#entries.values()) {
-      entry.active = false;
-    }
-    this.#entries.clear();
-    try {
-      this.#db.stopWatches();
-    } catch {
-      // Best-effort if the underlying database is already closed.
+    const watchIds = [...this.#entries.keys()];
+    for (const watchId of watchIds) {
+      this.#unregister(watchId);
     }
   }
 
   markClosed(): void {
     this.#stopped = true;
     this.stopAll();
+    try {
+      this.#db.stopWatches();
+    } catch {
+      // Best-effort if the underlying database is already closed.
+    }
   }
 
   #unregister(watchId: number): void {

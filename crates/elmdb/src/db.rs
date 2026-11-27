@@ -606,11 +606,12 @@ impl Database {
             .with(|m| m.borrow_mut().remove(&self.id))
             .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
         let ctx = slot.ctx.ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on commit"))?;
+        let committed_schema = Arc::clone(ctx.schema());
         let committed = ctx.finish_and_commit(true)?;
         let out_meta = match committed {
             Some((seq, receipt, sum)) => {
                 if let Some(ref s) = sum {
-                    self.hub.notify_commit(&eng.schema(), s, now_unix_ms());
+                    self.hub.notify_commit(&committed_schema, s, now_unix_ms());
                 }
                 Some((seq, receipt))
             }
@@ -1005,8 +1006,14 @@ impl Database {
             policy,
             now_ms,
             1,
-            |ro, schema, exec| {
-                let plan = compile_query_spec(schema, spec, |ext_id| lookup_ext_id_in_txn(ro, &dbs, ext_id))?;
+            |ro, schema, exec, unresolved_ext_id| {
+                let plan = compile_query_spec(schema, spec, |ext_id| {
+                    let found = lookup_ext_id_in_txn(ro, &dbs, ext_id)?;
+                    if found.is_none() {
+                        *unresolved_ext_id = true;
+                    }
+                    Ok(found)
+                })?;
                 let out = exec(&plan)?;
                 let explain = spec.explain.then_some(&out.explain);
                 let ans =
@@ -1036,8 +1043,14 @@ impl Database {
             ExecBudgets::default(),
             now_ms,
             cost_ms,
-            |ro, schema, exec| {
-                let plan = compile_query_spec(schema, spec, |ext_id| lookup_ext_id_in_txn(ro, &dbs, ext_id))?;
+            |ro, schema, exec, unresolved_ext_id| {
+                let plan = compile_query_spec(schema, spec, |ext_id| {
+                    let found = lookup_ext_id_in_txn(ro, &dbs, ext_id)?;
+                    if found.is_none() {
+                        *unresolved_ext_id = true;
+                    }
+                    Ok(found)
+                })?;
                 let out = exec(&plan)?;
                 let explain = spec.explain.then_some(&out.explain);
                 let ans =

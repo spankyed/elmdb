@@ -274,4 +274,43 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
 
     healthy.stop();
   });
+
+  it('stopAll unregisters active watches without permanently poisoning the Rust WatchScheduler', () => {
+    const handle = temps.open({ schema: watchSchema });
+    const clock = createFakeClock(30_000);
+    const engine = createEarsEngine({ database: handle.database, clock });
+
+    const firstSnapshots: number[] = [];
+    const first = engine.query.of('Task').watchCount((c) => firstSnapshots.push(c), { minGapMs: 0 });
+    expect(firstSnapshots).toEqual([0]);
+    expect(engine.watches.activeCount).toBe(1);
+
+    engine.watches.stopAll();
+    expect(first.active).toBe(false);
+    expect(engine.watches.activeCount).toBe(0);
+
+    // Mutating after stopAll must not deliver to the stopped watch.
+    engine.create('Task', { title: 'after-stop', done: false }, 't-after-stop');
+    clock.advance(50);
+    expect(firstSnapshots).toEqual([0]);
+
+    // Registering a brand-new watch after stopAll MUST still receive live updates!
+    const secondSnapshots: number[] = [];
+    const second = engine.query.of('Task').watchCount((c) => secondSnapshots.push(c), { minGapMs: 0 });
+    expect(secondSnapshots).toEqual([1]);
+    expect(engine.watches.activeCount).toBe(1);
+
+    engine.create('Task', { title: 'live-again', done: false }, 't-live-again');
+    clock.advance(50);
+    expect(secondSnapshots).toEqual([1, 2]);
+    expect(engine.watches.settled()).toBe(true);
+
+    second.stop();
+
+    // Closing the database permanently stops watches; registering a watch after close throws CLOSED.
+    handle.database.close();
+    expect(() => engine.query.of('Task').watchCount(() => {})).toThrowError(
+      expect.objectContaining({ code: 'CLOSED' }),
+    );
+  });
 });

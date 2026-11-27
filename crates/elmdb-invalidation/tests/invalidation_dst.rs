@@ -659,7 +659,7 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
     });
 
     // Reader takes snapshot at seq S
-    let (read_seq, read_epoch, _out, read_set) =
+    let (read_seq, _read_txnid, read_epoch, _out, read_set) =
         run_tracked_snapshot(&engine, &qe, &plan, ExecBudgets::default()).unwrap();
     let mut idx2 = InvalidationIndex::new(read_seq, read_epoch);
 
@@ -690,7 +690,7 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
     assert!(stale_related, "concurrent commit touching watched entity MUST stale reader via CommitRing");
 
     // CommitRing overflow (> COMMIT_RING_CAP commits of unrelated Author) -> MUST fail strictly safe!
-    let (snap_seq, snap_epoch, _o, snap_rs) =
+    let (snap_seq, _snap_txnid, snap_epoch, _o, snap_rs) =
         run_tracked_snapshot(&engine, &qe, &plan, ExecBudgets::default()).unwrap();
     let mut idx3 = InvalidationIndex::new(snap_seq, snap_epoch);
     for i in 0..(COMMIT_RING_CAP + 10) {
@@ -965,7 +965,7 @@ fn review_regression_subdb_same_seq_seq_gap_resurrection_abort_and_imperative_se
         }),
         terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
-    let (snap_seq, snap_epoch, _o, vec_rs) =
+    let (snap_seq, _snap_txnid, snap_epoch, _o, vec_rs) =
         run_tracked_snapshot(&engine, &qe, &vec_plan, ExecBudgets::default()).unwrap();
     let mut idx = InvalidationIndex::new(snap_seq, snap_epoch);
     set_entity_embeddings(&engine, ids.idx_vec, kv1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
@@ -1021,11 +1021,12 @@ fn review_regression_subdb_same_seq_seq_gap_resurrection_abort_and_imperative_se
     assert_eq!(hub.stats().tier2_live_ranges, 0);
 
     hub.stop_watches();
-    let _ = hub
+    let closed_err = hub
         .register_query_watch(&engine, &qe, &note_plan, ExecBudgets::default(), WatchPolicy::default(), 120, 1, |_| {
             None
         })
-        .unwrap();
+        .unwrap_err();
+    assert_eq!(closed_err.code, ErrorCode::Closed, "register_query_watch after stop_watches must return Closed");
     assert_eq!(hub.stats().active_watches, 0, "register_query_watch after stop_watches must not leak into index");
 }
 
@@ -1130,4 +1131,78 @@ fn review_regression_cross_process_maintenance_write_and_4096_overflow() {
         "> 4,096 elapsed commits must fail strictly safe and invalidate all watches"
     );
     let _ = w_auth;
+}
+
+#[test]
+fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
+    let (engine, _reg, ids) = open_sim();
+    let qe = QueryEngine::default();
+    let base_sum = engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Author".into(),
+                external_id: Some("a1".into()),
+                fields: vec![("name".into(), CanonicalValue::String("A1".into()))],
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n1".into()),
+                fields: vec![("title".into(), CanonicalValue::String("N1".into()))],
+            },
+        ])
+        .unwrap()
+        .summary
+        .unwrap();
+
+    let mut idx = InvalidationIndex::new_with_txnid(base_sum.seq, base_sum.schema_epoch, base_sum.txnid);
+    let note_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+        terminal: TerminalSpec::Ids,
+    });
+    let (s0, t0, e0, _o, rs0) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
+    assert!(!idx.register_after_read_with_txnid(WatchId(1), s0, t0, e0, &rs0, &engine.schema()));
+
+    // Produce two commits: seq S+1 (touches Note) and seq S+2 (touches Author).
+    let sum1 = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("n1".into()),
+            fields: vec![("title".into(), CanonicalValue::String("N1-v2".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    let sum2 = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("a1".into()),
+            fields: vec![("name".into(), CanonicalValue::String("A1-v2".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+
+    // Deliver OUT OF ORDER: sum2 first (seq gap -> fail-safe invalidates WatchId(1)), then late sum1!
+    let d2 = idx.notify_commit(&engine.schema(), &sum2);
+    assert!(d2.contains(&WatchId(1)), "out-of-order sum2 must fail-safe invalidate WatchId(1)");
+    let d1 = idx.notify_commit(&engine.schema(), &sum1);
+    assert!(d1.is_empty(), "late out-of-order sum1 must not corrupt ring or spuriously re-invalidate");
+
+    // A fresh reader at S+2 MUST register cleanly as NOT stale!
+    let (s2, t2, e2, _o2, rs2) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
+    assert!(!idx.register_after_read_with_txnid(WatchId(1), s2, t2, e2, &rs2, &engine.schema()));
+
+    // Now commit seq S+3 WITHOUT calling notify_commit yet, and fire notify_subdb_write at seq S+3:
+    // Because SubDbWrite carries no commit summary, `seq > prev_seq` MUST fail-safe invalidate WatchId(1)!
+    let sum3 = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("n1".into()),
+            fields: vec![("title".into(), CanonicalValue::String("N1-v3".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    let d_sub = idx.notify_subdb_write_at_txnid(sum3.seq, sum3.schema_epoch, sum3.txnid + 1, ids.idx_vec_slot, &[0x01]);
+    assert!(
+        d_sub.contains(&WatchId(1)),
+        "notify_subdb_write observing an unseen normal commit seq MUST fail-safe invalidate all watches"
+    );
 }

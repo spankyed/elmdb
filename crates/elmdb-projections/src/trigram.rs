@@ -23,15 +23,29 @@ const TAG_OVERFLOW: u8 = 0x04;
 /// Maximum trigrams indexed per single entity to bound worst-case write amplification on huge blobs.
 pub const MAX_TRIGRAMS_PER_DOC: usize = 16_384;
 
+/// Context-free Unicode case folding for trigram indexing and case-insensitive substring/regex matching.
+///
+/// Uses per-char `char::to_lowercase()` and normalizes Greek final sigma (`ς` U+03C2 -> `σ` U+03C3)
+/// so trigrams of any substring are always a subset of trigrams of any containing string,
+/// preventing false negatives on contextual Unicode case folding (e.g. `ΑΟΣ` inside `ΑΟΣΑ`).
+pub fn fold_case(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        for lc in c.to_lowercase() {
+            out.push(if lc == 'ς' { 'σ' } else { lc });
+        }
+    }
+    out
+}
+
 /// Extracts sorted, deduplicated lowercase 3-character Unicode trigrams from `text` using
-/// full-string `str::to_lowercase()` so contextual case folding (e.g., Greek final sigma `Σ` -> `ς`)
-/// matches `Contains` substring evaluation identically.
+/// context-free case folding (`fold_case`) so both `Contains` and `Regex` pushdown are sound.
 pub fn extract_trigrams(text: &str) -> Vec<String> {
     extract_trigrams_with_overflow(text).0
 }
 
 fn extract_trigrams_with_overflow(text: &str) -> (Vec<String>, bool) {
-    let lower = text.to_lowercase();
+    let lower = fold_case(text);
     let mut set = BTreeSet::new();
     let mut iter = lower.chars();
     let (Some(mut c0), Some(mut c1)) = (iter.next(), iter.next()) else {
