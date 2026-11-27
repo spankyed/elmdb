@@ -15,7 +15,7 @@ import type { CommitDelta, EarsDatabase, EdgeDirection } from './database.ts';
 import { EarsError, hasKnownErrorCode, toEarsError } from './errors.ts';
 import type { EarsOperationObserver } from './observer.ts';
 import { createQueryRoot, type EntityRow, type QueryRoot } from './query.ts';
-import { createSystemClock, WatchPump, type EarsClock, type WatchController } from './watch.ts';
+import { createSystemClock, WatchPump, type AfterClock, type EarsClock, type WatchController } from './watch.ts';
 
 /**
  * Synchronous hook invoked inside a native LMDB nested savepoint before a commit finalizes.
@@ -38,11 +38,13 @@ export interface GetEdgesOptions {
 /** Options for `createEarsEngine`. */
 export interface CreateEarsEngineOptions {
   readonly database: EarsDatabase;
-  readonly clock?: EarsClock;
+  readonly clock?: EarsClock | AfterClock;
   /** Optional fallback handler for errors thrown inside watch callbacks or reruns. */
   readonly onWatchError?: (error: EarsError) => void;
   /** Optional synchronous operation observer (zero overhead when omitted). */
   readonly observer?: EarsOperationObserver;
+  /** Cooperative turn-slice budget (ms) for watch pump drains (default `8`). */
+  readonly watchTurnSliceMs?: number;
 }
 
 /** Administrative, schema evolution, and maintenance operations on an `EarsEngine`. */
@@ -135,7 +137,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
   let hookDepth = 0;
   let outerTxnMutated = false;
   const isInWriteTxn = (): boolean => txnDepth > 0 || hookDepth > 0;
-  const pump = new WatchPump(db, clock, options.onWatchError, observer);
+  const pump = new WatchPump(db, clock, options.onWatchError, observer, options.watchTurnSliceMs);
   const query = createQueryRoot(db, pump, observer, isInWriteTxn);
 
   const runBatchPayload = (payload: Uint8Array, ops = 1): BatchResult => {
@@ -464,6 +466,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       const finish = isOuter
         ? observer?.start({ kind: 'unit', ops: 1, watch: false, inUnit: false })
         : undefined;
+      const prevOuterMutated = outerTxnMutated;
       if (isOuter) outerTxnMutated = false;
       let commitSeq: number | undefined;
       txnDepth++;
@@ -484,6 +487,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
           return result;
         }, opts) as T;
       } catch (error) {
+        outerTxnMutated = prevOuterMutated;
         txnDepth--;
         if (hasKnownErrorCode(error)) {
           const earsErr = toEarsError(error);

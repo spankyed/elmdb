@@ -66,10 +66,12 @@ export type {
   SimilarityOptions,
   SourceOptions,
   WatchHitsOptions,
+  WatchRowsOptions,
   WhereInput,
 } from '../query.ts';
 export type { BatchSlot, BatchWriter, EntityTarget, LinkOptions } from '../batch.ts';
 export type {
+  AfterClock,
   EarsClock,
   WatchController,
   WatchHandle,

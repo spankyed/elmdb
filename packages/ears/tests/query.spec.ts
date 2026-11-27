@@ -356,4 +356,85 @@ describe('@elmdb/ears algebraic QueryBuilder', () => {
     expect(seen[1]).toHaveLength(2);
     handle.stop();
   });
+
+  it('preserves orderBy across where().limit()/after(), scopes score across hops(), rejects non-finite/BigInt values, routes limit(0).first() through DB+observer, and supports fields on query.watch()', async () => {
+    const obsEvents: Array<{ kind: string; outcome: string }> = [];
+    const handle = temps.open({ schema: querySchema });
+    const engine = createEarsEngine({
+      database: handle.database,
+      observer: {
+        start(op) {
+          return (res) => obsEvents.push({ kind: op.kind, outcome: res.outcome });
+        },
+      },
+    });
+
+    engine.batch((b) => {
+      b.create('Doc', { title: 'Alpha', body: 'alpha body', score: 10, category: 'eng' }, 'd1');
+      b.create('Doc', { title: 'Beta', body: 'beta body', score: 30, category: 'eng' }, 'd2');
+      b.create('Doc', { title: 'Gamma', body: 'gamma body', score: 20, category: 'eng' }, 'd3');
+      b.create('Doc', { title: 'Delta', body: 'delta body', score: 50, category: 'ops' }, 'd4');
+      b.link('d1', 'cites', 'd2');
+      b.link('d2', 'cites', 'd3');
+    });
+
+    // P1-13 (a): orderBy().where().limit() preserves orderBy instead of clobbering to id asc!
+    const ordered = engine.query.of('Doc').orderBy('score', 'desc').where('category', 'eng').limit(2).ids();
+    expect(ordered).toEqual(['d2', 'd3']);
+
+    // P1-13 (b): orderBy().where().after() preserves by: 'field' + dir: 'desc'!
+    const paged = engine.query
+      .of('Doc')
+      .orderBy('score', 'desc')
+      .where('category', 'eng')
+      .after({ value: 30, id: 'd2' })
+      .ids();
+    expect(paged).toEqual(['d3', 'd1']);
+
+    // P1-13 (c): search().hops().limit() does NOT reverse hop order with by: 'score', dir: 'desc'!
+    const hopLimitSpec = engine.query.of('Doc').search('fts', 'Alpha').hops({ relKinds: ['cites'], maxHops: 2 }).limit(2).toSpec();
+    const hopSteps = hopLimitSpec.steps ?? [];
+    const lastStep = hopSteps[hopSteps.length - 1];
+    expect(lastStep).toEqual({ kind: 'orderSlice', by: 'id', dir: 'asc', limit: 2 });
+
+    // P1-14: normalizeQueryValue rejects NaN, Infinity, -Infinity, and BigInt cleanly with INVALID_ARGUMENT!
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, BigInt(42)]) {
+      expect(() => engine.query.of('Doc').where('score', bad as unknown as number)).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+      );
+      expect(() => engine.query.of('Doc').where('score', { gte: bad as unknown as number })).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+      );
+      expect(() => engine.query.of('Doc').orderBy('score').after({ id: 'd1', value: bad })).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+      );
+    }
+
+    // P2-9: query.watch() supports optional `fields` projection on both initial and live updates!
+    const projectedDeliveries: Array<Array<Record<string, unknown>>> = [];
+    const projWatch = engine.query
+      .of('Doc')
+      .where('category', 'ops')
+      .watch((rows) => projectedDeliveries.push(rows.map((r) => ({ ...r.fields }))), {
+        fields: ['title'],
+        minGapMs: 0,
+      });
+    expect(projectedDeliveries).toEqual([[{ title: 'Delta' }]]);
+    engine.patch('d4', { title: 'Delta-2' });
+    engine.watches.flushSync(Date.now() + 100);
+    expect(projectedDeliveries).toEqual([[{ title: 'Delta' }], [{ title: 'Delta-2' }]]);
+    projWatch.stop();
+
+    // P2-8: first() / firstAsync() with .limit(0) still validates schema + notifies observer!
+    const obsBefore = obsEvents.length;
+    expect(engine.query.of('Doc').limit(0).first()).toBeNull();
+    expect(await engine.query.of('Doc').limit(0).firstAsync()).toBeNull();
+    expect(obsEvents.length - obsBefore).toBe(2);
+    expect(() => engine.query.of('NoSuchType').limit(0).first()).toThrowError(
+      expect.objectContaining({ code: 'UNKNOWN_TYPE' }),
+    );
+    await expect(engine.query.of('NoSuchType').limit(0).firstAsync()).rejects.toMatchObject({
+      code: 'UNKNOWN_TYPE',
+    });
+  });
 });

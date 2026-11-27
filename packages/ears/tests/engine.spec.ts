@@ -424,4 +424,93 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     unsub();
     watch.stop();
   });
+
+  it('preserves JS error messages from throwing beforeCommit hooks and clears pending N-API exceptions (P1-12) and avoids phantom sequence on rolled-back nested transact (P1-15)', () => {
+    const events: Array<{ op: EarsOperation; res: EarsOperationResult }> = [];
+    const observer: EarsOperationObserver = {
+      start(op) {
+        return (res) => events.push({ op, res });
+      },
+    };
+    const handle = temps.open({ schema: baseSchema });
+    const engine = createEarsEngine({ database: handle.database, observer });
+
+    // P1-12 (a): Standard Error thrown inside beforeCommit preserves message + HOOK_ABORTED
+    const unsubErr = engine.beforeCommit(['Task'], () => {
+      throw new Error('custom domain violation');
+    });
+    let caughtBatch: unknown;
+    try {
+      engine.create('Task', { title: 'Blocked', done: false }, 't-blocked');
+    } catch (e) {
+      caughtBatch = e;
+    }
+    expect(isEarsError(caughtBatch)).toBe(true);
+    expect((caughtBatch as EarsError).code).toBe('HOOK_ABORTED');
+    expect((caughtBatch as EarsError).message).toContain('custom domain violation');
+
+    // Also works inside transact() and leaves N-API env completely clean afterwards!
+    let caughtTxn: unknown;
+    try {
+      engine.transact(() => {
+        engine.create('Task', { title: 'Blocked in txn', done: false }, 't-blocked-txn');
+      });
+    } catch (e) {
+      caughtTxn = e;
+    }
+    expect(isEarsError(caughtTxn)).toBe(true);
+    expect((caughtTxn as EarsError).code).toBe('HOOK_ABORTED');
+    expect((caughtTxn as EarsError).message).toContain('custom domain violation');
+    unsubErr();
+
+    // P1-12 (b): Non-Error string throw and hostile throwing `.message` getter both clear N-API cleanly!
+    const unsubStr = engine.beforeCommit(['Task'], () => {
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw 'string-hook-abort';
+    });
+    expect(() => engine.create('Task', { title: 'Str', done: false }, 't-str')).toThrowError(
+      expect.objectContaining({ code: 'HOOK_ABORTED', message: expect.stringContaining('string-hook-abort') }),
+    );
+    unsubStr();
+
+    const unsubHostile = engine.beforeCommit(['Task'], () => {
+      const hostile = {
+        get message(): string {
+          throw new Error('getter explosion');
+        },
+        toString(): string {
+          throw new Error('toString explosion');
+        },
+      };
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw hostile;
+    });
+    expect(() => engine.create('Task', { title: 'Hostile', done: false }, 't-hostile')).toThrowError(
+      expect.objectContaining({ code: 'HOOK_ABORTED' }),
+    );
+    unsubHostile();
+
+    // Engine remains 100% healthy after all thrown hooks!
+    engine.create('Task', { title: 'Healthy after hooks', done: false }, 't-ok');
+    expect(engine.get('t-ok')?.fields['title']).toBe('Healthy after hooks');
+
+    // P1-15: Nested transact() rolls back the ONLY write; outer catches & succeeds -> NO phantom sequence!
+    const beforeNested = events.length;
+    const outcome = engine.transact(() => {
+      try {
+        engine.transact(() => {
+          engine.create('Task', { title: 'Rolled back', done: false }, 't-rb-only');
+          throw new Error('inner rollback');
+        });
+      } catch {
+        // Outer recovers and performs no writes of its own!
+      }
+      return 'recovered';
+    });
+    expect(outcome).toBe('recovered');
+    expect(engine.get('t-rb-only')).toBeNull();
+    const nestedUnit = events.slice(beforeNested).find((e) => e.op.kind === 'unit');
+    expect(nestedUnit?.res.outcome).toBe('ok');
+    expect(nestedUnit?.res.sequence).toBeUndefined();
+  });
 });

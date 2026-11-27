@@ -40,6 +40,7 @@ export {
 
 export {
   createSystemClock,
+  type AfterClock,
   type EarsClock,
   type WatchController,
   type WatchHandle,
@@ -77,6 +78,7 @@ export type {
   SimilarityOptions,
   SourceOptions,
   WatchHitsOptions,
+  WatchRowsOptions,
   WhereInput,
 } from './query.ts';
 

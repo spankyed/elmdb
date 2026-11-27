@@ -95,6 +95,8 @@ export declare class Database {
   catchUpCrossProcess(nowMs?: number | undefined | null): Array<number>
   tickWatches(nowMs?: number | undefined | null): WatchTick
   nextDueWatch(nowMs?: number | undefined | null, elapsedTurnMs?: number | undefined | null): NextDueWatch
+  beginWatchRun(watchId: number): boolean
+  abortWatchRun(watchId: number, requeueDirty: boolean, nowMs?: number | undefined | null): boolean
   caughtUp(nowMs?: number | undefined | null, soon?: boolean | undefined | null): boolean
   watchesSettled(): boolean
   stopWatches(): void
