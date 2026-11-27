@@ -437,7 +437,13 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
             let _ = rw.commit_raw().unwrap();
         }
         store.crash_power_loss();
-        assert_eq!(store.begin_read().unwrap().txnid(), 0);
+        let ro_empty = store.begin_read().unwrap();
+        assert_eq!(ro_empty.txnid(), 0);
+        assert!(
+            ro_empty.open_subdb_existing("data", DbFlags::DEFAULT).unwrap().is_none(),
+            "commits before first sync (durable.txnid == 0) must not corrupt txnid 0 on power loss"
+        );
+        drop(ro_empty);
 
         let mut rw = store.begin_write(()).unwrap();
         let db = rw.open_subdb("data", DbFlags::DEFAULT).unwrap();
@@ -446,12 +452,16 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         store.sync(&()).unwrap();
         assert_eq!(store.durable_txnid(), r1.txnid);
 
-        // Clean (no-op) commits after sync must NOT trigger freelist reuse corruption!
+        // Clean (no-op) commits after sync must NOT trigger freelist reuse corruption on power loss!
         for _ in 0..4 {
             let rw = store.begin_write(()).unwrap();
             let _ = rw.commit_raw().unwrap();
         }
-        // Holding TWO simultaneous `SimRoTxn`s at D: dropping ONE leaves the second still protecting D!
+        store.crash_power_loss();
+        assert_eq!(store.begin_read().unwrap().get(db, b"k").unwrap(), Some(b"durable_v1".as_slice()));
+
+        // Holding TWO simultaneous `SimRoTxn`s at D: dropping ONE leaves the second still protecting D
+        // across D+1..D+3 so a power loss STILL reads D intact!
         let ro_guard1 = store.begin_read().unwrap();
         let ro_guard2 = store.begin_read().unwrap();
         drop(ro_guard1);
@@ -461,13 +471,24 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
             let _ = rw.commit_raw().unwrap();
         }
         drop(ro_guard2);
-        // Holding a reader at `D+3` (`r > durable.txnid`) does NOT protect D!
+        store.crash_power_loss();
+        assert_eq!(
+            store.begin_read().unwrap().get(db, b"k").unwrap(),
+            Some(b"durable_v1".as_slice()),
+            "second concurrent reader at D must keep D's pages protected after first reader drops"
+        );
+
+        // Now with ZERO readers at <= D (even with a newer reader at D+1!), D+1..D+3 recycles D's pages!
+        let mut rw = store.begin_write(()).unwrap();
+        rw.put(db, b"k", b"d_plus_1").unwrap();
+        let _ = rw.commit_raw().unwrap();
         let newer_reader = store.begin_read().unwrap();
         assert!(newer_reader.txnid() > r1.txnid);
-        // Once all `<= D` readers drop, the next unsynced commit recycles D's pages even while `newer_reader` is live.
-        let mut rw = store.begin_write(()).unwrap();
-        rw.put(db, b"k", b"recycled_d_pages").unwrap();
-        let _ = rw.commit_raw().unwrap();
+        for i in 2..=3 {
+            let mut rw = store.begin_write(()).unwrap();
+            rw.put(db, b"k", format!("recycled_{i}").as_bytes()).unwrap();
+            let _ = rw.commit_raw().unwrap();
+        }
         drop(newer_reader);
 
         store.crash_power_loss();
@@ -600,10 +621,16 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
             db_e
         };
         let tx_before_grow = gate_e.last_txnid().unwrap();
-        // `grow_map` on Fresh/unpinned Grouped DB seals AND pins `tx_before_grow`!
+        // `grow_map` on Fresh/unpinned Grouped DB seals AND pins `tx_before_grow` in exactly ONE sidecar write
+        // (kills `receipt.txnid >= sealed_txnid` double-seal mutant in `verify_and_seal_after_remap_locked`)!
         let _ = gate_e.grow_map(Some(128 * 1024 * 1024)).unwrap();
         assert_eq!(store_e.durable_txnid(), tx_before_grow);
         assert_eq!(store_e.pinned_txnid(), Some(tx_before_grow), "grow_map on Fresh Grouped DB MUST acquire pin");
+        let next_slot_e = gate_e.sync().unwrap().expect("sync slot");
+        assert_eq!(
+            next_slot_e.seq, 1,
+            "grow_map without peer commit must seal sidecar only once (seq 0 -> next seq 1)"
+        );
 
         // 5 unsynced commits + power loss -> D (`before_grow`) stays 100% intact!
         for i in 1..=5 {

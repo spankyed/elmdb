@@ -125,10 +125,11 @@ pub(crate) fn atomic_publish_file_no_overwrite(tmp_path: &Path, target: &Path) -
 /// Checking `symlink_metadata` on the trailing-separator-stripped path ensures `lstat(2)` / Win32
 /// inspects the symlink itself instead of following `link/` to its target directory.
 fn normalize_non_symlink_target_dir(target_dir: &Path) -> Result<(PathBuf, Option<fs::Metadata>)> {
-    // Reject trailing `.` explicitly because `Path::components()` silently drops non-leading `CurDir`.
+    // Reject trailing `/.` / `\.` explicitly because `Path::components()` silently drops non-leading `CurDir`
+    // (empty paths, bare `.`, `..`, and root are caught by `components().next_back()` below).
     let raw = target_dir.to_string_lossy();
     let trimmed = raw.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() || trimmed == "." || trimmed.ends_with("/.") || trimmed.ends_with("\\.") {
+    if trimmed.ends_with("/.") || trimmed.ends_with("\\.") {
         return Err(ElmdbError::new(
             ErrorCode::InvalidArgument,
             format!("invalid publish target directory '{}'", target_dir.display()),

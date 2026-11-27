@@ -676,7 +676,7 @@ impl KvWrite for SimRwTxn {
         }
         let receipt = CommitReceipt { txnid: final_snap.txnid, roots_sha256: final_snap.roots_sha256() };
         let mut inner = self.inner.lock();
-        if was_dirty && inner.durable.txnid > 0 && final_snap.txnid > inner.durable.txnid {
+        if was_dirty && inner.durable.txnid > 0 {
             let freed_at = *inner.durable_freed_at.get_or_insert(final_snap.txnid);
             // LMDB keeps 2 meta slots, so pages freed at `freed_at` become eligible for freelist
             // reuse on commit `freed_at + 2` unless an active reader or durable pin holds `<= durable.txnid`.
