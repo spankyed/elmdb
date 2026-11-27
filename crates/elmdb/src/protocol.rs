@@ -360,6 +360,9 @@ pub fn compiled_to_raw_schema(schema: &CompiledSchema) -> RawSchema {
         }
         let mut fields = BTreeMap::new();
         for fd in &td.fields {
+            if fd.archived {
+                continue;
+            }
             fields.insert(
                 fd.name.clone(),
                 RawField { kind: field_kind_to_raw(schema, &fd.kind), optional: fd.optional, nullable: fd.nullable },
@@ -414,6 +417,9 @@ pub fn compiled_to_raw_schema(schema: &CompiledSchema) -> RawSchema {
 
     let mut relations = BTreeMap::new();
     for rd in &schema.relations {
+        if rd.archived {
+            continue;
+        }
         let endpoints = rd
             .endpoints
             .iter()
@@ -1168,6 +1174,16 @@ pub struct QueryAnswer {
 // ---------------------------------------------------------------------------
 
 pub fn json_to_canonical(v: &serde_json::Value) -> Result<CanonicalValue> {
+    json_to_canonical_depth(v, 0)
+}
+
+fn json_to_canonical_depth(v: &serde_json::Value, depth: usize) -> Result<CanonicalValue> {
+    if depth > elmdb_wire::MAX_VALUE_DEPTH {
+        return Err(ElmdbError::new(
+            ErrorCode::ValidationFailed,
+            format!("JSON value nesting depth exceeds maximum {}", elmdb_wire::MAX_VALUE_DEPTH),
+        ));
+    }
     match v {
         serde_json::Value::Null => Ok(CanonicalValue::Null),
         serde_json::Value::Bool(b) => Ok(CanonicalValue::Bool(*b)),
@@ -1193,7 +1209,7 @@ pub fn json_to_canonical(v: &serde_json::Value) -> Result<CanonicalValue> {
         serde_json::Value::Array(xs) => {
             let mut out = Vec::with_capacity(xs.len());
             for x in xs {
-                out.push(json_to_canonical(x)?);
+                out.push(json_to_canonical_depth(x, depth + 1)?);
             }
             Ok(CanonicalValue::Array(out))
         }
@@ -1203,7 +1219,7 @@ pub fn json_to_canonical(v: &serde_json::Value) -> Result<CanonicalValue> {
                 if k == "__proto__" {
                     return Err(ElmdbError::new(ErrorCode::ValidationFailed, "reserved key '__proto__'"));
                 }
-                out.push((k.clone(), json_to_canonical(val)?));
+                out.push((k.clone(), json_to_canonical_depth(val, depth + 1)?));
             }
             CanonicalValue::object(out)
         }
@@ -1397,7 +1413,7 @@ where
     let (mut active_type, mut node) = match &spec.source {
         QuerySource::Type { type_name, include_trashed } => {
             let td = schema
-                .type_by_name(type_name)
+                .type_by_name_any(type_name)
                 .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{type_name}'")))?;
             (Some(td.id), LogicalNode::Source(SourceSpec::Type { type_id: td.id, include_trashed: *include_trashed }))
         }
@@ -1405,7 +1421,7 @@ where
             let mut tids = Vec::with_capacity(type_names.len());
             for tn in type_names {
                 let td = schema
-                    .type_by_name(tn)
+                    .type_by_name_any(tn)
                     .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{tn}'")))?;
                 tids.push(td.id);
             }

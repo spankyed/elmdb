@@ -10,8 +10,8 @@ pub mod wire;
 
 pub use error::{ElmdbError, ErrorCode, Result};
 pub use value::{
-    CanonicalValue, NUMERIC_INDEX_KEY_LEN, ValueRef, ValueTag, compare_numeric, decode_value, decode_value_ref,
-    encode_numeric_index_key, encode_value,
+    CanonicalValue, MAX_VALUE_DEPTH, NUMERIC_INDEX_KEY_LEN, ValueRef, ValueTag, compare_numeric, decode_value,
+    decode_value_ref, encode_numeric_index_key, encode_value,
 };
 pub use wire::{
     CommitReturnFlags, DecodedBatch, DecodedResultFrame, EntityTarget, ResultDecoder, ResultEncoder, WireOp,

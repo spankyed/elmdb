@@ -1032,3 +1032,243 @@ fn review_regressions_atomic_batch_in_transact_lock_guards_noop_seq_cross_proc_a
     db2.close().unwrap();
     db.close().unwrap();
 }
+
+#[test]
+fn batch1_dump_load_refs_list_refs_archived_fields_timestamps_and_protocol_guards() {
+    use elmdb::protocol::{
+        FieldDefinition, FieldSpec, ProtocolOnDelete, QueryFilter, QuerySource, QuerySpec, QueryStep, QueryTerminal,
+        RelationDefinition, RelationEndpoint, Schema, TypeDefinition, compiled_to_raw_schema, json_to_canonical,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db_dir = tmp.path().join("src_db");
+    let dump_path = tmp.path().join("full.dump.json");
+    let loaded_dir = tmp.path().join("loaded_db");
+
+    let mut schema = Schema::default();
+    let mut project = TypeDefinition::default();
+    project.fields.insert("name".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    schema.types.insert("Project".into(), project);
+
+    let mut other = TypeDefinition::default();
+    other.fields.insert("label".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    schema.types.insert("Other".into(), other);
+
+    let mut task = TypeDefinition::default();
+    task.fields.insert("title".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    task.fields.insert("legacy".into(), FieldDefinition { kind: FieldSpec::String, optional: true, nullable: true });
+    task.fields.insert(
+        "parent".into(),
+        FieldDefinition {
+            kind: FieldSpec::Ref { to: vec!["Project".into()], on_delete: ProtocolOnDelete::Restrict },
+            optional: false,
+            nullable: false,
+        },
+    );
+    task.fields.insert(
+        "optParent".into(),
+        FieldDefinition {
+            kind: FieldSpec::Ref { to: vec!["Project".into()], on_delete: ProtocolOnDelete::SetNull },
+            optional: true,
+            nullable: true,
+        },
+    );
+    task.fields.insert(
+        "danglingRef".into(),
+        FieldDefinition {
+            kind: FieldSpec::Ref { to: vec!["Project".into()], on_delete: ProtocolOnDelete::AllowDangling },
+            optional: true,
+            nullable: true,
+        },
+    );
+    // Required List<Ref> field (P0-3)
+    task.fields.insert(
+        "deps".into(),
+        FieldDefinition {
+            kind: FieldSpec::List {
+                of: Box::new(FieldSpec::Ref { to: vec!["Task".into()], on_delete: ProtocolOnDelete::Restrict }),
+            },
+            optional: false,
+            nullable: false,
+        },
+    );
+    schema.types.insert("Task".into(), task);
+    schema.relations.insert(
+        "REL_ACTIVE".into(),
+        RelationDefinition {
+            endpoints: vec![RelationEndpoint { source: "Task".into(), target: "Project".into() }],
+            ..Default::default()
+        },
+    );
+    schema.relations.insert(
+        "REL_ARCHIVED".into(),
+        RelationDefinition {
+            endpoints: vec![RelationEndpoint { source: "Task".into(), target: "Project".into() }],
+            ..Default::default()
+        },
+    );
+
+    let db = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_schema(&schema).unwrap();
+
+    // Create entities including forward/cyclic required List<Ref>, Restrict/SetNull refs, and a DanglingRef
+    // whose external ID "reused-id" is later reused by an entity of a DIFFERENT type (`Other`).
+    db.execute_batch(&[
+        WireOp::Create {
+            type_name: "Project".into(),
+            external_id: Some("p-1".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Core".into()))],
+        },
+        WireOp::Create {
+            type_name: "Project".into(),
+            external_id: Some("reused-id".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Soon Deleted".into()))],
+        },
+        WireOp::Create {
+            type_name: "Task".into(),
+            external_id: Some("t-1".into()),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("First".into())),
+                ("legacy".into(), CanonicalValue::String("old-val".into())),
+                ("parent".into(), CanonicalValue::String("p-1".into())),
+                ("optParent".into(), CanonicalValue::String("p-1".into())),
+                ("danglingRef".into(), CanonicalValue::String("reused-id".into())),
+                ("deps".into(), CanonicalValue::Array(vec![])),
+            ],
+        },
+        WireOp::Create {
+            type_name: "Task".into(),
+            external_id: Some("t-2".into()),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("Second".into())),
+                ("parent".into(), CanonicalValue::String("p-1".into())),
+                ("deps".into(), CanonicalValue::Array(vec![CanonicalValue::String("t-1".into())])),
+            ],
+        },
+        // Cyclic required List<Ref>: t-1 -> [t-2], t-2 -> [t-1]
+        WireOp::Patch {
+            target: EntityTarget::ExternalId("t-1".into()),
+            fields: vec![("deps".into(), CanonicalValue::Array(vec![CanonicalValue::String("t-2".into())]))],
+        },
+        WireOp::Link {
+            source: EntityTarget::ExternalId("t-1".into()),
+            rel_kind: "REL_ACTIVE".into(),
+            target: EntityTarget::ExternalId("p-1".into()),
+            weight: None,
+            info: None,
+        },
+    ])
+    .unwrap();
+
+    // Destroy Project "reused-id" (turning t-1.danglingRef into DanglingRef("reused-id")),
+    // then create an Other entity with the exact same external ID "reused-id"!
+    db.execute_batch(&[
+        WireOp::Destroy { target: EntityTarget::ExternalId("reused-id".into()) },
+        WireOp::Create {
+            type_name: "Other".into(),
+            external_id: Some("reused-id".into()),
+            fields: vec![("label".into(), CanonicalValue::String("Different Type".into()))],
+        },
+    ])
+    .unwrap();
+
+    // Archive field `legacy` and relation `REL_ARCHIVED` (with ZERO archived types!) to test P0-3 & P1-5.
+    let mut evolved = schema.clone();
+    evolved.types.get_mut("Task").unwrap().fields.remove("legacy");
+    evolved.relations.remove("REL_ARCHIVED");
+    db.set_schema(&evolved).unwrap();
+
+    // P1-5: `compiled_to_raw_schema` must omit archived fields & relations cleanly.
+    let raw_roundtrip = compiled_to_raw_schema(&db.schema().unwrap());
+    assert!(!raw_roundtrip.types["Task"].fields.contains_key("legacy"));
+    assert!(!raw_roundtrip.relations.contains_key("REL_ARCHIVED"));
+
+    let orig_t1 = db.get_row("t-1").unwrap().unwrap();
+    let orig_edges = db.get_edges("t-1", Some("REL_ACTIVE"), elmdb::EdgeDir::Out).unwrap();
+    assert_eq!(orig_edges.len(), 1);
+
+    // Sleep slightly so any non-preserved timestamp during load would differ!
+    std::thread::sleep(std::time::Duration::from_millis(15));
+
+    elmdb::dump::dump(&db, &dump_path).unwrap();
+    db.close().unwrap();
+
+    elmdb::dump::load(&dump_path, &loaded_dir).unwrap();
+    let loaded = Database::open(&loaded_dir, OpenOptions::default()).unwrap();
+
+    // P0-2: Restrict & SetNull Ref fields MUST still be present with their exact values!
+    let loaded_t1 = loaded.get_row("t-1").unwrap().unwrap();
+    let loaded_t1_resolved = loaded.get_row_resolved("t-1").unwrap().unwrap();
+    assert_eq!(loaded_t1_resolved.fields.get("parent"), Some(&serde_json::json!("p-1")));
+    assert_eq!(loaded_t1_resolved.fields.get("optParent"), Some(&serde_json::json!("p-1")));
+    assert_eq!(loaded_t1_resolved.fields.get("danglingRef"), Some(&serde_json::json!("reused-id")));
+    assert_eq!(loaded_t1_resolved.fields.get("deps"), Some(&serde_json::json!(["t-2"])));
+    // P2-5: Timestamps preserved losslessly across dump/load!
+    assert_eq!(loaded_t1.created_at_ms, orig_t1.created_at_ms);
+    assert_eq!(loaded_t1.updated_at_ms, orig_t1.updated_at_ms);
+    assert_eq!(loaded_t1.trashed_at_ms, orig_t1.trashed_at_ms);
+    let loaded_edges = loaded.get_edges("t-1", Some("REL_ACTIVE"), elmdb::EdgeDir::Out).unwrap();
+    assert_eq!(loaded_edges.len(), 1);
+    assert_eq!(loaded_edges[0].created_at_ms, orig_edges[0].created_at_ms);
+
+    // P0-2: Restrict enforcement still active after load!
+    let restrict_err =
+        loaded.execute_batch(&[WireOp::Destroy { target: EntityTarget::ExternalId("p-1".into()) }]).unwrap_err();
+    assert_eq!(restrict_err.code, ErrorCode::Referenced);
+
+    // P0-3: Archived field & relation stay archived (not active!) in loaded schema!
+    let loaded_schema = elmdb::protocol::compiled_to_protocol_schema(&loaded.schema().unwrap(), false);
+    assert!(!loaded_schema.types["Task"].fields.contains_key("legacy"));
+    assert!(!loaded_schema.relations.contains_key("REL_ARCHIVED"));
+
+    // P1-5: Archiving `Other` still allows querying `Other` via QuerySource::Type & QuerySource::Types!
+    let mut no_other = evolved.clone();
+    no_other.types.remove("Other");
+    loaded.set_schema(&no_other).unwrap();
+    let ans = loaded
+        .execute_query_spec(
+            &QuerySpec {
+                source: QuerySource::Type { type_name: "Other".into(), include_trashed: false },
+                steps: vec![],
+                terminal: Some(QueryTerminal::Ids),
+                explain: false,
+            },
+            elmdb::ExecBudgets::default(),
+        )
+        .unwrap();
+    match ans.body {
+        elmdb::protocol::QueryAnswerBody::Ids { ids } => assert_eq!(ids, vec!["reused-id".to_owned()]),
+        other => panic!("expected Ids, got {other:?}"),
+    }
+
+    // P2-2: Deeply nested JSON (> MAX_VALUE_DEPTH) fails with ValidationFailed without stack overflow.
+    let mut deep = serde_json::json!(1);
+    for _ in 0..80 {
+        deep = serde_json::json!([deep]);
+    }
+    let depth_err = json_to_canonical(&deep).unwrap_err();
+    assert_eq!(depth_err.code, ErrorCode::ValidationFailed);
+    let filter_err = loaded
+        .execute_query_spec(
+            &QuerySpec {
+                source: QuerySource::Type { type_name: "Task".into(), include_trashed: false },
+                steps: vec![QueryStep::Filter { expr: QueryFilter::Eq { field: "title".into(), value: deep } }],
+                terminal: Some(QueryTerminal::Ids),
+                explain: false,
+            },
+            elmdb::ExecBudgets::default(),
+        )
+        .unwrap_err();
+    assert_eq!(filter_err.code, ErrorCode::ValidationFailed);
+
+    assert!(loaded.check(None).unwrap().is_clean());
+    loaded.close().unwrap();
+}

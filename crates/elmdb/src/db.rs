@@ -1365,7 +1365,20 @@ impl Database {
         if propagate_sync_err { sync_res } else { Ok(()) }
     }
 
-    /// Single-snapshot scan of schema, primary rows, outgoing edges, and embeddings (used by `dump`).
+    /// Restores persisted entity and relation timestamps during lossless `dump::load`.
+    pub(crate) fn restore_loaded_timestamps(
+        &self,
+        entity_timestamps: &[(String, i64, i64, i64)],
+        edge_timestamps: &[(String, String, String, i64)],
+    ) -> Result<()> {
+        let eng = self.enter_op()?;
+        self.require_writable()?;
+        self.forbid_inside_txn("restore_loaded_timestamps")?;
+        eng.restore_loaded_timestamps(entity_timestamps, edge_timestamps)
+    }
+
+    /// Single-snapshot scan of schema, raw primary rows (preserving `EntityRef` vs `DanglingRef`),
+    /// outgoing edges, embeddings, and named counters (used by `dump`).
     pub(crate) fn snapshot_for_dump(&self) -> Result<DumpSnapshot> {
         let eng = self.enter_op()?;
         self.forbid_inside_txn("dump")?;
@@ -1379,7 +1392,7 @@ impl Database {
             while let Some((k, _)) = item {
                 if k.len() == 8 {
                     let ek = EntityKey::from_ne_bytes(k.try_into().expect("8"));
-                    if let Some(row) = read_stored_row(&ro, &schema, &dbs, ek)? {
+                    if let Some(row) = elmdb_engine::read_raw_stored_row(&ro, &schema, &dbs, ek)? {
                         rows.push(row);
                     }
                 }
@@ -1488,7 +1501,10 @@ fn build_host_hook_delta(
     let entities =
         snap.entity_deltas
             .iter()
-            .map(|d| {
+            .filter_map(|d| {
+                if d.before.is_none() && d.after.is_none() {
+                    return None;
+                }
                 let type_name = sc.type_by_id(d.type_id).map(|t| t.name.clone()).unwrap_or_default();
                 let id = d.after.as_ref().or(d.before.as_ref()).map(|r| r.header.ext_id.clone()).unwrap_or_default();
                 let op =
@@ -1500,11 +1516,14 @@ fn build_host_hook_delta(
                         }
                         _ => "update",
                     };
-                HostEntityDelta { id, type_name, op }
+                Some(HostEntityDelta { id, type_name, op })
             })
             .collect();
     let mut edges = Vec::with_capacity(snap.edge_deltas.len());
     for e in &snap.edge_deltas {
+        if e.before.is_none() && e.after.is_none() {
+            continue;
+        }
         let rel_kind = sc.relation_by_id(e.kind).map(|r| r.name.clone()).unwrap_or_default();
         let op = match (&e.before, &e.after) {
             (None, Some(_)) => "link",

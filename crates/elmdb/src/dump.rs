@@ -121,26 +121,13 @@ fn field_spec_contains_ref(spec: &FieldSpec) -> bool {
     }
 }
 
-fn dump_value_for_field(
-    v: &CanonicalValue,
-    spec: Option<&FieldSpec>,
-    key_to_ext: &HashMap<EntityKey, String>,
-    live_ext_ids: &std::collections::HashSet<&str>,
-) -> DumpValue {
-    match (spec, v) {
-        (Some(FieldSpec::Ref { .. }), CanonicalValue::String(ext)) => {
-            if live_ext_ids.contains(ext.as_str()) {
-                DumpValue::EntityRef(ext.clone())
-            } else {
-                DumpValue::DanglingRef(ext.clone())
-            }
+fn relax_field_spec_for_staging(spec: &mut FieldSpec) {
+    match spec {
+        FieldSpec::Ref { on_delete, .. } => {
+            *on_delete = ProtocolOnDelete::AllowDangling;
         }
-        (Some(FieldSpec::List { of }), CanonicalValue::Array(items)) if field_spec_contains_ref(of) => {
-            DumpValue::Array(
-                items.iter().map(|it| dump_value_for_field(it, Some(of), key_to_ext, live_ext_ids)).collect(),
-            )
-        }
-        _ => DumpValue::from_canonical(v, key_to_ext),
+        FieldSpec::List { of } => relax_field_spec_for_staging(of),
+        _ => {}
     }
 }
 
@@ -150,6 +137,12 @@ struct DumpEntity {
     id: String,
     type_name: String,
     trashed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    updated_at_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    trashed_at_ms: Option<i64>,
     fields: BTreeMap<String, DumpValue>,
 }
 
@@ -160,6 +153,8 @@ struct DumpRelation {
     source_id: String,
     target_id: String,
     weight: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_at_ms: Option<i64>,
     info: Option<DumpValue>,
 }
 
@@ -229,26 +224,18 @@ pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
     let archived_types: Vec<String> = snap.schema.types.iter().filter(|t| t.archived).map(|t| t.name.clone()).collect();
 
     let key_to_ext: HashMap<EntityKey, String> = snap.rows.iter().map(|r| (r.key, r.id.clone())).collect();
-    let live_ext_ids: std::collections::HashSet<&str> = snap.rows.iter().map(|r| r.id.as_str()).collect();
 
     let entities: Vec<DumpEntity> = snap
         .rows
         .iter()
-        .map(|r| {
-            let type_fields = full_schema.types.get(&r.type_name).map(|t| &t.fields);
-            DumpEntity {
-                id: r.id.clone(),
-                type_name: r.type_name.clone(),
-                trashed: r.trashed,
-                fields: r
-                    .fields
-                    .iter()
-                    .map(|(k, v)| {
-                        let spec = type_fields.and_then(|fs| fs.get(k)).map(|f| &f.kind);
-                        (k.clone(), dump_value_for_field(v, spec, &key_to_ext, &live_ext_ids))
-                    })
-                    .collect(),
-            }
+        .map(|r| DumpEntity {
+            id: r.id.clone(),
+            type_name: r.type_name.clone(),
+            trashed: r.trashed,
+            created_at_ms: Some(r.created_at_ms),
+            updated_at_ms: Some(r.updated_at_ms),
+            trashed_at_ms: Some(r.trashed_at_ms),
+            fields: r.fields.iter().map(|(k, v)| (k.clone(), DumpValue::from_canonical(v, &key_to_ext))).collect(),
         })
         .collect();
 
@@ -260,6 +247,7 @@ pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
             source_id: key_to_ext.get(&e.src).cloned().unwrap_or_default(),
             target_id: key_to_ext.get(&e.dst).cloned().unwrap_or_default(),
             weight: e.weight,
+            created_at_ms: Some(e.created_at_ms),
             info: e.info.as_ref().map(|v| DumpValue::from_canonical(v, &key_to_ext)),
         })
         .collect();
@@ -348,14 +336,14 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
         },
     )?;
 
-    // Build a relaxed staging schema so forward/cyclic Refs, DanglingRefs, and trashed unique-key collisions
-    // load cleanly in 2 passes before restoring the exact schema + rebuilding unique/derived indexes!
+    // Build a relaxed staging schema so forward/cyclic Refs, List<Ref>, DanglingRefs, and trashed
+    // unique-key collisions load cleanly in 2 passes before restoring exact schema & unique indexes!
     let mut staging_schema = payload.full_schema.clone();
     for tdef in staging_schema.types.values_mut() {
         for fdef in tdef.fields.values_mut() {
-            if let FieldSpec::Ref { on_delete, .. } = &mut fdef.kind {
+            if field_spec_contains_ref(&fdef.kind) {
                 fdef.optional = true;
-                *on_delete = ProtocolOnDelete::AllowDangling;
+                relax_field_spec_for_staging(&mut fdef.kind);
             }
         }
         for idx in tdef.indexes.values_mut() {
@@ -445,10 +433,31 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
         db.execute_batch(&trash_ops)?;
     }
 
+    // Pass 5b: Restore original entity & relation timestamps so RecencyDecay stays lossless.
+    let entity_timestamps: Vec<(String, i64, i64, i64)> = payload
+        .entities
+        .iter()
+        .filter_map(|e| {
+            let c = e.created_at_ms?;
+            let u = e.updated_at_ms.unwrap_or(c);
+            let t = e.trashed_at_ms.unwrap_or(0);
+            Some((e.id.clone(), c, u, t))
+        })
+        .collect();
+    let edge_timestamps: Vec<(String, String, String, i64)> = payload
+        .relations
+        .iter()
+        .filter_map(|r| {
+            let c = r.created_at_ms?;
+            Some((r.rel_kind.clone(), r.source_id.clone(), r.target_id.clone(), c))
+        })
+        .collect();
+    db.restore_loaded_timestamps(&entity_timestamps, &edge_timestamps)?;
+
     // Pass 6: Apply exact full schema (re-enabling unique & strict onDelete constraints),
-    // then apply active schema if any types were archived so archived types are preserved cleanly!
+    // then apply active schema whenever archived types/fields/relations exist!
     db.set_schema(&payload.full_schema)?;
-    if !payload.archived_types.is_empty() {
+    if payload.schema != payload.full_schema || !payload.archived_types.is_empty() {
         db.set_schema(&payload.schema)?;
     }
 

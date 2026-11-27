@@ -205,8 +205,10 @@ impl PartialEq for CanonicalValue {
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Int(a), Self::Int(b)) => a == b,
             (Self::Float(a), Self::Float(b)) => {
-                if !a.is_finite() || !b.is_finite() {
-                    return false;
+                // Canonicalize `-0.0` to `+0.0`, and compare non-finite floats by canonical NaN/bits
+                // so `PartialEq` strictly upholds `Eq` reflexivity even if callers construct raw `Float(NaN)`.
+                if a.is_nan() && b.is_nan() {
+                    return true;
                 }
                 let na = if *a == 0.0 { 0.0 } else { *a };
                 let nb = if *b == 0.0 { 0.0 } else { *b };
@@ -383,7 +385,7 @@ pub fn encode_value(val: &CanonicalValue, out: &mut Vec<u8>) {
             for item in items {
                 encode_value(item, out);
             }
-            let payload_len = (out.len() - payload_start + 4) as u32;
+            let payload_len = u32::try_from(out.len() - payload_start + 4).expect("wire array payload fits u32");
             out[len_pos..len_pos + 4].copy_from_slice(&payload_len.to_le_bytes());
         }
         CanonicalValue::Object(entries) => {
@@ -397,7 +399,7 @@ pub fn encode_value(val: &CanonicalValue, out: &mut Vec<u8>) {
                 out.extend_from_slice(k.as_bytes());
                 encode_value(v, out);
             }
-            let payload_len = (out.len() - payload_start + 4) as u32;
+            let payload_len = u32::try_from(out.len() - payload_start + 4).expect("wire object payload fits u32");
             out[len_pos..len_pos + 4].copy_from_slice(&payload_len.to_le_bytes());
         }
     }
