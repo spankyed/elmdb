@@ -54,6 +54,8 @@ pub trait KvRead {
     fn get(&self, db: SubDbHandle, key: &[u8]) -> Result<Option<&[u8]>, StorageError>;
     fn cursor(&self, db: SubDbHandle) -> Result<Self::Cursor<'_>, StorageError>;
     fn entries(&self, db: SubDbHandle) -> Result<u64, StorageError>;
+    /// Returns the MVCC snapshot transaction ID of this transaction (`mdb_txn_id` on LMDB).
+    fn txnid(&self) -> u64;
     /// Opens an already-existing named sub-DB visible in this transaction (`Ok(None)` if absent).
     fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError>;
 }
@@ -63,6 +65,9 @@ pub trait KvRead {
 /// Higher layers should commit exclusively through `DurabilityGate::commit` rather than
 /// invoking `commit_raw` directly.
 pub trait KvWrite: KvRead + Sized {
+    /// L2 `MapGate` read guard owned by this write transaction and returned back on commit.
+    type MapReadGuard: 'static;
+
     fn open_subdb(&mut self, name: &str, flags: DbFlags) -> Result<SubDbHandle, StorageError>;
     fn put(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<(), StorageError>;
     /// Inserts `(key, val)` only if `key` does not already exist. Returns `true` if inserted.
@@ -80,8 +85,9 @@ pub trait KvWrite: KvRead + Sized {
     fn abort_savepoint(&mut self, depth: u32) -> Result<(), StorageError>;
     fn savepoint_depth(&self) -> u32;
 
-    /// Commits the root transaction. Must fail if any nested savepoint is still open.
-    fn commit_raw(self) -> Result<CommitReceipt, StorageError>;
+    /// Commits the root transaction, returning the commit receipt and the held L2 `MapReadGuard`.
+    /// Must fail if any nested savepoint is still open.
+    fn commit_raw(self) -> Result<(CommitReceipt, Self::MapReadGuard), StorageError>;
     fn abort(self);
 }
 
@@ -90,23 +96,53 @@ pub trait KvStore: Send + Sync {
     type RoTxn<'a>: KvRead
     where
         Self: 'a;
-    type RwTxn<'a>: KvWrite
+    type RwTxn<'a>: KvWrite<MapReadGuard = Self::MapReadGuard>
     where
         Self: 'a;
-    type OwnedRwTxn: KvWrite + 'static;
+    type OwnedRwTxn: KvWrite<MapReadGuard = Self::MapReadGuard> + 'static;
+    /// Guard token proving the caller holds L2 `MapGate::read()` for this environment.
+    type MapReadGuard: 'static;
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError>;
-    fn begin_write(&self) -> Result<Self::RwTxn<'_>, StorageError>;
-    fn begin_write_owned(&self) -> Result<Self::OwnedRwTxn, StorageError>;
+    fn begin_write(&self, map_guard: Self::MapReadGuard) -> Result<Self::RwTxn<'_>, StorageError>;
+    fn begin_write_owned(&self, map_guard: Self::MapReadGuard) -> Result<Self::OwnedRwTxn, StorageError>;
+    fn lock_map_read(&self) -> Self::MapReadGuard;
     fn open_subdb_ro(
         &self,
         txn: &Self::RoTxn<'_>,
         name: &str,
         flags: DbFlags,
     ) -> Result<Option<SubDbHandle>, StorageError>;
-    fn sync(&self) -> Result<(), StorageError>;
+    /// Pre-opens any committed named sub-DBs into the environment handle cache in an isolated RO txn.
+    /// Callers MUST pass an active `MapReadGuard` (L2) and hold `WriterLock` (L3).
+    fn ensure_subdbs_open(
+        &self,
+        _map_guard: &Self::MapReadGuard,
+        _names: &[(&str, DbFlags)],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    /// Returns `Some(target_map_size)` when free headroom is below the proactive growth threshold.
+    fn needs_map_growth(&self) -> Result<Option<usize>, StorageError> {
+        Ok(None)
+    }
+    /// Grows the underlying mmap to at least `min_size` (or doubles current size) under L2 `MapGate::write()`.
+    /// Caller MUST NOT hold any active transaction (`L2` or `L3`).
+    fn grow_map(&self, _min_size: Option<usize>) -> Result<usize, StorageError> {
+        Ok(self.map_size())
+    }
+    /// Adopts an external cross-process map resize (`mdb_env_set_mapsize(env, 0)`) under L2 `MapGate::write()`.
+    /// Caller MUST NOT hold any active transaction (`L2` or `L3`).
+    fn adopt_resized_map(&self) -> Result<usize, StorageError> {
+        Ok(self.map_size())
+    }
+    fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError>;
     fn last_txnid(&self) -> Result<u64, StorageError>;
     fn roots_sha256(&self) -> Result<[u8; 32], StorageError>;
+    /// Atomically reads `(txnid, roots_sha256)` from a single active meta-page snapshot (no TOCTOU).
+    fn active_receipt(&self) -> Result<CommitReceipt, StorageError> {
+        Ok(CommitReceipt { txnid: self.last_txnid()?, roots_sha256: self.roots_sha256()? })
+    }
     fn map_size(&self) -> usize;
     fn page_size(&self) -> usize;
     /// Writes a consistent compacted copy of the store into `target_dir` and returns the copied file's receipt.

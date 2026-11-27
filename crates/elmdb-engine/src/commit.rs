@@ -571,11 +571,35 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         Ok(())
     }
 
+    /// Retries a pure write closure strictly on LMDB `MDB_MAP_FULL`, doubling the map size
+    /// under L2 `MapGate::write()` between attempts (when zero transactions are open).
+    fn retry_on_map_full<T, F>(&self, mut f: F) -> Result<T>
+    where
+        F: FnMut() -> Result<T>,
+    {
+        const MAX_GROWTH_RETRIES: usize = 8;
+        for attempt in 0..=MAX_GROWTH_RETRIES {
+            let before = self.gate.map_size();
+            match f() {
+                Ok(v) => return Ok(v),
+                Err(err) if err.is_map_full() && attempt < MAX_GROWTH_RETRIES => {
+                    let target = before.saturating_mul(2);
+                    let after = self.gate.grow_map(Some(target))?;
+                    if after <= before {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("loop returns on final attempt")
+    }
+
     /// Compiles and installs a new schema, retiring dropped index slots via O(1) `truncate`
     /// without calling `mdb_dbi_close()` and without holding `SchemaEpochLock` (L1) across I/O or builds.
     pub fn set_schema(&self, raw: &RawSchema) -> Result<(Arc<CompiledSchema>, SchemaDiff)> {
-        let (compiled, next_pool, diff) = {
-            let mut txn = self.gate.begin_write()?;
+        let (compiled, next_pool, diff) = self.retry_on_map_full(|| {
+            let (mut txn, _) = self.begin_write_with_fresh_schema()?;
             let (cur_schema, mut next_pool) = load_schema_and_pool(&txn, &self.dbs)?;
             let (compiled, diff) = CompiledSchema::compile(raw, Some(&cur_schema), &mut next_pool)?;
 
@@ -603,11 +627,9 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                     txn.del(self.dbs.embeddings, &k)?;
                 }
             }
-            // Pre-open newly allocated slots at root write txn so readers never need `mdb_dbi_open`.
-            for &idx_id in &diff.added_indexes {
-                if let Some(def) = compiled.index_by_id(idx_id) {
-                    let _ = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
-                }
+            // Pre-open all active index slots at root write txn so readers never need `mdb_dbi_open`.
+            for def in &compiled.indexes {
+                let _ = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
             }
 
             self.projections.on_schema_change(&mut txn, &compiled, &self.dbs, &diff)?;
@@ -628,8 +650,8 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 &[],
             )?;
             txn.commit()?;
-            (compiled, next_pool, diff)
-        };
+            Ok((compiled, next_pool, diff))
+        })?;
 
         let arc = Arc::new(compiled);
         self.publish_schema_monotonic(Arc::clone(&arc), next_pool);
@@ -649,7 +671,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// O(1) metadata rename of a type (external IDs stay immutable by default; optional `rewrite_ids`
     /// rewrites `<old>-<suffix>` prefixes in `ext_id` and `PackedRow` headers only).
     pub fn rename_type(&self, old_type: &str, new_type: &str, rewrite_ids: bool) -> Result<Arc<CompiledSchema>> {
-        let (next, pool) = {
+        let (next, pool) = self.retry_on_map_full(|| {
             let mut txn = self.gate.begin_write()?;
             let (cur_schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
             let type_id = cur_schema
@@ -707,19 +729,19 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 &[],
             )?;
             txn.commit()?;
-            (next, pool)
-        };
+            Ok((next, pool))
+        })?;
 
         let arc = Arc::new(next);
         self.publish_schema_monotonic(Arc::clone(&arc), pool);
         Ok(arc)
     }
 
-    fn apply_schema_rename<F>(&self, f: F) -> Result<Arc<CompiledSchema>>
+    fn apply_schema_rename<F>(&self, mut f: F) -> Result<Arc<CompiledSchema>>
     where
-        F: FnOnce(&CompiledSchema) -> Result<CompiledSchema>,
+        F: FnMut(&CompiledSchema) -> Result<CompiledSchema>,
     {
-        let (next, pool) = {
+        let (next, pool) = self.retry_on_map_full(|| {
             let mut txn = self.gate.begin_write()?;
             let (cur_schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
             let next = f(&cur_schema)?;
@@ -738,8 +760,8 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 &[],
             )?;
             txn.commit()?;
-            (next, pool)
-        };
+            Ok((next, pool))
+        })?;
         let arc = Arc::new(next);
         self.publish_schema_monotonic(Arc::clone(&arc), pool);
         Ok(arc)
@@ -754,7 +776,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     }
 
     /// Acquires a write transaction and its exact matching `Arc<CompiledSchema>` with zero TOCTOU
-    /// race and strict `L1 -> L3` lock ordering (never holds L1 during the write transaction body!).
+    /// race and strict `L1 -> L2 -> L3` lock ordering (never holds L1 during the write transaction body!).
     fn begin_write_with_fresh_schema(&self) -> Result<(GatedWriteTxn<'_, S, V>, Arc<CompiledSchema>)> {
         {
             let guard = self.schema_state.read();
@@ -765,47 +787,37 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 drop(guard);
                 return Ok((txn, schema));
             }
-            // Drop L3 before taking L1.write() to uphold strict L1 -> L3 order.
+            // Drop L3 + L2 before taking L1.write() to uphold strict L1 -> L2 -> L3 order.
         }
         let mut state = self.schema_state.write();
-        let mut txn = self.gate.begin_write()?;
-        let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
-        if disk_epoch > state.schema.epoch {
+        loop {
+            let txn = self.gate.begin_write()?;
+            let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
+            if disk_epoch <= state.schema.epoch {
+                let schema = Arc::clone(&state.schema);
+                drop(state);
+                return Ok((txn, schema));
+            }
             let (schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
-            // Drop L3 write txn BEFORE pre-opening new sub-DBs in an RO txn so every newly discovered
-            // DBI is permanently published in `MDB_env` prior to `mdb_txn_begin()` of the write txn!
+            // Drop L3+L2 write txn BEFORE pre-opening cross-process sub-DBs in an isolated committed RO txn
+            // (under L2+L3 inside `ensure_subdbs_open`) so every DBI is permanently published in `MDB_env`
+            // prior to `mdb_txn_begin()` of the write txn and NEVER races with any write txn's `mdb_dbi_open`!
             drop(txn);
-            {
-                let ro = self.gate.begin_read()?;
-                for idx in &schema.indexes {
-                    let _ = self.gate.open_subdb_ro(&ro, &idx.subdb_slot().name(), DbFlags::DEFAULT)?;
-                }
-            }
-            txn = self.gate.begin_write()?;
-            let recheck_epoch = read_schema_epoch(&txn, &self.dbs)?;
-            if recheck_epoch > schema.epoch {
-                let (fresh_schema, fresh_pool) = load_schema_and_pool(&txn, &self.dbs)?;
-                for idx in &fresh_schema.indexes {
-                    let _ = txn.open_subdb(&idx.subdb_slot().name(), DbFlags::DEFAULT)?;
-                }
-                state.schema = Arc::new(fresh_schema);
-                state.pool = fresh_pool;
-            } else {
-                state.schema = Arc::new(schema);
-                state.pool = pool;
-            }
+            let slot_names: Vec<String> = schema.indexes.iter().map(|i| i.subdb_slot().name()).collect();
+            let slot_refs: Vec<(&str, DbFlags)> = slot_names.iter().map(|s| (s.as_str(), DbFlags::DEFAULT)).collect();
+            self.gate.ensure_subdbs_open(&slot_refs)?;
+            state.schema = Arc::new(schema);
+            state.pool = pool;
+            // Loop to re-acquire the write txn and verify no concurrent process advanced `disk_epoch` again.
         }
-        let schema = Arc::clone(&state.schema);
-        drop(state);
-        Ok((txn, schema))
     }
 
     /// Atomically compacts an index into a fresh staging `SubDbSlot` drawn from `SubDbPool`,
     /// swaps the index's active slot in `meta`, and truncates the retired slot in O(1) without
     /// ever calling `mdb_dbi_close()` (zero `MDB_DBS_FULL` leaks!).
-    pub fn swap_index_slot<T, F>(&self, index_id: IndexId, f: F) -> Result<(T, CommitReceipt)>
+    pub fn swap_index_slot<T, F>(&self, index_id: IndexId, mut f: F) -> Result<(T, CommitReceipt)>
     where
-        F: FnOnce(
+        F: FnMut(
             &mut GatedWriteTxn<'_, S, V>,
             &CompiledSchema,
             &SystemDbs,
@@ -813,7 +825,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             SubDbHandle, // clean staging sub-DB
         ) -> Result<T>,
     {
-        let (out, receipt, next_schema, next_pool) = {
+        let (out, receipt, next_schema, next_pool) = self.retry_on_map_full(|| {
             let mut txn = self.gate.begin_write()?;
             let (mut schema, mut pool) = load_schema_and_pool(&txn, &self.dbs)?;
             let idx_pos =
@@ -849,22 +861,25 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 &[],
             )?;
             let receipt = txn.commit()?;
-            (out, receipt, schema, pool)
-        };
+            Ok((out, receipt, schema, pool))
+        })?;
         self.publish_schema_monotonic(Arc::new(next_schema), next_pool);
         Ok((out, receipt))
     }
 
     /// Runs a lock-order-safe maintenance write transaction (used by chunked index builders,
-    /// `rebuild()`, vector drain, and ping-pong compaction) with zero schema-epoch TOCTOU.
-    pub fn run_maintenance_write<T, F>(&self, f: F) -> Result<(T, CommitReceipt)>
+    /// `rebuild()`, vector drain, and ping-pong compaction) with zero schema-epoch TOCTOU and
+    /// automatic LMDB map growth retry.
+    pub fn run_maintenance_write<T, F>(&self, mut f: F) -> Result<(T, CommitReceipt)>
     where
-        F: FnOnce(&mut GatedWriteTxn<'_, S, V>, &Arc<CompiledSchema>, &SystemDbs) -> Result<T>,
+        F: FnMut(&mut GatedWriteTxn<'_, S, V>, &Arc<CompiledSchema>, &SystemDbs) -> Result<T>,
     {
-        let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
-        let out = f(&mut txn, &schema, &self.dbs)?;
-        let receipt = txn.commit()?;
-        Ok((out, receipt))
+        self.retry_on_map_full(|| {
+            let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
+            let out = f(&mut txn, &schema, &self.dbs)?;
+            let receipt = txn.commit()?;
+            Ok((out, receipt))
+        })
     }
 
     /// Executes a binary `elmdb-wire` batch frame in one atomic commit.
@@ -880,36 +895,38 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     }
 
     pub fn execute_batch_with_flags(&self, ops: &[WireOp], flags: CommitReturnFlags) -> Result<BatchOutcome> {
-        let (txn, schema) = self.begin_write_with_fresh_schema()?;
-        let commit_seq = self.next_commit_seq(&txn)?;
-        let now_ms = self.clock.now_ms();
+        self.retry_on_map_full(|| {
+            let (txn, schema) = self.begin_write_with_fresh_schema()?;
+            let commit_seq = self.next_commit_seq(&txn)?;
+            let now_ms = self.clock.now_ms();
 
-        let mut ctx = TxnCtx {
-            engine: EngineRef::Borrowed(self),
-            txn,
-            schema,
-            commit_seq,
-            now_ms,
-            dirty: false,
-            total_deltas: DeltaBatch::new(),
-            round_deltas: DeltaBatch::new(),
-            active_hook_deltas: None,
-            round_touched_types: TypeMask::empty(),
-            pending_deltas: DeltaBatch::new(),
-            saved_frames: Vec::new(),
-        };
+            let mut ctx = TxnCtx {
+                engine: EngineRef::Borrowed(self),
+                txn,
+                schema,
+                commit_seq,
+                now_ms,
+                dirty: false,
+                total_deltas: DeltaBatch::new(),
+                round_deltas: DeltaBatch::new(),
+                active_hook_deltas: None,
+                round_touched_types: TypeMask::empty(),
+                pending_deltas: DeltaBatch::new(),
+                saved_frames: Vec::new(),
+            };
 
-        let mut batch_slots: Vec<(EntityKey, String)> = Vec::new();
-        for op in ops {
-            ctx.apply_op(op, &mut batch_slots)?;
-        }
-        ctx.flush_projections()?;
-        ctx.run_before_commit_cascade()?;
-        ctx.finalize_commit_log()?;
+            let mut batch_slots: Vec<(EntityKey, String)> = Vec::new();
+            for op in ops {
+                ctx.apply_op(op, &mut batch_slots)?;
+            }
+            ctx.flush_projections()?;
+            ctx.run_before_commit_cascade()?;
+            ctx.finalize_commit_log()?;
 
-        let created_ids: Vec<String> = batch_slots.into_iter().map(|(_, id)| id).collect();
-        let (receipt, summary_out) = ctx.commit_with_summary(flags.contains(CommitReturnFlags::FULL_CHANGESET))?;
-        Ok(BatchOutcome { commit_seq, receipt, created_ids, summary: summary_out })
+            let created_ids: Vec<String> = batch_slots.into_iter().map(|(_, id)| id).collect();
+            let (receipt, summary_out) = ctx.commit_with_summary(flags.contains(CommitReturnFlags::FULL_CHANGESET))?;
+            Ok(BatchOutcome { commit_seq, receipt, created_ids, summary: summary_out })
+        })
     }
 
     /// Begins an owned `'static` (but `!Send`) write `TxnCtx` for callback-scoped synchronous
@@ -955,36 +972,22 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             }
         }
         let mut state = self.schema_state.write();
-        let mut txn = self.gate.begin_write_owned()?;
-        let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
-        if disk_epoch > state.schema.epoch {
+        loop {
+            let txn = self.gate.begin_write_owned()?;
+            let disk_epoch = read_schema_epoch(&txn, &self.dbs)?;
+            if disk_epoch <= state.schema.epoch {
+                let schema = Arc::clone(&state.schema);
+                drop(state);
+                return Ok((txn, schema));
+            }
             let (schema, pool) = load_schema_and_pool(&txn, &self.dbs)?;
-            // Drop L3 write txn BEFORE pre-opening new sub-DBs in an RO txn so every newly discovered
-            // DBI is permanently published in `MDB_env` prior to `mdb_txn_begin()` of the write txn!
             drop(txn);
-            {
-                let ro = self.gate.begin_read()?;
-                for idx in &schema.indexes {
-                    let _ = self.gate.open_subdb_ro(&ro, &idx.subdb_slot().name(), DbFlags::DEFAULT)?;
-                }
-            }
-            txn = self.gate.begin_write_owned()?;
-            let recheck_epoch = read_schema_epoch(&txn, &self.dbs)?;
-            if recheck_epoch > schema.epoch {
-                let (fresh_schema, fresh_pool) = load_schema_and_pool(&txn, &self.dbs)?;
-                for idx in &fresh_schema.indexes {
-                    let _ = txn.open_subdb(&idx.subdb_slot().name(), DbFlags::DEFAULT)?;
-                }
-                state.schema = Arc::new(fresh_schema);
-                state.pool = fresh_pool;
-            } else {
-                state.schema = Arc::new(schema);
-                state.pool = pool;
-            }
+            let slot_names: Vec<String> = schema.indexes.iter().map(|i| i.subdb_slot().name()).collect();
+            let slot_refs: Vec<(&str, DbFlags)> = slot_names.iter().map(|s| (s.as_str(), DbFlags::DEFAULT)).collect();
+            self.gate.ensure_subdbs_open(&slot_refs)?;
+            state.schema = Arc::new(schema);
+            state.pool = pool;
         }
-        let schema = Arc::clone(&state.schema);
-        drop(state);
-        Ok((txn, schema))
     }
 
     /// Restores persisted entity and relation timestamps during lossless `dump::load` without
@@ -999,64 +1002,66 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         if entity_timestamps.is_empty() && edge_timestamps.is_empty() {
             return Ok(());
         }
-        let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
-        let dbs = self.dbs;
+        self.retry_on_map_full(|| {
+            let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
+            let dbs = self.dbs;
 
-        for (ext_id, created_at_ms, updated_at_ms, trashed_at_ms) in entity_timestamps {
-            let Some(key) = lookup_ext_id_in_txn(&txn, &dbs, ext_id)? else {
-                continue;
-            };
-            let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
-                continue;
-            };
-            let mut packed =
-                decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
-            packed.header.created_at_ms = *created_at_ms;
-            packed.header.updated_at_ms = *updated_at_ms;
-            packed.header.trashed_at_ms = *trashed_at_ms;
-            let enc = encode_row(&packed)?;
-            txn.put(dbs.entities, &key.to_ne_bytes(), &enc.row_bytes)?;
-        }
-
-        if !edge_timestamps.is_empty() {
-            let mut queues: FxHashMap<(RelKindId, EntityKey, EntityKey), VecDeque<i64>> = FxHashMap::default();
-            for (rel_kind, src_ext, dst_ext, created_at_ms) in edge_timestamps {
-                let Some(rdef) = schema.relations.iter().find(|r| r.name == *rel_kind) else {
+            for (ext_id, created_at_ms, updated_at_ms, trashed_at_ms) in entity_timestamps {
+                let Some(key) = lookup_ext_id_in_txn(&txn, &dbs, ext_id)? else {
                     continue;
                 };
-                let Some(src) = lookup_ext_id_in_txn(&txn, &dbs, src_ext)? else {
+                let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
                     continue;
                 };
-                let Some(dst) = lookup_ext_id_in_txn(&txn, &dbs, dst_ext)? else {
-                    continue;
-                };
-                queues.entry((rdef.id, src, dst)).or_default().push_back(*created_at_ms);
+                let mut packed =
+                    decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
+                packed.header.created_at_ms = *created_at_ms;
+                packed.header.updated_at_ms = *updated_at_ms;
+                packed.header.trashed_at_ms = *trashed_at_ms;
+                let enc = encode_row(&packed)?;
+                txn.put(dbs.entities, &key.to_ne_bytes(), &enc.row_bytes)?;
             }
-            let mut updates: Vec<(RelKey, Vec<u8>)> = Vec::new();
-            {
-                let mut cur = txn.cursor(dbs.relations)?;
-                let mut item = cur.first()?;
-                while let Some((k, v)) = item {
-                    if k.len() == 8 {
-                        let rk = RelKey::from_ne_bytes(k.try_into().expect("8"));
-                        let mut edge = PackedEdge::decode(rk, v)?;
-                        if let Some(q) = queues.get_mut(&(edge.kind, edge.src, edge.dst))
-                            && let Some(ts) = q.pop_front()
-                        {
-                            edge.created_at_ms = ts;
-                            updates.push((rk, edge.encode()));
+
+            if !edge_timestamps.is_empty() {
+                let mut queues: FxHashMap<(RelKindId, EntityKey, EntityKey), VecDeque<i64>> = FxHashMap::default();
+                for (rel_kind, src_ext, dst_ext, created_at_ms) in edge_timestamps {
+                    let Some(rdef) = schema.relations.iter().find(|r| r.name == *rel_kind) else {
+                        continue;
+                    };
+                    let Some(src) = lookup_ext_id_in_txn(&txn, &dbs, src_ext)? else {
+                        continue;
+                    };
+                    let Some(dst) = lookup_ext_id_in_txn(&txn, &dbs, dst_ext)? else {
+                        continue;
+                    };
+                    queues.entry((rdef.id, src, dst)).or_default().push_back(*created_at_ms);
+                }
+                let mut updates: Vec<(RelKey, Vec<u8>)> = Vec::new();
+                {
+                    let mut cur = txn.cursor(dbs.relations)?;
+                    let mut item = cur.first()?;
+                    while let Some((k, v)) = item {
+                        if k.len() == 8 {
+                            let rk = RelKey::from_ne_bytes(k.try_into().expect("8"));
+                            let mut edge = PackedEdge::decode(rk, v)?;
+                            if let Some(q) = queues.get_mut(&(edge.kind, edge.src, edge.dst))
+                                && let Some(ts) = q.pop_front()
+                            {
+                                edge.created_at_ms = ts;
+                                updates.push((rk, edge.encode()));
+                            }
                         }
+                        item = cur.next()?;
                     }
-                    item = cur.next()?;
+                }
+                for (rk, bytes) in updates {
+                    txn.put(dbs.relations, &rk.to_ne_bytes(), &bytes)?;
                 }
             }
-            for (rk, bytes) in updates {
-                txn.put(dbs.relations, &rk.to_ne_bytes(), &bytes)?;
-            }
-        }
 
-        txn.commit()?;
-        Ok(())
+            txn.commit()?;
+            Ok(())
+        })
     }
 
     /// Executes a synchronous read-modify-write transaction with native LMDB nested savepoints
@@ -1094,10 +1099,12 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
 
     /// Atomically increments named transactional counter `name` by 1 and returns the new value (`1, 2, ...`).
     pub fn next_counter(&self, name: &str) -> Result<u64> {
-        let mut txn = self.gate.begin_write()?;
-        let next = next_counter_in_txn(&mut txn, &self.dbs, name)?;
-        txn.commit()?;
-        Ok(next)
+        self.retry_on_map_full(|| {
+            let mut txn = self.gate.begin_write()?;
+            let next = next_counter_in_txn(&mut txn, &self.dbs, name)?;
+            txn.commit()?;
+            Ok(next)
+        })
     }
 
     /// Reads the current value of named counter `name` (`0` if never incremented).
@@ -1108,10 +1115,12 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
 
     /// Sets named transactional counter `name` to `value`.
     pub fn set_counter(&self, name: &str, value: u64) -> Result<()> {
-        let mut txn = self.gate.begin_write()?;
-        set_counter_in_txn(&mut txn, &self.dbs, name, value)?;
-        txn.commit()?;
-        Ok(())
+        self.retry_on_map_full(|| {
+            let mut txn = self.gate.begin_write()?;
+            set_counter_in_txn(&mut txn, &self.dbs, name, value)?;
+            txn.commit()?;
+            Ok(())
+        })
     }
 
     /// Lists all named counters (for lossless `dump()`).
@@ -1199,9 +1208,11 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// shared state never regresses backwards!
     pub fn begin_read_pinned(&self) -> Result<(S::RoTxn<'_>, Arc<CompiledSchema>)> {
         loop {
+            // Snapshot cached schema under L1 BEFORE acquiring `ro` (L2 MapGate read) so we
+            // never acquire L1 while holding L2 (strict L1 -> L2 -> L3 -> L4 lock order).
+            let cached = Arc::clone(&self.schema_state.read().schema);
             let ro = self.gate.begin_read()?;
             let disk_epoch = read_schema_epoch(&ro, &self.dbs)?;
-            let cached = Arc::clone(&self.schema_state.read().schema);
             if cached.epoch == disk_epoch {
                 return Ok((ro, cached));
             }
@@ -1209,13 +1220,14 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 let (historical, _) = load_schema_and_pool(&ro, &self.dbs)?;
                 return Ok((ro, Arc::new(historical)));
             }
-            // Cross-process schema advance (`disk_epoch > cached.epoch`): refresh shared cache monotonically
-            // and pre-open any newly-created index sub-DBs into LMDB's `MDB_env` before re-opening `RoTxn`
-            // so the returned `RoTxn`'s `mt_numdbs` table covers every slot in the updated schema!
+            // Cross-process schema advance (`disk_epoch > cached.epoch`): drop `ro` (L2 read) FIRST
+            // so strict `L1 -> L2 -> L3` order is preserved, then pre-open any newly-created index
+            // sub-DBs via `ensure_subdbs_open` (L2+L3) before updating `schema_state` (L1) and re-opening `RoTxn`!
             let (schema, pool) = load_schema_and_pool(&ro, &self.dbs)?;
-            for idx in &schema.indexes {
-                let _ = self.gate.open_subdb_ro(&ro, &idx.subdb_slot().name(), DbFlags::DEFAULT)?;
-            }
+            drop(ro);
+            let slot_names: Vec<String> = schema.indexes.iter().map(|i| i.subdb_slot().name()).collect();
+            let slot_refs: Vec<(&str, DbFlags)> = slot_names.iter().map(|s| (s.as_str(), DbFlags::DEFAULT)).collect();
+            self.gate.ensure_subdbs_open(&slot_refs)?;
             {
                 let mut state = self.schema_state.write();
                 if disk_epoch > state.schema.epoch {
@@ -1223,7 +1235,6 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                     state.pool = pool;
                 }
             }
-            drop(ro);
             // Next iteration opens a fresh `RoTxn` whose LMDB `mt_numdbs` includes all pre-opened DBIs!
         }
     }

@@ -532,6 +532,118 @@ pub fn set_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(
     Ok(hint)
 }
 
+/// Atomically resolves `ext_id` and its type-scoped vector `index_name` (supporting both
+/// unqualified `"emb"` scoped to the entity's own `TypeId` and `"TypeName.emb"`) inside ONE
+/// write transaction so there is zero TOCTOU race and zero cross-type index ambiguity!
+pub fn set_entity_embeddings_by_ext_id<S: KvStore, V: Vfs, C: Clock>(
+    engine: &Engine<S, V, C>,
+    index_name: &str,
+    ext_id: &str,
+    chunks: &[Vec<f32>],
+) -> Result<(IndexId, BackpressureHint)> {
+    let ((index_id, hint), _) = engine.run_maintenance_write(|txn, schema, dbs| {
+        let entity = elmdb_engine::lookup_ext_id_in_txn(txn, dbs, ext_id)?
+            .ok_or_else(|| ElmdbError::new(ErrorCode::EntityNotFound, format!("entity '{ext_id}' not found")))?;
+        let row = read_packed_row(txn, dbs, entity)?
+            .ok_or_else(|| ElmdbError::new(ErrorCode::EntityNotFound, format!("entity '{ext_id}' not found")))?;
+        if row.header.is_trashed() {
+            return Err(ElmdbError::new(ErrorCode::EntityTrashed, "cannot embed trashed entity"));
+        }
+
+        // Check exact unqualified index name on this entity's type first (supports dotted index names like `v1.emb`),
+        // then fall back to `TypeName.indexName` qualification.
+        let def = if let Some(exact) =
+            schema.indexes.iter().find(|i| i.type_id == row.header.type_id && i.name == index_name)
+        {
+            exact
+        } else {
+            let (req_type_name, short_name) = match index_name.split_once('.') {
+                Some((t, n)) => (Some(t), n),
+                None => (None, index_name),
+            };
+            if let Some(tn) = req_type_name {
+                let td = schema
+                    .type_by_id(row.header.type_id)
+                    .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
+                if td.name != tn {
+                    return Err(ElmdbError::new(
+                        ErrorCode::EndpointMismatch,
+                        format!("entity '{ext_id}' has type '{}', not '{tn}'", td.name),
+                    ));
+                }
+            }
+            schema.indexes.iter().find(|i| i.type_id == row.header.type_id && i.name == short_name).ok_or_else(
+                || {
+                    if schema.indexes.iter().any(|i| i.name == short_name || i.name == index_name) {
+                        ElmdbError::new(ErrorCode::EndpointMismatch, "entity type does not match vector index")
+                    } else {
+                        ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{index_name}'"))
+                    }
+                },
+            )?
+        };
+        let IndexKind::Vector { dims, .. } = &def.kind else {
+            return Err(ElmdbError::new(
+                ErrorCode::InvalidArgument,
+                format!("index '{index_name}' is not a vector index"),
+            ));
+        };
+        for c in chunks {
+            validate_vector(c, *dims)?;
+        }
+
+        let index_id = def.id;
+        let db = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
+        let mut meta = load_meta_or_init(txn, db, def)?;
+        let old_chunks = list_live_chunks_for_entity(txn, db, entity)?;
+
+        for (chunk_idx, vec) in chunks.iter().enumerate() {
+            let chunk = chunk_idx as u32;
+            let vec_gen = meta.next_vec_gen;
+            meta.next_vec_gen = meta
+                .next_vec_gen
+                .checked_add(1)
+                .ok_or_else(|| ElmdbError::new(ErrorCode::StorageFull, "vector generation counter exhausted"))?;
+
+            txn.put(dbs.embeddings, &primary_emb_key(index_id, entity, chunk), &encode_primary_emb(vec_gen, vec))?;
+
+            let lmk = live_map_key(entity, chunk);
+            if let Some(old_raw) = txn.get(db, &lmk)? {
+                let old_map = LiveMapping::decode(old_raw)?;
+                if old_map.node_id.is_some() {
+                    meta.live_nodes = meta.live_nodes.saturating_sub(1);
+                    meta.dead_nodes = meta.dead_nodes.saturating_add(1);
+                }
+            }
+            txn.put(db, &lmk, &LiveMapping { node_id: None, vec_gen }.encode())?;
+
+            let pk = pending_key(entity, chunk);
+            let existed_pending = txn.get(db, &pk)?.is_some();
+            txn.put(db, &pk, &PendingOp::Upsert(vec_gen).encode())?;
+            if !existed_pending {
+                meta.pending_count = meta.pending_count.saturating_add(1);
+            }
+        }
+
+        let new_len = chunks.len() as u32;
+        for (old_chunk, old_map) in old_chunks {
+            if old_chunk >= new_len {
+                remove_single_chunk(txn, dbs, db, (index_id, entity, old_chunk), old_map, &mut meta, true)?;
+            }
+        }
+
+        txn.put(db, &[TAG_META], &meta.encode())?;
+        Ok((
+            index_id,
+            BackpressureHint {
+                pending_count: meta.pending_count,
+                backpressure: meta.pending_count > PENDING_BACKPRESSURE_THRESHOLD,
+            },
+        ))
+    })?;
+    Ok((index_id, hint))
+}
+
 /// Removes all embeddings for `entity` in `index_id` cleanly (both primary and derived).
 pub fn delete_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(
     engine: &Engine<S, V, C>,

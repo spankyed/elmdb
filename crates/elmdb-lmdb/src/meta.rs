@@ -135,12 +135,21 @@ pub fn verify_data_file_headers(data_mdb: &Path) -> Result<Option<MetaPageInfo>,
     if !data_mdb.exists() {
         return Ok(None);
     }
-    let len = std::fs::metadata(data_mdb)?.len();
-    if len == 0 {
+    let initial_len = std::fs::metadata(data_mdb)?.len();
+    if initial_len == 0 {
         return Ok(None);
     }
+    // Read active meta page FIRST, then check file length AFTER so a concurrent cross-process
+    // commit growing `data.mdb` cannot cause a false TOCTOU EOF rejection (data.mdb never shrinks).
     let meta = read_active_meta_page(data_mdb)?;
+    let len = std::fs::metadata(data_mdb)?.len();
     let max_pgno = len / u64::from(meta.page_size);
+    if meta.last_pg >= max_pgno {
+        return Err(StorageError::Corrupted(format!(
+            "LMDB last_pg {} lies past data.mdb EOF ({max_pgno} pages)",
+            meta.last_pg
+        )));
+    }
     for (label, root) in [("main_root", meta.main_root), ("free_root", meta.free_root)] {
         if root != u64::MAX && root >= max_pgno {
             return Err(StorageError::Corrupted(format!(

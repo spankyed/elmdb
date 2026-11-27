@@ -710,34 +710,87 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Cross-Process `commit_log` Catch-Up on Two Live LMDB Handles
+// 4. Real Cross-Process `commit_log` Catch-Up on Two OS Processes
 // ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "child process helper invoked by cross_process_lmdb_selective_catchup_schema_bump_and_window_overflow"]
+fn child_xproc_invalidation_writer() {
+    let db_dir = std::path::PathBuf::from(std::env::var("ELMDB_TEST_XPROC_DIR").expect("ELMDB_TEST_XPROC_DIR"));
+    let action = std::env::var("ELMDB_TEST_XPROC_ACTION").expect("ELMDB_TEST_XPROC_ACTION");
+    let store = LmdbStore::open(&db_dir, LmdbConfig::default()).unwrap();
+    let reg =
+        Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)));
+    let (eng_b, _) = Engine::open_with_projections(
+        store,
+        OsVfs::new(),
+        SystemClock::default(),
+        db_dir,
+        DurabilityMode::Strict,
+        Arc::clone(&reg) as _,
+    )
+    .unwrap();
+    match action.as_str() {
+        "create_note" => {
+            eng_b
+                .execute_batch(&[WireOp::Create {
+                    type_name: "Note".into(),
+                    external_id: Some("from_b".into()),
+                    fields: vec![("title".into(), CanonicalValue::String("Cross-process".into()))],
+                }])
+                .unwrap();
+        }
+        "bump_schema" => {
+            let mut s2 = test_schema();
+            s2.relations.insert(
+                "EXTRA_REL".into(),
+                RawRelation {
+                    cardinality: Cardinality::ManyToMany,
+                    acyclic: false,
+                    weighted: false,
+                    endpoints: vec![RawEndpoint { source: "Note".into(), target: "Note".into() }],
+                    declared_by: None,
+                },
+            );
+            eng_b.set_schema(&s2).unwrap();
+        }
+        "set_embeddings" => {
+            let ids = resolve_ids(&eng_b.schema());
+            let kx1 = eng_b.get_row("x1").unwrap().unwrap().key;
+            set_entity_embeddings(&eng_b, ids.idx_vec, kx1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+        }
+        other => panic!("unknown action: {other}"),
+    }
+}
+
+fn run_xproc_child(db_dir: &std::path::Path, action: &str) {
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_xproc_invalidation_writer", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_XPROC_DIR", db_dir)
+        .env("ELMDB_TEST_XPROC_ACTION", action)
+        .status()
+        .unwrap();
+    assert!(status.success(), "child writer '{action}' failed: {status}");
+}
 
 #[test]
 fn cross_process_lmdb_selective_catchup_schema_bump_and_window_overflow() {
     let dir = tempdir().unwrap();
     let db_dir = dir.path().join("xproc_db");
 
-    let open_handle = || {
-        let store = LmdbStore::open(&db_dir, LmdbConfig::default()).unwrap();
-        let reg = Arc::new(
-            ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)),
-        );
-        let (eng, _) = Engine::open_with_projections(
-            store,
-            OsVfs,
-            SystemClock::default(),
-            db_dir.clone(),
-            DurabilityMode::Strict,
-            Arc::clone(&reg) as _,
-        )
-        .unwrap();
-        eng
-    };
-
-    let eng_a = open_handle();
+    let store = LmdbStore::open(&db_dir, LmdbConfig::default()).unwrap();
+    let reg =
+        Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)));
+    let (eng_a, _) = Engine::open_with_projections(
+        store,
+        OsVfs::new(),
+        SystemClock::default(),
+        db_dir.clone(),
+        DurabilityMode::Strict,
+        Arc::clone(&reg) as _,
+    )
+    .unwrap();
     eng_a.set_schema(&test_schema()).unwrap();
-    let eng_b = open_handle();
 
     let ids = resolve_ids(&eng_a.schema());
     let qe = QueryEngine::default();
@@ -761,33 +814,16 @@ fn cross_process_lmdb_selective_catchup_schema_bump_and_window_overflow() {
         .register_query_watch(&eng_a, &qe, &author_plan, ExecBudgets::default(), WatchPolicy::default(), 0, 1, |_| None)
         .unwrap();
 
-    // Process B mutates ONLY a Note!
-    eng_b
-        .execute_batch(&[WireOp::Create {
-            type_name: "Note".into(),
-            external_id: Some("from_b".into()),
-            fields: vec![("title".into(), CanonicalValue::String("Cross-process".into()))],
-        }])
-        .unwrap();
+    // Real child process B mutates ONLY a Note!
+    run_xproc_child(&db_dir, "create_note");
 
     // Process A catches up via persisted `commit_log` -> ONLY `w_note` invalidated, `w_author` untouched!
     let dirty_selective = hub_a.catch_up_cross_process(&eng_a, 100).unwrap();
     assert!(dirty_selective.contains(&w_note), "cross-process Note create MUST invalidate Note watch");
     assert!(!dirty_selective.contains(&w_author), "cross-process Note create must NOT invalidate Author watch");
 
-    // Process B bumps schema epoch -> Process A MUST invalidate BOTH watches!
-    let mut s2 = test_schema();
-    s2.relations.insert(
-        "EXTRA_REL".into(),
-        RawRelation {
-            cardinality: Cardinality::ManyToMany,
-            acyclic: false,
-            weighted: false,
-            endpoints: vec![RawEndpoint { source: "Note".into(), target: "Note".into() }],
-            declared_by: None,
-        },
-    );
-    eng_b.set_schema(&s2).unwrap();
+    // Real child process B bumps schema epoch -> Process A MUST invalidate BOTH watches!
+    run_xproc_child(&db_dir, "bump_schema");
     let dirty_schema = hub_a.catch_up_cross_process(&eng_a, 200).unwrap();
     assert!(dirty_schema.contains(&w_note));
     assert!(dirty_schema.contains(&w_author));
@@ -998,24 +1034,18 @@ fn review_regression_cross_process_maintenance_write_and_4096_overflow() {
     let dir = tempdir().unwrap();
     let db_dir = dir.path().join("xproc_maint_db");
 
-    let open_handle = || {
-        let store = LmdbStore::open(&db_dir, LmdbConfig::default()).unwrap();
-        let reg = Arc::new(
-            ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)),
-        );
-        let (eng, _) = Engine::open_with_projections(
-            store,
-            OsVfs,
-            SystemClock::default(),
-            db_dir.clone(),
-            DurabilityMode::Strict,
-            Arc::clone(&reg) as _,
-        )
-        .unwrap();
-        eng
-    };
-
-    let eng_a = open_handle();
+    let store = LmdbStore::open(&db_dir, LmdbConfig::default()).unwrap();
+    let reg =
+        Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)));
+    let (eng_a, _) = Engine::open_with_projections(
+        store,
+        OsVfs::new(),
+        SystemClock::default(),
+        db_dir.clone(),
+        DurabilityMode::Strict,
+        Arc::clone(&reg) as _,
+    )
+    .unwrap();
     eng_a.set_schema(&test_schema()).unwrap();
     eng_a
         .execute_batch(&[
@@ -1031,8 +1061,6 @@ fn review_regression_cross_process_maintenance_write_and_4096_overflow() {
             },
         ])
         .unwrap();
-    let kx1 = eng_a.get_row("x1").unwrap().unwrap().key;
-    let eng_b = open_handle();
 
     let ids = resolve_ids(&eng_a.schema());
     let qe = QueryEngine::default();
@@ -1056,8 +1084,8 @@ fn review_regression_cross_process_maintenance_write_and_4096_overflow() {
         .register_query_watch(&eng_a, &qe, &author_plan, ExecBudgets::default(), WatchPolicy::default(), 0, 1, |_| None)
         .unwrap();
 
-    // P0-3B: Process B performs a maintenance write (`set_entity_embeddings`, unchanged `commit_seq`, advanced `txnid`!)
-    set_entity_embeddings(&eng_b, ids.idx_vec, kx1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    // P0-3B: Real child process B performs a maintenance write (`set_entity_embeddings`, unchanged `commit_seq`, advanced `txnid`!)
+    run_xproc_child(&db_dir, "set_embeddings");
     let dirty_maint = hub_a.catch_up_cross_process(&eng_a, 100).unwrap();
     assert!(dirty_maint.contains(&w_vec), "cross-process maintenance write must be detected via txnid advance");
 

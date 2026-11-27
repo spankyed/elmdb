@@ -251,7 +251,7 @@ fn live_lmdb_vec_pending_survives_reopen_and_ping_pong_compaction_reclaims_tombs
         );
         let (engine, _) = Engine::open_with_projections(
             store,
-            OsVfs,
+            OsVfs::new(),
             SystemClock::new(),
             dir.path(),
             DurabilityMode::Strict,
@@ -286,7 +286,7 @@ fn live_lmdb_vec_pending_survives_reopen_and_ping_pong_compaction_reclaims_tombs
         );
         let (engine, _) = Engine::open_with_projections(
             store,
-            OsVfs,
+            OsVfs::new(),
             SystemClock::new(),
             dir.path(),
             DurabilityMode::Strict,
@@ -619,46 +619,86 @@ fn review_regression_vec_tombstone_dominance_trash_restore_and_drop_purge() {
 }
 
 #[test]
-fn review_regression_lmdb_cross_handle_sees_newly_allocated_compaction_slot() {
-    // P0 #3: Reader handle opened BEFORE compaction creates `p_002` must still see `p_002` after swap_index_slot!
-    let dir = tempfile::tempdir().unwrap();
-    let store_writer = LmdbStore::open(dir.path(), LmdbConfig::default()).unwrap();
-    let reg_w =
+#[ignore = "child process helper invoked by review_regression_lmdb_cross_process_sees_newly_allocated_compaction_slot"]
+fn child_compact_vec_index_helper() {
+    let dir = std::path::PathBuf::from(std::env::var("ELMDB_TEST_VEC_DIR").expect("ELMDB_TEST_VEC_DIR"));
+    let store = LmdbStore::open(&dir, LmdbConfig::default()).unwrap();
+    let reg =
         Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)));
     let (writer, _) = Engine::open_with_projections(
-        store_writer,
-        OsVfs,
+        store,
+        OsVfs::new(),
         SystemClock::new(),
-        dir.path(),
+        &dir,
         DurabilityMode::Strict,
-        Arc::clone(&reg_w) as _,
+        Arc::clone(&reg) as _,
     )
     .unwrap();
-    writer.set_schema(&vec_and_rank_schema("sq8", 4)).unwrap();
     let idx_id = writer.schema().indexes.iter().find(|i| i.name == "emb").unwrap().id;
-    writer
-        .execute_batch(&[WireOp::Create { type_name: "Doc".into(), external_id: Some("x1".into()), fields: vec![] }])
-        .unwrap();
-    let k1 = writer.get_row("x1").unwrap().unwrap().key;
-    set_entity_embeddings(&writer, idx_id, k1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
-    flush(&writer, idx_id).unwrap();
+    compact_now(&writer, idx_id).unwrap();
+}
 
-    // Open second independent `LmdbStore` handle BEFORE ping-pong compaction allocates a brand-new slot!
+#[test]
+fn review_regression_lmdb_cross_handle_sees_newly_allocated_compaction_slot() {
+    // P0-4 / P0-5: Real cross-process test! Reader stays open BEFORE child process compacts `emb` into a brand-new
+    // `SubDbSlot` (`p_002`), then reader refreshes schema, pre-opens the new slot safely, and searches it!
+    let dir = tempfile::tempdir().unwrap();
+    let (idx_id, k1) = {
+        let store_writer = LmdbStore::open(dir.path(), LmdbConfig::default()).unwrap();
+        let reg_w = Arc::new(
+            ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)),
+        );
+        let (writer, _) = Engine::open_with_projections(
+            store_writer,
+            OsVfs::new(),
+            SystemClock::new(),
+            dir.path(),
+            DurabilityMode::Strict,
+            Arc::clone(&reg_w) as _,
+        )
+        .unwrap();
+        writer.set_schema(&vec_and_rank_schema("sq8", 4)).unwrap();
+        let idx_id = writer.schema().indexes.iter().find(|i| i.name == "emb").unwrap().id;
+        writer
+            .execute_batch(&[WireOp::Create {
+                type_name: "Doc".into(),
+                external_id: Some("x1".into()),
+                fields: vec![],
+            }])
+            .unwrap();
+        let k1 = writer.get_row("x1").unwrap().unwrap().key;
+        set_entity_embeddings(&writer, idx_id, k1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+        flush(&writer, idx_id).unwrap();
+        (idx_id, k1)
+    };
+
+    // Open reader in THIS process BEFORE the child process allocates a brand-new compaction slot!
     let store_reader = LmdbStore::open(dir.path(), LmdbConfig::default()).unwrap();
     let (reader, _) =
-        Engine::open(store_reader, OsVfs, SystemClock::new(), dir.path(), DurabilityMode::Strict).unwrap();
+        Engine::open(store_reader, OsVfs::new(), SystemClock::new(), dir.path(), DurabilityMode::Strict).unwrap();
 
-    // Writer compacts -> allocates a brand-new `SubDbSlot` never seen by `store_reader`'s initial DbiCache!
-    compact_now(&writer, idx_id).unwrap();
+    // Verify in-process second open is strictly rejected with DatabaseLocked (P0-5).
+    assert!(matches!(
+        LmdbStore::open(dir.path(), LmdbConfig::default()),
+        Err(elmdb_storage::StorageError::DatabaseLocked(_))
+    ));
 
-    // Reader MUST observe the new slot cleanly (never silently returning Ok(None))!
+    // Real child process compacts -> allocates a brand-new `SubDbSlot` never seen by `reader`'s initial DbiCache!
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_compact_vec_index_helper", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_VEC_DIR", dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "child compaction process failed: {status}");
+
+    // Reader MUST observe the new slot cleanly via `begin_read_pinned()` -> `ensure_subdbs_open()`!
     let (ro, schema) = reader.begin_read_pinned().unwrap();
     let def = schema.index_by_id(idx_id).unwrap();
     let db = reader
         .gate()
         .open_subdb_ro(&ro, &def.subdb_slot().name(), DbFlags::DEFAULT)
         .unwrap()
-        .expect("cross-handle reader must resolve newly allocated compaction SubDbSlot!");
+        .expect("cross-process reader must resolve newly allocated compaction SubDbSlot!");
     let hits = search_near(&ro, &reader.dbs(), def, db, &[1.0, 0.0, 0.0, 0.0], SearchNearOpts::new(1)).unwrap();
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].key, k1);

@@ -852,8 +852,9 @@ impl InvalidationIndex {
         &mut self,
         engine: &Engine<S, V, C>,
     ) -> Result<Vec<WatchId>> {
+        use elmdb_storage::KvRead;
         let (ro, schema) = engine.begin_read_pinned()?;
-        let cur_txnid = engine.gate().last_txnid()?;
+        let cur_txnid = ro.txnid();
         let (tip_seq, summaries_opt) = elmdb_engine::read_commit_summaries_in_txn(&ro, &engine.dbs(), self.latest_seq)?;
         let tip_epoch = schema.epoch;
         drop(ro);

@@ -14,6 +14,12 @@ pub enum StorageError {
     #[error("storage map is full (map_size={map_size})")]
     MapFull { map_size: usize },
 
+    #[error("storage map was resized externally; transaction must retry after adopting new map size")]
+    MapResized,
+
+    #[error("database directory '{0}' is already open in this process")]
+    DatabaseLocked(String),
+
     #[error("maximum number of sub-databases reached (max_dbs={max_dbs})")]
     DbsFull { max_dbs: u32 },
 

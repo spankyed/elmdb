@@ -549,7 +549,7 @@ fn live_lmdb_projections_and_600_index_churn_never_hits_mdb_dbs_full() {
     let reg = Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange));
     let (engine, _) = Engine::open_with_projections(
         store,
-        OsVfs,
+        OsVfs::new(),
         SystemClock::new(),
         dir.path(),
         DurabilityMode::Strict,

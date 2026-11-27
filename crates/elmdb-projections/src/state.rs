@@ -330,6 +330,10 @@ impl<'a, R: KvRead> KvRead for MemCheckTxn<'a, R> {
         if db == self.target_db { Ok(self.map.len() as u64) } else { self.backing.entries(db) }
     }
 
+    fn txnid(&self) -> u64 {
+        self.backing.txnid()
+    }
+
     fn open_subdb_existing(
         &self,
         name: &str,
