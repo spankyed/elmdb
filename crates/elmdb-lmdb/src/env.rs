@@ -243,8 +243,9 @@ pub(crate) struct LmdbEnvInner {
     /// Set to `true` if `mdb_env_set_mapsize` unmaps `me_map` and fails to remap; all FFI
     /// entrypoints fail closed with `StorageError::Corrupted` instead of dereferencing dangling `me_metas`.
     pub(crate) map_broken: AtomicBool,
-    /// Number of active write transactions holding uncommitted `mdb_dbi_open` handles (`0` or `1`).
-    pub(crate) rw_uncommitted_dbis: AtomicUsize,
+    /// Count of live `LmdbRwTxn` handles in this process (`0` or `1`); synchronized via `dbis.write()`
+    /// so `ensure_subdbs_open()` and `LmdbRwTxn` are 100% mutually exclusive even for direct callers.
+    pub(crate) active_rw_txns: AtomicUsize,
     /// L4 reader-writer lock guarding both the DBI handle cache AND LMDB's internal `me_numdbs`/`me_dbflags`
     /// table across `LmdbRoTxn::begin()` (L4 read) vs `commit_raw`/`ensure_subdbs_open` (L4 write).
     pub(crate) dbis: MetaRwLock<DbiCache>,
@@ -432,7 +433,7 @@ impl LmdbStore {
                 main_dbi,
                 map_gate: MapGate::new(()),
                 map_broken: AtomicBool::new(false),
-                rw_uncommitted_dbis: AtomicUsize::new(0),
+                active_rw_txns: AtomicUsize::new(0),
                 dbis: MetaRwLock::new(cache),
                 env_identity,
             }),
@@ -648,9 +649,9 @@ impl KvStore for LmdbStore {
         // + cache insertion so no concurrent `ensure_subdbs_open` or `LmdbRoTxn::begin()` can race with
         // LMDB's non-atomic `env->me_numdbs` / `env->me_dbflags` updates!
         let mut cache = self.inner.dbis.write();
-        if self.inner.rw_uncommitted_dbis.load(Ordering::Acquire) != 0 {
+        if self.inner.active_rw_txns.load(Ordering::Acquire) != 0 {
             return Err(StorageError::InvalidState(
-                "cannot call ensure_subdbs_open while a write transaction holds uncommitted sub-DB handles".into(),
+                "cannot call ensure_subdbs_open while a write transaction is active".into(),
             ));
         }
         let missing: Vec<(&str, DbFlags)> =
@@ -781,12 +782,13 @@ impl KvStore for LmdbStore {
         // SAFETY: L2 `map_gate.write()` guarantees zero active transactions or `me_metas` readers in this process.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), aligned) };
         if rc != ffi::MDB_SUCCESS {
-            // `mdb_env_set_mapsize` unmaps BEFORE remapping; attempt rollback to `cur` and fail closed if unmapped!
-            let rollback_rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), cur) };
-            if rollback_rc != ffi::MDB_SUCCESS {
+            // `mdb_env_set_mapsize` returns `EINVAL` before unmapping (`mdb.c:4718`). Any other failure
+            // happens after `munmap`/`UnmapViewOfFile` and leaves `env->me_map` unmapped (`me_metas` dangling),
+            // which LMDB's public C API cannot remap -> fail closed permanently!
+            if rc != libc::EINVAL {
                 self.inner.map_broken.store(true, Ordering::SeqCst);
                 return Err(StorageError::Corrupted(format!(
-                    "mdb_env_set_mapsize({aligned}) failed (rc={rc}) and rollback to {cur} failed (rc={rollback_rc})"
+                    "mdb_env_set_mapsize({aligned}) failed after unmap (rc={rc}); environment is unusable"
                 )));
             }
             return Err(map_mdb_err(rc, aligned, self.inner.max_dbs));
@@ -813,11 +815,10 @@ impl KvStore for LmdbStore {
         // SAFETY: `size = 0` tells LMDB to adopt the external cross-process map size cleanly.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), 0) };
         if rc != ffi::MDB_SUCCESS {
-            let rollback_rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), cur) };
-            if rollback_rc != ffi::MDB_SUCCESS {
+            if rc != libc::EINVAL {
                 self.inner.map_broken.store(true, Ordering::SeqCst);
                 return Err(StorageError::Corrupted(format!(
-                    "mdb_env_set_mapsize(0) failed (rc={rc}) and rollback to {cur} failed (rc={rollback_rc})"
+                    "mdb_env_set_mapsize(0) failed after unmap (rc={rc}); environment is unusable"
                 )));
             }
             return Err(map_mdb_err(rc, cur, self.inner.max_dbs));

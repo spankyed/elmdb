@@ -92,7 +92,7 @@ struct RegisteredHostHook {
 
 struct ActiveTxnSlot {
     ctx: Option<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>>,
-    commit_seq: u64,
+    commit_seq: Option<u64>,
     depth: usize,
 }
 
@@ -367,7 +367,7 @@ impl Database {
     /// or `None` outside an active write transaction.
     pub fn pending_commit_seq(&self) -> Option<u64> {
         ACTIVE_TXNS
-            .try_with(|m| m.try_borrow().ok().and_then(|map| map.get(&self.id).map(|slot| slot.commit_seq)))
+            .try_with(|m| m.try_borrow().ok().and_then(|map| map.get(&self.id).and_then(|slot| slot.commit_seq)))
             .ok()
             .flatten()
     }
@@ -576,7 +576,7 @@ impl Database {
         let ctx = eng.arc().begin_owned_txn()?;
         let commit_seq = ctx.commit_seq();
         ACTIVE_TXNS.with(|m| {
-            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx: Some(ctx), commit_seq, depth: 1 });
+            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx: Some(ctx), commit_seq: Some(commit_seq), depth: 1 });
         });
 
         struct OuterGuard {
@@ -836,7 +836,7 @@ impl Database {
 
     fn enter_borrowed_txn_sentinel(&self) -> BorrowedTxnSentinelGuard {
         ACTIVE_TXNS.with(|m| {
-            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx: None, commit_seq: 0, depth: 1 });
+            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx: None, commit_seq: None, depth: 1 });
         });
         BorrowedTxnSentinelGuard { db_id: self.id }
     }

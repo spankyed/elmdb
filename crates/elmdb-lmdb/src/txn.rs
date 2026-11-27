@@ -95,19 +95,22 @@ impl KvRead for LmdbRoTxn<'_> {
 /// Exclusive read-write LMDB transaction supporting native LIFO nested savepoints
 /// without `transmute` to `'static`.
 ///
-/// Field drop order ensures `Drop::drop` aborts all `MDB_txn` handles BEFORE `map_guard` releases L2 `MapGate`.
+/// Field drop order ensures:
+/// 1. `Drop::drop` aborts all `MDB_txn` handles and decrements `active_rw_txns`,
+/// 2. `map_guard` releases L2 `MapGate`,
+/// 3. `inner` drops the `Arc<LmdbEnvInner>` last (matching `LmdbRoTxn`).
 pub struct LmdbRwTxn<'env> {
-    inner: Arc<LmdbEnvInner>,
     /// Index 0 is the root `MDB_txn`; indices `1..` are active nested savepoint child txns.
     /// Every operation targets `*stack.last().unwrap()`.
     stack: Vec<NonNull<ffi::MDB_txn>>,
     /// Newly created sub-DB handles staged until root `commit_raw` succeeds, preventing
     /// aborted transactions from polluting the shared environment DBI cache.
     pending_dbis: Vec<(String, ffi::MDB_dbi, DbFlags)>,
-    /// Whether this transaction incremented `inner.rw_uncommitted_dbis`.
-    marked_uncommitted_dbis: bool,
+    /// Whether this transaction currently holds an `inner.active_rw_txns` count.
+    counted_active_rw: bool,
     /// L2 `MapGate` read guard proving the env mmap cannot be unmapped while this txn is live.
     map_guard: Option<LmdbMapReadGuard>,
+    inner: Arc<LmdbEnvInner>,
     _env: PhantomData<&'env LmdbStore>,
 }
 
@@ -126,19 +129,30 @@ impl<'env> LmdbRwTxn<'env> {
     fn begin_from_inner(inner: Arc<LmdbEnvInner>, map_guard: LmdbMapReadGuard) -> Result<Self, StorageError> {
         inner.assert_map_guard(&map_guard)?;
         inner.check_map_ok()?;
+        // Briefly acquire L4 `dbis.write()` (valid L2 -> L3 -> L4 order) to wait for any in-flight
+        // `ensure_subdbs_open()` and mark `active_rw_txns` before releasing L4 so readers are never
+        // blocked while waiting on LMDB's writer lock in `mdb_txn_begin(..., 0)`.
+        {
+            let _dbi_guard = inner.dbis.write();
+            inner.active_rw_txns.fetch_add(1, Ordering::AcqRel);
+        }
         let mut raw: *mut ffi::MDB_txn = ptr::null_mut();
         // SAFETY: `inner.env` is open and protected by L2 `map_guard`; `parent = null` opens a root RW txn.
         let rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), 0, &mut raw) };
         if rc != ffi::MDB_SUCCESS {
+            inner.active_rw_txns.fetch_sub(1, Ordering::Release);
             return Err(map_mdb_err(rc, inner.current_map_size(), inner.max_dbs));
         }
-        let txn = NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null write MDB_txn".into()))?;
+        let Some(txn) = NonNull::new(raw) else {
+            inner.active_rw_txns.fetch_sub(1, Ordering::Release);
+            return Err(StorageError::InvalidState("null write MDB_txn".into()));
+        };
         Ok(Self {
-            inner,
             stack: vec![txn],
             pending_dbis: Vec::new(),
-            marked_uncommitted_dbis: false,
+            counted_active_rw: true,
             map_guard: Some(map_guard),
+            inner,
             _env: PhantomData,
         })
     }
@@ -164,9 +178,9 @@ impl Drop for LmdbRwTxn<'_> {
                 ffi::mdb_txn_abort(txn.as_ptr());
             }
         }
-        if self.marked_uncommitted_dbis {
-            self.inner.rw_uncommitted_dbis.fetch_sub(1, Ordering::Release);
-            self.marked_uncommitted_dbis = false;
+        if self.counted_active_rw {
+            self.inner.active_rw_txns.fetch_sub(1, Ordering::Release);
+            self.counted_active_rw = false;
         }
     }
 }
@@ -276,10 +290,6 @@ impl KvWrite for LmdbRwTxn<'_> {
         let mut mdb_flags = ffi::MDB_CREATE;
         if flags.integer_key {
             mdb_flags |= ffi::MDB_INTEGERKEY;
-        }
-        if !self.marked_uncommitted_dbis {
-            self.inner.rw_uncommitted_dbis.fetch_add(1, Ordering::AcqRel);
-            self.marked_uncommitted_dbis = true;
         }
         let mut dbi: ffi::MDB_dbi = 0;
         // SAFETY: `active_raw()` is the serialized root write `MDB_txn`, `cname` is NUL-terminated.
@@ -414,9 +424,9 @@ impl KvWrite for LmdbRwTxn<'_> {
         if self.pending_dbis.is_empty() {
             // SAFETY: `root` is the sole remaining live `MDB_txn`; `mdb_txn_commit` consumes it.
             let rc = unsafe { ffi::mdb_txn_commit(root.as_ptr()) };
-            if self.marked_uncommitted_dbis {
-                self.inner.rw_uncommitted_dbis.fetch_sub(1, Ordering::Release);
-                self.marked_uncommitted_dbis = false;
+            if self.counted_active_rw {
+                self.inner.active_rw_txns.fetch_sub(1, Ordering::Release);
+                self.counted_active_rw = false;
             }
             if rc != ffi::MDB_SUCCESS {
                 return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
@@ -428,9 +438,9 @@ impl KvWrite for LmdbRwTxn<'_> {
             let mut cache = self.inner.dbis.write();
             // SAFETY: `root` is the sole remaining live `MDB_txn`; `mdb_txn_commit` consumes it.
             let rc = unsafe { ffi::mdb_txn_commit(root.as_ptr()) };
-            if self.marked_uncommitted_dbis {
-                self.inner.rw_uncommitted_dbis.fetch_sub(1, Ordering::Release);
-                self.marked_uncommitted_dbis = false;
+            if self.counted_active_rw {
+                self.inner.active_rw_txns.fetch_sub(1, Ordering::Release);
+                self.counted_active_rw = false;
             }
             if rc != ffi::MDB_SUCCESS {
                 return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));

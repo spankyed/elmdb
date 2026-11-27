@@ -1627,6 +1627,7 @@ fn batch2_map_growth_cross_proc_resize_sidecar_race_opguard_hooks_and_index_disa
     db.transact(|_tx| {
         assert_eq!(db_reenter.get_row("doc-1").unwrap_err().code, ErrorCode::InvalidArgument);
         assert_eq!(db_reenter.close().unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db_reenter.pending_commit_seq(), None);
         Ok(())
     })
     .unwrap();
