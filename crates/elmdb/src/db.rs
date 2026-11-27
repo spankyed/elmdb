@@ -2104,18 +2104,30 @@ mod tests {
         db1.set_schema(&schema).unwrap();
 
         let initial_map = db1.stats().unwrap().map_size_bytes;
-        let pad = "x".repeat(32 * 1024);
+        // Generate genuinely incompressible ASCII payloads (8 * 32 KiB = 256 KiB) so zstd blob compression
+        // cannot shrink them and the first transact_scoped() deterministically hits MDB_MAP_FULL on 4/16/64 KiB pages.
+        let payloads: Vec<String> = (0..8u64)
+            .map(|i| {
+                let mut s = String::with_capacity(32 * 1024);
+                let mut x = 0x9E37_79B9_7F4A_7C15u64 ^ (i.wrapping_add(1).wrapping_mul(0xBF58_476D_1CE4_E5B9));
+                for _ in 0..(32 * 1024) {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    s.push((b'!' + (x % 93) as u8) as char);
+                }
+                s
+            })
+            .collect();
         let mut calls = 0usize;
-        // Use distinct per-doc payloads so content-addressed blob deduplication does not collapse them;
-        // 8 * 32 KiB = 256 KiB overflows a 128 KiB map on BOTH 4 KiB (Linux/Windows) and 16 KiB (Apple Silicon) pages.
         let first_err = db1
             .transact_scoped(TransactOptions::default(), || {
                 calls += 1;
-                for i in 0..8 {
+                for (i, payload) in payloads.iter().enumerate() {
                     db1.execute_batch(&[WireOp::Create {
                         type_name: "doc".into(),
                         external_id: Some(format!("doc_{i}")),
-                        fields: vec![("body".into(), CanonicalValue::String(format!("doc_{i}_{pad}")))],
+                        fields: vec![("body".into(), CanonicalValue::String(payload.clone()))],
                     }])?;
                 }
                 Ok(())
@@ -2128,15 +2140,15 @@ mod tests {
             "transact_scoped() must grow map_size after outermost MapFull abort"
         );
 
-        // Retry (growing further if needed on 16 KiB pages where 8*32 KiB exceeds 256 KiB) now makes forward progress and succeeds!
+        // Retry (growing further if needed on larger OS pages) now makes forward progress and succeeds!
         let mut retries = 0usize;
         loop {
             match db1.transact_scoped(TransactOptions::default(), || {
-                for i in 0..8 {
+                for (i, payload) in payloads.iter().enumerate() {
                     db1.execute_batch(&[WireOp::Create {
                         type_name: "doc".into(),
                         external_id: Some(format!("doc_{i}")),
-                        fields: vec![("body".into(), CanonicalValue::String(format!("doc_{i}_{pad}")))],
+                        fields: vec![("body".into(), CanonicalValue::String(payload.clone()))],
                     }])?;
                 }
                 Ok(())

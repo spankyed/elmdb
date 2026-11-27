@@ -973,7 +973,7 @@ impl KvStore for LmdbStore {
             if pin_after {
                 self.inner.acquire_pin_retrying_resize_under_write()?;
             }
-            return Ok(cur);
+            return Ok(self.inner.current_map_size());
         }
         // Release any Grouped durable pin strictly BEFORE `mdb_env_set_mapsize` unmaps `me_map`
         // so its `MDB_txn` never holds dangling `me_metas` pointers.
