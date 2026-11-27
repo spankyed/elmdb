@@ -96,22 +96,39 @@ export function isThenable(value: unknown): boolean {
 }
 
 /**
+ * Invokes a synchronous callback and rejects Promises/thenables inside the same `try/catch`
+ * so hostile throwing `.then` getters are wrapped cleanly as `EarsError('INVALID_ARGUMENT')`
+ * while preserving `EarsError('ASYNC_CALLBACK_FORBIDDEN')`.
+ */
+export function runSyncCallback<TArg, TResult>(
+  fn: (arg: TArg) => TResult,
+  arg: TArg,
+  asyncErrorMessage: string,
+): TResult {
+  try {
+    const returned = fn(arg);
+    if (isThenable(returned)) {
+      throw new EarsError('ASYNC_CALLBACK_FORBIDDEN', asyncErrorMessage);
+    }
+    return returned;
+  } catch (error) {
+    if (error instanceof EarsError && error.code === 'ASYNC_CALLBACK_FORBIDDEN') {
+      throw error;
+    }
+    throw toEarsError(error, 'INVALID_ARGUMENT');
+  }
+}
+
+/**
  * Synchronously populates and encodes an atomic `elmdb-wire` binary batch.
  * Rejects Promises/thenables with `EarsError('ASYNC_CALLBACK_FORBIDDEN')`.
  */
 export function encodeBatch(fn: (batch: BatchWriter) => void, returnFlags?: number): Uint8Array {
   const writer = createBatchWriter();
-  let returned: unknown;
-  try {
-    returned = fn(writer);
-  } catch (error) {
-    throw toEarsError(error, 'INVALID_ARGUMENT');
-  }
-  if (isThenable(returned)) {
-    throw new EarsError(
-      'ASYNC_CALLBACK_FORBIDDEN',
-      'Batch callbacks must be synchronous (Promises and async callbacks are forbidden)',
-    );
-  }
+  runSyncCallback(
+    fn,
+    writer,
+    'Batch callbacks must be synchronous (Promises and async callbacks are forbidden)',
+  );
   return writer.encode(returnFlags);
 }

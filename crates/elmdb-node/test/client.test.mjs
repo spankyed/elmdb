@@ -2,10 +2,12 @@
 // Verifies elmdb/client zero-dependency binary wire batch encoder (`elmdb-wire` EWB2).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 /** @type {typeof import('../index.js')} */
@@ -117,4 +119,22 @@ test('buildWireBatch rejects async/thenable callbacks, __proto__, non-plain obje
   assert.throws(() => new BatchSlot(-1), RangeError);
   const b2 = new WireBatchBuilder();
   assert.throws(() => b2.encode(0xff), RangeError);
+});
+
+test('examples/diagnostics.mjs runs end-to-end against real Database & WireBatchBuilder without drifting (F5)', (t) => {
+  const testDir = dirname(fileURLToPath(import.meta.url));
+  const examplePath = join(testDir, '..', 'examples', 'diagnostics.mjs');
+  const indexPath = join(testDir, '..', 'index.js');
+  const shimDir = mkdtempSync(join(tmpdir(), 'elmdb-diag-shim-'));
+  t.after(() => {
+    rmSync(shimDir, { recursive: true, force: true });
+  });
+  const shimPath = join(shimDir, 'diag-binding.cjs');
+  writeFileSync(
+    shimPath,
+    `const { Database } = require(${JSON.stringify(indexPath)});\n`
+      + 'module.exports = { Database, collectDiagnostics() {}, takeDiagnostics() { return { spans: [], dropped: 0 }; } };\n',
+  );
+  const out = execFileSync(process.execPath, [examplePath, shimPath], { encoding: 'utf8' });
+  assert.match(out, /0 spans, 0 dropped/);
 });

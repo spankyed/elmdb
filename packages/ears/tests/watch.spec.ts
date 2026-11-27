@@ -604,4 +604,56 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
       expect(clock.pendingTimers).toBe(0);
     }
   });
+
+  it('seeds filterLocal baseline unconditionally when immediate: false so unrelated raw mutations never fire spuriously (F2)', () => {
+    const clock = createFakeClock(40_000);
+    const handle = temps.open({ schema: watchSchema });
+    const engine = createEarsEngine({ database: handle.database, clock });
+
+    engine.create('Task', { title: 'initial-done', done: true }, 'f2-init');
+    const declDeliveries: Array<readonly string[]> = [];
+    const wDecl = engine.query
+      .of('Task')
+      .filterLocal((r) => r.fields['done'] === true)
+      .watch((rows) => declDeliveries.push(rows.map((r) => r.id)), {
+        immediate: false,
+        minGapMs: 0,
+      });
+
+    // 1. No immediate delivery on registration.
+    expect(declDeliveries).toEqual([]);
+
+    // 2. Unrelated raw Task mutation filtered OUT by filterLocal must NOT trigger a spurious delivery!
+    engine.create('Task', { title: 'not-done', done: false }, 'f2-ignored');
+    clock.advance(20);
+    expect(declDeliveries).toEqual([]);
+
+    // 3. Mutation that DOES change the filtered output delivers once.
+    engine.create('Task', { title: 'second-done', done: true }, 'f2-match');
+    clock.advance(20);
+    expect(declDeliveries).toEqual([['f2-init', 'f2-match']]);
+
+    // 4. Another filtered-out mutation still does not fire spuriously.
+    engine.patch('f2-ignored', { title: 'still-not-done' });
+    clock.advance(20);
+    expect(declDeliveries).toEqual([['f2-init', 'f2-match']]);
+
+    // 5. Contrast: imperative mode with immediate: false still delivers on invalidation.
+    const impDeliveries: number[] = [];
+    const wImp = engine.query
+      .of('Task')
+      .filterLocal((r) => r.fields['done'] === true)
+      .watch((rows) => impDeliveries.push(rows.length), {
+        immediate: false,
+        mode: 'imperative',
+        minGapMs: 0,
+      });
+    expect(impDeliveries).toEqual([]);
+    engine.patch('f2-ignored', { title: 'imperative-trigger' });
+    clock.advance(20);
+    expect(impDeliveries).toEqual([2]);
+
+    wDecl.stop();
+    wImp.stop();
+  });
 });

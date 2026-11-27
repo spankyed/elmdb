@@ -28,7 +28,7 @@ try {
   for (let i = 0; i < 1000; i++) {
     b.create('Note', { title: `note ${i}` });
   }
-  db.executeWireBatch(b.finish());
+  db.executeWireBatch(b.encode());
   db.rebuild('Note.title');
 } finally {
   db.close();
