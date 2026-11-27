@@ -1399,7 +1399,7 @@ pub fn search_bmw_with_prefix<R: KvRead>(
         return Ok((Vec::new(), BmwSearchStats::default()));
     }
 
-    let mut heap: BinaryHeap<HeapHit> = BinaryHeap::with_capacity(top_k + 1);
+    let mut heap: BinaryHeap<HeapHit> = BinaryHeap::with_capacity(top_k.min(4096));
     let mut search_stats = BmwSearchStats::default();
 
     loop {

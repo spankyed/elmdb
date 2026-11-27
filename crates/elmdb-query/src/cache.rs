@@ -113,16 +113,17 @@ pub enum NodeShape {
     Terminal { input: Box<NodeShape>, terminal: TerminalShape },
 }
 
-/// Full structural plan-cache key including `schema_epoch` (zero hash-only collisions!).
+/// Full structural plan-cache key including `(schema_epoch, maint_seq)` (zero hash-only collisions!).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PlanShapeKey {
     pub schema_epoch: u64,
+    pub maint_seq: u64,
     pub root: NodeShape,
 }
 
 impl PlanShapeKey {
-    pub fn from_plan(schema_epoch: u64, plan: &LogicalPlan) -> Self {
-        Self { schema_epoch, root: shape_node(&plan.root) }
+    pub fn from_plan(schema_epoch: u64, maint_seq: u64, plan: &LogicalPlan) -> Self {
+        Self { schema_epoch, maint_seq, root: shape_node(&plan.root) }
     }
 }
 
@@ -304,18 +305,20 @@ pub struct PlanCacheStats {
     pub misses: u64,
     pub entries: usize,
     pub schema_epoch: u64,
+    pub maint_seq: u64,
 }
 
 struct CacheInner {
     capacity: usize,
     epoch: u64,
+    maint_seq: u64,
     map: FxHashMap<PlanShapeKey, CachedStrategy>,
     lru: VecDeque<PlanShapeKey>,
     hits: u64,
     misses: u64,
 }
 
-/// Thread-safe bounded internal LRU query plan cache (automatically cleared on `schema_epoch` advance).
+/// Thread-safe bounded internal LRU query plan cache (automatically cleared on `(schema_epoch, maint_seq)` advance).
 pub struct PlanCache {
     inner: MetaLock<CacheInner>,
 }
@@ -332,6 +335,7 @@ impl PlanCache {
             inner: MetaLock::new(CacheInner {
                 capacity: capacity.clamp(16, 4096),
                 epoch: 0,
+                maint_seq: 0,
                 map: FxHashMap::default(),
                 lru: VecDeque::new(),
                 hits: 0,
@@ -342,12 +346,15 @@ impl PlanCache {
 
     pub fn get(&self, key: &PlanShapeKey) -> Option<CachedStrategy> {
         let mut guard = self.inner.lock();
-        if key.schema_epoch > guard.epoch {
+        let key_ver = (key.schema_epoch, key.maint_seq);
+        let cur_ver = (guard.epoch, guard.maint_seq);
+        if key_ver > cur_ver {
             guard.map.clear();
             guard.lru.clear();
             guard.epoch = key.schema_epoch;
+            guard.maint_seq = key.maint_seq;
         }
-        if key.schema_epoch != guard.epoch {
+        if key_ver != (guard.epoch, guard.maint_seq) {
             guard.misses += 1;
             return None;
         }
@@ -366,13 +373,16 @@ impl PlanCache {
 
     pub fn put(&self, key: PlanShapeKey, strategy: CachedStrategy) {
         let mut guard = self.inner.lock();
-        if key.schema_epoch < guard.epoch {
+        let key_ver = (key.schema_epoch, key.maint_seq);
+        let cur_ver = (guard.epoch, guard.maint_seq);
+        if key_ver < cur_ver {
             return;
         }
-        if key.schema_epoch > guard.epoch {
+        if key_ver > cur_ver {
             guard.map.clear();
             guard.lru.clear();
             guard.epoch = key.schema_epoch;
+            guard.maint_seq = key.maint_seq;
         }
         if guard.map.contains_key(&key) {
             if let Some(pos) = guard.lru.iter().position(|k| k == &key) {
@@ -395,6 +405,12 @@ impl PlanCache {
 
     pub fn stats(&self) -> PlanCacheStats {
         let guard = self.inner.lock();
-        PlanCacheStats { hits: guard.hits, misses: guard.misses, entries: guard.map.len(), schema_epoch: guard.epoch }
+        PlanCacheStats {
+            hits: guard.hits,
+            misses: guard.misses,
+            entries: guard.map.len(),
+            schema_epoch: guard.epoch,
+            maint_seq: guard.maint_seq,
+        }
     }
 }

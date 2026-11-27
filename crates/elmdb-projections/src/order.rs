@@ -218,6 +218,17 @@ pub fn apply_delta<W: KvMut>(
     Ok(())
 }
 
+/// Verifies that the persisted collator stamp matches `cached`, returning `IndexNotReady` on mismatch.
+pub fn ensure_stamp_matches<R: KvRead>(txn: &R, db: SubDbHandle, cached: &CachedCollator) -> Result<()> {
+    if !stamp_matches(txn, db, cached)? {
+        return Err(ElmdbError::new(
+            ErrorCode::IndexNotReady,
+            format!("order index collator stamp mismatch for locale '{}'; rebuild required", cached.locale),
+        ));
+    }
+    Ok(())
+}
+
 /// Streams `EntityKey`s in exact ICU collation order (resolving rare >240 B cut-key ties via primary lookup).
 pub fn scan_ordered<R: KvRead>(
     txn: &R,
@@ -233,12 +244,7 @@ pub fn scan_ordered<R: KvRead>(
         return Ok(Vec::new());
     }
     // Enforce collator stamp on read: refuse silently mis-ordered scans after ICU upgrades or corruption!
-    if !stamp_matches(txn, db, cached)? {
-        return Err(ElmdbError::new(
-            ErrorCode::IndexNotReady,
-            format!("order index collator stamp mismatch for locale '{}'; rebuild required", cached.locale),
-        ));
-    }
+    ensure_stamp_matches(txn, db, cached)?;
     // Collect entries grouped by identical cut prefix so cut ties resolve cleanly.
     struct Entry {
         prefix: Vec<u8>,
@@ -323,6 +329,7 @@ pub fn scan_ordered<R: KvRead>(
 pub fn scan_missing_keys<R: KvRead>(
     txn: &R,
     db: SubDbHandle,
+    cached: &CachedCollator,
     reverse: bool,
     limit: Option<usize>,
 ) -> Result<Vec<EntityKey>> {
@@ -330,6 +337,7 @@ pub fn scan_missing_keys<R: KvRead>(
     if cap == 0 {
         return Ok(Vec::new());
     }
+    ensure_stamp_matches(txn, db, cached)?;
     let mut out = Vec::new();
     let mut cur = txn.cursor(db)?;
     let mut step = if !reverse {

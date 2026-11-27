@@ -1238,6 +1238,7 @@ impl Database {
             None => None,
         };
         let (_, mr) = self.registry.rebuild_with_receipt(&eng, idx_id)?;
+        self.query_engine.clear_cache();
         self.hub.notify_full_rebuild_with_maint(mr.seq, mr.schema_epoch, mr.maint_seq, now_unix_ms());
         Ok(())
     }

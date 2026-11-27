@@ -795,6 +795,8 @@ fn review_regression_compound_unique_long_plus_null_and_prefix_range_and_stamp_m
         let cached = reg.collators().get_or_build(locale).unwrap();
         let err = order::scan_ordered(&txn, &engine.dbs(), db, &cached, *field, false, None).unwrap_err();
         assert_eq!(err.code, ErrorCode::IndexNotReady);
+        let missing_err = order::scan_missing_keys(&txn, db, &cached, false, Some(1)).unwrap_err();
+        assert_eq!(missing_err.code, ErrorCode::IndexNotReady);
     }
     let write_err = engine
         .execute_batch(&[WireOp::Create {
@@ -1066,4 +1068,37 @@ fn batch_c_build_chunk_propagates_map_full_and_io_without_poisoning_build_state(
         let statuses_after = reg.index_status(&engine).unwrap();
         assert_eq!(statuses_after[0].state, BuildState::Ready);
     }
+}
+
+#[test]
+fn batch_d_bm25f_unbounded_top_k_does_not_overflow_or_oom() {
+    let (engine, _reg) = open_sim_engine(BuildPolicy::EagerInSchemaChange);
+    engine.set_schema(&full_schema()).unwrap();
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("d1-a".into()),
+                fields: make_fields(&[("title", CanonicalValue::String("quantum lattice".into()))]),
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("d1-b".into()),
+                fields: make_fields(&[("title", CanonicalValue::String("quantum mechanics".into()))]),
+            },
+        ])
+        .unwrap();
+
+    let (txn, schema) = engine.begin_read_pinned().unwrap();
+    let fts_idx = schema.indexes.iter().find(|i| matches!(i.kind, IndexKind::Text { .. })).unwrap();
+    let db = engine.gate().open_subdb_ro(&txn, &fts_idx.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+
+    // `top_k = usize::MAX` (produced by `ScoreSpec::Bm25f { top_k: None }` without a limit) must not
+    // overflow `top_k + 1` or OOM-abort, and `top_k = 1_000_000_000` must also succeed cleanly.
+    let (hits_max, _) =
+        text::search_bmw_with_prefix(&txn, db, "quantum", None, usize::MAX, false, false, None).unwrap();
+    assert_eq!(hits_max.len(), 2);
+    let (hits_huge, _) =
+        text::search_bmw_with_prefix(&txn, db, "quantum", None, 1_000_000_000, false, false, None).unwrap();
+    assert_eq!(hits_huge.len(), 2);
 }
