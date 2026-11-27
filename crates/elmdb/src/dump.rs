@@ -212,7 +212,7 @@ impl Drop for DirCleanupGuard {
 /// Atomically dumps `db`'s schema and primary state (entities, relations, embeddings) to a new file `target`.
 pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
     let target = target.as_ref();
-    if target.exists() {
+    if target.symlink_metadata().is_ok() {
         return Err(ElmdbError::new(
             ErrorCode::AlreadyExists,
             format!("dump target '{}' already exists", target.display()),
@@ -274,10 +274,7 @@ pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
     let bytes = serde_json::to_vec_pretty(&payload)
         .map_err(|e| ElmdbError::new(ErrorCode::Internal, format!("serialize dump: {e}")))?;
 
-    let parent = match target.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
+    let parent = crate::fs_publish::parent_dir(target);
     fs::create_dir_all(parent).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
 
     let nonce = NEXT_DUMP_NONCE.fetch_add(1, Ordering::Relaxed);
@@ -289,7 +286,7 @@ pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
         f.write_all(&bytes).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
         f.sync_all().map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
     }
-    fs::rename(&tmp_path, target).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
+    crate::fs_publish::atomic_publish_file_no_overwrite(&tmp_path, target)?;
     cleanup.disarm();
     Ok(report)
 }
@@ -318,10 +315,7 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
         ));
     }
 
-    let parent = match target_dir.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
+    let parent = crate::fs_publish::parent_dir(target_dir);
     fs::create_dir_all(parent).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
     let nonce = NEXT_DUMP_NONCE.fetch_add(1, Ordering::Relaxed);
     let staging = parent.join(format!(".elmdb-load-tmp-{}-{nonce}", std::process::id()));
@@ -469,10 +463,7 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
     db.flush()?;
     db.close()?;
 
-    if target_dir.exists() {
-        fs::remove_dir(target_dir).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
-    }
-    fs::rename(&staging, target_dir).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
+    crate::fs_publish::atomic_publish_dir_new(&staging, target_dir)?;
     cleanup.disarm();
 
     Ok(DumpReport {

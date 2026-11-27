@@ -2477,3 +2477,142 @@ fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_a
 
     db.close().unwrap();
 }
+
+#[test]
+fn batch_b_durability_close_readonly_and_atomic_publish() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db_dir = tmp.path().join("db");
+
+    // 1. Create a DB with data in Grouped mode, flush, and remove `synced.v2` so reopen sees `unsyncedAfterReboot`.
+    {
+        let db =
+            Database::open(&db_dir, OpenOptions { durability: DurabilityMode::Grouped, ..Default::default() }).unwrap();
+        db.set_schema(&make_schema()).unwrap();
+        db.execute_batch(&[WireOp::Create {
+            type_name: "note".into(),
+            external_id: Some("n1".into()),
+            fields: vec![("title".into(), CanonicalValue::String("hello".into()))],
+        }])
+        .unwrap();
+        db.flush().unwrap();
+        db.close().unwrap();
+    }
+    std::fs::remove_file(db_dir.join("synced.v2")).unwrap();
+
+    // B1: Reopen observes `unsyncedAfterReboot`; `flush()` + `close()` MUST NOT silently seal `synced.v2`!
+    {
+        let db =
+            Database::open(&db_dir, OpenOptions { durability: DurabilityMode::Grouped, ..Default::default() }).unwrap();
+        assert_eq!(db.open_report().status, "unsyncedAfterReboot");
+        db.flush().unwrap();
+        db.close().unwrap();
+    }
+    {
+        let db =
+            Database::open(&db_dir, OpenOptions { durability: DurabilityMode::Grouped, ..Default::default() }).unwrap();
+        assert_eq!(
+            db.open_report().status,
+            "unsyncedAfterReboot",
+            "close()/flush() without acknowledge_restore() must preserve unsyncedAfterReboot"
+        );
+        db.acknowledge_restore().unwrap();
+        db.close().unwrap();
+    }
+    // After explicit `acknowledge_restore()`, next open is `clean`!
+    {
+        let db =
+            Database::open(&db_dir, OpenOptions { durability: DurabilityMode::Grouped, ..Default::default() }).unwrap();
+        assert_eq!(db.open_report().status, "clean");
+        db.close().unwrap();
+    }
+
+    // B3: Read-only open MUST NEVER create `synced.v2.lock`, and still works when `synced.v2.lock` already exists!
+    // Also verify `Unsafe` mode never creates `synced.v2.lock`, while writable `Strict` mode does.
+    let unsafe_dir = tmp.path().join("unsafe_db");
+    {
+        let udb = Database::open(&unsafe_dir, OpenOptions { durability: DurabilityMode::Unsafe, ..Default::default() })
+            .unwrap();
+        assert!(!unsafe_dir.join("synced.v2.lock").exists(), "Unsafe mode must not create synced.v2.lock");
+        udb.close().unwrap();
+    }
+    let lock_path = db_dir.join("synced.v2.lock");
+    assert!(lock_path.exists(), "writable Grouped/Strict open must create synced.v2.lock");
+    let _ = std::fs::remove_file(&lock_path);
+    assert!(!lock_path.exists());
+    {
+        let ro = Database::open(&db_dir, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+        assert_eq!(ro.open_report().status, "clean");
+        assert!(!lock_path.exists(), "read-only Database::open must never create synced.v2.lock");
+        ro.close().unwrap();
+    }
+    // Now create `synced.v2.lock` and verify read-only open takes shared lock cleanly.
+    std::fs::write(&lock_path, b"").unwrap();
+    {
+        let ro = Database::open(&db_dir, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+        assert_eq!(ro.open_report().status, "clean");
+        ro.close().unwrap();
+    }
+
+    // B4 + B5: Backup into empty dir (`New`), replace backup (`Backups`), reject non-backup overwrite,
+    // and reject self-overwrite / descendant overwrite of a live-opened backup directory!
+    let backup_dir = tmp.path().join("backup_target");
+    std::fs::create_dir_all(&backup_dir).unwrap();
+    let non_backup_dir = tmp.path().join("non_backup");
+    std::fs::create_dir_all(&non_backup_dir).unwrap();
+    std::fs::write(non_backup_dir.join("keep.txt"), b"precious").unwrap();
+
+    {
+        let db = Database::open(&db_dir, OpenOptions::default()).unwrap();
+        // Backup into existing empty directory succeeds under `BackupInto::New`.
+        db.backup_into(&backup_dir, BackupInto::New).unwrap();
+        // Second `BackupInto::New` into now non-empty dir fails with AlreadyExists.
+        assert_eq!(db.backup_into(&backup_dir, BackupInto::New).unwrap_err().code, ErrorCode::AlreadyExists);
+        // `BackupInto::Backups` into non-backup directory fails with AlreadyExists.
+        assert_eq!(db.backup_into(&non_backup_dir, BackupInto::Backups).unwrap_err().code, ErrorCode::AlreadyExists);
+        // `BackupInto::Backups` into previous backup replaces atomically.
+        db.backup_into(&backup_dir, BackupInto::Backups).unwrap();
+        // Self-overwrite and descendant target rejected with InvalidArgument.
+        assert_eq!(db.backup_into(&db_dir, BackupInto::Backups).unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.backup_into(db_dir.join("sub"), BackupInto::New).unwrap_err().code, ErrorCode::InvalidArgument);
+        db.close().unwrap();
+    }
+
+    // Open the backup directory itself (which contains `.elmdb-backup`!) and verify self-overwrite is blocked!
+    {
+        let live_backup = Database::open(&backup_dir, OpenOptions::default()).unwrap();
+        assert_eq!(
+            live_backup.backup_into(&backup_dir, BackupInto::Backups).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            live_backup.backup_into(backup_dir.join("child"), BackupInto::New).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        assert!(live_backup.get_row_resolved("n1").unwrap().is_some());
+        live_backup.close().unwrap();
+    }
+
+    // B5: `dump::dump` refuses to overwrite existing file; `dump::load` atomically replaces existing empty dir
+    // and rejects non-empty dir.
+    let dump_file = tmp.path().join("snapshot.json");
+    {
+        let db = Database::open(&db_dir, OpenOptions::default()).unwrap();
+        let report = elmdb::dump::dump(&db, &dump_file).unwrap();
+        assert_eq!(report.entities, 1);
+        assert_eq!(elmdb::dump::dump(&db, &dump_file).unwrap_err().code, ErrorCode::AlreadyExists);
+        db.close().unwrap();
+    }
+
+    let load_empty = tmp.path().join("load_into_empty");
+    std::fs::create_dir_all(&load_empty).unwrap();
+    let loaded = elmdb::dump::load(&dump_file, &load_empty).unwrap();
+    assert_eq!(loaded.entities, 1);
+    {
+        let db = Database::open(&load_empty, OpenOptions::default()).unwrap();
+        assert_eq!(db.open_report().status, "clean");
+        assert!(db.get_row_resolved("n1").unwrap().is_some());
+        db.close().unwrap();
+    }
+    assert_eq!(elmdb::dump::load(&dump_file, &non_backup_dir).unwrap_err().code, ErrorCode::AlreadyExists);
+    assert_eq!(std::fs::read(non_backup_dir.join("keep.txt")).unwrap(), b"precious");
+}

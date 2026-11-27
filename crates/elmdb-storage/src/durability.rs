@@ -128,27 +128,51 @@ pub struct DurabilityGate<S: KvStore, V: Vfs> {
     sidecar_path: PathBuf,
     sidecar_lock_path: PathBuf,
     mode: DurabilityMode,
+    read_only: bool,
     writer: WriterLock<WriterState>,
+    unacked_reboot: AtomicBool,
     poisoned: AtomicBool,
     poison_reason: MetaLock<Option<String>>,
 }
 
 impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
-    /// Constructs a `DurabilityGate` and immediately runs `recover()` so slot sequence numbers
-    /// are initialized before any write or sync can occur.
+    /// Constructs a writable `DurabilityGate` and immediately runs `recover()` so slot sequence
+    /// numbers and unacknowledged-reboot status are initialized before any write or sync can occur.
     pub fn open(
         store: S,
         vfs: V,
         dir: impl AsRef<Path>,
         mode: DurabilityMode,
     ) -> Result<(Self, RecoveryReport), StorageError> {
-        let gate = Self::new_unrecovered(store, vfs, dir, mode);
+        Self::open_with_options(store, vfs, dir, mode, false)
+    }
+
+    /// Constructs a `DurabilityGate` with explicit `read_only` enforcement and immediately runs `recover()`.
+    pub fn open_with_options(
+        store: S,
+        vfs: V,
+        dir: impl AsRef<Path>,
+        mode: DurabilityMode,
+        read_only: bool,
+    ) -> Result<(Self, RecoveryReport), StorageError> {
+        let gate = Self::new_unrecovered_with_options(store, vfs, dir, mode, read_only);
         let report = gate.recover()?;
         Ok((gate, report))
     }
 
-    /// Constructs an unrecovered gate; callers must invoke `recover()` before `begin_write()` or `sync()`.
+    /// Constructs an unrecovered writable gate; callers must invoke `recover()` before `begin_write()` or `sync()`.
     pub fn new_unrecovered(store: S, vfs: V, dir: impl AsRef<Path>, mode: DurabilityMode) -> Self {
+        Self::new_unrecovered_with_options(store, vfs, dir, mode, false)
+    }
+
+    /// Constructs an unrecovered gate with explicit `read_only` enforcement.
+    pub fn new_unrecovered_with_options(
+        store: S,
+        vfs: V,
+        dir: impl AsRef<Path>,
+        mode: DurabilityMode,
+        read_only: bool,
+    ) -> Self {
         let dir = dir.as_ref().to_path_buf();
         let sidecar_path = dir.join(SYNC_SIDECAR_NAME);
         let sidecar_lock_path = dir.join(SYNC_LOCK_NAME);
@@ -159,7 +183,9 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             sidecar_path,
             sidecar_lock_path,
             mode,
+            read_only,
             writer: WriterLock::new(WriterState::default()),
+            unacked_reboot: AtomicBool::new(false),
             poisoned: AtomicBool::new(false),
             poison_reason: MetaLock::new(None),
         }
@@ -167,6 +193,14 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
 
     pub fn mode(&self) -> DurabilityMode {
         self.mode
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub fn has_unacked_reboot(&self) -> bool {
+        self.unacked_reboot.load(Ordering::Acquire)
     }
 
     pub fn store(&self) -> &S {
@@ -257,6 +291,9 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// Caller MUST NOT hold any open read or write transaction on the calling thread.
     pub fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
         self.check_poisoned()?;
+        if self.read_only {
+            return Err(StorageError::ReadOnly);
+        }
         match self.store.grow_map(min_size) {
             Ok(size) => Ok(size),
             Err(StorageError::Corrupted(msg)) => Err(self.poison_corrupted(msg)),
@@ -304,11 +341,17 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         let mut state = self.writer.lock();
         self.check_poisoned()?;
 
-        // Serialize sidecar inspection against concurrent writers in other processes when writable;
-        // tolerate read-only mounts (`PermissionDenied` / `ReadOnlyFilesystem`) gracefully.
+        // Serialize sidecar inspection against concurrent writers in other processes.
+        // Read-only opens NEVER create `synced.v2.lock` (they take a shared lock only if it exists).
+        // Tolerate read-only mounts (`PermissionDenied` / `ReadOnlyFilesystem`) gracefully.
         let _sidecar_lock = if self.mode != DurabilityMode::Unsafe {
-            match self.vfs.lock_file(&self.sidecar_lock_path) {
-                Ok(guard) => Some(guard),
+            let lock_res = if self.read_only {
+                self.vfs.lock_file_shared_if_exists(&self.sidecar_lock_path)
+            } else {
+                self.vfs.lock_file(&self.sidecar_lock_path).map(Some)
+            };
+            match lock_res {
+                Ok(guard) => guard,
                 Err(StorageError::Io(ref e))
                     if matches!(
                         e.kind(),
@@ -323,16 +366,19 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             None
         };
 
-        let receipt = self.store.active_receipt()?;
-        let observed_txnid = receipt.txnid;
-        let observed_roots = receipt.roots_sha256;
-
+        // Read the sidecar strictly BEFORE `active_receipt()`! Because writers always commit `data.mdb`
+        // before updating `synced.v2`, reading the sidecar first guarantees `durable.txnid <= observed_txnid`
+        // even for read-only opens when `synced.v2.lock` does not yet exist (`_sidecar_lock.is_none()`).
         let (sidecar_exists, valid_slots, best, empty_file) = self.read_sidecar_best()?;
         if sidecar_exists && !empty_file && valid_slots == 0 {
             return Err(StorageError::Corrupted(
                 "durability sidecar exists but neither 4 KiB slot has a valid checksum".into(),
             ));
         }
+
+        let receipt = self.store.active_receipt()?;
+        let observed_txnid = receipt.txnid;
+        let observed_roots = receipt.roots_sha256;
 
         let current_boot = self.vfs.boot_id();
         let status = match best {
@@ -369,6 +415,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             state.next_seq = slot.seq.saturating_add(1);
             state.last_durable = Some(slot);
         }
+        self.unacked_reboot.store(status == RecoveryStatus::UnsyncedAfterReboot, Ordering::Release);
         state.recovered = true;
 
         Ok(RecoveryReport { status, durable: best, observed_txnid, observed_roots_sha256: observed_roots, valid_slots })
@@ -394,6 +441,9 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// Begins a write transaction guarded by L2 `MapGate` (acquired before L3 `WriterLock`),
     /// proactive map growth, recovery check, and fail-stop poison checks.
     pub fn begin_write(&self) -> Result<GatedWriteTxn<'_, S, V>, StorageError> {
+        if self.read_only {
+            return Err(StorageError::ReadOnly);
+        }
         loop {
             self.check_poisoned()?;
             if let Some(target) = self.store.needs_map_growth()? {
@@ -432,6 +482,9 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         S: 'static,
         V: 'static,
     {
+        if self.read_only {
+            return Err(StorageError::ReadOnly);
+        }
         loop {
             self.check_poisoned()?;
             if let Some(target) = self.store.needs_map_growth()? {
@@ -465,10 +518,17 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
 
     /// Flushes LMDB to disk and writes + fsyncs the next alternating 4 KiB durability slot.
     ///
+    /// Refuses to overwrite `synced.v2` while `unacked_reboot` is set (returning `Ok(None)`),
+    /// so routine `close()` / `flush()` cannot silently erase an `UnsyncedAfterReboot` recovery
+    /// state before the caller explicitly invokes `acknowledge_restore()`.
+    ///
     /// Permanently poisons the gate on any failure so no subsequent read or write can proceed on
     /// an uncertain durability boundary.
     pub fn sync(&self) -> Result<Option<SyncSlot>, StorageError> {
         self.check_poisoned()?;
+        if self.read_only {
+            return Err(StorageError::ReadOnly);
+        }
         let map_guard = self.store.lock_map_read();
         let mut guard = self.writer.lock();
         self.check_poisoned()?;
@@ -480,7 +540,45 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if self.mode == DurabilityMode::Unsafe {
             return Ok(None);
         }
+        if self.unacked_reboot.load(Ordering::Acquire) {
+            // Flush LMDB pages so Grouped-mode writes are not lost, without sealing `synced.v2`
+            // until the caller explicitly invokes `acknowledge_restore()`.
+            if let Err(err) = self.store.sync(&map_guard) {
+                return Err(self.poison(format!("store sync failed: {err}")));
+            }
+            drop(guard);
+            drop(map_guard);
+            return Ok(None);
+        }
         let slot = self.persist_durable_locked(&mut guard, &map_guard, None)?;
+        drop(guard);
+        drop(map_guard);
+        Ok(Some(slot))
+    }
+
+    /// Explicitly acknowledges an `UnsyncedAfterReboot` recovery state, flushing LMDB and sealing
+    /// the current root state into `synced.v2`.
+    ///
+    /// Only after the sidecar write and fsync succeed is `unacked_reboot` cleared.
+    pub fn acknowledge_restore(&self) -> Result<Option<SyncSlot>, StorageError> {
+        self.check_poisoned()?;
+        if self.read_only {
+            return Err(StorageError::ReadOnly);
+        }
+        let map_guard = self.store.lock_map_read();
+        let mut guard = self.writer.lock();
+        self.check_poisoned()?;
+        if !guard.recovered {
+            return Err(StorageError::InvalidState(
+                "DurabilityGate::recover() must succeed before calling acknowledge_restore()".into(),
+            ));
+        }
+        if self.mode == DurabilityMode::Unsafe {
+            self.unacked_reboot.store(false, Ordering::Release);
+            return Ok(None);
+        }
+        let slot = self.persist_durable_locked(&mut guard, &map_guard, None)?;
+        self.unacked_reboot.store(false, Ordering::Release);
         drop(guard);
         drop(map_guard);
         Ok(Some(slot))
@@ -825,8 +923,18 @@ impl<'a, S: KvStore + 'a, V: Vfs> GatedWriteTxn<'a, S, V> {
             }
         };
         let out = if gate.mode == DurabilityMode::Strict {
-            let slot = gate.persist_durable_locked(self.writer_guard.state_mut(), &map_guard, Some(receipt.txnid))?;
-            CommitReceipt { txnid: slot.txnid, roots_sha256: slot.roots_sha256 }
+            if gate.unacked_reboot.load(Ordering::Acquire) {
+                // Flush LMDB pages so writes aren't lost, but NEVER overwrite `synced.v2`
+                // until the caller explicitly invokes `acknowledge_restore()`.
+                if let Err(err) = gate.store.sync(&map_guard) {
+                    return Err(gate.poison(format!("store sync failed: {err}")));
+                }
+                receipt
+            } else {
+                let slot =
+                    gate.persist_durable_locked(self.writer_guard.state_mut(), &map_guard, Some(receipt.txnid))?;
+                CommitReceipt { txnid: slot.txnid, roots_sha256: slot.roots_sha256 }
+            }
         } else {
             receipt
         };
