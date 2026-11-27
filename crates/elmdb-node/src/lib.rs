@@ -313,10 +313,11 @@ fn call_js_hook_sync<'env>(
     let mut recv = std::ptr::null_mut();
     let mut ret = std::ptr::null_mut();
     // SAFETY: `raw_env`, `func.raw()`, and `raw_arg` are valid N-API handles on this JS thread.
-    let status = unsafe {
-        let _ = napi::sys::napi_get_undefined(raw_env, &mut recv);
-        napi::sys::napi_call_function(raw_env, recv, func.raw(), 1, &raw_arg, &mut ret)
-    };
+    let recv_status = unsafe { napi::sys::napi_get_undefined(raw_env, &mut recv) };
+    if recv_status != napi::sys::Status::napi_ok {
+        return Err(extract_and_clear_hook_error(env, napi::Error::from_status(napi::Status::from(recv_status))));
+    }
+    let status = unsafe { napi::sys::napi_call_function(raw_env, recv, func.raw(), 1, &raw_arg, &mut ret) };
     if status != napi::sys::Status::napi_ok {
         return Err(extract_and_clear_hook_error(env, napi::Error::from_status(napi::Status::from(status))));
     }

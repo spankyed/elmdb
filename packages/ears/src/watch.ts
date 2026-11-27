@@ -128,7 +128,7 @@ export class WatchPump implements WatchController {
   readonly #observer: EarsOperationObserver | undefined;
   readonly #turnSliceMs: number;
   readonly #entries = new Map<number, WatchEntry>();
-  readonly #settledListeners = new Set<() => void>();
+  readonly #settledListeners = new Set<{ readonly run: () => void }>();
   #cancelTimer: (() => void) | undefined = undefined;
   #pumping = false;
   #rescheduleAfterPump = false;
@@ -141,11 +141,17 @@ export class WatchPump implements WatchController {
     observer?: EarsOperationObserver,
     turnSliceMs = DEFAULT_TURN_SLICE_MS,
   ) {
+    if (!Number.isSafeInteger(turnSliceMs) || turnSliceMs < 1) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        `watchTurnSliceMs must be a positive safe integer, got ${String(turnSliceMs)}`,
+      );
+    }
     this.#db = db;
     this.#clock = clock;
     this.#onWatchError = onWatchError;
     this.#observer = observer;
-    this.#turnSliceMs = Math.max(1, turnSliceMs);
+    this.#turnSliceMs = turnSliceMs;
   }
 
   get activeCount(): number {
@@ -274,13 +280,14 @@ export class WatchPump implements WatchController {
   }
 
   onSettled(listener: () => void): () => void {
-    if (this.settled()) {
+    if (!this.#pumping && this.settled()) {
       listener();
       return () => {};
     }
-    this.#settledListeners.add(listener);
+    const token = { run: listener };
+    this.#settledListeners.add(token);
     return () => {
-      this.#settledListeners.delete(listener);
+      this.#settledListeners.delete(token);
     };
   }
 
@@ -290,7 +297,7 @@ export class WatchPump implements WatchController {
     for (const watchId of watchIds) {
       this.#unregister(watchId);
     }
-    this.#notifySettledIfReady();
+    if (!this.#pumping) this.#notifySettledIfReady();
   }
 
   markClosed(): void {
@@ -301,7 +308,7 @@ export class WatchPump implements WatchController {
     } catch {
       // Best-effort if the underlying database is already closed.
     }
-    this.#notifySettledIfReady();
+    if (!this.#pumping) this.#notifySettledIfReady();
   }
 
   #notifySettledIfReady(): void {
@@ -315,9 +322,9 @@ export class WatchPump implements WatchController {
     if (!isSettled) return;
     const listeners = [...this.#settledListeners];
     this.#settledListeners.clear();
-    for (const listener of listeners) {
+    for (const token of listeners) {
       try {
-        listener();
+        token.run();
       } catch {
         // Isolate listener exceptions so remaining settled listeners still run.
       }
@@ -335,7 +342,7 @@ export class WatchPump implements WatchController {
       // Ignore if DB was already closed.
     }
     if (this.#entries.size === 0) this.#clearTimer();
-    this.#notifySettledIfReady();
+    if (!this.#pumping) this.#notifySettledIfReady();
   }
 
   #clearTimer(): void {
@@ -354,10 +361,10 @@ export class WatchPump implements WatchController {
       if (this.#stopped) return;
       this.#drain(this.#clock.now(), true);
     };
-    if ('after' in this.#clock) {
+    if ('after' in this.#clock && typeof this.#clock.after === 'function') {
       this.#cancelTimer = this.#clock.after(delay, run);
     } else {
-      const clock = this.#clock;
+      const clock = this.#clock as EarsClock;
       const handle = clock.setTimeout(run, delay);
       this.#cancelTimer = () => {
         clock.clearTimeout(handle);
@@ -416,7 +423,7 @@ export class WatchPump implements WatchController {
     this.#rescheduleAfterPump = false;
     let ran = 0;
     let nextWakeDelayMs: number | undefined;
-    let backoffDelayMs: number | undefined;
+    let sawBackoff = false;
     const failedThisTurn = new Set<number>();
 
     try {
@@ -440,6 +447,7 @@ export class WatchPump implements WatchController {
           } catch {
             break;
           }
+          let dbFailed = false;
           for (const candidate of tick.dueIds) {
             const candidateEntry = this.#entries.get(candidate);
             if (!candidateEntry || !candidateEntry.active) {
@@ -449,21 +457,25 @@ export class WatchPump implements WatchController {
             if (!failedThisTurn.has(candidate) && candidateEntry.backoffUntilMs <= nowMs) {
               // Mark running & clear dirty atomically (matching nextDueWatch) so rerunWatch
               // does not leave the watch permanently dirty after completing!
-              if (!this.#db.beginWatchRun(candidate)) {
+              let began: boolean;
+              try {
+                began = this.#db.beginWatchRun(candidate);
+              } catch {
+                dbFailed = true;
+                break;
+              }
+              if (!began) {
                 continue;
               }
               watchId = candidate;
               break;
             }
           }
+          if (dbFailed) {
+            break;
+          }
           if (watchId === undefined) {
-            for (const candidate of tick.dueIds) {
-              const candidateEntry = this.#entries.get(candidate);
-              if (candidateEntry) {
-                const wait = Math.max(0, candidateEntry.backoffUntilMs - nowMs);
-                backoffDelayMs = backoffDelayMs === undefined ? wait : Math.min(backoffDelayMs, wait);
-              }
-            }
+            sawBackoff = true;
             if (tick.nextWakeDelayMs !== null) {
               nextWakeDelayMs =
                 nextWakeDelayMs === undefined
@@ -522,8 +534,7 @@ export class WatchPump implements WatchController {
                 ? INITIAL_TRANSIENT_BACKOFF_MS
                 : Math.min(MAX_TRANSIENT_BACKOFF_MS, entry.backoffMs * 2);
             entry.backoffUntilMs = nowMs + entry.backoffMs;
-            backoffDelayMs =
-              backoffDelayMs === undefined ? entry.backoffMs : Math.min(backoffDelayMs, entry.backoffMs);
+            sawBackoff = true;
           }
           this.#reportError(entry, earsErr, true);
           // Break if all remaining due watches are backed off so we don't pop the same watch again in this turn.
@@ -557,16 +568,13 @@ export class WatchPump implements WatchController {
       return ran;
     }
 
-    // Compute the earliest next wake across backoff, scheduler cooldowns, turn-slice yields,
-    // and mutations that arrived mid-drain so a failing watch never stalls healthy watches!
+    // Recompute live next wake delay from the Rust scheduler + current active backoff deadlines
+    // (avoiding stale orphan timers if a failing watch stopped itself inside `onError`).
     const candidates: number[] = [];
-    if (backoffDelayMs !== undefined) {
-      candidates.push(Math.max(0, backoffDelayMs));
-    }
-    if (nextWakeDelayMs !== undefined) {
+    if (nextWakeDelayMs !== undefined && !sawBackoff) {
       candidates.push(Math.max(0, nextWakeDelayMs));
     }
-    if (this.#rescheduleAfterPump || !scheduleTail || backoffDelayMs !== undefined || candidates.length === 0) {
+    if (this.#rescheduleAfterPump || !scheduleTail || sawBackoff || candidates.length === 0) {
       const scheduledDelay = this.#computeNextDelay(this.#clock.now());
       if (scheduledDelay !== undefined) {
         candidates.push(scheduledDelay);

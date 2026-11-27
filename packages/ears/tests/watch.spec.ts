@@ -459,5 +459,38 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     healthyWatch.stop();
     healthy2.stop();
     healthy3.stop();
+
+    // Review regressions (P1-1, P1-3, P2-1, P2-2):
+    // 1. Invalid watchTurnSliceMs throws INVALID_ARGUMENT
+    for (const badSlice of [Number.NaN, Number.POSITIVE_INFINITY, 0, -5, 1.5]) {
+      expect(() =>
+        createEarsEngine({ database: handle.database, clock: afterClock, watchTurnSliceMs: badSlice }),
+      ).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    }
+
+    // 2. Stopping a failing watch inside onError fires onSettled AFTER onError (not mid-drain),
+    //    leaves zero orphan timers, and duplicate onSettled registrations unsubscribe independently!
+    const order: string[] = [];
+    const steady = engine.query.of('Task').watchCount(() => {}, { minGapMs: 0, adaptiveMultiplier: 0 });
+    const selfStopping = engine.query.of('Task').watchCount(() => {}, {
+      minGapMs: 0,
+      adaptiveMultiplier: 0,
+      onError: () => {
+        order.push('onError');
+        selfStopping.stop();
+      },
+    });
+    transientFailWatchId = selfStopping.id;
+    engine.create('Task', { title: 't4', done: false }, 't-4');
+    const sharedListener = (): void => {
+      order.push('onSettled');
+    };
+    const cancelFirst = engine.watches.onSettled(sharedListener);
+    engine.watches.onSettled(sharedListener);
+    cancelFirst(); // Must NOT cancel the second registration of `sharedListener`!
+    advanceAfter(20);
+    expect(order).toEqual(['onError', 'onSettled']);
+    expect(timers.size).toBe(0);
+    steady.stop();
   });
 });
