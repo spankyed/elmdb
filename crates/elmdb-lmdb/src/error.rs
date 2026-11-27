@@ -25,12 +25,38 @@ pub(crate) fn map_mdb_err(rc: c_int, map_size: usize, max_dbs: u32) -> StorageEr
     }
 }
 
+const _: () = assert!(ffi::MDB_KEYEXIST <= ffi::MDB_LAST_ERRCODE);
+
 pub(crate) fn mdb_strerror(rc: c_int) -> String {
-    // SAFETY: `mdb_strerror` returns a static NUL-terminated ASCII C string for any `c_int`.
+    // On Windows, LMDB's `mdb_strerror` formats unrecognized error codes into a stack-local
+    // `char buf[...]` and returns a pointer to it (stack-use-after-return UB). Restrict calls
+    // to `MDB_SUCCESS` and LMDB's static `mdb_errstr` table (`MDB_KEYEXIST..=MDB_LAST_ERRCODE`).
+    if rc != ffi::MDB_SUCCESS && !(ffi::MDB_KEYEXIST..=ffi::MDB_LAST_ERRCODE).contains(&rc) {
+        return format!("LMDB error {rc}");
+    }
+    // SAFETY: `rc` is 0 or in LMDB's static error table, so `mdb_strerror` returns a static
+    // NUL-terminated ASCII C string on every platform.
     let ptr = unsafe { ffi::mdb_strerror(rc) };
     if ptr.is_null() {
         return format!("LMDB error {rc}");
     }
     // SAFETY: `ptr` is non-null and NUL-terminated per LMDB's contract.
     unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mdb_strerror_uses_static_table_only_for_known_lmdb_codes() {
+        assert!(!mdb_strerror(ffi::MDB_SUCCESS).starts_with("LMDB error "));
+        assert!(!mdb_strerror(ffi::MDB_KEYEXIST).starts_with("LMDB error "));
+        assert!(!mdb_strerror(ffi::MDB_LAST_ERRCODE).starts_with("LMDB error "));
+
+        // Out-of-range codes must never invoke LMDB's Windows stack-buffer fallback.
+        for rc in [-1, ffi::MDB_KEYEXIST - 1, ffi::MDB_LAST_ERRCODE + 1, i32::MIN, 1] {
+            assert_eq!(mdb_strerror(rc), format!("LMDB error {rc}"));
+        }
+    }
 }

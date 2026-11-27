@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 //! Core storage abstractions, durability choke point, bounded DBI slot pool,
-//! and strict 4-domain lock hierarchy for elmdb v2.
+//! and strict 5-domain lock hierarchy for elmdb v2.
 //!
 //! This crate has zero LMDB dependency so production code and deterministic
 //! simulation (`elmdb-sim`) compile against the exact same traits.
@@ -21,6 +21,9 @@ pub use durability::{
 };
 pub use error::StorageError;
 pub use kv::{CommitReceipt, DbFlags, KvCursor, KvEntry, KvRead, KvStore, KvWrite, SubDbHandle, with_savepoint};
-pub use locks::{LockDomain, MapGate, MetaLock, MetaRwLock, OrderedArcReadGuard, SchemaEpochLock, WriterLock};
+pub use locks::{
+    DbiPublishGate, LockDomain, MapGate, MetaLock, MetaRwLock, OrderedArcReadGuard, OrderedReadGuard, SchemaEpochLock,
+    WriterLock,
+};
 pub use slot::{MAX_POOLED_SLOTS, SubDbPool, SubDbSlot};
 pub use vfs::{BootId, OsVfs, Vfs, VfsLockGuard};

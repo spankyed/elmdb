@@ -1,10 +1,11 @@
-//! Strictly ordered 4-domain non-recursive lock hierarchy:
+//! Strictly ordered 5-domain non-recursive lock hierarchy:
 //!
 //! ```text
 //! L1: SchemaEpochLock (RwLock — read-mostly; NEVER held during index drops or builds)
 //! L2: MapGate         (RwLock — only write-locked on Windows growth or >16 GiB Unix overflow)
 //! L3: WriterLock      (Mutex  — serializes LMDB write transactions + DurabilityGate)
-//! L4: MetaLock        (Mutex  — short O(us) critical sections; NEVER held across I/O or queries)
+//! L4: DbiPublishGate  (RwLock — serializes rare LMDB `me_numdbs`/`me_dbflags` publication vs `begin_read`/`copy_compacted`)
+//! L5: MetaLock        (Mutex/RwLock — short O(us) critical sections; NEVER held across I/O or queries)
 //! ```
 //!
 //! In debug/test builds, every acquisition asserts strict ascending order
@@ -28,7 +29,8 @@ pub enum LockDomain {
     SchemaEpoch = 1,
     MapGate = 2,
     Writer = 3,
-    Meta = 4,
+    DbiPublish = 4,
+    Meta = 5,
 }
 
 impl LockDomain {
@@ -250,7 +252,55 @@ impl<T> WriterLock<T> {
     }
 }
 
-/// L4: Short-lived metadata / invalidation / scheduler mutex.
+/// Exclusive write guard for `DbiPublishGate`: holds `copy_lock.write()` then `pub_lock.write()`
+/// so a writer waiting on a long `copy_compacted` backup never blocks `LmdbRoTxn::begin()`!
+pub struct DbiPublishWriteGuard<'a> {
+    _pub_guard: RwLockWriteGuard<'a, ()>,
+    _copy_guard: RwLockWriteGuard<'a, ()>,
+    _token: DomainToken,
+}
+
+/// L4: Dual-lane barrier serializing rare LMDB `env->me_numdbs`/`env->me_dbflags` publication
+/// (`commit_raw` when opening new sub-DBs and `ensure_subdbs_open`) against BOTH short-lived
+/// `mdb_txn_begin(RDONLY)` (`read_txn`) and long-running `mdb_env_copy2` (`read_copy`).
+///
+/// Writers acquire `copy_lock.write()` BEFORE `pub_lock.write()`, so a writer waiting on a
+/// streaming backup never parks on `pub_lock` and therefore **never stalls concurrent readers**,
+/// while staying separate from L5 `MetaRwLock` (`DbiCache`) so routine writes and `lookup_flags`
+/// never contend with backups either.
+#[derive(Debug, Default)]
+pub struct DbiPublishGate {
+    copy_lock: RwLock<()>,
+    pub_lock: RwLock<()>,
+}
+
+impl DbiPublishGate {
+    pub const fn new() -> Self {
+        Self { copy_lock: RwLock::new(()), pub_lock: RwLock::new(()) }
+    }
+
+    /// Short-lived reader barrier for `mdb_txn_begin(..., MDB_RDONLY)`.
+    pub fn read_txn(&self) -> OrderedReadGuard<'_, ()> {
+        let token = DomainToken::enter(LockDomain::DbiPublish);
+        OrderedReadGuard { guard: self.pub_lock.read(), _token: token }
+    }
+
+    /// Long-lived reader barrier for `mdb_env_copy2(..., MDB_CP_COMPACT)`.
+    pub fn read_copy(&self) -> OrderedReadGuard<'_, ()> {
+        let token = DomainToken::enter(LockDomain::DbiPublish);
+        OrderedReadGuard { guard: self.copy_lock.read(), _token: token }
+    }
+
+    /// Exclusive writer barrier for `mdb_dbis_update` (`commit_raw` with new sub-DBs / `ensure_subdbs_open`).
+    pub fn write(&self) -> DbiPublishWriteGuard<'_> {
+        let token = DomainToken::enter(LockDomain::DbiPublish);
+        let copy_guard = self.copy_lock.write();
+        let pub_guard = self.pub_lock.write();
+        DbiPublishWriteGuard { _pub_guard: pub_guard, _copy_guard: copy_guard, _token: token }
+    }
+}
+
+/// L5: Short-lived metadata / invalidation / scheduler mutex.
 #[derive(Debug, Default)]
 pub struct MetaLock<T>(Mutex<T>);
 

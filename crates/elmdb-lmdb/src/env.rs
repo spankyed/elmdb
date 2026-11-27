@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use elmdb_storage::{
-    BootId, CommitReceipt, DbFlags, KvStore, MapGate, MetaRwLock, OrderedArcReadGuard, StorageError, SubDbHandle,
+    BootId, CommitReceipt, DbFlags, DbiPublishGate, KvStore, MapGate, MetaRwLock, OrderedArcReadGuard,
+    OrderedReadGuard, StorageError, SubDbHandle,
 };
 use lmdb_master_sys as ffi;
 #[cfg(any(target_os = "macos", windows))]
@@ -243,17 +244,56 @@ pub(crate) struct LmdbEnvInner {
     /// Set to `true` if `mdb_env_set_mapsize` unmaps `me_map` and fails to remap; all FFI
     /// entrypoints fail closed with `StorageError::Corrupted` instead of dereferencing dangling `me_metas`.
     pub(crate) map_broken: AtomicBool,
-    /// Count of live `LmdbRwTxn` handles in this process (`0` or `1`); synchronized via `dbis.write()`
+    /// Count of live `LmdbRwTxn` handles in this process (`0` or `1`); synchronized via L5 `dbis.write()`
     /// so `ensure_subdbs_open()` and `LmdbRwTxn` are 100% mutually exclusive even for direct callers.
     pub(crate) active_rw_txns: AtomicUsize,
-    /// L4 reader-writer lock guarding both the DBI handle cache AND LMDB's internal `me_numdbs`/`me_dbflags`
-    /// table across `LmdbRoTxn::begin()` (L4 read) vs `commit_raw`/`ensure_subdbs_open` (L4 write).
+    /// L4 dual-lane reader-writer barrier serializing rare LMDB `env->me_numdbs`/`env->me_dbflags` updates
+    /// (`commit_raw` ONLY when `!pending_dbis.is_empty()` and `ensure_subdbs_open`) against
+    /// `LmdbRoTxn::begin()` (`read_txn`) and `copy_compacted` (`read_copy`), kept separate from L5 `dbis`
+    /// so long backups never block routine writes, hot-path `lookup_flags`, or concurrent `begin_read`!
+    pub(crate) dbi_publish_gate: DbiPublishGate,
+    /// L5 reader-writer lock guarding the Rust `DbiCache` (`by_name`/`by_id`) and `active_rw_txns`.
     pub(crate) dbis: MetaRwLock<DbiCache>,
     /// Held until strictly AFTER `mdb_env_close` completes so duplicate opens are blocked cleanly.
     env_identity: EnvIdentity,
 }
 
+/// Unified RAII guard holding L2 `map_gate.read_arc()` and L4 `dbi_publish_gate` in canonical
+/// ascending lock order (`L2 -> L4`), releasing L4 before L2 on drop.
+///
+/// Every LMDB C call that opens or renews a read transaction (`mdb_txn_begin(..., MDB_RDONLY)`
+/// via `lock_env_read`, or `mdb_env_copy2` via `lock_env_copy`) MUST acquire `EnvReadGuard` so
+/// LMDB's non-atomic `env->me_numdbs` / `env->me_dbflags` loads never race `commit_raw` or
+/// `ensure_subdbs_open`.
+pub(crate) struct EnvReadGuard<'a> {
+    _publish_guard: OrderedReadGuard<'a, ()>,
+    map_guard: OrderedArcReadGuard<()>,
+}
+
+impl EnvReadGuard<'_> {
+    /// Drops L4 `dbi_publish_gate` while retaining L2 `map_gate.read_arc()` for a live `LmdbRoTxn`.
+    pub(crate) fn into_map_guard(self) -> OrderedArcReadGuard<()> {
+        self.map_guard
+    }
+}
+
 impl LmdbEnvInner {
+    /// Acquires `EnvReadGuard` (`L2 map_gate.read_arc()` + `check_map_ok()` + L4 `read_txn`).
+    pub(crate) fn lock_env_read(&self) -> Result<EnvReadGuard<'_>, StorageError> {
+        let map_guard = self.map_gate.read_arc();
+        self.check_map_ok()?;
+        let publish_guard = self.dbi_publish_gate.read_txn();
+        Ok(EnvReadGuard { _publish_guard: publish_guard, map_guard })
+    }
+
+    /// Acquires `EnvReadGuard` for streaming backups (`L2 map_gate.read_arc()` + `check_map_ok()` + L4 `read_copy`).
+    pub(crate) fn lock_env_copy(&self) -> Result<EnvReadGuard<'_>, StorageError> {
+        let map_guard = self.map_gate.read_arc();
+        self.check_map_ok()?;
+        let publish_guard = self.dbi_publish_gate.read_copy();
+        Ok(EnvReadGuard { _publish_guard: publish_guard, map_guard })
+    }
+
     #[inline]
     pub(crate) fn current_map_size(&self) -> usize {
         self.map_size.load(Ordering::Acquire)
@@ -434,6 +474,7 @@ impl LmdbStore {
                 map_gate: MapGate::new(()),
                 map_broken: AtomicBool::new(false),
                 active_rw_txns: AtomicUsize::new(0),
+                dbi_publish_gate: DbiPublishGate::new(),
                 dbis: MetaRwLock::new(cache),
                 env_identity,
             }),
@@ -475,9 +516,10 @@ impl LmdbStore {
         let c_path = path_to_cstring(target_dir)?;
         let copied_data = target_dir.join("data.mdb");
         {
-            let _map_guard = self.inner.map_gate.read();
-            self.inner.check_map_ok()?;
-            // SAFETY: `self.inner.env` is an open `MDB_env` protected by L2 `map_gate.read()` and `c_path` is NUL-terminated.
+            let _copy_guard = self.inner.lock_env_copy()?;
+            // SAFETY: `self.inner.env` is an open `MDB_env` protected by L2 `map_gate.read()` + L4
+            // `dbi_publish_gate.read_copy()`, preventing concurrent `mdb_dbis_update` from racing `mdb_env_copy2`'s
+            // internal `mdb_txn_renew0` without blocking routine writes, `begin_read`, or `lookup_flags` reads.
             let mut rc = unsafe { ffi::mdb_env_copy2(self.inner.env.as_ptr(), c_path.as_ptr(), ffi::MDB_CP_COMPACT) };
             if rc == ffi::MDB_READERS_FULL {
                 let mut dead: libc::c_int = 0;
@@ -573,9 +615,12 @@ fn preopen_existing_subdbs(
             let mut dbi: ffi::MDB_dbi = 0;
             // SAFETY: `txn` is live; opening without `MDB_CREATE` only succeeds for genuine sub-DBs.
             let rc = unsafe { ffi::mdb_dbi_open(txn, cname.as_ptr(), 0, &mut dbi) };
-            if rc != ffi::MDB_SUCCESS {
+            if rc == ffi::MDB_INCOMPATIBLE {
                 // Non-sub-DB entries in MAIN_DBI (if any) return MDB_INCOMPATIBLE; skip them safely.
                 continue;
+            }
+            if rc != ffi::MDB_SUCCESS {
+                return Err(map_mdb_err(rc, map_size, max_dbs));
             }
             let mut raw_flags: libc::c_uint = 0;
             // SAFETY: `txn` and `dbi` are live.
@@ -654,9 +699,11 @@ impl KvStore for LmdbStore {
             }
         }
 
-        // Hold L4 write lock across the entire `mdb_txn_begin(RDONLY) -> mdb_dbi_open -> mdb_txn_commit`
-        // + cache insertion so no concurrent `ensure_subdbs_open` or `LmdbRoTxn::begin()` can race with
-        // LMDB's non-atomic `env->me_numdbs` / `env->me_dbflags` updates!
+        // Hold L4 `dbi_publish_gate.write()` -> L5 `dbis.write()` across the entire
+        // `mdb_txn_begin(RDONLY) -> mdb_dbi_open -> mdb_txn_commit` + cache insertion so no concurrent
+        // `ensure_subdbs_open`, `LmdbRoTxn::begin()`, or `copy_compacted()` can race with LMDB's
+        // non-atomic `env->me_numdbs` / `env->me_dbflags` updates!
+        let _publish = self.inner.dbi_publish_gate.write();
         let mut cache = self.inner.dbis.write();
         if self.inner.active_rw_txns.load(Ordering::Acquire) != 0 {
             return Err(StorageError::InvalidState(
