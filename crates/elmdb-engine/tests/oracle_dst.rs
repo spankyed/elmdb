@@ -575,3 +575,157 @@ fn review_hardening_savepoint_delta_rollback_nested_proto_and_archived_purge() {
     engine.execute_batch(&[WireOp::Destroy { target: EntityTarget::ExternalId("Task-ref".into()) }]).unwrap();
     assert!(engine.get_row("Task-ref").unwrap().is_none());
 }
+
+#[test]
+fn batch1_spilled_extra_patch_live_kind_change_refusal_and_ephemeral_delta_folding() {
+    let store = SimKvStore::default();
+    let vfs = SimVfs::default();
+    let (engine, _) =
+        Engine::open(store, vfs, SimClock::default(), Path::new("/sim/batch1"), DurabilityMode::Unsafe).unwrap();
+    let mut schema = sample_schema();
+    schema.types.get_mut("Task").unwrap().additional_fields = true;
+    engine.set_schema(&schema).unwrap();
+
+    // P0-1: Updating an entity whose `extra` is already spilled (>4 KiB) MUST rewrite EXTRA_BLOB_FIELD_ID!
+    let big_v1 = "a".repeat(5_000);
+    let big_v2 = "b".repeat(5_200);
+    engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Task".into(),
+            external_id: Some("Task-extra".into()),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("Extra Test".into())),
+                ("dyn_big".into(), CanonicalValue::String(big_v1)),
+                ("dyn_flag".into(), CanonicalValue::Int(1)),
+            ],
+        }])
+        .unwrap();
+
+    engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("Task-extra".into()),
+            fields: vec![
+                ("dyn_big".into(), CanonicalValue::String(big_v2.clone())),
+                ("dyn_flag".into(), CanonicalValue::Int(2)),
+            ],
+        }])
+        .unwrap();
+    let row = engine.get_row("Task-extra").unwrap().expect("row exists");
+    assert_eq!(row.fields.get("dyn_big"), Some(&CanonicalValue::String(big_v2.clone())));
+    assert_eq!(row.fields.get("dyn_flag"), Some(&CanonicalValue::Int(2)));
+
+    // Unsetting one extra key while remaining spilled (>4 KiB) must also rewrite the extra blob.
+    engine
+        .execute_batch(&[WireOp::Unset {
+            target: EntityTarget::ExternalId("Task-extra".into()),
+            fields: vec!["dyn_flag".into()],
+        }])
+        .unwrap();
+    let row2 = engine.get_row("Task-extra").unwrap().expect("row exists");
+    assert_eq!(row2.fields.get("dyn_big"), Some(&CanonicalValue::String(big_v2)));
+    assert_eq!(row2.fields.get("dyn_flag"), None);
+
+    // P0-2: Incompatible kind change on an ACTIVE field MUST fail with InvalidSchema (not silently archive!).
+    let mut bad_schema = schema.clone();
+    bad_schema.types.get_mut("Task").unwrap().fields.get_mut("title").unwrap().kind = RawFieldKind::Integer;
+    let err = engine.set_schema(&bad_schema).unwrap_err();
+    assert_eq!(err.code, ErrorCode::InvalidSchema);
+
+    // P0-2: Changing Ref.on_delete on an active Ref field preserves FieldId and loaded data!
+    let mut relaxed = schema.clone();
+    relaxed.types.get_mut("Task").unwrap().fields.get_mut("projectRestrict").unwrap().kind =
+        RawFieldKind::Ref { to: vec!["Project".into()], on_delete: OnDeletePolicy::AllowDangling };
+    engine.set_schema(&relaxed).unwrap();
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Project".into(),
+                external_id: Some("Proj-1".into()),
+                fields: vec![("name".into(), CanonicalValue::String("P1".into()))],
+            },
+            WireOp::Patch {
+                target: EntityTarget::ExternalId("Task-extra".into()),
+                fields: vec![("projectRestrict".into(), CanonicalValue::String("Proj-1".into()))],
+            },
+        ])
+        .unwrap();
+    // Tighten AllowDangling -> Restrict: field stays intact on same FieldId and Restrict enforces!
+    engine.set_schema(&schema).unwrap();
+    assert_eq!(
+        engine.get_field("Task-extra", "projectRestrict").unwrap(),
+        Some(CanonicalValue::String("Proj-1".into()))
+    );
+    let ref_err =
+        engine.execute_batch(&[WireOp::Destroy { target: EntityTarget::ExternalId("Proj-1".into()) }]).unwrap_err();
+    assert_eq!(ref_err.code, ErrorCode::Referenced);
+
+    // P1-6: Create-then-destroy and link-then-unlink in the same transaction fold into net no-op
+    // (no phantom `(None, None)` delta in beforeCommit hooks and no tombstone!).
+    let saw_hook = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let saw_hook_c = std::sync::Arc::clone(&saw_hook);
+    let task_tid = engine.schema().type_by_name("Task").unwrap().id;
+    let mut wants = elmdb_engine::TypeMask::empty();
+    wants.insert(task_tid);
+    engine.register_before_commit(BeforeCommitHook {
+        wants,
+        callback: Arc::new(move |ctx| {
+            saw_hook_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            for d in ctx.entity_deltas() {
+                assert!(d.before.is_some() || d.after.is_some(), "must never emit (None, None) entity delta");
+            }
+            for e in ctx.edge_deltas() {
+                assert!(e.before.is_some() || e.after.is_some(), "must never emit (None, None) edge delta");
+            }
+            Ok(())
+        }),
+    });
+
+    engine
+        .transact(|ctx| {
+            ctx.exec_batch_and_flush(&[
+                WireOp::Create {
+                    type_name: "Task".into(),
+                    external_id: Some("Task-ephemeral".into()),
+                    fields: vec![("title".into(), CanonicalValue::String("Temp".into()))],
+                },
+                WireOp::Link {
+                    source: EntityTarget::BatchSlot(0),
+                    rel_kind: "IN_PROJECT".into(),
+                    target: EntityTarget::ExternalId("Proj-1".into()),
+                    weight: None,
+                    info: None,
+                },
+                WireOp::Unlink {
+                    source: EntityTarget::BatchSlot(0),
+                    rel_kind: Some("IN_PROJECT".into()),
+                    target: Some(EntityTarget::ExternalId("Proj-1".into())),
+                },
+                WireOp::Destroy { target: EntityTarget::BatchSlot(0) },
+            ])?;
+            Ok(())
+        })
+        .unwrap();
+    // Also verify mixed batch: ephemeral Task create+destroy + real Audit create MUST NOT spuriously fire Task hook!
+    engine
+        .transact(|ctx| {
+            ctx.exec_batch_and_flush(&[
+                WireOp::Create {
+                    type_name: "Task".into(),
+                    external_id: Some("Task-ephemeral-mixed".into()),
+                    fields: vec![("title".into(), CanonicalValue::String("TempMixed".into()))],
+                },
+                WireOp::Destroy { target: EntityTarget::BatchSlot(0) },
+                WireOp::Create {
+                    type_name: "Audit".into(),
+                    external_id: Some("Audit-real".into()),
+                    fields: vec![("msg".into(), CanonicalValue::String("real audit".into()))],
+                },
+            ])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(saw_hook.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(engine.get_row("Task-ephemeral").unwrap().is_none());
+    assert!(engine.get_row("Task-ephemeral-mixed").unwrap().is_none());
+    assert!(engine.get_row("Audit-real").unwrap().is_some());
+}

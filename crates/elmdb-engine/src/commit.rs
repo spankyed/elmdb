@@ -255,6 +255,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Default for HookRegistry<S, V, C> {
 struct DeltaBatch {
     entities: BTreeMap<EntityKey, EntityDelta>,
     edges: BTreeMap<RelKey, EdgeDelta>,
+    edge_endpoint_types: FxHashMap<RelKey, (Option<TypeId>, Option<TypeId>)>,
     touched_types: TypeMask,
     touched_rel_kinds: BTreeSet<RelKindId>,
     tombstones: Vec<(EntityKey, TypeId, String)>,
@@ -265,6 +266,7 @@ impl DeltaBatch {
         Self {
             entities: BTreeMap::new(),
             edges: BTreeMap::new(),
+            edge_endpoint_types: FxHashMap::default(),
             touched_types: TypeMask::empty(),
             touched_rel_kinds: BTreeSet::new(),
             tombstones: Vec::new(),
@@ -280,28 +282,80 @@ impl DeltaBatch {
         changed_fields: FieldMask,
         liveness_changed: bool,
     ) {
-        self.touched_types.insert(type_id);
         match self.entities.get_mut(&key) {
             Some(existing) => {
-                existing.changed_fields.union_with(&changed_fields);
-                existing.liveness_changed |= liveness_changed;
-                existing.after = after;
+                if existing.before.is_none() && after.is_none() {
+                    // Created and destroyed in the same transaction -> net no-op.
+                    self.entities.remove(&key);
+                    self.tombstones.retain(|(k, _, _)| *k != key);
+                } else {
+                    existing.changed_fields.union_with(&changed_fields);
+                    existing.liveness_changed |= liveness_changed;
+                    existing.after = after;
+                }
             }
             None => {
-                self.entities
-                    .insert(key, EntityDelta { key, type_id, before, after, changed_fields, liveness_changed });
+                if before.is_some() || after.is_some() {
+                    self.entities
+                        .insert(key, EntityDelta { key, type_id, before, after, changed_fields, liveness_changed });
+                }
             }
         }
     }
 
-    fn record_edge(&mut self, key: RelKey, kind: RelKindId, before: Option<PackedEdge>, after: Option<PackedEdge>) {
-        self.touched_rel_kinds.insert(kind);
+    fn record_edge(
+        &mut self,
+        key: RelKey,
+        kind: RelKindId,
+        before: Option<PackedEdge>,
+        after: Option<PackedEdge>,
+        endpoint_types: (Option<TypeId>, Option<TypeId>),
+    ) {
         match self.edges.get_mut(&key) {
-            Some(existing) => existing.after = after,
+            Some(existing) => {
+                if existing.before.is_none() && after.is_none() {
+                    // Linked and unlinked in the same transaction -> net no-op.
+                    self.edges.remove(&key);
+                    self.edge_endpoint_types.remove(&key);
+                } else {
+                    existing.after = after;
+                    let entry = self.edge_endpoint_types.entry(key).or_insert((None, None));
+                    if endpoint_types.0.is_some() {
+                        entry.0 = endpoint_types.0;
+                    }
+                    if endpoint_types.1.is_some() {
+                        entry.1 = endpoint_types.1;
+                    }
+                }
+            }
             None => {
-                self.edges.insert(key, EdgeDelta { key, kind, before, after });
+                if before.is_some() || after.is_some() {
+                    self.edges.insert(key, EdgeDelta { key, kind, before, after });
+                    self.edge_endpoint_types.insert(key, endpoint_types);
+                }
             }
         }
+    }
+
+    fn recompute_touched(&mut self) {
+        let mut types = TypeMask::empty();
+        for d in self.entities.values() {
+            types.insert(d.type_id);
+        }
+        let mut rels = BTreeSet::new();
+        for (&rk, e) in &self.edges {
+            rels.insert(e.kind);
+            if let Some(&(src_ty, dst_ty)) = self.edge_endpoint_types.get(&rk) {
+                if let Some(t) = src_ty {
+                    types.insert(t);
+                }
+                if let Some(t) = dst_ty {
+                    types.insert(t);
+                }
+            }
+        }
+        self.touched_types = types;
+        self.touched_rel_kinds = rels;
     }
 
     fn is_empty(&self) -> bool {
@@ -933,6 +987,78 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         Ok((txn, schema))
     }
 
+    /// Restores persisted entity and relation timestamps during lossless `dump::load` without
+    /// altering field payloads, edges, or derived projections.
+    pub fn restore_loaded_timestamps(
+        &self,
+        entity_timestamps: &[(String, i64, i64, i64)],
+        edge_timestamps: &[(String, String, String, i64)],
+    ) -> Result<()> {
+        use std::collections::VecDeque;
+
+        if entity_timestamps.is_empty() && edge_timestamps.is_empty() {
+            return Ok(());
+        }
+        let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
+        let dbs = self.dbs;
+
+        for (ext_id, created_at_ms, updated_at_ms, trashed_at_ms) in entity_timestamps {
+            let Some(key) = lookup_ext_id_in_txn(&txn, &dbs, ext_id)? else {
+                continue;
+            };
+            let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
+                continue;
+            };
+            let mut packed =
+                decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
+            packed.header.created_at_ms = *created_at_ms;
+            packed.header.updated_at_ms = *updated_at_ms;
+            packed.header.trashed_at_ms = *trashed_at_ms;
+            let enc = encode_row(&packed)?;
+            txn.put(dbs.entities, &key.to_ne_bytes(), &enc.row_bytes)?;
+        }
+
+        if !edge_timestamps.is_empty() {
+            let mut queues: FxHashMap<(RelKindId, EntityKey, EntityKey), VecDeque<i64>> = FxHashMap::default();
+            for (rel_kind, src_ext, dst_ext, created_at_ms) in edge_timestamps {
+                let Some(rdef) = schema.relations.iter().find(|r| r.name == *rel_kind) else {
+                    continue;
+                };
+                let Some(src) = lookup_ext_id_in_txn(&txn, &dbs, src_ext)? else {
+                    continue;
+                };
+                let Some(dst) = lookup_ext_id_in_txn(&txn, &dbs, dst_ext)? else {
+                    continue;
+                };
+                queues.entry((rdef.id, src, dst)).or_default().push_back(*created_at_ms);
+            }
+            let mut updates: Vec<(RelKey, Vec<u8>)> = Vec::new();
+            {
+                let mut cur = txn.cursor(dbs.relations)?;
+                let mut item = cur.first()?;
+                while let Some((k, v)) = item {
+                    if k.len() == 8 {
+                        let rk = RelKey::from_ne_bytes(k.try_into().expect("8"));
+                        let mut edge = PackedEdge::decode(rk, v)?;
+                        if let Some(q) = queues.get_mut(&(edge.kind, edge.src, edge.dst))
+                            && let Some(ts) = q.pop_front()
+                        {
+                            edge.created_at_ms = ts;
+                            updates.push((rk, edge.encode()));
+                        }
+                    }
+                    item = cur.next()?;
+                }
+            }
+            for (rk, bytes) in updates {
+                txn.put(dbs.relations, &rk.to_ne_bytes(), &bytes)?;
+            }
+        }
+
+        txn.commit()?;
+        Ok(())
+    }
+
     /// Executes a synchronous read-modify-write transaction with native LMDB nested savepoints
     /// and a final bounded `beforeCommit` cascade.
     pub fn transact<T, F>(&self, f: F) -> Result<(T, CommitReceipt)>
@@ -1371,6 +1497,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 
     fn flush_projections(&mut self) -> Result<()> {
         if self.pending_deltas.is_empty() {
+            self.pending_deltas = DeltaBatch::new();
             return Ok(());
         }
         self.dirty = true;
@@ -1380,8 +1507,6 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 
         self.engine.projections.apply_deltas(&mut self.txn, &self.schema, &self.engine.dbs, &entity_vec, &edge_vec)?;
 
-        self.round_touched_types.union_with(&batch.touched_types);
-        self.total_deltas.touched_types.union_with(&batch.touched_types);
         for d in entity_vec {
             self.round_deltas.record_entity(
                 d.key,
@@ -1394,10 +1519,14 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             self.total_deltas.record_entity(d.key, d.type_id, d.before, d.after, d.changed_fields, d.liveness_changed);
         }
         for e in edge_vec {
-            self.round_deltas.record_edge(e.key, e.kind, e.before.clone(), e.after.clone());
-            self.total_deltas.record_edge(e.key, e.kind, e.before, e.after);
+            let ep = batch.edge_endpoint_types.get(&e.key).copied().unwrap_or((None, None));
+            self.round_deltas.record_edge(e.key, e.kind, e.before.clone(), e.after.clone(), ep);
+            self.total_deltas.record_edge(e.key, e.kind, e.before, e.after, ep);
         }
         self.total_deltas.tombstones.extend(batch.tombstones);
+        self.round_deltas.recompute_touched();
+        self.total_deltas.recompute_touched();
+        self.round_touched_types = self.round_deltas.touched_types.clone();
         Ok(())
     }
 
@@ -1780,7 +1909,11 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 self.txn.del(self.engine.dbs.adj, &type_list_key(type_id, key))?;
                 self.txn.del(self.engine.dbs.entities, &key.to_ne_bytes())?;
 
-                self.pending_deltas.tombstones.push((key, type_id, old_row.header.ext_id.clone()));
+                let created_in_txn = self.pending_deltas.entities.get(&key).is_some_and(|e| e.before.is_none())
+                    || self.total_deltas.entities.get(&key).is_some_and(|e| e.before.is_none());
+                if !created_in_txn {
+                    self.pending_deltas.tombstones.push((key, type_id, old_row.header.ext_id.clone()));
+                }
                 self.pending_deltas.record_entity(key, type_id, Some(old_row), None, FieldMask::empty(), true);
                 Ok(())
             }
@@ -1859,9 +1992,13 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 };
                 self.txn.put(self.engine.dbs.relations, &rel_key.to_ne_bytes(), &edge.encode())?;
                 self.write_adj_entries(&edge)?;
-                self.pending_deltas.record_edge(rel_key, rdef.id, None, Some(edge));
-                self.pending_deltas.touched_types.insert(src_hdr.type_id);
-                self.pending_deltas.touched_types.insert(dst_hdr.type_id);
+                self.pending_deltas.record_edge(
+                    rel_key,
+                    rdef.id,
+                    None,
+                    Some(edge),
+                    (Some(src_hdr.type_id), Some(dst_hdr.type_id)),
+                );
                 Ok(())
             }
             WireOp::Unlink { source, rel_kind, target } => {
@@ -1942,8 +2079,14 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 
         // Only rewrite blobs whose value actually changed or newly spilled!
         for (fid, blob_bytes) in enc.blobs {
-            let unchanged =
-                old.is_some_and(|o| prev_blobs.contains(&fid) && o.fields.get(&fid) == next.fields.get(&fid));
+            let unchanged = old.is_some_and(|o| {
+                prev_blobs.contains(&fid)
+                    && if fid == crate::row::EXTRA_BLOB_FIELD_ID {
+                        o.extra == next.extra
+                    } else {
+                        o.fields.get(&fid) == next.fields.get(&fid)
+                    }
+            });
             if !unchanged {
                 self.txn.put(self.engine.dbs.blobs, &blob_key(key, fid), &blob_bytes)?;
             }
@@ -2228,13 +2371,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         self.txn.del(self.engine.dbs.relations, &rel_key.to_ne_bytes())?;
 
         // Track endpoint types so `beforeCommit` hooks watching those types see the unlink!
-        if let Ok(hdr) = self.load_row_header(edge.src) {
-            self.pending_deltas.touched_types.insert(hdr.type_id);
-        }
-        if let Ok(hdr) = self.load_row_header(edge.dst) {
-            self.pending_deltas.touched_types.insert(hdr.type_id);
-        }
-        self.pending_deltas.record_edge(rel_key, edge.kind, Some(edge), None);
+        let src_ty = self.load_row_header(edge.src).ok().map(|h| h.type_id);
+        let dst_ty = self.load_row_header(edge.dst).ok().map(|h| h.type_id);
+        self.pending_deltas.record_edge(rel_key, edge.kind, Some(edge), None, (src_ty, dst_ty));
         Ok(())
     }
 
@@ -3026,6 +3165,44 @@ pub fn scan_edges_by_kind<R: KvRead>(txn: &R, dbs: &SystemDbs, kind: RelKindId) 
         entry = cur.next()?;
     }
     Ok(out)
+}
+
+pub fn read_raw_stored_row<R: KvRead>(
+    txn: &R,
+    schema: &CompiledSchema,
+    dbs: &SystemDbs,
+    key: EntityKey,
+) -> Result<Option<StoredRow>> {
+    let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
+        return Ok(None);
+    };
+    let packed = decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
+    let tdef = schema
+        .type_by_id(packed.header.type_id)
+        .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
+
+    let mut fields = BTreeMap::new();
+    for (fid, val) in packed.fields {
+        if let Some(fdef) = tdef.field_by_id(fid) {
+            fields.insert(fdef.name.clone(), val);
+        }
+    }
+    for (k, v) in packed.extra {
+        fields.insert(k, v);
+    }
+
+    let trashed = packed.header.is_trashed();
+    Ok(Some(StoredRow {
+        key,
+        id: packed.header.ext_id,
+        type_name: tdef.name.clone(),
+        type_id: tdef.id,
+        trashed,
+        created_at_ms: packed.header.created_at_ms,
+        updated_at_ms: packed.header.updated_at_ms,
+        trashed_at_ms: packed.header.trashed_at_ms,
+        fields,
+    }))
 }
 
 pub fn read_stored_row<R: KvRead>(

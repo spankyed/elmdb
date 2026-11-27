@@ -417,9 +417,7 @@ impl CompiledSchema {
                 continue;
             };
             let tdef = types.iter_mut().find(|t| t.id == type_id).expect("type exists");
-            for f in &mut tdef.fields {
-                f.archived = true;
-            }
+            let mut seen_field_ids: BTreeSet<FieldId> = BTreeSet::new();
             for (fname, rfield) in &raw_ty.fields {
                 if fname.is_empty() || fname.len() > 128 {
                     errors.push(format!("types.{type_name}.fields.{fname}: invalid field name"));
@@ -436,13 +434,15 @@ impl CompiledSchema {
                     None => continue,
                 };
                 if let Some(existing) = tdef.fields.iter_mut().find(|f| f.name == *fname) {
-                    if !existing.archived && existing.kind != kind {
+                    let compatible = field_kind_compatible(&existing.kind, &kind);
+                    if !existing.archived && !compatible {
                         errors.push(format!(
                             "types.{type_name}.fields.{fname}: incompatible field kind change on existing field"
                         ));
+                        seen_field_ids.insert(existing.id);
                         continue;
                     }
-                    if existing.archived && existing.kind != kind {
+                    if existing.archived && !compatible {
                         // Previously archived field revived with a new kind -> allocate a fresh FieldId
                         // and retire the old archived name to avoid collision.
                         let old_id = existing.id.0;
@@ -460,11 +460,13 @@ impl CompiledSchema {
                             nullable: rfield.nullable,
                             archived: false,
                         });
+                        seen_field_ids.insert(fid);
                     } else {
                         existing.kind = kind;
                         existing.optional = rfield.optional;
                         existing.nullable = rfield.nullable;
                         existing.archived = false;
+                        seen_field_ids.insert(existing.id);
                     }
                 } else {
                     let fid = FieldId(tdef.next_field_id);
@@ -480,6 +482,12 @@ impl CompiledSchema {
                         nullable: rfield.nullable,
                         archived: false,
                     });
+                    seen_field_ids.insert(fid);
+                }
+            }
+            for f in &mut tdef.fields {
+                if !seen_field_ids.contains(&f.id) {
+                    f.archived = true;
                 }
             }
         }
@@ -828,5 +836,24 @@ fn compile_field_kind(
         }
         RawFieldKind::Object => Some(FieldKind::Object),
         RawFieldKind::Any => Some(FieldKind::Any),
+    }
+}
+
+/// Returns true if an existing field of kind `old` can evolve in-place to `new` on the same `FieldId`
+/// without corrupting already-persisted primary rows.
+fn field_kind_compatible(old: &FieldKind, new: &FieldKind) -> bool {
+    if old == new {
+        return true;
+    }
+    match (old, new) {
+        // Changing `onDelete` policy (e.g. AllowDangling -> Restrict / SetNull during dump::load)
+        // or widening `Ref.to` keeps the exact same binary representation (`EntityRef` / `DanglingRef`).
+        (FieldKind::Ref { to: old_to, .. }, FieldKind::Ref { to: new_to, .. }) => {
+            old_to.iter().all(|tid| new_to.contains(tid))
+        }
+        // Widening enum values preserves all existing stored values.
+        (FieldKind::Enum(old_vals), FieldKind::Enum(new_vals)) => old_vals.iter().all(|v| new_vals.contains(v)),
+        (FieldKind::List(a), FieldKind::List(b)) => field_kind_compatible(a, b),
+        _ => false,
     }
 }

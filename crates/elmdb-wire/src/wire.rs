@@ -296,14 +296,19 @@ impl ResultEncoder {
         if let Some(&id) = self.str_to_id.get(s) {
             return Ok(id);
         }
-        let id = u16::try_from(self.dict.len())
-            .map_err(|_| ElmdbError::new(ErrorCode::ResourceLimit, "response string dictionary > 65535"))?;
+        // Keep `dict.len() <= u16::MAX` (65,535 entries, indices `0..=65534`) so `finish()`'s
+        // `u16` `dict_len` header never wraps `65536 as u16 == 0`.
+        if self.dict.len() >= usize::from(u16::MAX) {
+            return Err(ElmdbError::new(ErrorCode::ResourceLimit, "response string dictionary > 65535"));
+        }
+        let id = u16::try_from(self.dict.len()).expect("checked < u16::MAX");
         self.dict.push(s.to_owned());
         self.str_to_id.insert(s.to_owned(), id);
         Ok(id)
     }
 
-    /// Resolves `entity_key` via `resolve_fn` at most once per response and interns its external ID.
+    /// Resolves `entity_key` via `resolve_fn` at most once per response and interns its external ID,
+    /// returning `ErrorCode::ResourceLimit` if the `u16` dictionary is at capacity (65,535 entries).
     pub fn intern_entity_ref<F>(&mut self, entity_key: u64, resolve_fn: F) -> Result<u16>
     where
         F: FnOnce(u64) -> Result<String>,
@@ -317,8 +322,35 @@ impl ResultEncoder {
         Ok(dict_id)
     }
 
+    fn try_intern_entity_ref<F>(&mut self, entity_key: u64, resolve_fn: F) -> Result<std::result::Result<u16, String>>
+    where
+        F: FnOnce(u64) -> Result<String>,
+    {
+        if let Some(&id) = self.entity_to_dict_id.get(&entity_key) {
+            return Ok(Ok(id));
+        }
+        let ext_id = resolve_fn(entity_key)?;
+        if let Some(&id) = self.str_to_id.get(&ext_id) {
+            self.entity_to_dict_id.insert(entity_key, id);
+            return Ok(Ok(id));
+        }
+        if self.dict.len() < usize::from(u16::MAX) {
+            let dict_id = u16::try_from(self.dict.len()).expect("checked < u16::MAX");
+            self.dict.push(ext_id.clone());
+            self.str_to_id.insert(ext_id, dict_id);
+            self.entity_to_dict_id.insert(entity_key, dict_id);
+            Ok(Ok(dict_id))
+        } else {
+            Ok(Err(ext_id))
+        }
+    }
+
     /// Appends one row `(external_id, type_name, fields)` to the response frame atomically
-    /// (truncating partial body bytes on error) and resolving nested `EntityRef`s in arrays.
+    /// (rolling back partial body bytes and newly interned dictionary entries on error) and
+    /// resolving nested `EntityRef`s in arrays.
+    ///
+    /// Row `external_id`s are written inline so responses with >65,535 rows never exhaust the `u16`
+    /// string dictionary; repeated field names, type names, and `EntityRef` targets remain interned.
     pub fn push_row<F>(
         &mut self,
         external_id: &str,
@@ -334,10 +366,12 @@ impl ResultEncoder {
             .checked_add(1)
             .ok_or_else(|| ElmdbError::new(ErrorCode::ResourceLimit, "response row count overflow"))?;
         let checkpoint = self.body.len();
+        let dict_checkpoint = self.dict.len();
+        let mut added_entity_keys: Vec<u64> = Vec::new();
         let res = (|| -> Result<()> {
-            let id_sym = self.intern(external_id)?;
+            write_u32(external_id.len(), &mut self.body);
+            self.body.extend_from_slice(external_id.as_bytes());
             let type_sym = self.intern(type_name)?;
-            self.body.extend_from_slice(&id_sym.to_le_bytes());
             self.body.extend_from_slice(&type_sym.to_le_bytes());
             let field_count = u16::try_from(fields.len())
                 .map_err(|_| ElmdbError::new(ErrorCode::ResourceLimit, "row field count > 65535"))?;
@@ -347,14 +381,33 @@ impl ResultEncoder {
                 self.body.extend_from_slice(&sym.to_le_bytes());
                 match val {
                     CanonicalValue::EntityRef(key) => {
-                        let ref_sym = self.intern_entity_ref(*key, &mut resolve_ref)?;
-                        self.body.push(0xFE); // interned external ID reference
-                        self.body.extend_from_slice(&ref_sym.to_le_bytes());
+                        let had_key = self.entity_to_dict_id.contains_key(key);
+                        match self.try_intern_entity_ref(*key, &mut resolve_ref)? {
+                            Ok(ref_sym) => {
+                                if !had_key {
+                                    added_entity_keys.push(*key);
+                                }
+                                self.body.push(0xFE); // interned external ID reference
+                                self.body.extend_from_slice(&ref_sym.to_le_bytes());
+                            }
+                            Err(ext) => {
+                                self.body.push(0xFF); // dict full -> inline string fallback
+                                encode_value(&CanonicalValue::String(ext), &mut self.body);
+                            }
+                        }
                     }
                     CanonicalValue::DanglingRef(ext) => {
-                        let ref_sym = self.intern(ext)?;
-                        self.body.push(0xFE);
-                        self.body.extend_from_slice(&ref_sym.to_le_bytes());
+                        if let Some(&ref_sym) = self.str_to_id.get(ext.as_str()) {
+                            self.body.push(0xFE);
+                            self.body.extend_from_slice(&ref_sym.to_le_bytes());
+                        } else if self.dict.len() < usize::from(u16::MAX) {
+                            let ref_sym = self.intern(ext)?;
+                            self.body.push(0xFE);
+                            self.body.extend_from_slice(&ref_sym.to_le_bytes());
+                        } else {
+                            self.body.push(0xFF);
+                            encode_value(&CanonicalValue::String(ext.clone()), &mut self.body);
+                        }
                     }
                     other if other.contains_internal_ref() => {
                         let resolved = resolve_value_refs(other, &mut resolve_ref)?;
@@ -371,6 +424,12 @@ impl ResultEncoder {
         })();
         if let Err(err) = res {
             self.body.truncate(checkpoint);
+            for s in self.dict.drain(dict_checkpoint..) {
+                self.str_to_id.remove(&s);
+            }
+            for k in added_entity_keys {
+                self.entity_to_dict_id.remove(&k);
+            }
             return Err(err);
         }
         self.row_count = next_count;
@@ -379,9 +438,10 @@ impl ResultEncoder {
 
     /// Finalizes the frame: `[MAGIC:4][dict_len:2][dict_strings...][row_count:4][body...]`.
     pub fn finish(self) -> Vec<u8> {
+        let dict_len = u16::try_from(self.dict.len()).expect("response string dictionary length fits u16");
         let mut out = Vec::with_capacity(16 + self.dict.len() * 12 + self.body.len());
         out.extend_from_slice(&RESULT_MAGIC);
-        out.extend_from_slice(&(self.dict.len() as u16).to_le_bytes());
+        out.extend_from_slice(&dict_len.to_le_bytes());
         for s in &self.dict {
             write_u32(s.len(), &mut out);
             out.extend_from_slice(s.as_bytes());
@@ -429,12 +489,8 @@ impl ResultDecoder {
         let row_count = r.read_u32()? as usize;
         let mut rows = Vec::with_capacity(row_count.min(256));
         for _ in 0..row_count {
-            let id_sym = usize::from(r.read_u16()?);
+            let id = r.read_str()?.to_owned();
             let type_sym = usize::from(r.read_u16()?);
-            let id = dict
-                .get(id_sym)
-                .ok_or_else(|| ElmdbError::new(ErrorCode::InvalidWireFrame, "bad id dict index"))?
-                .clone();
             let type_name = dict
                 .get(type_sym)
                 .ok_or_else(|| ElmdbError::new(ErrorCode::InvalidWireFrame, "bad type dict index"))?
@@ -660,5 +716,45 @@ mod tests {
         assert!(!decoded.has_proto_key);
         assert_eq!(decoded.rows.len(), 10);
         assert_eq!(decoded.rows[9].fields[1], ("parent".into(), CanonicalValue::String("Project-main".into())));
+    }
+
+    #[test]
+    fn result_encoder_exceeds_65535_rows_and_rolls_back_dict_on_error() {
+        let mut enc = ResultEncoder::new();
+        let n = CanonicalValue::Int(1);
+        let row_count = 66_000usize;
+        for i in 0..row_count {
+            let id = format!("row-{i}");
+            enc.push_row(&id, "Item", &[("n", &n)], |_| unreachable!()).unwrap();
+        }
+        // Error mid-row must roll back both body bytes AND newly interned dict entries.
+        let bad_ref = CanonicalValue::EntityRef(999);
+        let err = enc
+            .push_row("row-bad", "BadType", &[("brand_new_field", &bad_ref)], |_| {
+                Err(ElmdbError::new(ErrorCode::EntityNotFound, "missing"))
+            })
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::EntityNotFound);
+
+        let frame = enc.finish();
+        let decoded = ResultDecoder::decode(&frame).unwrap();
+        assert_eq!(decoded.rows.len(), row_count);
+        assert_eq!(decoded.rows[0].id, "row-0");
+        assert_eq!(decoded.rows[row_count - 1].id, format!("row-{}", row_count - 1));
+        assert!(!decoded.dict.iter().any(|s| s == "BadType" || s == "brand_new_field"));
+
+        // Also test hitting the exact 65,535-entry dictionary ceiling with 66,000 distinct EntityRef targets:
+        // dict_len MUST stay 65,535 (never wrap 65536 as u16 == 0) and overflow refs fall back cleanly to inline strings.
+        let mut enc_refs = ResultEncoder::new();
+        for i in 0u64..66_000 {
+            let id = format!("r-{i}");
+            let r = CanonicalValue::EntityRef(i + 1);
+            enc_refs.push_row(&id, "Item", &[("parent", &r)], |k| Ok(format!("target-{k}"))).unwrap();
+        }
+        let frame_refs = enc_refs.finish();
+        let dec_refs = ResultDecoder::decode(&frame_refs).unwrap();
+        assert_eq!(dec_refs.dict.len(), usize::from(u16::MAX));
+        assert_eq!(dec_refs.rows.len(), 66_000);
+        assert_eq!(dec_refs.rows[65_999].fields[0], ("parent".into(), CanonicalValue::String("target-66000".into())));
     }
 }
