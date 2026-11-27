@@ -463,11 +463,26 @@ describe('@elmdb/ears algebraic QueryBuilder', () => {
       expect.objectContaining({ code: 'INVALID_ARGUMENT', message: expect.stringContaining('depth') }),
     );
 
-    // 3. Non-plain objects (Map, Set, RegExp, custom class instances, Int32Array) throw INVALID_ARGUMENT.
+    // 3. Non-plain objects (Map, Set, RegExp, custom class instances, Int32Array, spoofed Date/Uint8Array,
+    //    and throwing constructor getters) plus sparse/non-array `in` predicates throw INVALID_ARGUMENT.
     class CustomBox {
       readonly v = 1;
     }
-    for (const nonPlain of [new Map([['a', 1]]), new Set([1]), /abc/i, new CustomBox(), new Int32Array([1, 2])]) {
+    const throwingCtor = Object.create({
+      get constructor(): unknown {
+        throw new Error('ctor boom');
+      },
+    }) as unknown;
+    for (const nonPlain of [
+      new Map([['a', 1]]),
+      new Set([1]),
+      /abc/i,
+      new CustomBox(),
+      new Int32Array([1, 2]),
+      Object.create(Date.prototype) as unknown,
+      Object.create(Uint8Array.prototype) as unknown,
+      throwingCtor,
+    ]) {
       expect(() => engine.query.of('Doc').where('title', nonPlain as unknown as string)).toThrowError(
         expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
       );
@@ -475,6 +490,12 @@ describe('@elmdb/ears algebraic QueryBuilder', () => {
         expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
       );
     }
+    expect(() => engine.query.of('Doc').where('title', { in: new Array(3) as unknown[] })).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+    );
+    expect(() => engine.query.of('Doc').where('title', { in: 'not-an-array' as unknown as unknown[] })).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+    );
 
     // 4. Shared non-cyclic DAG references, Uint8Array, valid Date, and allowlisted primitives succeed cleanly.
     const shared = { nested: 'ok' };

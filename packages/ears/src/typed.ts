@@ -248,9 +248,7 @@ export function defineEars<TSchema extends EarsSchemaShape>(
       getEngine().setEmbeddings(indexName, id, vectors);
     },
     batch(fn) {
-      return getEngine().batch((raw: BatchWriter) => {
-        fn(raw as unknown as TypedBatchWriter<TSchema>);
-      });
+      return getEngine().batch((raw: BatchWriter) => fn(raw as unknown as TypedBatchWriter<TSchema>));
     },
     transact(fn, opts) {
       return getEngine().transact(fn, opts);
@@ -271,9 +269,7 @@ export function defineEars<TSchema extends EarsSchemaShape>(
       return getEngine().beforeCommit(typeNames, (delta) => {
         const ret = callback(delta);
         if (typeof ret === 'function') {
-          return (raw: BatchWriter) => {
-            ret(raw as unknown as TypedBatchWriter<TSchema>);
-          };
+          return (raw: BatchWriter) => ret(raw as unknown as TypedBatchWriter<TSchema>);
         }
         return ret;
       });

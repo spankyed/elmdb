@@ -234,12 +234,17 @@ function normalizeQueryValue(
   if (typeof value === 'symbol' || typeof value === 'function') {
     throw new EarsError('INVALID_ARGUMENT', `Unsupported query value type '${typeof value}'`);
   }
-  if (value instanceof Uint8Array) {
+  if (value instanceof Uint8Array && ArrayBuffer.isView(value)) {
     // Rust protocol `coerce_json_for_field` decodes `Bytes` fields from JSON `number[]` (0..=255).
     return Array.from(value);
   }
   if (value instanceof Date) {
-    const ms = value.getTime();
+    let ms: number;
+    try {
+      ms = Date.prototype.getTime.call(value);
+    } catch {
+      throw new EarsError('INVALID_ARGUMENT', 'Invalid Date passed to query filter or cursor');
+    }
     if (!Number.isFinite(ms)) {
       throw new EarsError('INVALID_ARGUMENT', 'Invalid Date passed to query filter or cursor');
     }
@@ -292,10 +297,14 @@ function normalizeQueryValue(
       seen.delete(value);
     }
   }
-  const ctorName =
-    typeof value === 'object' && value.constructor && typeof value.constructor.name === 'string'
-      ? value.constructor.name
-      : typeof value;
+  let ctorName: string = typeof value;
+  try {
+    if (typeof value === 'object' && value !== null && value.constructor && typeof value.constructor.name === 'string') {
+      ctorName = value.constructor.name;
+    }
+  } catch {
+    ctorName = 'object';
+  }
   throw new EarsError('INVALID_ARGUMENT', `Unsupported non-plain query value of type '${ctorName}'`);
 }
 
@@ -344,7 +353,14 @@ function compileFieldPredicate(field: string, valueOrPredicate: WhereInput): Que
     filters.push({ op: 'ne', field, value: normalizeQueryValue(pred.ne) });
   }
   if (pred.in !== undefined) {
-    filters.push({ op: 'in', field, values: pred.in.map((v) => normalizeQueryValue(v)) });
+    if (!Array.isArray(pred.in)) {
+      throw new EarsError('INVALID_ARGUMENT', `Filter 'in' predicate for field '${field}' must be an array`);
+    }
+    const values: unknown[] = [];
+    for (let i = 0; i < pred.in.length; i++) {
+      values.push(normalizeQueryValue(pred.in[i]));
+    }
+    filters.push({ op: 'in', field, values });
   }
   if (pred.gt !== undefined || pred.gte !== undefined || pred.lt !== undefined || pred.lte !== undefined) {
     const low: [unknown, boolean] | undefined =

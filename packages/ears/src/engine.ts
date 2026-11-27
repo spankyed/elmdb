@@ -157,6 +157,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
   const query = createQueryRoot(db, pump, observer, isInWriteTxn);
 
   const runBatchPayload = (payload: Uint8Array, ops = 1): BatchResult => {
+    const requestBytes = payload instanceof Uint8Array ? payload.byteLength : 0;
     const finish = observer?.start({ kind: 'write', ops, watch: false, inUnit: isInWriteTxn() });
     let result: BatchResult;
     try {
@@ -165,7 +166,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       const earsErr = toEarsError(error);
       finish?.({
         outcome: 'error',
-        requestBytes: payload.byteLength,
+        requestBytes,
         responseBytes: 0,
         errorCode: earsErr.code,
       });
@@ -177,7 +178,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
     finish?.({
       outcome: 'ok',
       sequence: result.commitSeq,
-      requestBytes: payload.byteLength,
+      requestBytes,
       responseBytes: 0,
     });
     if (!isInWriteTxn()) {

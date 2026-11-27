@@ -589,5 +589,10 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     expect(() =>
       engine.batch((async () => {}) as unknown as Parameters<typeof engine.batch>[0]),
     ).toThrowError(expect.objectContaining({ code: 'ASYNC_CALLBACK_FORBIDDEN' }));
+
+    // Non-Uint8Array payload with an observer still reports EarsError('INVALID_ARGUMENT') without TypeError on byteLength.
+    expect(() => engine.executeWireBatch(null as unknown as Uint8Array)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+    );
   });
 });
