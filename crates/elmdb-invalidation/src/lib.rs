@@ -19,8 +19,8 @@ use elmdb_wire::Result;
 pub use index::{COMMIT_RING_CAP, InvalidationIndex, InvalidationStats};
 pub use read_set::{CoalescedRange, EdgeAdjWatch, PointWatch, ReadSet, WatchId};
 pub use scheduler::{
-    DEFAULT_ADAPTIVE_MULTIPLIER, DEFAULT_MIN_GAP_MS, DEFAULT_TURN_SLICE_MS, NextDue, TickResult, WatchMode,
-    WatchPolicy, WatchScheduler, hash_result_128,
+    DEFAULT_ADAPTIVE_MULTIPLIER, DEFAULT_FAILURE_BACKOFF_BASE_MS, DEFAULT_FAILURE_BACKOFF_MAX_MS, DEFAULT_MIN_GAP_MS,
+    DEFAULT_TURN_SLICE_MS, NextDue, TickResult, WatchMode, WatchPolicy, WatchScheduler, hash_result_128,
 };
 
 struct HubState {
@@ -110,6 +110,7 @@ impl LiveQueryHub {
         }
         // P0-6: Mark `already_ran = true` even when `hash == None` (e.g. Imperative watches)!
         guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
+        guard.scheduler.accept_snapshot(watch_id, (read_seq, read_maint_seq, read_epoch));
         let stale = guard.index.register_after_read_with_maint(
             watch_id,
             read_seq,
@@ -140,8 +141,15 @@ impl LiveQueryHub {
         result_hash: impl FnOnce(&QueryOutput) -> Option<[u8; 16]>,
     ) -> Result<(QueryOutput, bool)> {
         {
-            // Ensure `dirty -> running` transition before taking the lock-free snapshot (no-op if `next_due` already started it).
+            // Fail fast on stopped/unregistered watches before taking a lock-free snapshot, and
+            // ensure `dirty -> running` transition (no-op if `next_due` already started it).
             let mut guard = self.state.lock().expect("hub lock poisoned");
+            if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
+                return Err(elmdb_wire::ElmdbError::new(
+                    elmdb_wire::ErrorCode::Closed,
+                    "watch is stopped or unregistered",
+                ));
+            }
             guard.scheduler.begin_run(watch_id);
         }
         let snap = match run_tracked_snapshot(engine, query_engine, plan, budgets) {
@@ -158,8 +166,8 @@ impl LiveQueryHub {
         let current_schema = engine.schema();
 
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        // P0-4: Never resurrect a watch that was unregistered or stopped while our snapshot ran!
-        if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
+        // P0-4 & E3: Never resurrect an unregistered/stopped watch or overwrite a newer snapshot's ReadSet!
+        if !guard.scheduler.accept_snapshot(watch_id, (read_seq, read_maint_seq, read_epoch)) {
             return Ok((output, false));
         }
         let stale = guard.index.register_after_read_with_maint(
@@ -219,6 +227,7 @@ impl LiveQueryHub {
             return Err(elmdb_wire::ElmdbError::new(elmdb_wire::ErrorCode::Closed, "watch scheduler is stopped"));
         }
         guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
+        guard.scheduler.accept_snapshot(watch_id, (read_seq, read_maint_seq, read_epoch));
         let stale = guard.index.register_after_read_with_maint(
             watch_id,
             read_seq,
@@ -253,6 +262,12 @@ impl LiveQueryHub {
     ) -> Result<(A, bool)> {
         {
             let mut guard = self.state.lock().expect("hub lock poisoned");
+            if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
+                return Err(elmdb_wire::ElmdbError::new(
+                    elmdb_wire::ErrorCode::Closed,
+                    "watch is stopped or unregistered",
+                ));
+            }
             guard.scheduler.begin_run(watch_id);
         }
         struct RerunSnap<A> {
@@ -291,7 +306,7 @@ impl LiveQueryHub {
         let current_schema = engine.schema();
 
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
+        if !guard.scheduler.accept_snapshot(watch_id, (read_seq, read_maint_seq, read_epoch)) {
             return Ok((answer, false));
         }
         let stale = guard.index.register_after_read_with_maint(

@@ -18,6 +18,10 @@ pub const DEFAULT_MIN_GAP_MS: u64 = 16;
 pub const DEFAULT_ADAPTIVE_MULTIPLIER: u64 = 4;
 /// Default cooperative turn slice budget (`8ms`).
 pub const DEFAULT_TURN_SLICE_MS: u64 = 8;
+/// Initial exponential backoff delay after an aborted/failed watch run (`50ms`).
+pub const DEFAULT_FAILURE_BACKOFF_BASE_MS: u64 = 50;
+/// Maximum exponential backoff delay for repeatedly failing watches (`30_000ms`).
+pub const DEFAULT_FAILURE_BACKOFF_MAX_MS: u64 = 30_000;
 
 /// Watch delivery semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,12 +66,20 @@ struct WatchSlot {
     dirty_since_ms: Option<u64>,
     last_run_ms: Option<u64>,
     last_cost_ms: u64,
+    consecutive_failures: u32,
+    last_snapshot: Option<(u64, u64, u64)>,
     last_result_hash: Option<[u8; 16]>,
 }
 
 impl WatchSlot {
     fn gap_ms(&self) -> u64 {
-        self.policy.min_gap_ms.max(self.last_cost_ms.saturating_mul(self.policy.adaptive_multiplier))
+        let adaptive = self.policy.min_gap_ms.max(self.last_cost_ms.saturating_mul(self.policy.adaptive_multiplier));
+        if self.consecutive_failures == 0 {
+            return adaptive;
+        }
+        let shift = self.consecutive_failures.saturating_sub(1).min(16);
+        let backoff = DEFAULT_FAILURE_BACKOFF_BASE_MS.saturating_mul(1u64 << shift).min(DEFAULT_FAILURE_BACKOFF_MAX_MS);
+        adaptive.max(backoff)
     }
 
     fn ready_at_ms(&self) -> u64 {
@@ -161,9 +173,29 @@ impl WatchScheduler {
                 dirty_since_ms: if already_ran { None } else { Some(now_ms) },
                 last_run_ms: if already_ran { Some(now_ms) } else { None },
                 last_cost_ms: initial_cost_ms,
+                consecutive_failures: 0,
+                last_snapshot: None,
                 last_result_hash: initial_hash,
             },
         );
+    }
+
+    /// Seeds or advances the monotonic `(commit_seq, maint_seq, schema_epoch)` snapshot fence for `id`.
+    /// Returns `false` if `id` is stopped/unregistered or if `snapshot` is strictly older in any clock
+    /// component than the latest snapshot already accepted for `id`.
+    pub fn accept_snapshot(&mut self, id: WatchId, snapshot: (u64, u64, u64)) -> bool {
+        let Some(slot) = self.watches.get_mut(&id) else {
+            return false;
+        };
+        if let Some((prev_seq, prev_maint, prev_epoch)) = slot.last_snapshot
+            && (snapshot.0 < prev_seq || snapshot.1 < prev_maint || snapshot.2 < prev_epoch)
+        {
+            return false;
+        }
+        slot.last_snapshot = Some(snapshot);
+        slot.dirty = false;
+        slot.dirty_since_ms = None;
+        true
     }
 
     /// Removes a watch from scheduling.
@@ -306,7 +338,8 @@ impl WatchScheduler {
     }
 
     /// Aborts an in-flight run (e.g. after query cancellation or error), clearing `running = false`
-    /// so the scheduler never wedges. When `requeue_dirty == true`, marks the watch dirty again.
+    /// so the scheduler never wedges. Applies bounded exponential failure backoff and clamps
+    /// `last_run_ms` monotonically (idempotent if called more than once after the run already cleared).
     pub fn abort_run(&mut self, id: WatchId, requeue_dirty: bool, now_ms: u64) -> bool {
         if self.stopped {
             return false;
@@ -314,7 +347,12 @@ impl WatchScheduler {
         let Some(slot) = self.watches.get_mut(&id) else {
             return false;
         };
+        let was_running = slot.running;
         slot.running = false;
+        if was_running {
+            slot.last_run_ms = Some(slot.last_run_ms.map_or(now_ms, |prev| prev.max(now_ms)));
+            slot.consecutive_failures = slot.consecutive_failures.saturating_add(1);
+        }
         if requeue_dirty && !slot.dirty {
             slot.dirty = true;
             slot.dirty_since_ms = Some(now_ms);
@@ -334,6 +372,7 @@ impl WatchScheduler {
             return false;
         };
         slot.running = false;
+        slot.consecutive_failures = 0;
         // Clamp `last_run_ms` monotonically so a backward host clock step cannot shorten cooldowns.
         slot.last_run_ms = Some(slot.last_run_ms.map_or(now_ms, |prev| prev.max(now_ms)));
         slot.last_cost_ms = cost_ms;

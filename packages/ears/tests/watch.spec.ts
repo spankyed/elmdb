@@ -493,4 +493,54 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     expect(timers.size).toBe(0);
     steady.stop();
   });
+
+  it('unregisters and settles permanently poisoned PANICKED and POISONED watch handles without leaking timers (E2)', () => {
+    for (const permanentCode of ['PANICKED', 'POISONED'] as const) {
+      const clock = createFakeClock(20_000);
+      const handle = temps.open({ schema: watchSchema });
+      const realDb = handle.database;
+      let injectFault = false;
+      const wrappedDb = new Proxy(realDb, {
+        get(target, prop, receiver) {
+          if (prop === 'rerunWatch') {
+            return (watchId: number, spec: unknown, now: number, costMs: number) => {
+              if (injectFault) {
+                throw new EarsError(permanentCode, `simulated ${permanentCode} fault`);
+              }
+              return target.rerunWatch(watchId, spec as Parameters<typeof target.rerunWatch>[1], now, costMs);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+
+      const engine = createEarsEngine({ database: wrappedDb, clock });
+      const errors: EarsError[] = [];
+      const w = engine.query.of('Task').watchCount(() => {}, {
+        minGapMs: 0,
+        onError: (err) => errors.push(err),
+      });
+
+      let settledCalls = 0;
+      injectFault = true;
+      engine.create('Task', { title: 'trigger', done: false }, 'p-1');
+      engine.watches.onSettled(() => {
+        settledCalls++;
+      });
+
+      clock.advance(10);
+      expect(errors).toHaveLength(1);
+      expect(errors[0]!.code).toBe(permanentCode);
+      expect(w.active).toBe(false);
+      expect(engine.watches.activeCount).toBe(0);
+      expect(engine.watches.settled()).toBe(true);
+      expect(settledCalls).toBe(1);
+      expect(clock.pendingTimers).toBe(0);
+
+      // Advancing well past any backoff window must never re-invoke onError!
+      clock.advance(60_000);
+      expect(errors).toHaveLength(1);
+    }
+  });
 });

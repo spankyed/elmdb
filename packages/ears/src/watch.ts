@@ -84,17 +84,52 @@ export function createSystemClock(): EarsClock & AfterClock {
 }
 
 /**
- * Error codes indicating a watch's compiled query can no longer succeed on the current schema/handle.
- * Such watches are automatically unregistered on rerun failure instead of spinning in a 0ms livelock.
+ * Compile-time exhaustive retry policy for every canonical `EarsErrorCode`.
+ * `'permanent'` errors unregister the watch immediately so broken/poisoned handles never spin or leak timers;
+ * `'transient'` errors apply bounded exponential backoff.
  */
-const PERMANENT_WATCH_ERROR_CODES: Readonly<Partial<Record<EarsErrorCode, true>>> = Object.freeze({
-  UNKNOWN_TYPE: true,
-  TYPE_ARCHIVED: true,
-  UNKNOWN_FIELD: true,
-  UNKNOWN_RELATION: true,
-  UNKNOWN_INDEX: true,
-  INVALID_ARGUMENT: true,
-  CLOSED: true,
+const WATCH_ERROR_POLICY: Readonly<Record<EarsErrorCode, 'permanent' | 'transient'>> = Object.freeze({
+  INVALID_ARGUMENT: 'permanent',
+  INVALID_WIRE_FRAME: 'permanent',
+  INVALID_SCHEMA: 'permanent',
+  SCHEMA_CHANGED: 'transient',
+  UNKNOWN_TYPE: 'permanent',
+  TYPE_ARCHIVED: 'permanent',
+  UNKNOWN_FIELD: 'permanent',
+  UNKNOWN_RELATION: 'permanent',
+  UNKNOWN_INDEX: 'permanent',
+  ENTITY_NOT_FOUND: 'transient',
+  ENTITY_ALREADY_EXISTS: 'transient',
+  ENTITY_TRASHED: 'transient',
+  ENTITY_NOT_TRASHED: 'transient',
+  RELATION_NOT_FOUND: 'transient',
+  RELATION_ALREADY_EXISTS: 'transient',
+  VALIDATION_FAILED: 'permanent',
+  UNIQUE_VIOLATION: 'transient',
+  CARDINALITY_VIOLATION: 'transient',
+  CYCLE_DETECTED: 'transient',
+  REFERENCED: 'transient',
+  ENDPOINT_MISMATCH: 'permanent',
+  HOOK_ABORTED: 'transient',
+  HOOK_CYCLE_LIMIT: 'transient',
+  ASYNC_CALLBACK_FORBIDDEN: 'permanent',
+  INDEX_BUILD_FAILED: 'transient',
+  INDEX_NOT_READY: 'transient',
+  RESOURCE_LIMIT: 'transient',
+  CANCELLED: 'transient',
+  STORAGE_FULL: 'transient',
+  CORRUPTED: 'permanent',
+  DURABILITY_FAILED: 'transient',
+  POISONED: 'permanent',
+  IO: 'transient',
+  INTERNAL: 'transient',
+  CLOSED: 'permanent',
+  READ_ONLY: 'permanent',
+  NO_DATABASE: 'permanent',
+  DATABASE_LOCKED: 'transient',
+  ALREADY_EXISTS: 'permanent',
+  PANICKED: 'permanent',
+  ALREADY_LOADED: 'permanent',
 });
 
 const INITIAL_TRANSIENT_BACKOFF_MS = 50;
@@ -517,8 +552,8 @@ export class WatchPump implements WatchController {
           const earsErr = toEarsError(rerunErr);
           finishRerun?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
           failedThisTurn.add(entry.id);
-          if (Object.prototype.hasOwnProperty.call(PERMANENT_WATCH_ERROR_CODES, earsErr.code)) {
-            // Permanent schema/compile/closed error: stop the broken watch so it cannot livelock or starve others.
+          if (WATCH_ERROR_POLICY[earsErr.code] === 'permanent') {
+            // Permanent schema/compile/closed/poisoned/panicked error: stop the broken watch so it cannot livelock or starve others.
             this.#unregister(entry.id);
           } else {
             // Ensure Rust WatchScheduler clears `running = false` and requeues `dirty = true` even if
