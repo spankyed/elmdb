@@ -166,12 +166,20 @@ pub struct CrossProcCommitSummary {
 pub struct CommitDeltaSummary {
     pub seq: u64,
     pub maint_seq: u64,
-    pub txnid: u64,
     pub schema_epoch: u64,
     pub touched_types: TypeMask,
     pub touched_rel_kinds: Vec<RelKindId>,
     pub entity_deltas: Vec<EntityDelta>,
     pub edge_deltas: Vec<EdgeDelta>,
+}
+
+/// Exact logical clocks atomically captured inside a committed maintenance or slot-swap write transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaintReceipt {
+    pub seq: u64,
+    pub schema_epoch: u64,
+    pub maint_seq: u64,
+    pub receipt: CommitReceipt,
 }
 
 /// Result returned from `Engine::execute_batch`.
@@ -820,7 +828,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     /// Atomically compacts an index into a fresh staging `SubDbSlot` drawn from `SubDbPool`,
     /// swaps the index's active slot in `meta`, and truncates the retired slot in O(1) without
     /// ever calling `mdb_dbi_close()` (zero `MDB_DBS_FULL` leaks!).
-    pub fn swap_index_slot<T, F>(&self, index_id: IndexId, mut f: F) -> Result<(T, CommitReceipt)>
+    pub fn swap_index_slot<T, F>(&self, index_id: IndexId, mut f: F) -> Result<(T, MaintReceipt)>
     where
         F: FnMut(
             &mut GatedWriteTxn<'_, S, V>,
@@ -830,7 +838,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             SubDbHandle, // clean staging sub-DB
         ) -> Result<T>,
     {
-        let (out, receipt, next_schema, next_pool) = self.retry_on_map_full(|| {
+        let (out, maint_receipt, next_schema, next_pool) = self.retry_on_map_full(|| {
             let mut txn = self.gate.begin_write()?;
             let (mut schema, mut pool) = load_schema_and_pool(&txn, &self.dbs)?;
             let idx_pos =
@@ -852,6 +860,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             pool.recycle(old_slot)?;
 
             let seq = self.next_commit_seq(&txn)?;
+            let maint_seq = read_maint_seq(&txn, &self.dbs)?;
             persist_schema_and_pool(&mut txn, &self.dbs, &schema, &pool, seq)?;
             write_commit_summary(
                 &mut txn,
@@ -865,26 +874,50 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 },
                 &[],
             )?;
+            let schema_epoch = schema.epoch;
             let receipt = txn.commit()?;
-            Ok((out, receipt, schema, pool))
+            Ok((out, MaintReceipt { seq, schema_epoch, maint_seq, receipt }, schema, pool))
         })?;
         self.publish_schema_monotonic(Arc::new(next_schema), next_pool);
-        Ok((out, receipt))
+        Ok((out, maint_receipt))
     }
 
     /// Runs a lock-order-safe maintenance write transaction (used by chunked index builders,
-    /// `rebuild()`, vector drain, and ping-pong compaction) with zero schema-epoch TOCTOU and
-    /// automatic LMDB map growth retry.
-    pub fn run_maintenance_write<T, F>(&self, mut f: F) -> Result<(T, CommitReceipt)>
+    /// `rebuild()`, vector drain, and ping-pong compaction) with zero schema-epoch TOCTOU,
+    /// automatic LMDB map growth retry, and exact atomic `(seq, schema_epoch, maint_seq)` capture.
+    pub fn run_maintenance_write<T, F>(&self, mut f: F) -> Result<(T, MaintReceipt)>
     where
         F: FnMut(&mut GatedWriteTxn<'_, S, V>, &Arc<CompiledSchema>, &SystemDbs) -> Result<T>,
     {
         self.retry_on_map_full(|| {
             let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
             let out = f(&mut txn, &schema, &self.dbs)?;
-            let _ = bump_maint_seq(&mut txn, &self.dbs)?;
+            let seq = read_commit_seq(&txn, &self.dbs)?;
+            let maint_seq = bump_maint_seq(&mut txn, &self.dbs)?;
+            let schema_epoch = schema.epoch;
             let receipt = txn.commit()?;
-            Ok((out, receipt))
+            Ok((out, MaintReceipt { seq, schema_epoch, maint_seq, receipt }))
+        })
+    }
+
+    /// Runs a conditional maintenance write transaction: if `f` returns `Ok(None)` (e.g. a concurrent
+    /// drainer already finished the pending work), the transaction aborts cleanly without bumping
+    /// `maint_seq` or committing.
+    pub fn run_maintenance_write_opt<T, F>(&self, mut f: F) -> Result<Option<(T, MaintReceipt)>>
+    where
+        F: FnMut(&mut GatedWriteTxn<'_, S, V>, &Arc<CompiledSchema>, &SystemDbs) -> Result<Option<T>>,
+    {
+        self.retry_on_map_full(|| {
+            let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
+            let Some(out) = f(&mut txn, &schema, &self.dbs)? else {
+                drop(txn);
+                return Ok(None);
+            };
+            let seq = read_commit_seq(&txn, &self.dbs)?;
+            let maint_seq = bump_maint_seq(&mut txn, &self.dbs)?;
+            let schema_epoch = schema.epoch;
+            let receipt = txn.commit()?;
+            Ok(Some((out, MaintReceipt { seq, schema_epoch, maint_seq, receipt })))
         })
     }
 
@@ -1008,12 +1041,9 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         if entity_timestamps.is_empty() && edge_timestamps.is_empty() {
             return Ok(());
         }
-        self.retry_on_map_full(|| {
-            let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
-            let dbs = self.dbs;
-
+        let (_, _) = self.run_maintenance_write(|txn, schema, dbs| {
             for (ext_id, created_at_ms, updated_at_ms, trashed_at_ms) in entity_timestamps {
-                let Some(key) = lookup_ext_id_in_txn(&txn, &dbs, ext_id)? else {
+                let Some(key) = lookup_ext_id_in_txn(txn, dbs, ext_id)? else {
                     continue;
                 };
                 let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
@@ -1034,10 +1064,10 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                     let Some(rdef) = schema.relations.iter().find(|r| r.name == *rel_kind) else {
                         continue;
                     };
-                    let Some(src) = lookup_ext_id_in_txn(&txn, &dbs, src_ext)? else {
+                    let Some(src) = lookup_ext_id_in_txn(txn, dbs, src_ext)? else {
                         continue;
                     };
-                    let Some(dst) = lookup_ext_id_in_txn(&txn, &dbs, dst_ext)? else {
+                    let Some(dst) = lookup_ext_id_in_txn(txn, dbs, dst_ext)? else {
                         continue;
                     };
                     queues.entry((rdef.id, src, dst)).or_default().push_back(*created_at_ms);
@@ -1065,9 +1095,9 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 }
             }
 
-            txn.commit()?;
             Ok(())
-        })
+        })?;
+        Ok(())
     }
 
     /// Executes a synchronous read-modify-write transaction with native LMDB nested savepoints
@@ -1616,7 +1646,6 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         let summary = want_summary.then(|| CommitDeltaSummary {
             seq: self.commit_seq,
             maint_seq,
-            txnid: receipt.txnid,
             schema_epoch: self.schema.epoch,
             touched_types: self.total_deltas.touched_types,
             touched_rel_kinds: self.total_deltas.touched_rel_kinds.into_iter().collect(),

@@ -14,8 +14,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use elmdb_engine::{
-    EdgeDelta, Engine, EntityDelta, EntityKey, IndexId, IndexKind, RelKindId, SystemDbs, TypeId, read_packed_row,
-    scan_adj_in_raw, scan_adj_out_raw, scan_type_keys,
+    EdgeDelta, Engine, EntityDelta, EntityKey, IndexId, IndexKind, MaintReceipt, RelKindId, SystemDbs, TypeId,
+    read_packed_row, scan_adj_in_raw, scan_adj_out_raw, scan_type_keys,
 };
 use elmdb_storage::{Clock, DbFlags, KvCursor, KvRead, KvStore, SubDbHandle, Vfs};
 use elmdb_wire::{ElmdbError, ErrorCode, Result};
@@ -507,6 +507,16 @@ pub fn drain_rank_chunk<S: KvStore, V: Vfs, C: Clock>(
     index_id: IndexId,
     max_pushes: usize,
 ) -> Result<usize> {
+    Ok(drain_rank_chunk_with_receipt(engine, index_id, max_pushes)?.0)
+}
+
+/// Like `drain_rank_chunk`, also returning `Some((active_slot, maint_receipt))` whenever a
+/// maintenance write actually committed (returning `None` without bumping `maint_seq` on 0-work races!).
+pub fn drain_rank_chunk_with_receipt<S: KvStore, V: Vfs, C: Clock>(
+    engine: &Engine<S, V, C>,
+    index_id: IndexId,
+    max_pushes: usize,
+) -> Result<(usize, Option<(u16, MaintReceipt)>)> {
     // Fast RO pre-check so converged rank indexes never take the write lock!
     {
         let (ro, schema) = engine.begin_read_pinned()?;
@@ -520,24 +530,37 @@ pub fn drain_rank_chunk<S: KvStore, V: Vfs, C: Clock>(
             let mut cur = ro.cursor(db)?;
             let has_dirty = cur.seek_ge(&[TAG_DIRTY])?.is_some_and(|(k, _)| k.first() == Some(&TAG_DIRTY));
             if !has_dirty {
-                return Ok(0);
+                return Ok((0, None));
             }
         } else {
-            return Ok(0);
+            return Ok((0, None));
         }
     }
 
-    let (pushes, _) = engine.run_maintenance_write(|txn, schema, dbs| {
+    let committed = engine.run_maintenance_write_opt(|txn, schema, dbs| {
         let def = schema
             .index_by_id(index_id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0)))?;
         let IndexKind::Rank { relations, weighted } = &def.kind else {
             return Err(ElmdbError::new(ErrorCode::InvalidArgument, "index is not a Rank index"));
         };
+        let slot = def.slot;
         let db = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
-        drain_pushes_in_txn(txn, dbs, db, relations, *weighted, max_pushes)
+        let has_dirty = {
+            let mut cur = txn.cursor(db)?;
+            cur.seek_ge(&[TAG_DIRTY])?.is_some_and(|(k, _)| k.first() == Some(&TAG_DIRTY))
+        };
+        if !has_dirty {
+            // Concurrent drainer already cleared `TAG_DIRTY`: abort cleanly without bumping `maint_seq`.
+            return Ok(None);
+        }
+        let pushes = drain_pushes_in_txn(txn, dbs, db, relations, *weighted, max_pushes)?;
+        Ok(Some((pushes, slot)))
     })?;
-    Ok(pushes)
+    match committed {
+        Some(((pushes, slot), mr)) => Ok((pushes, Some((slot, mr)))),
+        None => Ok((0, None)),
+    }
 }
 
 /// Drains a Push PageRank index to full convergence (`|r(v)| <= epsilon` for all nodes).

@@ -1745,8 +1745,8 @@ fn child_batch3_worker() {
         // P0-1 review regression: maintenance-only write in child, followed by unrelated local commit in parent!
         db.set_embeddings("emb", "n2", &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
     } else {
-        // P0-11: Combine a normal data commit (bumps commit_seq += 1, txnid += 1) AND a maintenance
-        // write (`set_embeddings`, bumps txnid += 1 without bumping commit_seq) in one polling window!
+        // P0-11: Combine a normal data commit (bumps commit_seq += 1) AND a maintenance
+        // write (`set_embeddings`, bumps maint_seq += 1 without bumping commit_seq) in one polling window!
         db.execute_batch(&[WireOp::Patch {
             target: EntityTarget::ExternalId("a1".into()),
             fields: vec![("name".into(), CanonicalValue::String("Updated By Child".into()))],
@@ -2016,7 +2016,7 @@ fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_a
 
     // Review P0-1 regression: child performs maintenance-only `set_embeddings("emb", "n2", [1,0,0,0])`,
     // then parent performs an UNRELATED local write (`Patch Author("a1")`) BEFORE `catch_up_cross_process()`.
-    // `notify_commit` MUST detect the txnid maintenance gap and dirty `w_vec` instead of swallowing it!
+    // `notify_commit` MUST detect the maint_seq gap and dirty `w_vec` instead of swallowing it!
     let status2 = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "child_batch3_worker", "--ignored", "--nocapture"])
         .env("ELMDB_TEST_B3_DIR", &db_dir)
@@ -2034,11 +2034,11 @@ fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_a
     let due_after_local = db.tick_watches(now).due_ids;
     assert!(
         due_after_local.contains(&w_vec),
-        "unrelated local commit after cross-process maintenance write MUST detect txnid gap and dirty Note vector watch!"
+        "unrelated local commit after cross-process maintenance write MUST detect maint_seq gap and dirty Note vector watch!"
     );
     assert!(db.begin_watch_run(w_vec));
     let _ = db.rerun_query_watch(w_vec, &vec_spec, now + 10, 1).unwrap();
-    assert!(db.watches_settled(), "watch MUST settle cleanly after txnid-gap rerun");
+    assert!(db.watches_settled(), "watch MUST settle cleanly after maint_seq-gap rerun");
     db.unregister_watch(w_vec);
 
     // -------------------------------------------------------------------------

@@ -252,8 +252,7 @@ enum CommitRingPayload {
 #[derive(Debug, Clone)]
 struct CommitRingEntry {
     seq: u64,
-    maint_start: u64,
-    maint_end: u64,
+    maint_seq: u64,
     schema_epoch: u64,
     payload: CommitRingPayload,
 }
@@ -447,7 +446,7 @@ impl InvalidationIndex {
     /// Registers (or atomically replaces) `watch_id`'s `ReadSet` collected during an MVCC snapshot read
     /// at `(read_at_seq, read_at_maint_seq, read_schema_epoch)` and immediately checks `CommitRing`.
     ///
-    /// Comparing maintenance writes strictly against `read_at_maint_seq` (`maint_end > read_at_maint_seq`)
+    /// Comparing maintenance writes strictly against `read_at_maint_seq` (`rec.maint_seq > read_at_maint_seq`)
     /// prevents post-maintenance watch livelock while catching every concurrent maintenance write!
     pub fn register_after_read_with_maint(
         &mut self,
@@ -546,24 +545,24 @@ impl InvalidationIndex {
         for rec in &self.ring {
             match &rec.payload {
                 CommitRingPayload::SubDbWrite { slot, key } => {
-                    if rec.maint_end <= read_at_maint_seq {
+                    if rec.maint_seq <= read_at_maint_seq {
                         continue;
                     }
                     if rec.schema_epoch != read_schema_epoch {
                         return true;
                     }
-                    if rec.maint_start > expected_maint {
+                    if rec.maint_seq > expected_maint {
                         return true;
                     }
-                    if rec.maint_end >= expected_maint {
-                        expected_maint = rec.maint_end.saturating_add(1);
+                    if rec.maint_seq == expected_maint {
+                        expected_maint = expected_maint.saturating_add(1);
                     }
                     if entry_matches_subdb_key(entry, *slot, key) {
                         return true;
                     }
                 }
                 CommitRingPayload::FullInvalidation => {
-                    if rec.seq > read_at_seq || rec.maint_end > read_at_maint_seq {
+                    if rec.seq > read_at_seq || rec.maint_seq > read_at_maint_seq {
                         return true;
                     }
                 }
@@ -608,27 +607,27 @@ impl InvalidationIndex {
             || (read_at_maint_seq < self.latest_maint_seq && expected_maint <= self.latest_maint_seq)
     }
 
-    fn push_ring(&mut self, seq: u64, maint_start: u64, maint_end: u64, schema_epoch: u64, payload: CommitRingPayload) {
+    fn push_ring(&mut self, seq: u64, maint_seq: u64, schema_epoch: u64, payload: CommitRingPayload) {
         self.latest_seq = self.latest_seq.max(seq);
-        self.latest_maint_seq = self.latest_maint_seq.max(maint_end);
+        self.latest_maint_seq = self.latest_maint_seq.max(maint_seq);
         self.latest_schema_epoch = self.latest_schema_epoch.max(schema_epoch);
         if self.ring.len() >= COMMIT_RING_CAP
             && let Some(evicted) = self.ring.pop_front()
         {
             match evicted.payload {
                 CommitRingPayload::SubDbWrite { .. } => {
-                    self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(evicted.maint_end);
+                    self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(evicted.maint_seq);
                 }
                 CommitRingPayload::FullInvalidation => {
                     self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(evicted.seq);
-                    self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(evicted.maint_end);
+                    self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(evicted.maint_seq);
                 }
                 CommitRingPayload::Local(_) | CommitRingPayload::CrossProc(_) => {
                     self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(evicted.seq);
                 }
             }
         }
-        self.ring.push_back(CommitRingEntry { seq, maint_start, maint_end, schema_epoch, payload });
+        self.ring.push_back(CommitRingEntry { seq, maint_seq, schema_epoch, payload });
     }
 
     /// Processes an in-process committed `CommitDeltaSummary`, appends it to `CommitRing`,
@@ -648,13 +647,7 @@ impl InvalidationIndex {
         if maint_gap {
             self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(summary.seq);
             self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(summary.maint_seq);
-            self.push_ring(
-                summary.seq,
-                summary.maint_seq,
-                summary.maint_seq,
-                summary.schema_epoch,
-                CommitRingPayload::FullInvalidation,
-            );
+            self.push_ring(summary.seq, summary.maint_seq, summary.schema_epoch, CommitRingPayload::FullInvalidation);
             return self.all_watch_ids();
         }
         if summary.seq <= prev_seq {
@@ -666,21 +659,9 @@ impl InvalidationIndex {
         if seq_gap {
             let missing_up_to = summary.seq.saturating_sub(1);
             self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(missing_up_to);
-            self.push_ring(
-                missing_up_to,
-                prev_maint,
-                prev_maint,
-                summary.schema_epoch,
-                CommitRingPayload::FullInvalidation,
-            );
+            self.push_ring(missing_up_to, prev_maint, summary.schema_epoch, CommitRingPayload::FullInvalidation);
         }
-        self.push_ring(
-            summary.seq,
-            summary.maint_seq,
-            summary.maint_seq,
-            summary.schema_epoch,
-            CommitRingPayload::Local(summary.clone()),
-        );
+        self.push_ring(summary.seq, summary.maint_seq, summary.schema_epoch, CommitRingPayload::Local(summary.clone()));
 
         if schema_changed || seq_gap {
             return self.all_watch_ids();
@@ -867,7 +848,7 @@ impl InvalidationIndex {
 
     /// Notifies a direct sub-DB write outside `execute_batch` (e.g., `set_entity_embeddings` or background vector/rank drain).
     pub fn notify_subdb_write(&mut self, seq: u64, schema_epoch: u64, slot: u16, key: &[u8]) -> Vec<WatchId> {
-        self.notify_subdb_write_at_maint(seq, schema_epoch, 0, 1, slot, key)
+        self.notify_subdb_write_at_maint(seq, schema_epoch, 0, slot, key)
     }
 
     pub fn notify_subdb_write_at_maint(
@@ -875,38 +856,30 @@ impl InvalidationIndex {
         seq: u64,
         schema_epoch: u64,
         maint_seq: u64,
-        maint_commits: u64,
         slot: u16,
         key: &[u8],
     ) -> Vec<WatchId> {
         let prev_seq = self.latest_seq;
         let prev_maint = self.latest_maint_seq;
         let prev_epoch = self.latest_schema_epoch;
-        let commits = maint_commits.max(1);
-        let schema_changed = schema_epoch != prev_epoch;
-        let seq_gap = seq > prev_seq;
 
-        if !seq_gap && !schema_changed && maint_seq > 0 && maint_seq <= prev_maint {
+        // Ignore stale delayed receipts already superseded by a newer catch-up, schema change, or barrier.
+        if maint_seq > 0 && maint_seq <= prev_maint && seq <= prev_seq && schema_epoch <= prev_epoch {
             return Vec::new();
         }
 
-        let effective_maint = if maint_seq > 0 { maint_seq } else { prev_maint.saturating_add(commits) };
-        let maint_start = effective_maint.saturating_sub(commits.saturating_sub(1));
-        let maint_gap = effective_maint > prev_maint.saturating_add(commits);
+        let schema_changed = schema_epoch != prev_epoch;
+        let seq_gap = seq > prev_seq;
+        let effective_maint = if maint_seq > 0 { maint_seq } else { prev_maint.saturating_add(1) };
+        let maint_gap = effective_maint > prev_maint.saturating_add(1);
 
         if seq_gap || maint_gap {
             self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(seq);
             self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(effective_maint);
-            self.push_ring(seq, effective_maint, effective_maint, schema_epoch, CommitRingPayload::FullInvalidation);
+            self.push_ring(seq, effective_maint, schema_epoch, CommitRingPayload::FullInvalidation);
             return self.all_watch_ids();
         }
-        self.push_ring(
-            seq,
-            maint_start,
-            effective_maint,
-            schema_epoch,
-            CommitRingPayload::SubDbWrite { slot, key: key.to_vec() },
-        );
+        self.push_ring(seq, effective_maint, schema_epoch, CommitRingPayload::SubDbWrite { slot, key: key.to_vec() });
 
         if schema_changed {
             return self.all_watch_ids();
@@ -932,7 +905,7 @@ impl InvalidationIndex {
         if effective_maint > self.latest_maint_seq {
             self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(effective_maint);
         }
-        self.push_ring(seq, effective_maint, effective_maint, new_schema_epoch, CommitRingPayload::FullInvalidation);
+        self.push_ring(seq, effective_maint, new_schema_epoch, CommitRingPayload::FullInvalidation);
         self.all_watch_ids()
     }
 
@@ -943,12 +916,19 @@ impl InvalidationIndex {
     }
 
     pub fn notify_full_rebuild_at_maint(&mut self, seq: u64, schema_epoch: u64, maint_seq: u64) -> Vec<WatchId> {
+        if maint_seq > 0
+            && maint_seq <= self.latest_maint_seq
+            && seq <= self.latest_seq
+            && schema_epoch <= self.latest_schema_epoch
+        {
+            return Vec::new();
+        }
         let effective_maint = if maint_seq > 0 { maint_seq } else { self.latest_maint_seq.saturating_add(1) };
         if seq > self.latest_seq {
             self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(seq);
         }
         self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(effective_maint);
-        self.push_ring(seq, effective_maint, effective_maint, schema_epoch, CommitRingPayload::FullInvalidation);
+        self.push_ring(seq, effective_maint, schema_epoch, CommitRingPayload::FullInvalidation);
         self.all_watch_ids()
     }
 
@@ -968,7 +948,7 @@ impl InvalidationIndex {
         if tip_maint > self.latest_maint_seq {
             self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(tip_seq);
             self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(tip_maint);
-            self.push_ring(tip_seq, tip_maint, tip_maint, tip_epoch, CommitRingPayload::FullInvalidation);
+            self.push_ring(tip_seq, tip_maint, tip_epoch, CommitRingPayload::FullInvalidation);
             return Ok(self.all_watch_ids());
         }
 
@@ -978,8 +958,8 @@ impl InvalidationIndex {
 
         let Some(summaries) = summaries_opt else {
             // > 4,096 commits elapsed cross-process: fail strictly safe!
-            self.ring_dropped_seq_up_to = tip_seq;
-            self.push_ring(tip_seq, tip_maint, tip_maint, tip_epoch, CommitRingPayload::FullInvalidation);
+            self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(tip_seq);
+            self.push_ring(tip_seq, tip_maint, tip_epoch, CommitRingPayload::FullInvalidation);
             return Ok(self.all_watch_ids());
         };
 
@@ -995,8 +975,8 @@ impl InvalidationIndex {
                 expected = expected.saturating_add(1);
             }
             if !contiguous || expected != tip_seq.saturating_add(1) {
-                self.ring_dropped_seq_up_to = tip_seq;
-                self.push_ring(tip_seq, tip_maint, tip_maint, tip_epoch, CommitRingPayload::FullInvalidation);
+                self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(tip_seq);
+                self.push_ring(tip_seq, tip_maint, tip_epoch, CommitRingPayload::FullInvalidation);
                 return Ok(self.all_watch_ids());
             }
         }
@@ -1032,7 +1012,7 @@ impl InvalidationIndex {
         maint_seq: u64,
     ) -> Vec<WatchId> {
         let schema_changed = cp.schema_epoch != self.latest_schema_epoch;
-        self.push_ring(cp.seq, maint_seq, maint_seq, cp.schema_epoch, CommitRingPayload::CrossProc(cp.clone()));
+        self.push_ring(cp.seq, maint_seq, cp.schema_epoch, CommitRingPayload::CrossProc(cp.clone()));
         if schema_changed {
             return self.all_watch_ids();
         }

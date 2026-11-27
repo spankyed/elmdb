@@ -228,26 +228,144 @@ fn strip_toml_comment(line: &str) -> &str {
     line
 }
 
-fn parse_workspace_dependency_keys(manifest: &str) -> std::collections::BTreeSet<String> {
-    let mut keys = std::collections::BTreeSet::new();
-    let mut in_ws_deps = false;
+/// Joins multiline TOML arrays (`[...]`) and inline tables (`{...}`) into single logical statements,
+/// stripping `#` comments while respecting `'...'` and `"..."` string literals.
+fn toml_logical_lines(manifest: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut depth = 0usize;
     for raw_line in manifest.lines() {
         let line = strip_toml_comment(raw_line).trim();
         if line.is_empty() {
             continue;
         }
+        if depth == 0 && line.starts_with('[') && line.ends_with(']') {
+            if !buf.is_empty() {
+                out.push(std::mem::take(&mut buf));
+            }
+            out.push(line.to_owned());
+            continue;
+        }
+        if !buf.is_empty() {
+            buf.push(' ');
+        }
+        buf.push_str(line);
+
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+        for ch in line.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_double => escaped = true,
+                '"' if !in_single => in_double = !in_double,
+                '\'' if !in_double => in_single = !in_single,
+                '{' | '[' if !in_single && !in_double => depth += 1,
+                '}' | ']' if !in_single && !in_double => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        if depth == 0 && !buf.is_empty() {
+            out.push(std::mem::take(&mut buf));
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+/// Splits a dotted TOML key or table header body (without outer `[` / `]`) into unquoted segments,
+/// respecting `'...'` and `"..."` quoted segments that contain dots (e.g. `target.'cfg(unix)'.dependencies`).
+fn split_toml_key_segments(raw: &str) -> Vec<String> {
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_double => escaped = true,
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            '.' if !in_single && !in_double => {
+                let s = cur.trim().to_owned();
+                if !s.is_empty() {
+                    segs.push(s);
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    let s = cur.trim().to_owned();
+    if !s.is_empty() {
+        segs.push(s);
+    }
+    segs
+}
+
+/// Extracts all single- or double-quoted TOML string literals from `text`.
+fn extract_toml_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            let mut s = String::new();
+            let mut escaped = false;
+            for c in chars.by_ref() {
+                if escaped {
+                    s.push(c);
+                    escaped = false;
+                    continue;
+                }
+                if quote == '"' && c == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if c == quote {
+                    break;
+                }
+                s.push(c);
+            }
+            out.push(s);
+        }
+    }
+    out
+}
+
+fn parse_workspace_dependency_keys(manifest: &str) -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    let mut in_ws_deps = false;
+    for line in toml_logical_lines(manifest) {
         if line.starts_with('[') && line.ends_with(']') {
-            in_ws_deps = line == "[workspace.dependencies]";
+            let segs = split_toml_key_segments(&line[1..line.len() - 1]);
+            if segs.len() == 2 && segs[0] == "workspace" && segs[1] == "dependencies" {
+                in_ws_deps = true;
+            } else if segs.len() >= 3 && segs[0] == "workspace" && segs[1] == "dependencies" {
+                keys.insert(segs[2].clone());
+                in_ws_deps = false;
+            } else {
+                in_ws_deps = false;
+            }
             continue;
         }
         if !in_ws_deps {
             continue;
         }
-        if let Some((lhs, _)) = line.split_once('=') {
-            let key = lhs.trim().trim_matches('"').trim_matches('\'');
-            if !key.is_empty() {
-                keys.insert(key.to_owned());
-            }
+        if let Some((lhs, _)) = line.split_once('=')
+            && let Some(first) = split_toml_key_segments(lhs).into_iter().next()
+        {
+            keys.insert(first);
         }
     }
     keys
@@ -255,87 +373,103 @@ fn parse_workspace_dependency_keys(manifest: &str) -> std::collections::BTreeSet
 
 fn parse_workspace_members(manifest: &str) -> Vec<String> {
     let mut in_ws = false;
-    let mut in_members = false;
-    let mut buf = String::new();
-    for raw_line in manifest.lines() {
-        let line = strip_toml_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
-        }
+    for line in toml_logical_lines(manifest) {
         if line.starts_with('[') && line.ends_with(']') {
-            if in_members {
-                break;
-            }
-            in_ws = line == "[workspace]";
+            let segs = split_toml_key_segments(&line[1..line.len() - 1]);
+            in_ws = segs.len() == 1 && segs[0] == "workspace";
             continue;
         }
         if !in_ws {
             continue;
         }
-        if !in_members {
-            if let Some((lhs, rhs)) = line.split_once('=')
-                && lhs.trim() == "members"
-            {
-                in_members = true;
-                buf.push_str(rhs);
-                if rhs.contains(']') {
-                    break;
-                }
-            }
-        } else {
-            buf.push(' ');
-            buf.push_str(line);
-            if line.contains(']') {
-                break;
-            }
+        if let Some((lhs, rhs)) = line.split_once('=')
+            && lhs.trim() == "members"
+        {
+            return extract_toml_strings(rhs);
         }
     }
-    let re = regex::Regex::new(r#""([^"]+)""#).expect("valid regex");
-    re.captures_iter(&buf).map(|c| c[1].to_owned()).collect()
+    Vec::new()
 }
 
-fn is_dep_section_header(header: &str) -> bool {
-    let inner = header.trim_start_matches('[').trim_end_matches(']').trim();
-    matches!(inner, "dependencies" | "dev-dependencies" | "build-dependencies")
-        || (inner.starts_with("target.")
-            && (inner.ends_with(".dependencies")
-                || inner.ends_with(".dev-dependencies")
-                || inner.ends_with(".build-dependencies")))
+enum DepSection {
+    Other,
+    Table,
+    Subtable(String),
+}
+
+fn classify_dep_section(header: &str) -> DepSection {
+    let segs = split_toml_key_segments(&header[1..header.len() - 1]);
+    let is_dep_kind = |s: &str| matches!(s, "dependencies" | "dev-dependencies" | "build-dependencies");
+    match segs.as_slice() {
+        [kind] if is_dep_kind(kind) => DepSection::Table,
+        [kind, dep] if is_dep_kind(kind) => DepSection::Subtable(dep.clone()),
+        [target, _, kind] if target == "target" && is_dep_kind(kind) => DepSection::Table,
+        [target, _, kind, dep] if target == "target" && is_dep_kind(kind) => DepSection::Subtable(dep.clone()),
+        _ => DepSection::Other,
+    }
 }
 
 fn collect_used_workspace_deps(manifest: &str, used: &mut std::collections::BTreeSet<String>) {
-    let mut in_dep_sec = false;
     let ws_true_re = regex::Regex::new(r"\bworkspace\s*=\s*true\b").expect("valid regex");
-    let pkg_re = regex::Regex::new(r#"\bpackage\s*=\s*"([^"]+)""#).expect("valid regex");
-    for raw_line in manifest.lines() {
-        let line = strip_toml_comment(raw_line).trim();
-        if line.is_empty() {
-            continue;
+    let pkg_re = regex::Regex::new(r#"\bpackage\s*=\s*(?:"([^"]+)"|'([^']+)')"#).expect("valid regex");
+    let mut section = DepSection::Other;
+    let mut sub_ws_true = false;
+    let mut sub_pkg: Option<String> = None;
+
+    let flush_subtable = |sec: &DepSection,
+                          ws_true: &mut bool,
+                          pkg: &mut Option<String>,
+                          used: &mut std::collections::BTreeSet<String>| {
+        if let DepSection::Subtable(dep_name) = sec
+            && *ws_true
+        {
+            used.insert(dep_name.clone());
+            if let Some(p) = pkg.take() {
+                used.insert(p);
+            }
         }
+        *ws_true = false;
+        *pkg = None;
+    };
+
+    for line in toml_logical_lines(manifest) {
         if line.starts_with('[') && line.ends_with(']') {
-            in_dep_sec = is_dep_section_header(line);
-            continue;
-        }
-        if !in_dep_sec {
+            flush_subtable(&section, &mut sub_ws_true, &mut sub_pkg, used);
+            section = classify_dep_section(&line);
             continue;
         }
         let Some((lhs, rhs)) = line.split_once('=') else {
             continue;
         };
-        let lhs = lhs.trim();
         let rhs = rhs.trim();
-        if let Some(dep_name) = lhs.strip_suffix(".workspace") {
-            if rhs == "true" {
-                used.insert(dep_name.trim().trim_matches('"').trim_matches('\'').to_owned());
+        match &section {
+            DepSection::Other => {}
+            DepSection::Table => {
+                let segs = split_toml_key_segments(lhs);
+                if segs.len() == 2 && segs[1] == "workspace" {
+                    if rhs == "true" {
+                        used.insert(segs[0].clone());
+                    }
+                } else if segs.len() == 1 && ws_true_re.is_match(rhs) {
+                    used.insert(segs[0].clone());
+                    if let Some(cap) = pkg_re.captures(rhs)
+                        && let Some(m) = cap.get(1).or_else(|| cap.get(2))
+                    {
+                        used.insert(m.as_str().to_owned());
+                    }
+                }
             }
-        } else if ws_true_re.is_match(rhs) {
-            let key = lhs.trim_matches('"').trim_matches('\'');
-            used.insert(key.to_owned());
-            if let Some(cap) = pkg_re.captures(rhs) {
-                used.insert(cap[1].to_owned());
+            DepSection::Subtable(_) => {
+                let segs = split_toml_key_segments(lhs);
+                if segs.len() == 1 && segs[0] == "workspace" && rhs == "true" {
+                    sub_ws_true = true;
+                } else if segs.len() == 1 && segs[0] == "package" {
+                    sub_pkg = extract_toml_strings(rhs).into_iter().next();
+                }
             }
         }
     }
+    flush_subtable(&section, &mut sub_ws_true, &mut sub_pkg, used);
 }
 
 /// A `// mutant-skip: PATTERN` comment, ` (as above)` for a reason given by the one before it. Its reason follows it, as a comment
@@ -1856,12 +1990,24 @@ fn a() {
             root.join("Cargo.toml"),
             r#"
 [workspace]
-members = ["crates/a"]
+members = [
+    'crates/a',
+]
 
 [workspace.dependencies]
 alpha = "1.0"
-beta = { version = "2.0", features = ["std"] }
+beta = {
+    version = "2.0",
+    features = ["std"],
+}
+gamma.version = "3.0"
 libc = "0.2"
+
+[workspace.dependencies.delta]
+version = "4.0"
+
+[workspace.dependencies.epsilon]
+version = "5.0"
 "#,
         )
         .unwrap();
@@ -1873,16 +2019,32 @@ name = "a"
 
 [dependencies]
 alpha.workspace = true
-beta = { workspace = true, optional = true }
+beta = {
+    optional = true,
+    workspace = true,
+}
+
+[dependencies.gamma]
+workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc.workspace = true
+libc = {
+    features = ["extra_traits"],
+    workspace = true,
+}
+
+[target.'cfg(windows)'.dev-dependencies.delta]
+features = ["Win32"]
+workspace = true
+
+[build-dependencies.epsilon]
+workspace = true
 "#,
         )
         .unwrap();
         check_workspace_deps(root).unwrap();
 
-        // Adding an unused workspace dependency fails cleanly and names it.
+        // Adding an unused workspace dependency (inline or subtable) fails cleanly and names it.
         std::fs::write(
             root.join("Cargo.toml"),
             r#"
@@ -1892,13 +2054,20 @@ members = ["crates/a"]
 [workspace.dependencies]
 alpha = "1.0"
 beta = "2.0"
+gamma = "3.0"
 libc = "0.2"
+delta = "4.0"
+epsilon = "5.0"
 dead-crate = "0.1"
+
+[workspace.dependencies.dead-subtable]
+version = "0.2"
 "#,
         )
         .unwrap();
         let err = check_workspace_deps(root).unwrap_err();
         assert!(err.contains("dead-crate"), "{err}");
+        assert!(err.contains("dead-subtable"), "{err}");
     }
 
     #[test]

@@ -336,13 +336,12 @@ impl LiveQueryHub {
         seq: u64,
         schema_epoch: u64,
         maint_seq: u64,
-        maint_commits: u64,
         slot: u16,
         key: &[u8],
         now_ms: u64,
     ) -> Vec<WatchId> {
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        let dirty = guard.index.notify_subdb_write_at_maint(seq, schema_epoch, maint_seq, maint_commits, slot, key);
+        let dirty = guard.index.notify_subdb_write_at_maint(seq, schema_epoch, maint_seq, slot, key);
         guard.scheduler.mark_dirty(&dirty, now_ms);
         dirty
     }

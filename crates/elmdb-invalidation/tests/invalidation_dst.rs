@@ -659,7 +659,7 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
     });
 
     // Reader takes snapshot at seq S
-    let (read_seq, _read_txnid, read_epoch, _out, read_set) =
+    let (read_seq, _read_maint, read_epoch, _out, read_set) =
         run_tracked_snapshot(&engine, &qe, &plan, ExecBudgets::default()).unwrap();
     let mut idx2 = InvalidationIndex::new(read_seq, read_epoch);
 
@@ -690,7 +690,7 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
     assert!(stale_related, "concurrent commit touching watched entity MUST stale reader via CommitRing");
 
     // CommitRing overflow (> COMMIT_RING_CAP commits of unrelated Author) -> MUST fail strictly safe!
-    let (snap_seq, _snap_txnid, snap_epoch, _o, snap_rs) =
+    let (snap_seq, _snap_maint, snap_epoch, _o, snap_rs) =
         run_tracked_snapshot(&engine, &qe, &plan, ExecBudgets::default()).unwrap();
     let mut idx3 = InvalidationIndex::new(snap_seq, snap_epoch);
     for i in 0..(COMMIT_RING_CAP + 10) {
@@ -965,7 +965,7 @@ fn review_regression_subdb_same_seq_seq_gap_resurrection_abort_and_imperative_se
         }),
         terminal: TerminalSpec::Hits { fields: None, highlights: false },
     });
-    let (snap_seq, _snap_txnid, snap_epoch, _o, vec_rs) =
+    let (snap_seq, _snap_maint, snap_epoch, _o, vec_rs) =
         run_tracked_snapshot(&engine, &qe, &vec_plan, ExecBudgets::default()).unwrap();
     let mut idx = InvalidationIndex::new(snap_seq, snap_epoch);
     set_entity_embeddings(&engine, ids.idx_vec, kv1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
@@ -1085,10 +1085,10 @@ fn review_regression_cross_process_maintenance_write_and_4096_overflow() {
         .register_query_watch(&eng_a, &qe, &author_plan, ExecBudgets::default(), WatchPolicy::default(), 0, 1, |_| None)
         .unwrap();
 
-    // P0-3B: Real child process B performs a maintenance write (`set_entity_embeddings`, unchanged `commit_seq`, advanced `txnid`!)
+    // P0-3B: Real child process B performs a maintenance write (`set_entity_embeddings`, unchanged `commit_seq`, advanced `maint_seq`!)
     run_xproc_child(&db_dir, "set_embeddings");
     let dirty_maint = hub_a.catch_up_cross_process(&eng_a, 100).unwrap();
-    assert!(dirty_maint.contains(&w_vec), "cross-process maintenance write must be detected via txnid advance");
+    assert!(dirty_maint.contains(&w_vec), "cross-process maintenance write must be detected via maint_seq advance");
 
     // Actual > 4,096 cross-process commits window overflow (using fast SimKvStore on a single Engine simulating remote lag)!
     let (sim_eng, _reg, sim_ids) = open_sim();
@@ -1222,7 +1222,7 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         .summary
         .unwrap();
     let d_sub =
-        idx.notify_subdb_write_at_maint(sum3.seq, sum3.schema_epoch, sum3.maint_seq + 1, 1, ids.idx_vec_slot, &[0x01]);
+        idx.notify_subdb_write_at_maint(sum3.seq, sum3.schema_epoch, sum3.maint_seq + 1, ids.idx_vec_slot, &[0x01]);
     assert!(
         d_sub.contains(&WatchId(1)),
         "notify_subdb_write observing an unseen normal commit seq MUST fail-safe invalidate all watches"
@@ -1238,20 +1238,39 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         "same-seq notify_full_rebuild MUST mark concurrent reader stale"
     );
 
-    // Orthogonal `maint_seq` multi-chunk & gap tests:
+    // Orthogonal `maint_seq` single-commit, stale-receipt, and gap regression tests (PR #261 P0-1):
     let (s4, m4, e4, _o4, rs4) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
     let mut idx_mg = InvalidationIndex::new_with_maint_seq(s4, e4, m4);
     assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4, e4, &rs4, &engine.schema()));
-    // Multi-chunk local flush (`maint_commits = 3`, `m4 -> m4 + 3`) on an unrelated vector slot does NOT invalidate Note watch!
-    let d_multi = idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 3, 3, ids.idx_vec_slot, &[0x01]);
-    assert!(d_multi.is_empty(), "multi-chunk flush on unrelated slot must stay selective");
-    // Reader opened before or mid-flush on Note is still NOT stale (slot doesn't match), and at m4+3 settles!
+    // Per-commit local maintenance notifications (`m4 -> m4+1 -> m4+2`) on an unrelated vector slot stay selective!
+    assert!(idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 1, ids.idx_vec_slot, &[0x01]).is_empty());
+    assert!(idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 2, ids.idx_vec_slot, &[0x01]).is_empty());
+    // Readers opened before or between chunks on Note are still NOT stale (slot doesn't match), and at m4+2 settle!
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4, e4, &rs4, &engine.schema()));
     assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 1, e4, &rs4, &engine.schema()));
-    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 3, e4, &rs4, &engine.schema()));
-    // Unseen cross-process maintenance write (`m4 + 3 -> m4 + 5` with `maint_commits = 1`) MUST fail-safe invalidate all watches!
-    let d_mg = idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 5, 1, ids.idx_vec_slot, &[0x01]);
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 2, e4, &rs4, &engine.schema()));
+    // Delayed stale receipt (`maint_seq <= latest_maint_seq`, even with an older schema_epoch) is safely ignored
+    // and never advances `latest_maint_seq` or corrupts the ring!
+    assert!(idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 1, ids.idx_vec_slot, &[0x01]).is_empty());
+    assert!(idx_mg.notify_subdb_write_at_maint(s4, e4.saturating_sub(1), m4 + 1, ids.idx_vec_slot, &[0x01]).is_empty());
+    assert_eq!(idx_mg.latest_maint_seq(), m4 + 2);
+    // Unseen cross-process maintenance write (`m4 + 2 -> m4 + 4`) MUST fail-safe invalidate all watches!
+    let d_mg = idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 4, ids.idx_vec_slot, &[0x01]);
     assert!(
         d_mg.contains(&WatchId(77)),
-        "notify_subdb_write_at_maint with maint_seq gap (> prev_maint + commits) MUST fail-safe invalidate all watches"
+        "notify_subdb_write_at_maint with maint_seq gap (> prev_maint + 1) MUST fail-safe invalidate all watches"
     );
+
+    // PR #261 P1-1 regression: zero-work `run_maintenance_write_opt` aborts without bumping `maint_seq`!
+    let maint_before = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        elmdb_engine::read_maint_seq(&ro, &engine.dbs()).unwrap()
+    };
+    let opt_res: Option<((), _)> = engine.run_maintenance_write_opt(|_txn, _schema, _dbs| Ok(None)).unwrap();
+    assert!(opt_res.is_none());
+    let maint_after = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        elmdb_engine::read_maint_seq(&ro, &engine.dbs()).unwrap()
+    };
+    assert_eq!(maint_after, maint_before, "0-work run_maintenance_write_opt must NOT bump maint_seq");
 }

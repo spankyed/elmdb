@@ -13,7 +13,8 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 use elmdb_engine::{
-    CompiledSchema, EdgeDelta, Engine, EntityDelta, EntityKey, IndexDef, IndexId, IndexKind, SystemDbs, read_packed_row,
+    CompiledSchema, EdgeDelta, Engine, EntityDelta, EntityKey, IndexDef, IndexId, IndexKind, MaintReceipt, SystemDbs,
+    read_packed_row,
 };
 use elmdb_projections::{BuildState, ExternalProjection, IndexMismatch};
 use elmdb_storage::{Clock, DbFlags, GatedWriteTxn, KvCursor, KvRead, KvStore, SubDbHandle, Vfs};
@@ -535,13 +536,14 @@ pub fn set_entity_embeddings<S: KvStore, V: Vfs, C: Clock>(
 /// Atomically resolves `ext_id` and its type-scoped vector `index_name` (supporting both
 /// unqualified `"emb"` scoped to the entity's own `TypeId` and `"TypeName.emb"`) inside ONE
 /// write transaction so there is zero TOCTOU race and zero cross-type index ambiguity!
+/// Returns `(index_id, active_slot, backpressure_hint, maint_receipt)` captured atomically in the write txn.
 pub fn set_entity_embeddings_by_ext_id<S: KvStore, V: Vfs, C: Clock>(
     engine: &Engine<S, V, C>,
     index_name: &str,
     ext_id: &str,
     chunks: &[Vec<f32>],
-) -> Result<(IndexId, BackpressureHint)> {
-    let ((index_id, hint), _) = engine.run_maintenance_write(|txn, schema, dbs| {
+) -> Result<(IndexId, u16, BackpressureHint, MaintReceipt)> {
+    let ((index_id, slot, hint), mr) = engine.run_maintenance_write(|txn, schema, dbs| {
         let entity = elmdb_engine::lookup_ext_id_in_txn(txn, dbs, ext_id)?
             .ok_or_else(|| ElmdbError::new(ErrorCode::EntityNotFound, format!("entity '{ext_id}' not found")))?;
         let row = read_packed_row(txn, dbs, entity)?
@@ -593,6 +595,7 @@ pub fn set_entity_embeddings_by_ext_id<S: KvStore, V: Vfs, C: Clock>(
         }
 
         let index_id = def.id;
+        let slot = def.slot;
         let db = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
         let mut meta = load_meta_or_init(txn, db, def)?;
         let old_chunks = list_live_chunks_for_entity(txn, db, entity)?;
@@ -635,13 +638,14 @@ pub fn set_entity_embeddings_by_ext_id<S: KvStore, V: Vfs, C: Clock>(
         txn.put(db, &[TAG_META], &meta.encode())?;
         Ok((
             index_id,
+            slot,
             BackpressureHint {
                 pending_count: meta.pending_count,
                 backpressure: meta.pending_count > PENDING_BACKPRESSURE_THRESHOLD,
             },
         ))
     })?;
-    Ok((index_id, hint))
+    Ok((index_id, slot, hint, mr))
 }
 
 /// Removes all embeddings for `entity` in `index_id` cleanly (both primary and derived).
@@ -1233,6 +1237,16 @@ pub fn drain_pending_batch<S: KvStore, V: Vfs, C: Clock>(
     index_id: IndexId,
     batch_size: usize,
 ) -> Result<DrainResult> {
+    Ok(drain_pending_batch_with_receipt(engine, index_id, batch_size)?.0)
+}
+
+/// Like `drain_pending_batch`, also returning `Some((active_slot, maint_receipt))` whenever a
+/// maintenance write actually committed (returning `None` without bumping `maint_seq` on 0-work races!).
+pub fn drain_pending_batch_with_receipt<S: KvStore, V: Vfs, C: Clock>(
+    engine: &Engine<S, V, C>,
+    index_id: IndexId,
+    batch_size: usize,
+) -> Result<(DrainResult, Option<(u16, MaintReceipt)>)> {
     let limit = batch_size.max(1);
     // Fast RO pre-check validating IndexKind::Vector and inspecting both pending queue and compaction state.
     {
@@ -1244,20 +1258,22 @@ pub fn drain_pending_batch<S: KvStore, V: Vfs, C: Clock>(
             return Err(ElmdbError::new(ErrorCode::InvalidArgument, "index is not a Vector index"));
         }
         let Some(db) = engine.gate().open_subdb_ro(&ro, &def.subdb_slot().name(), DbFlags::DEFAULT)? else {
-            return Ok(DrainResult { processed: 0, needs_compaction: false });
+            return Ok((DrainResult { processed: 0, needs_compaction: false }, None));
         };
         let meta = load_meta_or_init(&ro, db, def)?;
         let mut cur = ro.cursor(db)?;
         let has_pending = cur.seek_ge(&[TAG_PENDING])?.is_some_and(|(k, _)| k.first() == Some(&TAG_PENDING));
         if !has_pending {
-            return Ok(DrainResult { processed: 0, needs_compaction: meta.should_compact() });
+            return Ok((DrainResult { processed: 0, needs_compaction: meta.should_compact() }, None));
         }
     }
 
-    let (result, _) = engine.run_maintenance_write(|txn, schema, dbs| {
+    let mut empty_needs_compaction = false;
+    let committed = engine.run_maintenance_write_opt(|txn, schema, dbs| {
         let def = schema
             .index_by_id(index_id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0)))?;
+        let slot = def.slot;
         let db = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
         let mut meta = load_meta_or_init(txn, db, def)?;
 
@@ -1282,9 +1298,14 @@ pub fn drain_pending_batch<S: KvStore, V: Vfs, C: Clock>(
             }
         }
         if items.is_empty() {
+            empty_needs_compaction = meta.should_compact();
+            if meta.pending_count == 0 {
+                // Concurrent drainer already emptied `TAG_PENDING`: abort cleanly without bumping `maint_seq`.
+                return Ok(None);
+            }
             meta.pending_count = 0;
             txn.put(db, &[TAG_META], &meta.encode())?;
-            return Ok(DrainResult { processed: 0, needs_compaction: meta.should_compact() });
+            return Ok(Some((DrainResult { processed: 0, needs_compaction: meta.should_compact() }, slot)));
         }
 
         let dims = meta.dims as usize;
@@ -1315,9 +1336,12 @@ pub fn drain_pending_batch<S: KvStore, V: Vfs, C: Clock>(
         }
 
         txn.put(db, &[TAG_META], &meta.encode())?;
-        Ok(DrainResult { processed: items.len(), needs_compaction: meta.should_compact() })
+        Ok(Some((DrainResult { processed: items.len(), needs_compaction: meta.should_compact() }, slot)))
     })?;
-    Ok(result)
+    match committed {
+        Some(((result, slot), mr)) => Ok((result, Some((slot, mr)))),
+        None => Ok((DrainResult { processed: 0, needs_compaction: empty_needs_compaction }, None)),
+    }
 }
 
 /// Drains ALL pending vectors in bounded `DEFAULT_DRAIN_BATCH` commits and compacts via ping-pong
@@ -1341,7 +1365,15 @@ pub fn flush<S: KvStore, V: Vfs, C: Clock>(engine: &Engine<S, V, C>, index_id: I
 /// rebuilding only live vectors (dropping all tombstoned `dead_nodes` and reclaiming `NodeId`s!),
 /// atomically swapping the active slot in `meta`, and truncating the retired slot in O(1)!
 pub fn compact_now<S: KvStore, V: Vfs, C: Clock>(engine: &Engine<S, V, C>, index_id: IndexId) -> Result<VectorStats> {
-    let (stats, _) = engine.swap_index_slot(index_id, |txn, schema, dbs, old_db, staging_db| {
+    Ok(compact_now_with_receipt(engine, index_id)?.0)
+}
+
+/// Like `compact_now`, also returning the atomic `MaintReceipt` captured inside the slot-swap txn.
+pub fn compact_now_with_receipt<S: KvStore, V: Vfs, C: Clock>(
+    engine: &Engine<S, V, C>,
+    index_id: IndexId,
+) -> Result<(VectorStats, MaintReceipt)> {
+    engine.swap_index_slot(index_id, |txn, schema, dbs, old_db, staging_db| {
         let def = schema
             .index_by_id(index_id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0)))?;
@@ -1391,8 +1423,7 @@ pub fn compact_now<S: KvStore, V: Vfs, C: Clock>(engine: &Engine<S, V, C>, index
             pending_count: new_meta.pending_count,
             needs_compaction: new_meta.should_compact(),
         })
-    })?;
-    Ok(stats)
+    })
 }
 
 /// Returns current live/dead/pending statistics for a vector index.
