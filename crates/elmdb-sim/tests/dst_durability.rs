@@ -478,6 +478,27 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
             "second concurrent reader at D must keep D's pages protected after first reader drops"
         );
 
+        // Only 2 unsynced commits (D+1, D+2) with NO reader do NOT recycle D's pages yet (LMDB has 2 meta slots);
+        // kills `final_snap.txnid >= freed_at + 2` -> `<` mutant!
+        for i in 1..=2 {
+            let mut rw = store.begin_write(()).unwrap();
+            rw.put(db, b"k", format!("two_commits_{i}").as_bytes()).unwrap();
+            let _ = rw.commit_raw().unwrap();
+        }
+        store.crash_power_loss();
+        assert_eq!(
+            store.begin_read().unwrap().get(db, b"k").unwrap(),
+            Some(b"durable_v1".as_slice()),
+            "D+1..D+2 without D+3 must not recycle D's pages"
+        );
+
+        // Open TWO readers at D and drop BOTH (WITHOUT crashing in between) so refcount goes 0 -> 1 -> 2 -> 1 -> 0;
+        // kills `SimRoTxn::drop` `*count -= 1` -> `+=` / `/=` mutants when D+1..D+3 then recycles D's pages!
+        let r_a = store.begin_read().unwrap();
+        let r_b = store.begin_read().unwrap();
+        drop(r_a);
+        drop(r_b);
+
         // Now with ZERO readers at <= D (even with a newer reader at D+1!), D+1..D+3 recycles D's pages!
         let mut rw = store.begin_write(()).unwrap();
         rw.put(db, b"k", b"d_plus_1").unwrap();
