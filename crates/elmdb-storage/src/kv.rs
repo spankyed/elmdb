@@ -54,6 +54,8 @@ pub trait KvRead {
     fn get(&self, db: SubDbHandle, key: &[u8]) -> Result<Option<&[u8]>, StorageError>;
     fn cursor(&self, db: SubDbHandle) -> Result<Self::Cursor<'_>, StorageError>;
     fn entries(&self, db: SubDbHandle) -> Result<u64, StorageError>;
+    /// Opens an already-existing named sub-DB visible in this transaction (`Ok(None)` if absent).
+    fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError>;
 }
 
 /// Write transaction interface with native LIFO nested savepoints and O(1) sub-DB truncate.
@@ -91,9 +93,11 @@ pub trait KvStore: Send + Sync {
     type RwTxn<'a>: KvWrite
     where
         Self: 'a;
+    type OwnedRwTxn: KvWrite + 'static;
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError>;
     fn begin_write(&self) -> Result<Self::RwTxn<'_>, StorageError>;
+    fn begin_write_owned(&self) -> Result<Self::OwnedRwTxn, StorageError>;
     fn open_subdb_ro(
         &self,
         txn: &Self::RoTxn<'_>,

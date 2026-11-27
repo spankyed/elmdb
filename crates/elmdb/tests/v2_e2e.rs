@@ -172,11 +172,12 @@ fn full_v2_e2e_lifecycle_queries_watches_hooks_backup_dump_load() {
                 index: "search".into(),
                 query: "LMDB engine".into(),
                 require_all: false,
+                prefix: false,
                 phrase: None,
                 top_k: Some(5),
             },
         }],
-        terminal: Some(QueryTerminal::Hits),
+        terminal: Some(QueryTerminal::Hits { fields: None, highlights: false }),
         explain: false,
     };
     match db.execute_query_spec(&q_bm25, ExecBudgets::default()).unwrap().body {
@@ -193,7 +194,7 @@ fn full_v2_e2e_lifecycle_queries_watches_hooks_backup_dump_load() {
         steps: vec![QueryStep::Score {
             spec: QueryScore::VectorNear { index: "vec".into(), vector: vec![0.95, 0.05, 0.0, 0.0], top_k: 2 },
         }],
-        terminal: Some(QueryTerminal::Hits),
+        terminal: Some(QueryTerminal::Hits { fields: None, highlights: false }),
         explain: false,
     };
     match db.execute_query_spec(&q_vec, ExecBudgets::default()).unwrap().body {
@@ -214,7 +215,7 @@ fn full_v2_e2e_lifecycle_queries_watches_hooks_backup_dump_load() {
             iterations: 20,
             tolerance: 1e-6,
         }],
-        terminal: Some(QueryTerminal::Hits),
+        terminal: Some(QueryTerminal::Hits { fields: None, highlights: false }),
         explain: false,
     };
     match db.execute_query_spec(&q_ppr, ExecBudgets::default()).unwrap().body {
@@ -521,5 +522,513 @@ fn review_regressions_lossless_dump_load_backup_sidecar_readonly_and_typed_queri
         fs::set_permissions(bak_dir.join("data.mdb"), fs::Permissions::from_mode(0o644)).unwrap();
     }
 
+    db.close().unwrap();
+}
+
+#[test]
+fn transact_nested_savepoints_ryow_counters_hooks_and_dump_load() {
+    let tmp = tempdir().unwrap();
+    let db_dir = tmp.path().join("txn_db");
+    let db = Arc::new(
+        Database::open(
+            &db_dir,
+            OpenOptions {
+                durability: DurabilityMode::Strict,
+                build_policy: BuildPolicy::EagerInSchemaChange,
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    db.set_schema(&make_schema()).unwrap();
+
+    assert_eq!(db.pending_commit_seq(), None);
+    assert_eq!(db.get_counter("DOC").unwrap(), 0);
+
+    // 3-level nested transact with RYOW, partial inner rollback, and counters.
+    let hook_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let seen_seq = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let seen_ryow_in_hook = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_calls_c = Arc::clone(&hook_calls);
+    let seen_seq_c = Arc::clone(&seen_seq);
+    let seen_ryow_c = Arc::clone(&seen_ryow_in_hook);
+    let db_for_hook = Arc::clone(&db);
+    let hook_id = db
+        .register_host_before_commit(
+            elmdb::TypeMask::all(),
+            Arc::new(move |delta| {
+                hook_calls_c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                seen_seq_c.store(delta.commit_seq, std::sync::atomic::Ordering::SeqCst);
+                assert_eq!(db_for_hook.pending_commit_seq(), Some(delta.commit_seq));
+                // Hook can read uncommitted writes via RYOW and increment counters!
+                let n1 = db_for_hook.get_row_resolved("n-outer").unwrap();
+                let n2 = db_for_hook.get_row_resolved("n-inner-ok").unwrap();
+                let n3 = db_for_hook.get_row_resolved("n-inner-abort").unwrap();
+                if n1.is_some() && n2.is_some() && n3.is_none() {
+                    seen_ryow_c.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                let _ = db_for_hook.next_counter("HOOK_SEQ")?;
+                Ok(None)
+            }),
+        )
+        .unwrap();
+
+    let committed_seq = db
+        .transact_scoped(elmdb::TransactOptions::default(), || {
+            let pseq = db.pending_commit_seq().expect("pending seq inside transact");
+            assert_eq!(db.next_counter("DOC")?, 1);
+            db.execute_batch(&[WireOp::Create {
+                type_name: "note".into(),
+                external_id: Some("n-outer".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("Outer".into())),
+                    ("body".into(), CanonicalValue::String("outer body".into())),
+                    ("priority".into(), CanonicalValue::Int(1)),
+                ],
+            }])?;
+
+            // Level 2 commits into Level 1 (must NOT fire beforeCommit yet!)
+            db.transact_scoped(elmdb::TransactOptions::default(), || {
+                assert_eq!(db.pending_commit_seq(), Some(pseq));
+                assert_eq!(db.next_counter("DOC")?, 2);
+                db.execute_batch(&[WireOp::Create {
+                    type_name: "note".into(),
+                    external_id: Some("n-inner-ok".into()),
+                    fields: vec![
+                        ("title".into(), CanonicalValue::String("Inner OK".into())),
+                        ("body".into(), CanonicalValue::String("inner body".into())),
+                        ("priority".into(), CanonicalValue::Int(2)),
+                    ],
+                }])?;
+
+                // Level 3 writes + bumps counter then aborts -> rolled back via native LMDB savepoint!
+                let l3: elmdb::Result<()> = db.transact_scoped(elmdb::TransactOptions::default(), || {
+                    assert_eq!(db.next_counter("DOC")?, 3);
+                    db.execute_batch(&[WireOp::Create {
+                        type_name: "note".into(),
+                        external_id: Some("n-inner-abort".into()),
+                        fields: vec![
+                            ("title".into(), CanonicalValue::String("Rolled back".into())),
+                            ("body".into(), CanonicalValue::String("gone".into())),
+                            ("priority".into(), CanonicalValue::Int(3)),
+                        ],
+                    }])?;
+                    // RYOW sees level 3 write inside level 3!
+                    assert!(db.get_row_resolved("n-inner-abort")?.is_some());
+                    Err(elmdb_wire::ElmdbError::new(ErrorCode::Cancelled, "rollback L3"))
+                });
+                assert!(l3.is_err());
+
+                // After L3 rollback: L3 entity & counter gone, L1 + L2 still visible via RYOW & queries!
+                assert!(db.get_row_resolved("n-inner-abort")?.is_none());
+                assert_eq!(db.get_counter("DOC")?, 2);
+                let q_cnt = QuerySpec {
+                    source: QuerySource::Type { type_name: "note".into(), include_trashed: false },
+                    steps: vec![],
+                    terminal: Some(QueryTerminal::Count),
+                    explain: false,
+                };
+                assert!(matches!(
+                    db.execute_query_spec(&q_cnt, ExecBudgets::default())?.body,
+                    QueryAnswerBody::Count { count: 2 }
+                ));
+                Ok(())
+            })?;
+
+            // beforeCommit MUST NOT have fired yet on inner savepoint release!
+            assert_eq!(hook_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+            Ok(pseq)
+        })
+        .unwrap();
+
+    assert_eq!(db.pending_commit_seq(), None);
+    assert_eq!(hook_calls.load(std::sync::atomic::Ordering::SeqCst), 1, "beforeCommit fires ONCE on outermost commit");
+    assert_eq!(seen_seq.load(std::sync::atomic::Ordering::SeqCst), committed_seq);
+    assert!(seen_ryow_in_hook.load(std::sync::atomic::Ordering::SeqCst));
+    assert_eq!(db.get_counter("DOC").unwrap(), 2);
+    assert_eq!(db.get_counter("HOOK_SEQ").unwrap(), 1);
+    assert!(db.get_row_resolved("n-outer").unwrap().is_some());
+    assert!(db.get_row_resolved("n-inner-ok").unwrap().is_some());
+    assert!(db.get_row_resolved("n-inner-abort").unwrap().is_none());
+
+    // Outer rollback reverts ALL nested writes & counters!
+    let outer_abort: elmdb::Result<()> = db.transact_scoped(elmdb::TransactOptions::default(), || {
+        assert_eq!(db.next_counter("DOC")?, 3);
+        db.transact_scoped(elmdb::TransactOptions::default(), || {
+            db.execute_batch(&[WireOp::Create {
+                type_name: "note".into(),
+                external_id: Some("n-outer-abort".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("Nope".into())),
+                    ("body".into(), CanonicalValue::String("nope".into())),
+                    ("priority".into(), CanonicalValue::Int(9)),
+                ],
+            }])?;
+            Ok(())
+        })?;
+        Err(elmdb_wire::ElmdbError::new(ErrorCode::Cancelled, "abort outer"))
+    });
+    assert!(outer_abort.is_err());
+    assert_eq!(db.get_counter("DOC").unwrap(), 2);
+    assert!(db.get_row_resolved("n-outer-abort").unwrap().is_none());
+    assert_eq!(hook_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    // run_before_commit: false bypasses hooks cleanly (used by projection catch-up chunks!)
+    db.transact_scoped(elmdb::TransactOptions { run_before_commit: false }, || {
+        db.set_counter("IMPORT", 42)?;
+        db.execute_batch(&[WireOp::Create {
+            type_name: "note".into(),
+            external_id: Some("n-no-hook".into()),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("Catchup".into())),
+                ("body".into(), CanonicalValue::String("no hook".into())),
+                ("priority".into(), CanonicalValue::Int(4)),
+            ],
+        }])?;
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(hook_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(db.get_counter("IMPORT").unwrap(), 42);
+    assert!(db.unregister_before_commit(hook_id));
+
+    // Counters survive dump & load losslessly!
+    let dump_file = tmp.path().join("counters_dump.json");
+    elmdb::dump::dump(&db, &dump_file).unwrap();
+    let loaded_dir = tmp.path().join("counters_loaded");
+    elmdb::dump::load(&dump_file, &loaded_dir).unwrap();
+    let loaded = Database::open(&loaded_dir, OpenOptions { read_only: true, ..Default::default() }).unwrap();
+    assert_eq!(loaded.get_counter("DOC").unwrap(), 2);
+    assert_eq!(loaded.get_counter("HOOK_SEQ").unwrap(), 1);
+    assert_eq!(loaded.get_counter("IMPORT").unwrap(), 42);
+    assert!(loaded.check(None).unwrap().is_clean());
+    loaded.close().unwrap();
+    db.close().unwrap();
+}
+
+#[test]
+fn search_highlights_prefix_bm25f_unicode_lists_and_fusion() {
+    let tmp = tempdir().unwrap();
+    let db_dir = tmp.path().join("hl_db");
+    let db = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Unsafe,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let mut fields = BTreeMap::new();
+    fields.insert("text".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    fields.insert(
+        "tags".into(),
+        FieldDefinition { kind: FieldSpec::List { of: Box::new(FieldSpec::String) }, optional: true, nullable: false },
+    );
+    fields.insert("ts".into(), FieldDefinition { kind: FieldSpec::Integer, optional: false, nullable: false });
+    let mut indexes = BTreeMap::new();
+    indexes.insert("fts".into(), IndexDefinition::Text { fields: vec![("text".into(), 3), ("tags".into(), 1)] });
+    let mut types = BTreeMap::new();
+    types.insert("msg".into(), TypeDefinition { fields, indexes, ..Default::default() });
+    db.set_schema(&Schema { dollar_schema: None, types, relations: BTreeMap::new() }).unwrap();
+
+    // Surrogate-pair emoji (2 UTF-16 code units each!) + BMP accent + list field
+    let emoji_text = "Hi 👋 café authentication 🚀 tokenized!";
+    db.execute_batch(&[
+        WireOp::Create {
+            type_name: "msg".into(),
+            external_id: Some("m1".into()),
+            fields: vec![
+                ("text".into(), CanonicalValue::String(emoji_text.into())),
+                (
+                    "tags".into(),
+                    CanonicalValue::Array(vec![
+                        CanonicalValue::String("unrelated".into()),
+                        CanonicalValue::String("auth-flow".into()),
+                    ]),
+                ),
+                ("ts".into(), CanonicalValue::Int(1_700_000_000_000)),
+            ],
+        },
+        WireOp::Create {
+            type_name: "msg".into(),
+            external_id: Some("m2".into()),
+            fields: vec![
+                ("text".into(), CanonicalValue::String("Authentication without the second word".into())),
+                ("ts".into(), CanonicalValue::Int(1_700_000_001_000)),
+            ],
+        },
+    ])
+    .unwrap();
+
+    // Prefix BM25F with require_all: true matches only m1 ("auth*" AND "tok*")!
+    // Fused with RecencyDecay + lazy highlights + projected row in one snapshot!
+    let q = QuerySpec {
+        source: QuerySource::Type { type_name: "msg".into(), include_trashed: false },
+        steps: vec![QueryStep::Score {
+            spec: QueryScore::Fuse {
+                inputs: vec![
+                    (
+                        QueryScore::Bm25f {
+                            index: "fts".into(),
+                            query: "auth tok".into(),
+                            require_all: true,
+                            prefix: true,
+                            phrase: None,
+                            top_k: Some(10),
+                        },
+                        2.0,
+                    ),
+                    (
+                        QueryScore::RecencyDecay {
+                            field: "ts".into(),
+                            now_ms: 1_700_000_002_000,
+                            half_life_ms: 10_000.0,
+                        },
+                        0.5,
+                    ),
+                ],
+                method: "rrf".into(),
+                rrf_k: Some(60.0),
+            },
+        }],
+        terminal: Some(QueryTerminal::Hits { fields: Some(vec!["text".into(), "ts".into()]), highlights: true }),
+        explain: false,
+    };
+
+    let ans = db.execute_query_spec(&q, ExecBudgets::default()).unwrap();
+    let QueryAnswerBody::Hits { hits } = ans.body else {
+        panic!("expected Hits");
+    };
+    let h1 = hits.iter().find(|h| h.id == "m1").expect("m1 in fused hits");
+    let row = h1.row.as_ref().expect("projected row");
+    assert_eq!(row.fields.get("text"), Some(&serde_json::json!(emoji_text)));
+    assert_eq!(row.fields.get("ts"), Some(&serde_json::json!(1_700_000_000_000i64)));
+    assert!(!row.fields.contains_key("tags"), "unprojected field must not be in Hit.row");
+
+    let hl = h1.highlights.as_ref().expect("highlights map");
+    let text_spans = hl.get("text").expect("text highlights");
+    // Verify exact UTF-16 code-unit slicing matches "authentication" and "tokenized"!
+    let utf16: Vec<u16> = emoji_text.encode_utf16().collect();
+    let sliced: Vec<String> = text_spans
+        .iter()
+        .map(|&(el, s, e)| {
+            assert_eq!(el, 0);
+            String::from_utf16(&utf16[s..e]).unwrap()
+        })
+        .collect();
+    assert_eq!(sliced, vec!["authentication", "tokenized"]);
+
+    // List field elementIndex == 1 ("auth-flow" -> "auth")
+    let tag_spans = hl.get("tags").expect("tags highlights");
+    assert_eq!(tag_spans.len(), 1);
+    assert_eq!(tag_spans[0].0, 1, "highlight must carry list elementIndex = 1");
+    let tag1_u16: Vec<u16> = "auth-flow".encode_utf16().collect();
+    assert_eq!(String::from_utf16(&tag1_u16[tag_spans[0].1..tag_spans[0].2]).unwrap(), "auth");
+
+    // Prefix require_all: true WITHOUT fusion returns strictly m1 (excludes m2!)
+    let q_strict = QuerySpec {
+        source: QuerySource::Type { type_name: "msg".into(), include_trashed: false },
+        steps: vec![QueryStep::Score {
+            spec: QueryScore::Bm25f {
+                index: "fts".into(),
+                query: "auth tok".into(),
+                require_all: true,
+                prefix: true,
+                phrase: None,
+                top_k: Some(10),
+            },
+        }],
+        terminal: Some(QueryTerminal::Hits { fields: None, highlights: false }),
+        explain: false,
+    };
+    let QueryAnswerBody::Hits { hits: strict_hits } =
+        db.execute_query_spec(&q_strict, ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Hits");
+    };
+    assert_eq!(strict_hits.len(), 1);
+    assert_eq!(strict_hits[0].id, "m1");
+    assert!(strict_hits[0].row.is_none());
+    assert!(strict_hits[0].highlights.is_none());
+
+    db.close().unwrap();
+}
+
+#[test]
+fn review_regressions_atomic_batch_in_transact_lock_guards_noop_seq_cross_proc_and_code_phrase() {
+    let tmp = tempdir().unwrap();
+    let db_dir = tmp.path().join("rev_db");
+
+    let mut fields = BTreeMap::new();
+    fields.insert("code".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    fields.insert("body".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    let mut indexes = BTreeMap::new();
+    indexes.insert("uniq_code".into(), IndexDefinition::Value { fields: vec!["code".into()], unique: true });
+    indexes.insert("fts".into(), IndexDefinition::Text { fields: vec![("body".into(), 1)] });
+    let mut types = BTreeMap::new();
+    types.insert("Ticket".into(), TypeDefinition { fields, indexes, ..Default::default() });
+    let schema = Schema { dollar_schema: None, types, relations: BTreeMap::new() };
+
+    let db = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_schema(&schema).unwrap();
+
+    // P1 #7: Empty no-op batch must NOT return a phantom incremented commit_seq!
+    let seq_before = db.stats().unwrap().commit_seq;
+    let noop_out = db.execute_batch(&[]).unwrap();
+    assert_eq!(noop_out.commit_seq, seq_before, "empty batch must not return phantom commit_seq");
+
+    db.execute_batch(&[WireOp::Create {
+        type_name: "Ticket".into(),
+        external_id: Some("t1".into()),
+        fields: vec![
+            ("code".into(), CanonicalValue::String("C-1".into())),
+            ("body".into(), CanonicalValue::String("Fix THR-12 error immediately".into())),
+        ],
+    }])
+    .unwrap();
+    db.execute_batch(&[WireOp::Create {
+        type_name: "Ticket".into(),
+        external_id: Some("t2".into()),
+        fields: vec![
+            ("code".into(), CanonicalValue::String("C-2".into())),
+            ("body".into(), CanonicalValue::String("Mentioned THR 12 error with space".into())),
+        ],
+    }])
+    .unwrap();
+
+    // P1 #5: Compound code phrase ["THR-12", "error"] matches "THR-12 error" (not "THR 12 error") and highlights it!
+    let q_phrase = QuerySpec {
+        source: QuerySource::Type { type_name: "Ticket".into(), include_trashed: false },
+        steps: vec![QueryStep::Score {
+            spec: QueryScore::Bm25f {
+                index: "fts".into(),
+                query: "THR-12 error".into(),
+                require_all: true,
+                prefix: false,
+                phrase: Some(vec!["THR-12".into(), "error".into()]),
+                top_k: Some(5),
+            },
+        }],
+        terminal: Some(QueryTerminal::Hits { fields: Some(vec!["body".into()]), highlights: true }),
+        explain: false,
+    };
+    let QueryAnswerBody::Hits { hits } = db.execute_query_spec(&q_phrase, ExecBudgets::default()).unwrap().body else {
+        panic!("expected Hits");
+    };
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "t1");
+    let body_text = "Fix THR-12 error immediately";
+    let body_hl = hits[0].highlights.as_ref().unwrap().get("body").unwrap();
+    assert!(
+        body_hl.iter().any(|&(el, s, e)| el == 0 && &body_text[s..e] == "THR-12 error"),
+        "expected full compound code phrase highlight, got {body_hl:?}"
+    );
+
+    // P0 #1 + P0 #2: Failing UniqueViolation execute_batch caught inside transact_scoped must NOT corrupt
+    // primary vs derived indexes, and forbidden lock-order methods return InvalidArgument cleanly!
+    let dump_tmp = tmp.path().join("nope.json");
+    db.transact_scoped(elmdb::TransactOptions::default(), || {
+        // Forbidden methods inside transact must fail with InvalidArgument (zero deadlock / lock-order panic!)
+        assert_eq!(db.acknowledge_restore().unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.stats().unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.check(None).unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.index_status().unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(
+            db.register_query_watch(&q_phrase, WatchPolicy::default(), 0).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(elmdb::dump::dump(&db, &dump_tmp).unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db.close().unwrap_err().code, ErrorCode::InvalidArgument);
+
+        // Execute a batch whose 2nd op violates unique index `uniq_code` ("C-1") -> catches error cleanly!
+        let err = db
+            .execute_batch(&[
+                WireOp::Create {
+                    type_name: "Ticket".into(),
+                    external_id: Some("t-partial".into()),
+                    fields: vec![
+                        ("code".into(), CanonicalValue::String("C-PARTIAL".into())),
+                        ("body".into(), CanonicalValue::String("partial".into())),
+                    ],
+                },
+                WireOp::Create {
+                    type_name: "Ticket".into(),
+                    external_id: Some("t-dup".into()),
+                    fields: vec![
+                        ("code".into(), CanonicalValue::String("C-1".into())),
+                        ("body".into(), CanonicalValue::String("dup".into())),
+                    ],
+                },
+            ])
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::UniqueViolation);
+        assert!(db.get_row_resolved("t-partial")?.is_none(), "op[0] must be rolled back on UniqueViolation");
+        assert!(db.get_row_resolved("t-dup")?.is_none());
+
+        // Subsequent valid write in the same outer transaction commits cleanly!
+        db.execute_batch(&[WireOp::Create {
+            type_name: "Ticket".into(),
+            external_id: Some("t-ok".into()),
+            fields: vec![
+                ("code".into(), CanonicalValue::String("C-OK".into())),
+                ("body".into(), CanonicalValue::String("ok".into())),
+            ],
+        }])?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(db.get_row_resolved("t-partial").unwrap().is_none());
+    assert!(db.get_row_resolved("t-ok").unwrap().is_some());
+    assert!(db.check(None).unwrap().is_clean(), "derived indexes must be 100% consistent after caught UniqueViolation");
+
+    // P1 #10: Second already-open handle sees new index added by first handle and writes inside nested savepoint!
+    let db2 = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut schema2 = schema.clone();
+    schema2
+        .types
+        .get_mut("Ticket")
+        .unwrap()
+        .indexes
+        .insert("by_body_val".into(), IndexDefinition::Value { fields: vec!["body".into()], unique: false });
+    db.set_schema(&schema2).unwrap();
+
+    db2.transact_scoped(elmdb::TransactOptions::default(), || {
+        db2.transact_scoped(elmdb::TransactOptions::default(), || {
+            db2.execute_batch(&[WireOp::Create {
+                type_name: "Ticket".into(),
+                external_id: Some("t-xproc".into()),
+                fields: vec![
+                    ("code".into(), CanonicalValue::String("C-XPROC".into())),
+                    ("body".into(), CanonicalValue::String("cross process nested".into())),
+                ],
+            }])?;
+            Ok(())
+        })?;
+        Ok(())
+    })
+    .unwrap();
+    assert!(db2.get_row_resolved("t-xproc").unwrap().is_some());
+    assert!(db2.check(None).unwrap().is_clean());
+
+    db2.close().unwrap();
     db.close().unwrap();
 }

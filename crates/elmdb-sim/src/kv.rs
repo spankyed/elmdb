@@ -210,8 +210,8 @@ pub struct SimRoTxn {
     snapshot: Arc<KvSnapshot>,
 }
 
-pub struct SimRwTxn<'a> {
-    store: &'a SimKvStore,
+pub struct SimRwTxn {
+    inner: Arc<Mutex<StoreInner>>,
     /// Stack of CoW working snapshots; index 0 is the root write txn, indices 1.. are nested savepoints.
     stack: Vec<KvSnapshot>,
     finished: bool,
@@ -346,6 +346,22 @@ fn read_entries(snap: &KvSnapshot, db: SubDbHandle) -> Result<u64, StorageError>
     Ok(sub.entries.len() as u64)
 }
 
+fn read_open_subdb_existing(
+    snap: &KvSnapshot,
+    name: &str,
+    flags: DbFlags,
+) -> Result<Option<SubDbHandle>, StorageError> {
+    validate_subdb_name(name)?;
+    let Some(&handle) = snap.by_name.get(name) else {
+        return Ok(None);
+    };
+    let existing = snap.dbs.get(&handle).expect("valid handle");
+    if existing.flags != flags {
+        return Err(StorageError::InvalidState(format!("sub-DB '{name}' opened read-only with mismatched flags")));
+    }
+    Ok(Some(handle))
+}
+
 impl KvRead for SimRoTxn {
     type Cursor<'a>
         = SimCursor<'a>
@@ -363,9 +379,13 @@ impl KvRead for SimRoTxn {
     fn entries(&self, db: SubDbHandle) -> Result<u64, StorageError> {
         read_entries(&self.snapshot, db)
     }
+
+    fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError> {
+        read_open_subdb_existing(&self.snapshot, name, flags)
+    }
 }
 
-impl SimRwTxn<'_> {
+impl SimRwTxn {
     fn top(&self) -> &KvSnapshot {
         self.stack.last().expect("write txn always has root snapshot")
     }
@@ -375,7 +395,7 @@ impl SimRwTxn<'_> {
     }
 }
 
-impl KvRead for SimRwTxn<'_> {
+impl KvRead for SimRwTxn {
     type Cursor<'a>
         = SimCursor<'a>
     where
@@ -392,12 +412,16 @@ impl KvRead for SimRwTxn<'_> {
     fn entries(&self, db: SubDbHandle) -> Result<u64, StorageError> {
         read_entries(self.top(), db)
     }
+
+    fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError> {
+        read_open_subdb_existing(self.top(), name, flags)
+    }
 }
 
-impl KvWrite for SimRwTxn<'_> {
+impl KvWrite for SimRwTxn {
     fn open_subdb(&mut self, name: &str, flags: DbFlags) -> Result<SubDbHandle, StorageError> {
         validate_subdb_name(name)?;
-        let max_dbs = self.store.inner.lock().config.max_dbs;
+        let max_dbs = self.inner.lock().config.max_dbs;
         let depth = self.savepoint_depth();
         let snap = self.top_mut();
         if let Some(&handle) = snap.by_name.get(name) {
@@ -424,7 +448,7 @@ impl KvWrite for SimRwTxn<'_> {
     }
 
     fn put(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<(), StorageError> {
-        let map_size = self.store.inner.lock().config.map_size;
+        let map_size = self.inner.lock().config.map_size;
         let snap = self.top_mut();
         let sub = snap.dbs.get_mut(&db).ok_or(StorageError::InvalidSubDb { handle: db.raw() })?;
         let parsed = SimKey::from_slice(sub.flags, key)?;
@@ -441,7 +465,7 @@ impl KvWrite for SimRwTxn<'_> {
     }
 
     fn put_no_overwrite(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<bool, StorageError> {
-        let map_size = self.store.inner.lock().config.map_size;
+        let map_size = self.inner.lock().config.map_size;
         let snap = self.top_mut();
         let sub = snap.dbs.get_mut(&db).ok_or(StorageError::InvalidSubDb { handle: db.raw() })?;
         let parsed = SimKey::from_slice(sub.flags, key)?;
@@ -524,7 +548,7 @@ impl KvWrite for SimRwTxn<'_> {
             final_snap.dirty = false;
         }
         let receipt = CommitReceipt { txnid: final_snap.txnid, roots_sha256: final_snap.roots_sha256() };
-        let mut inner = self.store.inner.lock();
+        let mut inner = self.inner.lock();
         inner.committed = Arc::new(final_snap);
         inner.writer_active = false;
         self.finished = true;
@@ -533,16 +557,16 @@ impl KvWrite for SimRwTxn<'_> {
 
     fn abort(mut self) {
         if !self.finished {
-            self.store.inner.lock().writer_active = false;
+            self.inner.lock().writer_active = false;
             self.finished = true;
         }
     }
 }
 
-impl Drop for SimRwTxn<'_> {
+impl Drop for SimRwTxn {
     fn drop(&mut self) {
         if !self.finished {
-            self.store.inner.lock().writer_active = false;
+            self.inner.lock().writer_active = false;
             self.finished = true;
         }
     }
@@ -550,7 +574,8 @@ impl Drop for SimRwTxn<'_> {
 
 impl KvStore for SimKvStore {
     type RoTxn<'a> = SimRoTxn;
-    type RwTxn<'a> = SimRwTxn<'a>;
+    type RwTxn<'a> = SimRwTxn;
+    type OwnedRwTxn = SimRwTxn;
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
         let inner = self.inner.lock();
@@ -558,6 +583,10 @@ impl KvStore for SimKvStore {
     }
 
     fn begin_write(&self) -> Result<Self::RwTxn<'_>, StorageError> {
+        self.begin_write_owned()
+    }
+
+    fn begin_write_owned(&self) -> Result<Self::OwnedRwTxn, StorageError> {
         let mut inner = self.inner.lock();
         if inner.writer_active {
             return Err(StorageError::InvalidState("concurrent write transaction already active".into()));
@@ -565,7 +594,7 @@ impl KvStore for SimKvStore {
         inner.writer_active = true;
         let mut root = (*inner.committed).clone();
         root.dirty = false;
-        Ok(SimRwTxn { store: self, stack: vec![root], finished: false })
+        Ok(SimRwTxn { inner: Arc::clone(&self.inner), stack: vec![root], finished: false })
     }
 
     fn open_subdb_ro(
@@ -574,15 +603,7 @@ impl KvStore for SimKvStore {
         name: &str,
         flags: DbFlags,
     ) -> Result<Option<SubDbHandle>, StorageError> {
-        validate_subdb_name(name)?;
-        let Some(&handle) = txn.snapshot.by_name.get(name) else {
-            return Ok(None);
-        };
-        let existing = txn.snapshot.dbs.get(&handle).expect("valid handle");
-        if existing.flags != flags {
-            return Err(StorageError::InvalidState(format!("sub-DB '{name}' opened read-only with mismatched flags")));
-        }
-        Ok(Some(handle))
+        txn.open_subdb_existing(name, flags)
     }
 
     fn sync(&self) -> Result<(), StorageError> {

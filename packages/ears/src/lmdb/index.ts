@@ -38,6 +38,12 @@ export type {
 } from '../engine.ts';
 export type { EarsError, EarsErrorCode } from '../errors.ts';
 export type {
+  EarsOperation,
+  EarsOperationKind,
+  EarsOperationObserver,
+  EarsOperationResult,
+} from '../observer.ts';
+export type {
   DegreesOptions,
   EntityRow,
   FieldPredicate,
@@ -45,6 +51,7 @@ export type {
   GraphPprResult,
   GraphTopoResult,
   HasLinkOptions,
+  HitsOptions,
   HopsOptions,
   KeysetCursor,
   LeidenOptions,
@@ -58,6 +65,7 @@ export type {
   ShortestPathOptions,
   SimilarityOptions,
   SourceOptions,
+  WatchHitsOptions,
   WhereInput,
 } from '../query.ts';
 export type { BatchSlot, BatchWriter, EntityTarget, LinkOptions } from '../batch.ts';
@@ -83,6 +91,7 @@ export type {
   Row,
   Schema,
   SchemaChange,
+  TransactOptions,
   WatchPolicyOptions,
   WatchRegistration,
   WatchRerun,

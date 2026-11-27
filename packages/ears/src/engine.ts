@@ -8,10 +8,12 @@ import type {
   RelationRow,
   Schema,
   SchemaChange,
+  TransactOptions,
 } from 'elmdb';
-import { encodeBatch, isThenable, type BatchWriter, type LinkOptions } from './batch.ts';
+import { createBatchWriter, encodeBatch, isThenable, type BatchWriter, type LinkOptions } from './batch.ts';
 import type { CommitDelta, EarsDatabase, EdgeDirection } from './database.ts';
-import { EarsError, toEarsError } from './errors.ts';
+import { EarsError, hasKnownErrorCode, toEarsError } from './errors.ts';
+import type { EarsOperationObserver } from './observer.ts';
 import { createQueryRoot, type EntityRow, type QueryRoot } from './query.ts';
 import { createSystemClock, WatchPump, type EarsClock, type WatchController } from './watch.ts';
 
@@ -39,6 +41,8 @@ export interface CreateEarsEngineOptions {
   readonly clock?: EarsClock;
   /** Optional fallback handler for errors thrown inside watch callbacks or reruns. */
   readonly onWatchError?: (error: EarsError) => void;
+  /** Optional synchronous operation observer (zero overhead when omitted). */
+  readonly observer?: EarsOperationObserver;
 }
 
 /** Administrative, schema evolution, and maintenance operations on an `EarsEngine`. */
@@ -97,6 +101,24 @@ export interface EarsEngine {
   executeWireBatch(payload: Uint8Array): BatchResult;
 
   /**
+   * Executes a strictly-synchronous callback inside a write transaction (or native LMDB savepoint when nested).
+   *
+   * - Reads (`get`, `getEdges`, `query`, `getCounter`) and writes see all uncommitted writes immediately (RYOW).
+   * - Throwing rolls back this transaction (or nested savepoint only, preserving outer writes).
+   * - Returning a Promise or thenable aborts immediately with `EarsError('ASYNC_CALLBACK_FORBIDDEN')`.
+   * - `beforeCommit` hooks run once on the outermost commit unless `{ runBeforeCommit: false }`.
+   */
+  transact<T>(fn: () => T, opts?: TransactOptions): T;
+  /** Returns the pending commit sequence while inside `transact()` or `beforeCommit`, or `null` outside a write txn. */
+  pendingCommitSeq(): number | null;
+  /** Atomically increments and returns the named persistent counter (`1, 2, 3, ...`), participating in `transact()`. */
+  nextCounter(name: string): number;
+  /** Reads the current value of the named persistent counter (`0` if unset), with RYOW inside `transact()`. */
+  getCounter(name: string): number;
+  /** Sets the named persistent counter (e.g. preserving imported high-water marks), participating in `transact()`. */
+  setCounter(name: string, value: number): void;
+
+  /**
    * Registers a synchronous engine-native `beforeCommit` hook.
    * Pass `null` for `typeNames` to subscribe to all entity/edge mutations.
    * Returns an idempotent unsubscribe function.
@@ -108,21 +130,60 @@ export interface EarsEngine {
 export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
   const db = options.database;
   const clock = options.clock ?? createSystemClock();
-  const pump = new WatchPump(db, clock, options.onWatchError);
-  const query = createQueryRoot(db, pump);
+  const observer = options.observer;
+  let txnDepth = 0;
+  let hookDepth = 0;
+  let outerTxnMutated = false;
+  const isInWriteTxn = (): boolean => txnDepth > 0 || hookDepth > 0;
+  const pump = new WatchPump(db, clock, options.onWatchError, observer);
+  const query = createQueryRoot(db, pump, observer, isInWriteTxn);
 
-  const runBatchPayload = (payload: Uint8Array): BatchResult => {
+  const runBatchPayload = (payload: Uint8Array, ops = 1): BatchResult => {
+    const finish = observer?.start({ kind: 'write', ops, watch: false, inUnit: isInWriteTxn() });
     let result: BatchResult;
     try {
       result = db.executeWireBatch(payload);
     } catch (error) {
-      throw toEarsError(error);
+      const earsErr = toEarsError(error);
+      finish?.({
+        outcome: 'error',
+        requestBytes: payload.byteLength,
+        responseBytes: 0,
+        errorCode: earsErr.code,
+      });
+      throw earsErr;
     }
-    pump.notifyMutation();
+    if (isInWriteTxn()) {
+      outerTxnMutated = true;
+    }
+    finish?.({
+      outcome: 'ok',
+      sequence: result.commitSeq,
+      requestBytes: payload.byteLength,
+      responseBytes: 0,
+    });
+    if (!isInWriteTxn()) {
+      pump.notifyMutation();
+    }
     return result;
   };
 
-  const batch = (fn: (b: BatchWriter) => void): BatchResult => runBatchPayload(encodeBatch(fn));
+  const batch = (fn: (b: BatchWriter) => void): BatchResult => {
+    const writer = createBatchWriter();
+    let returned: unknown;
+    try {
+      returned = fn(writer);
+    } catch (error) {
+      throw toEarsError(error, 'INVALID_ARGUMENT');
+    }
+    if (isThenable(returned)) {
+      throw new EarsError(
+        'ASYNC_CALLBACK_FORBIDDEN',
+        'Batch callbacks must be synchronous (Promises and async callbacks are forbidden)',
+      );
+    }
+    return runBatchPayload(writer.encode(), writer.length);
+  };
 
   const admin: EarsAdmin = {
     get path(): string {
@@ -294,12 +355,14 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       }
     },
     close(): void {
-      pump.markClosed();
+      // Close the underlying database FIRST so rejecting `close()` inside `transact()`
+      // never permanently stops `WatchPump` on an open database!
       try {
         db.close();
       } catch (error) {
         throw toEarsError(error);
       }
+      pump.markClosed();
     },
   };
 
@@ -308,18 +371,30 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
     watches: pump,
     admin,
     get(id: string): EntityRow | null {
+      const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      let row: EntityRow | null;
       try {
-        return db.get(id);
+        row = db.get(id);
       } catch (error) {
-        throw toEarsError(error);
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return row;
     },
     getEdges(id: string, opts?: GetEdgesOptions): RelationRow[] {
+      const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      let edges: RelationRow[];
       try {
-        return db.getEdges(id, opts?.relKind, opts?.dir);
+        edges = db.getEdges(id, opts?.relKind, opts?.dir);
       } catch (error) {
-        throw toEarsError(error);
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return edges;
     },
     create(typeName: string, fields: Record<string, unknown>, externalId?: string): string {
       const res = batch((b) => {
@@ -367,6 +442,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       });
     },
     setEmbeddings(indexName: string, id: string, vectors: ReadonlyArray<ReadonlyArray<number>>): void {
+      const finish = observer?.start({ kind: 'write', ops: 1, watch: false, inUnit: isInWriteTxn() });
       try {
         db.setEmbeddings(
           indexName,
@@ -374,35 +450,125 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
           vectors.map((v) => [...v]),
         );
       } catch (error) {
-        throw toEarsError(error);
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
       pump.notifyMutation();
     },
     batch,
-    executeWireBatch: runBatchPayload,
+    executeWireBatch: (payload: Uint8Array): BatchResult => runBatchPayload(payload, 1),
+    transact<T>(fn: () => T, opts?: TransactOptions): T {
+      const isOuter = !isInWriteTxn();
+      const finish = isOuter
+        ? observer?.start({ kind: 'unit', ops: 1, watch: false, inUnit: false })
+        : undefined;
+      if (isOuter) outerTxnMutated = false;
+      let commitSeq: number | undefined;
+      txnDepth++;
+      let value: T;
+      try {
+        value = db.transact(() => {
+          const result = fn();
+          if (isThenable(result)) {
+            throw new EarsError(
+              'ASYNC_CALLBACK_FORBIDDEN',
+              'transact() callbacks must be synchronous (Promises and async callbacks are forbidden)',
+            );
+          }
+          if (isOuter && finish !== undefined && outerTxnMutated) {
+            const pending = db.pendingCommitSeq();
+            if (pending !== null) commitSeq = pending;
+          }
+          return result;
+        }, opts) as T;
+      } catch (error) {
+        txnDepth--;
+        if (hasKnownErrorCode(error)) {
+          const earsErr = toEarsError(error);
+          finish?.({ outcome: 'aborted', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+          throw earsErr;
+        }
+        finish?.({ outcome: 'aborted', requestBytes: 0, responseBytes: 0 });
+        throw error;
+      }
+      txnDepth--;
+      finish?.({
+        outcome: 'ok',
+        ...(commitSeq !== undefined && { sequence: commitSeq }),
+        requestBytes: 0,
+        responseBytes: 0,
+      });
+      if (isOuter) {
+        pump.notifyMutation();
+      }
+      return value;
+    },
+    pendingCommitSeq(): number | null {
+      try {
+        return db.pendingCommitSeq();
+      } catch (error) {
+        throw toEarsError(error);
+      }
+    },
+    nextCounter(name: string): number {
+      const finish = observer?.start({ kind: 'write', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      let val: number;
+      try {
+        val = db.nextCounter(name);
+      } catch (error) {
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
+      }
+      if (isInWriteTxn()) outerTxnMutated = true;
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return val;
+    },
+    getCounter(name: string): number {
+      const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      let val: number;
+      try {
+        val = db.getCounter(name);
+      } catch (error) {
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
+      }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return val;
+    },
+    setCounter(name: string, value: number): void {
+      const finish = observer?.start({ kind: 'write', ops: 1, watch: false, inUnit: isInWriteTxn() });
+      try {
+        db.setCounter(name, value);
+      } catch (error) {
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
+      }
+      if (isInWriteTxn()) outerTxnMutated = true;
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    },
     beforeCommit(typeNames: readonly string[] | null, callback: BeforeCommitHook): () => void {
       let hookId: number;
       try {
         hookId = db.registerBeforeCommit(
           typeNames === null ? null : [...typeNames],
           (delta: CommitDelta): unknown => {
-            const ret: unknown = callback(delta);
-            if (isThenable(ret)) {
-              throw new EarsError(
-                'ASYNC_CALLBACK_FORBIDDEN',
-                'beforeCommit hooks must be synchronous (Promises and async callbacks are forbidden)',
-              );
-            }
-            if (typeof ret === 'function') {
-              return encodeBatch(ret as (b: BatchWriter) => void);
-            }
-            if (ret === undefined || ret === null || ret instanceof Uint8Array) {
+            hookDepth++;
+            try {
+              const ret: unknown = callback(delta);
+              if (typeof ret === 'function') {
+                return encodeBatch(ret as (b: BatchWriter) => void);
+              }
+              // Pass thenables and invalid return types straight to the native binding so it raises
+              // exact `ASYNC_CALLBACK_FORBIDDEN` / `INVALID_ARGUMENT` error codes cleanly.
               return ret;
+            } finally {
+              hookDepth--;
             }
-            throw new EarsError(
-              'INVALID_ARGUMENT',
-              'beforeCommit hook must return void, a batch callback, or a Uint8Array wire batch',
-            );
           },
         );
       } catch (error) {

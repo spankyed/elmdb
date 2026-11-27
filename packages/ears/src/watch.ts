@@ -1,6 +1,7 @@
 import type { QueryAnswer, QuerySpec, WatchPolicyOptions } from 'elmdb';
 import type { EarsDatabase } from './database.ts';
 import { EarsError, toEarsError, type EarsErrorCode } from './errors.ts';
+import type { EarsOperationObserver } from './observer.ts';
 
 /**
  * Injectable clock and timer interface for deterministic sans-I/O watch scheduling.
@@ -104,16 +105,23 @@ export class WatchPump implements WatchController {
   readonly #db: EarsDatabase;
   readonly #clock: EarsClock;
   readonly #onWatchError: ((error: EarsError) => void) | undefined;
+  readonly #observer: EarsOperationObserver | undefined;
   readonly #entries = new Map<number, WatchEntry>();
   #timer: unknown = undefined;
   #pumping = false;
   #rescheduleAfterPump = false;
   #stopped = false;
 
-  constructor(db: EarsDatabase, clock: EarsClock, onWatchError?: (error: EarsError) => void) {
+  constructor(
+    db: EarsDatabase,
+    clock: EarsClock,
+    onWatchError?: (error: EarsError) => void,
+    observer?: EarsOperationObserver,
+  ) {
     this.#db = db;
     this.#clock = clock;
     this.#onWatchError = onWatchError;
+    this.#observer = observer;
   }
 
   get activeCount(): number {
@@ -134,12 +142,16 @@ export class WatchPump implements WatchController {
     if (options?.adaptiveMultiplier !== undefined) policy.adaptiveMultiplier = options.adaptiveMultiplier;
 
     const nowMs = this.#clock.now();
+    const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
     let reg;
     try {
       reg = this.#db.registerWatch(spec, policy, nowMs);
     } catch (error) {
-      throw toEarsError(error);
+      const earsErr = toEarsError(error);
+      finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+      throw earsErr;
     }
+    finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
 
     const entry: WatchEntry = {
       id: reg.watchId,
@@ -394,21 +406,13 @@ export class WatchPump implements WatchController {
         }
 
         const runStart = this.#clock.now();
+        const finishRerun = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
+        let rerun;
         try {
-          const rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
-          entry.lastCostMs = Math.max(1, this.#clock.now() - runStart);
-          entry.backoffMs = 0;
-          entry.backoffUntilMs = 0;
-          ran++;
-          if (entry.active && rerun.changed) {
-            try {
-              entry.deliver(rerun.answer);
-            } catch (callbackErr) {
-              this.#reportError(entry, toEarsError(callbackErr), true);
-            }
-          }
+          rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
         } catch (rerunErr) {
           const earsErr = toEarsError(rerunErr);
+          finishRerun?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
           failedThisTurn.add(entry.id);
           if (Object.prototype.hasOwnProperty.call(PERMANENT_WATCH_ERROR_CODES, earsErr.code)) {
             // Permanent schema/compile/closed error: stop the broken watch so it cannot livelock or starve others.
@@ -426,6 +430,23 @@ export class WatchPump implements WatchController {
           this.#reportError(entry, earsErr, true);
           // Break if all remaining due watches are backed off so we don't pop the same watch again in this turn.
           if (this.#allDueBlocked(nowMs, failedThisTurn)) break;
+          continue;
+        }
+        try {
+          finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+        } catch (observerErr) {
+          this.#reportError(entry, toEarsError(observerErr), true);
+        }
+        entry.lastCostMs = Math.max(1, this.#clock.now() - runStart);
+        entry.backoffMs = 0;
+        entry.backoffUntilMs = 0;
+        ran++;
+        if (entry.active && rerun.changed) {
+          try {
+            entry.deliver(rerun.answer);
+          } catch (callbackErr) {
+            this.#reportError(entry, toEarsError(callbackErr), true);
+          }
         }
       }
     } finally {

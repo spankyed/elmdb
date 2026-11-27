@@ -6,6 +6,7 @@ import { Database, type DumpReport, type OpenOptions, type Schema } from 'elmdb'
 import type { BuildPolicy, DurabilityMode, EarsDatabase } from '../database.ts';
 import { createEarsEngine, type EarsEngine } from '../engine.ts';
 import { toEarsError, type EarsError } from '../errors.ts';
+import type { EarsOperationObserver } from '../observer.ts';
 import type { EarsClock } from '../watch.ts';
 
 /** Canonical elmdb v2 on-disk format identifier. */
@@ -34,6 +35,7 @@ export interface DatabaseOptions {
 export interface OpenEngineOptions extends DatabaseOptions {
   readonly clock?: EarsClock;
   readonly onWatchError?: (error: EarsError) => void;
+  readonly observer?: EarsOperationObserver;
 }
 
 function toNativeOpenOptions(options: DatabaseOptions): OpenOptions {
@@ -80,6 +82,7 @@ export function openEngine(options: OpenEngineOptions): EarsEngine {
       database,
       ...(options.clock !== undefined && { clock: options.clock }),
       ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
+      ...(options.observer !== undefined && { observer: options.observer }),
     });
   } catch (error) {
     try {
@@ -99,6 +102,7 @@ export async function openEngineAsync(options: OpenEngineOptions): Promise<EarsE
       database,
       ...(options.clock !== undefined && { clock: options.clock }),
       ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
+      ...(options.observer !== undefined && { observer: options.observer }),
     });
   } catch (error) {
     try {

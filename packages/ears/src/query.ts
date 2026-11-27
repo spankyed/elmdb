@@ -7,6 +7,7 @@ import type { QueryStep } from 'elmdb/protocol/QueryStep.js';
 import type { QueryTerminal } from 'elmdb/protocol/QueryTerminal.js';
 import type { EarsDatabase, EdgeDirection, FusionMethod, SortDirection } from './database.ts';
 import { EarsError, toEarsError } from './errors.ts';
+import type { EarsOperationObserver } from './observer.ts';
 import type { WatchHandle, WatchOptions, WatchPump } from './watch.ts';
 
 /** Canonical entity row returned by `get` and row-returning queries. */
@@ -54,9 +55,19 @@ export type WhereInput =
 /** Options for `QueryBuilder.search(...)` (BM25F full-text search). */
 export interface SearchOptions {
   readonly requireAll?: boolean;
+  readonly prefix?: boolean;
   readonly phrase?: readonly string[];
   readonly topK?: number;
 }
+
+/** Options for `QueryBuilder.hits(...)` and `QueryBuilder.hitsAsync(...)`. */
+export interface HitsOptions {
+  readonly fields?: readonly string[];
+  readonly highlights?: boolean;
+}
+
+/** Options for `QueryBuilder.watchHits(...)`. */
+export interface WatchHitsOptions extends WatchOptions, HitsOptions {}
 
 /** Options for `QueryBuilder.recency(...)`. */
 export interface RecencyOptions {
@@ -420,10 +431,10 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
   ids(): string[];
   /** Returns matching entity IDs asynchronously. */
   idsAsync(): Promise<string[]>;
-  /** Returns scored `{ id, score }` hits synchronously (also consumes `jaccard` / `adamicAdar`). */
-  hits(): Hit[];
-  /** Returns scored `{ id, score }` hits asynchronously (also consumes `jaccard` / `adamicAdar`). */
-  hitsAsync(): Promise<Hit[]>;
+  /** Returns scored `{ id, score, row?, highlights? }` hits synchronously (also consumes `jaccard` / `adamicAdar`). */
+  hits(opts?: HitsOptions): Hit[];
+  /** Returns scored `{ id, score, row?, highlights? }` hits asynchronously (also consumes `jaccard` / `adamicAdar`). */
+  hitsAsync(opts?: HitsOptions): Promise<Hit[]>;
   /** Returns count of matching entities synchronously. */
   count(): number;
   /** Returns count of matching entities asynchronously. */
@@ -469,8 +480,8 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
   watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle;
   /** Subscribes to live ID list updates. */
   watchIds(callback: (ids: string[]) => void, opts?: WatchOptions): WatchHandle;
-  /** Subscribes to live scored hit updates. */
-  watchHits(callback: (hits: Hit[]) => void, opts?: WatchOptions): WatchHandle;
+  /** Subscribes to live scored hit updates (with optional projected fields and UTF-16 highlights). */
+  watchHits(callback: (hits: Hit[]) => void, opts?: WatchHitsOptions): WatchHandle;
   /** Subscribes to live count updates. */
   watchCount(callback: (count: number) => void, opts?: WatchOptions): WatchHandle;
 }
@@ -492,6 +503,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   readonly #steps: readonly QueryStep[];
   readonly #localFilters: ReadonlyArray<(row: TResult) => boolean>;
   readonly #implicitOrderSlice: boolean;
+  readonly #observer: EarsOperationObserver | undefined;
+  readonly #inUnit: () => boolean;
 
   constructor(
     db: EarsDatabase,
@@ -500,6 +513,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     steps: readonly QueryStep[] = [],
     localFilters: ReadonlyArray<(row: TResult) => boolean> = [],
     implicitOrderSlice = false,
+    observer?: EarsOperationObserver,
+    inUnit: () => boolean = () => false,
   ) {
     this.#db = db;
     this.#pump = pump;
@@ -507,6 +522,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     this.#steps = steps;
     this.#localFilters = localFilters;
     this.#implicitOrderSlice = implicitOrderSlice;
+    this.#observer = observer;
+    this.#inUnit = inUnit;
   }
 
   #assertNoLocalFilters(stepName: string): void {
@@ -527,6 +544,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
       [...this.#steps, step],
       [],
       implicitOrderSlice,
+      this.#observer,
+      this.#inUnit,
     );
   }
 
@@ -539,6 +558,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
       [...this.#steps, step],
       [],
       false,
+      this.#observer,
+      this.#inUnit,
     );
   }
 
@@ -587,6 +608,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
         [...this.#steps.slice(0, -1), next],
         [],
         this.#implicitOrderSlice,
+        this.#observer,
+        this.#inUnit,
       );
     }
     const hasScore = this.#steps.some((s) => s.kind === 'score');
@@ -660,6 +683,7 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
       index,
       query,
       ...(opts?.requireAll !== undefined && { requireAll: opts.requireAll }),
+      ...(opts?.prefix !== undefined && { prefix: opts.prefix }),
       ...(opts?.phrase !== undefined && { phrase: [...opts.phrase] }),
       ...(opts?.topK !== undefined && { topK: opts.topK }),
     });
@@ -839,6 +863,8 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
       this.#steps,
       [...this.#localFilters, predicate],
       this.#implicitOrderSlice,
+      this.#observer,
+      this.#inUnit,
     );
   }
 
@@ -852,19 +878,43 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   #run(terminal?: QueryTerminal, explain?: boolean): QueryAnswer {
+    const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: this.#inUnit() });
+    let answer: QueryAnswer;
     try {
-      return this.#db.query(this.toSpec(terminal, explain));
+      answer = this.#db.query(this.toSpec(terminal, explain));
     } catch (error) {
-      throw toEarsError(error);
+      const earsErr = toEarsError(error);
+      finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+      throw earsErr;
     }
+    finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    return answer;
   }
 
   async #runAsync(terminal?: QueryTerminal, explain?: boolean): Promise<QueryAnswer> {
+    const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: false });
+    let answer: QueryAnswer;
     try {
-      return await this.#db.queryAsync(this.toSpec(terminal, explain));
+      answer = await this.#db.queryAsync(this.toSpec(terminal, explain));
     } catch (error) {
-      throw toEarsError(error);
+      const earsErr = toEarsError(error);
+      finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+      throw earsErr;
     }
+    finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    return answer;
+  }
+
+  #hitsTerminal(opts?: HitsOptions): QueryTerminal | undefined {
+    const last = this.#steps[this.#steps.length - 1];
+    if (isGraphHitsStep(last) && opts?.fields === undefined && opts?.highlights !== true) {
+      return undefined;
+    }
+    return {
+      kind: 'hits',
+      ...(opts?.fields !== undefined && { fields: [...opts.fields] }),
+      ...(opts?.highlights !== undefined && { highlights: opts.highlights }),
+    };
   }
 
   explain(terminal?: QueryTerminal): QueryAnswer {
@@ -921,20 +971,18 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     return ans.ids;
   }
 
-  hits(): Hit[] {
+  hits(opts?: HitsOptions): Hit[] {
     this.#forbidLocalFilter('hits');
-    const last = this.#steps[this.#steps.length - 1];
-    const ans = this.#run(isGraphHitsStep(last) ? undefined : { kind: 'hits' });
+    const ans = this.#run(this.#hitsTerminal(opts));
     if (ans.kind !== 'hits') {
       throw new EarsError('INTERNAL', `Expected 'hits' query answer, got '${ans.kind}'`);
     }
     return ans.hits;
   }
 
-  async hitsAsync(): Promise<Hit[]> {
+  async hitsAsync(opts?: HitsOptions): Promise<Hit[]> {
     this.#forbidLocalFilter('hitsAsync');
-    const last = this.#steps[this.#steps.length - 1];
-    const ans = await this.#runAsync(isGraphHitsStep(last) ? undefined : { kind: 'hits' });
+    const ans = await this.#runAsync(this.#hitsTerminal(opts));
     if (ans.kind !== 'hits') {
       throw new EarsError('INTERNAL', `Expected 'hits' query answer, got '${ans.kind}'`);
     }
@@ -1167,11 +1215,10 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     );
   }
 
-  watchHits(callback: (hits: Hit[]) => void, opts?: WatchOptions): WatchHandle {
+  watchHits(callback: (hits: Hit[]) => void, opts?: WatchHitsOptions): WatchHandle {
     this.#forbidLocalFilter('watchHits');
-    const last = this.#steps[this.#steps.length - 1];
     return this.#pump.register(
-      this.toSpec(isGraphHitsStep(last) ? undefined : { kind: 'hits' }),
+      this.toSpec(this.#hitsTerminal(opts)),
       (answer) => {
         if (answer.kind !== 'hits') {
           throw new EarsError('INTERNAL', `Expected 'hits' watch answer, got '${answer.kind}'`);
@@ -1198,44 +1245,88 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
 }
 
 /** Creates the `QueryRoot` bound to an `EarsDatabase` and `WatchPump`. */
-export function createQueryRoot(db: EarsDatabase, pump: WatchPump): QueryRoot {
+export function createQueryRoot(
+  db: EarsDatabase,
+  pump: WatchPump,
+  observer?: EarsOperationObserver,
+  inUnit: () => boolean = () => false,
+): QueryRoot {
   return {
     of(typeName, opts) {
-      return new QueryBuilderImpl(db, pump, {
-        kind: 'type',
-        typeName,
-        ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
-      });
+      return new QueryBuilderImpl(
+        db,
+        pump,
+        {
+          kind: 'type',
+          typeName,
+          ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
+        },
+        [],
+        [],
+        false,
+        observer,
+        inUnit,
+      );
     },
     ofTypes(typeNames, opts) {
-      return new QueryBuilderImpl(db, pump, {
-        kind: 'types',
-        typeNames: [...typeNames],
-        ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
-      });
+      return new QueryBuilderImpl(
+        db,
+        pump,
+        {
+          kind: 'types',
+          typeNames: [...typeNames],
+          ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
+        },
+        [],
+        [],
+        false,
+        observer,
+        inUnit,
+      );
     },
     allEntities(opts) {
-      return new QueryBuilderImpl(db, pump, {
-        kind: 'allEntities',
-        ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
-      });
+      return new QueryBuilderImpl(
+        db,
+        pump,
+        {
+          kind: 'allEntities',
+          ...(opts?.includeTrashed !== undefined && { includeTrashed: opts.includeTrashed }),
+        },
+        [],
+        [],
+        false,
+        observer,
+        inUnit,
+      );
     },
     ids(ids) {
-      return new QueryBuilderImpl(db, pump, { kind: 'ids', ids: [...ids] });
+      return new QueryBuilderImpl(db, pump, { kind: 'ids', ids: [...ids] }, [], [], false, observer, inUnit);
     },
     raw(spec) {
+      const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: inUnit() });
+      let answer: QueryAnswer;
       try {
-        return db.query(spec);
+        answer = db.query(spec);
       } catch (error) {
-        throw toEarsError(error);
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return answer;
     },
     async rawAsync(spec) {
+      const finish = observer?.start({ kind: 'read', ops: 1, watch: false, inUnit: false });
+      let answer: QueryAnswer;
       try {
-        return await db.queryAsync(spec);
+        answer = await db.queryAsync(spec);
       } catch (error) {
-        throw toEarsError(error);
+        const earsErr = toEarsError(error);
+        finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+        throw earsErr;
       }
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      return answer;
     },
   };
 }

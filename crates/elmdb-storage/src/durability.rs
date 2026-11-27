@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 
 use crate::error::StorageError;
-use crate::kv::{CommitReceipt, DbFlags, KvRead, KvStore, KvWrite, SubDbHandle};
-use crate::locks::{MetaLock, OrderedMutexGuard, WriterLock};
+use crate::kv::{CommitReceipt, DbFlags, KvCursor, KvEntry, KvRead, KvStore, KvWrite, SubDbHandle};
+use crate::locks::{MetaLock, OrderedArcMutexGuard, OrderedMutexGuard, WriterLock};
 use crate::vfs::{BootId, Vfs};
 
 /// File name of the dual-slot 8 KiB durability sidecar inside the database directory.
@@ -301,7 +302,34 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             ));
         }
         let txn = self.store.begin_write()?;
-        Ok(GatedWriteTxn { gate: self, _writer_guard: guard, txn: Some(txn) })
+        Ok(GatedWriteTxn {
+            gate: GateRef::Borrowed(self),
+            writer_guard: WriterGuardRef::Borrowed(guard),
+            txn: Some(RwTxnRef::Borrowed(txn)),
+        })
+    }
+
+    /// Begins an owned `'static` (but `!Send`) write transaction guarded by `WriterLock`,
+    /// allowing callback-scoped synchronous `transact(fn)` without any `unsafe` lifetime erasure.
+    pub fn begin_write_owned(self: &Arc<Self>) -> Result<GatedWriteTxn<'static, S, V>, StorageError>
+    where
+        S: 'static,
+        V: 'static,
+    {
+        self.check_poisoned()?;
+        let guard = self.writer.lock_arc();
+        self.check_poisoned()?;
+        if !guard.recovered {
+            return Err(StorageError::InvalidState(
+                "DurabilityGate::recover() must succeed before beginning a write transaction".into(),
+            ));
+        }
+        let txn = self.store.begin_write_owned()?;
+        Ok(GatedWriteTxn {
+            gate: GateRef::Owned(Arc::clone(self)),
+            writer_guard: WriterGuardRef::Owned(guard),
+            txn: Some(RwTxnRef::Owned(txn)),
+        })
     }
 
     /// Flushes LMDB to disk and writes + fsyncs the next alternating 4 KiB durability slot.
@@ -381,58 +409,167 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     }
 }
 
+enum GateRef<'a, S: KvStore, V: Vfs> {
+    Borrowed(&'a DurabilityGate<S, V>),
+    Owned(Arc<DurabilityGate<S, V>>),
+}
+
+impl<S: KvStore, V: Vfs> GateRef<'_, S, V> {
+    fn as_gate(&self) -> &DurabilityGate<S, V> {
+        match self {
+            Self::Borrowed(g) => g,
+            Self::Owned(g) => g,
+        }
+    }
+}
+
+enum WriterGuardRef<'a> {
+    Borrowed(OrderedMutexGuard<'a, WriterState>),
+    Owned(OrderedArcMutexGuard<WriterState>),
+}
+
+impl WriterGuardRef<'_> {
+    fn state_mut(&mut self) -> &mut WriterState {
+        match self {
+            Self::Borrowed(g) => g,
+            Self::Owned(g) => g,
+        }
+    }
+}
+
+enum RwTxnRef<'a, S: KvStore + 'a> {
+    Borrowed(S::RwTxn<'a>),
+    Owned(S::OwnedRwTxn),
+}
+
+pub enum GatedCursor<C1, C2> {
+    Borrowed(C1),
+    Owned(C2),
+}
+
+impl<'txn, C1: KvCursor<'txn>, C2: KvCursor<'txn>> KvCursor<'txn> for GatedCursor<C1, C2> {
+    fn first(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        match self {
+            Self::Borrowed(c) => c.first(),
+            Self::Owned(c) => c.first(),
+        }
+    }
+
+    fn last(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        match self {
+            Self::Borrowed(c) => c.last(),
+            Self::Owned(c) => c.last(),
+        }
+    }
+
+    fn seek_ge(&mut self, key: &[u8]) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        match self {
+            Self::Borrowed(c) => c.seek_ge(key),
+            Self::Owned(c) => c.seek_ge(key),
+        }
+    }
+
+    fn seek_exact(&mut self, key: &[u8]) -> Result<Option<&'txn [u8]>, StorageError> {
+        match self {
+            Self::Borrowed(c) => c.seek_exact(key),
+            Self::Owned(c) => c.seek_exact(key),
+        }
+    }
+
+    fn next(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        match self {
+            Self::Borrowed(c) => c.next(),
+            Self::Owned(c) => c.next(),
+        }
+    }
+
+    fn prev(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        match self {
+            Self::Borrowed(c) => c.prev(),
+            Self::Owned(c) => c.prev(),
+        }
+    }
+}
+
 /// Affine write transaction handle whose sole commit path is `DurabilityGate`.
 ///
 /// Dropping without calling `commit()` aborts the transaction cleanly.
-pub struct GatedWriteTxn<'a, S: KvStore, V: Vfs> {
-    gate: &'a DurabilityGate<S, V>,
-    _writer_guard: OrderedMutexGuard<'a, WriterState>,
-    txn: Option<S::RwTxn<'a>>,
+pub struct GatedWriteTxn<'a, S: KvStore + 'a, V: Vfs> {
+    gate: GateRef<'a, S, V>,
+    writer_guard: WriterGuardRef<'a>,
+    txn: Option<RwTxnRef<'a, S>>,
 }
 
-impl<'a, S: KvStore, V: Vfs> GatedWriteTxn<'a, S, V> {
-    fn inner(&self) -> &S::RwTxn<'a> {
+impl<'a, S: KvStore + 'a, V: Vfs> GatedWriteTxn<'a, S, V> {
+    fn inner(&self) -> &RwTxnRef<'a, S> {
         self.txn.as_ref().expect("txn present until commit/abort")
     }
 
-    fn inner_mut(&mut self) -> &mut S::RwTxn<'a> {
+    fn inner_mut(&mut self) -> &mut RwTxnRef<'a, S> {
         self.txn.as_mut().expect("txn present until commit/abort")
     }
 
     pub fn open_subdb(&mut self, name: &str, flags: DbFlags) -> Result<SubDbHandle, StorageError> {
-        self.inner_mut().open_subdb(name, flags)
+        match self.inner_mut() {
+            RwTxnRef::Borrowed(t) => t.open_subdb(name, flags),
+            RwTxnRef::Owned(t) => t.open_subdb(name, flags),
+        }
     }
 
     pub fn put(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<(), StorageError> {
-        self.inner_mut().put(db, key, val)
+        match self.inner_mut() {
+            RwTxnRef::Borrowed(t) => t.put(db, key, val),
+            RwTxnRef::Owned(t) => t.put(db, key, val),
+        }
     }
 
     pub fn put_no_overwrite(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<bool, StorageError> {
-        self.inner_mut().put_no_overwrite(db, key, val)
+        match self.inner_mut() {
+            RwTxnRef::Borrowed(t) => t.put_no_overwrite(db, key, val),
+            RwTxnRef::Owned(t) => t.put_no_overwrite(db, key, val),
+        }
     }
 
     pub fn del(&mut self, db: SubDbHandle, key: &[u8]) -> Result<bool, StorageError> {
-        self.inner_mut().del(db, key)
+        match self.inner_mut() {
+            RwTxnRef::Borrowed(t) => t.del(db, key),
+            RwTxnRef::Owned(t) => t.del(db, key),
+        }
     }
 
     pub fn truncate(&mut self, db: SubDbHandle) -> Result<(), StorageError> {
-        self.inner_mut().truncate(db)
+        match self.inner_mut() {
+            RwTxnRef::Borrowed(t) => t.truncate(db),
+            RwTxnRef::Owned(t) => t.truncate(db),
+        }
     }
 
     pub fn begin_savepoint(&mut self) -> Result<u32, StorageError> {
-        self.inner_mut().begin_savepoint()
+        match self.inner_mut() {
+            RwTxnRef::Borrowed(t) => t.begin_savepoint(),
+            RwTxnRef::Owned(t) => t.begin_savepoint(),
+        }
     }
 
     pub fn commit_savepoint(&mut self, depth: u32) -> Result<(), StorageError> {
-        self.inner_mut().commit_savepoint(depth)
+        match self.inner_mut() {
+            RwTxnRef::Borrowed(t) => t.commit_savepoint(depth),
+            RwTxnRef::Owned(t) => t.commit_savepoint(depth),
+        }
     }
 
     pub fn abort_savepoint(&mut self, depth: u32) -> Result<(), StorageError> {
-        self.inner_mut().abort_savepoint(depth)
+        match self.inner_mut() {
+            RwTxnRef::Borrowed(t) => t.abort_savepoint(depth),
+            RwTxnRef::Owned(t) => t.abort_savepoint(depth),
+        }
     }
 
     pub fn savepoint_depth(&self) -> u32 {
-        self.inner().savepoint_depth()
+        match self.inner() {
+            RwTxnRef::Borrowed(t) => t.savepoint_depth(),
+            RwTxnRef::Owned(t) => t.savepoint_depth(),
+        }
     }
 
     /// Executes `f` inside a native nested savepoint on this gated write transaction,
@@ -460,23 +597,28 @@ impl<'a, S: KvStore, V: Vfs> GatedWriteTxn<'a, S, V> {
 
     /// Consumes the write transaction and commits atomically through `DurabilityGate`.
     pub fn commit(mut self) -> Result<CommitReceipt, StorageError> {
-        self.gate.check_poisoned()?;
+        let gate = self.gate.as_gate();
+        gate.check_poisoned()?;
         let txn = self.txn.take().expect("txn present");
-        let receipt = match txn.commit_raw() {
+        let commit_res = match txn {
+            RwTxnRef::Borrowed(t) => t.commit_raw(),
+            RwTxnRef::Owned(t) => t.commit_raw(),
+        };
+        let receipt = match commit_res {
             Ok(r) => r,
             Err(err) => {
                 // If an error occurred in Strict mode on a fatal/IO boundary after commit may have
                 // landed, fail closed by poisoning the gate.
-                if self.gate.mode == DurabilityMode::Strict
+                if gate.mode == DurabilityMode::Strict
                     && matches!(err, StorageError::Io(_) | StorageError::Corrupted(_))
                 {
-                    return Err(self.gate.poison(format!("commit failed with uncertain durability: {err}")));
+                    return Err(gate.poison(format!("commit failed with uncertain durability: {err}")));
                 }
                 return Err(err);
             }
         };
-        if self.gate.mode == DurabilityMode::Strict {
-            self.gate.persist_durable_locked(&mut self._writer_guard, receipt)?;
+        if gate.mode == DurabilityMode::Strict {
+            gate.persist_durable_locked(self.writer_guard.state_mut(), receipt)?;
         }
         Ok(receipt)
     }
@@ -484,34 +626,56 @@ impl<'a, S: KvStore, V: Vfs> GatedWriteTxn<'a, S, V> {
     /// Explicitly aborts the transaction.
     pub fn abort(mut self) {
         if let Some(txn) = self.txn.take() {
-            txn.abort();
+            match txn {
+                RwTxnRef::Borrowed(t) => t.abort(),
+                RwTxnRef::Owned(t) => t.abort(),
+            }
         }
     }
 }
 
-impl<'a, S: KvStore, V: Vfs> KvRead for GatedWriteTxn<'a, S, V> {
+impl<'a, S: KvStore + 'a, V: Vfs> KvRead for GatedWriteTxn<'a, S, V> {
     type Cursor<'b>
-        = <S::RwTxn<'a> as KvRead>::Cursor<'b>
+        = GatedCursor<<S::RwTxn<'a> as KvRead>::Cursor<'b>, <S::OwnedRwTxn as KvRead>::Cursor<'b>>
     where
         Self: 'b;
 
     fn get(&self, db: SubDbHandle, key: &[u8]) -> Result<Option<&[u8]>, StorageError> {
-        self.inner().get(db, key)
+        match self.inner() {
+            RwTxnRef::Borrowed(t) => t.get(db, key),
+            RwTxnRef::Owned(t) => t.get(db, key),
+        }
     }
 
     fn cursor(&self, db: SubDbHandle) -> Result<Self::Cursor<'_>, StorageError> {
-        self.inner().cursor(db)
+        match self.inner() {
+            RwTxnRef::Borrowed(t) => Ok(GatedCursor::Borrowed(t.cursor(db)?)),
+            RwTxnRef::Owned(t) => Ok(GatedCursor::Owned(t.cursor(db)?)),
+        }
     }
 
     fn entries(&self, db: SubDbHandle) -> Result<u64, StorageError> {
-        self.inner().entries(db)
+        match self.inner() {
+            RwTxnRef::Borrowed(t) => t.entries(db),
+            RwTxnRef::Owned(t) => t.entries(db),
+        }
+    }
+
+    fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError> {
+        match self.inner() {
+            RwTxnRef::Borrowed(t) => t.open_subdb_existing(name, flags),
+            RwTxnRef::Owned(t) => t.open_subdb_existing(name, flags),
+        }
     }
 }
 
-impl<S: KvStore, V: Vfs> Drop for GatedWriteTxn<'_, S, V> {
+impl<'a, S: KvStore + 'a, V: Vfs> Drop for GatedWriteTxn<'a, S, V> {
     fn drop(&mut self) {
         if let Some(txn) = self.txn.take() {
-            txn.abort();
+            match txn {
+                RwTxnRef::Borrowed(t) => t.abort(),
+                RwTxnRef::Owned(t) => t.abort(),
+            }
         }
     }
 }

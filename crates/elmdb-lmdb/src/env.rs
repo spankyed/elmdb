@@ -11,7 +11,7 @@ use lmdb_master_sys as ffi;
 use crate::cursor::mdb_val_to_slice;
 use crate::error::map_mdb_err;
 use crate::meta::{read_active_meta_page, verify_data_file_headers};
-use crate::txn::{LmdbRoTxn, LmdbRwTxn, validate_subdb_name};
+use crate::txn::{LmdbRoTxn, LmdbRwTxn};
 
 /// Default virtual address map reservation: 16 GiB sparse on 64-bit Unix, 64 MiB on Windows.
 #[cfg(all(unix, target_pointer_width = "64"))]
@@ -218,7 +218,8 @@ impl LmdbStore {
         }
         let copied_data = target_dir.join("data.mdb");
         {
-            let f = fs::File::open(&copied_data)?;
+            // Windows FlushFileBuffers (File::sync_all) requires GENERIC_WRITE access.
+            let f = fs::OpenOptions::new().read(true).write(true).open(&copied_data)?;
             f.sync_all()?;
         }
         let meta = read_active_meta_page(&copied_data)?;
@@ -336,6 +337,7 @@ fn preopen_existing_subdbs(
 impl KvStore for LmdbStore {
     type RoTxn<'a> = LmdbRoTxn<'a>;
     type RwTxn<'a> = LmdbRwTxn<'a>;
+    type OwnedRwTxn = LmdbRwTxn<'static>;
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
         LmdbRoTxn::begin(self)
@@ -345,76 +347,17 @@ impl KvStore for LmdbStore {
         LmdbRwTxn::begin(self)
     }
 
+    fn begin_write_owned(&self) -> Result<Self::OwnedRwTxn, StorageError> {
+        LmdbRwTxn::begin_owned(self)
+    }
+
     fn open_subdb_ro(
         &self,
         txn: &Self::RoTxn<'_>,
         name: &str,
         flags: DbFlags,
     ) -> Result<Option<SubDbHandle>, StorageError> {
-        validate_subdb_name(name)?;
-
-        // Check exact MVCC visibility in `txn`'s snapshot via `MAIN_DBI` before touching DBI handles:
-        // a sub-DB created by a writer *after* `txn` began must return `Ok(None)`.
-        let mut k = ffi::MDB_val { mv_size: name.len(), mv_data: name.as_ptr() as *mut libc::c_void };
-        let mut v = ffi::MDB_val { mv_size: 0, mv_data: ptr::null_mut() };
-        // SAFETY: `txn.raw()` and `self.inner.main_dbi` are live; `k` points to readable UTF-8 bytes.
-        let rc = unsafe { ffi::mdb_get(txn.raw(), self.inner.main_dbi, &mut k, &mut v) };
-        match rc {
-            ffi::MDB_SUCCESS => {}
-            ffi::MDB_NOTFOUND => return Ok(None),
-            other => return Err(map_mdb_err(other, self.inner.map_size, self.inner.max_dbs)),
-        }
-
-        // Look up the permanently committed DBI handle (never calls `mdb_dbi_open` on an aborting RO txn).
-        let mut cache = self.inner.dbis.lock();
-        if let Some(&(dbi, cached_flags)) = cache.by_name.get(name) {
-            if cached_flags != flags {
-                return Err(StorageError::InvalidState(format!(
-                    "sub-DB '{name}' opened read-only with mismatched flags"
-                )));
-            }
-            return Ok(Some(SubDbHandle::from_raw(dbi)));
-        }
-
-        // Cross-process catch-up: `MAIN_DBI` confirmed `name` is committed and visible in `txn`,
-        // so another process created this sub-DB after our `LmdbStore::open`. Open it permanently
-        // in a short dedicated committed RO txn under L4 so readers never miss cross-process slots.
-        let c_name = CString::new(name).map_err(|_| StorageError::InvalidState("sub-DB name contains NUL".into()))?;
-        let mut open_txn: *mut ffi::MDB_txn = ptr::null_mut();
-        // SAFETY: `self.inner.env` is open; `MDB_RDONLY | MDB_NOTLS` allows a nested/independent RO txn on the same thread.
-        let rc =
-            unsafe { ffi::mdb_txn_begin(self.inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut open_txn) };
-        if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
-        }
-        let mut dbi: ffi::MDB_dbi = 0;
-        // SAFETY: `open_txn` is live and `c_name` is a valid NUL-terminated C string.
-        let rc = unsafe { ffi::mdb_dbi_open(open_txn, c_name.as_ptr(), 0, &mut dbi) };
-        if rc != ffi::MDB_SUCCESS {
-            // SAFETY: `open_txn` is live; abort on error.
-            unsafe { ffi::mdb_txn_abort(open_txn) };
-            return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
-        }
-        let mut raw_flags: libc::c_uint = 0;
-        // SAFETY: `open_txn` and `dbi` are valid.
-        let rc = unsafe { ffi::mdb_dbi_flags(open_txn, dbi, &mut raw_flags) };
-        if rc != ffi::MDB_SUCCESS {
-            // SAFETY: `open_txn` is live.
-            unsafe { ffi::mdb_txn_abort(open_txn) };
-            return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
-        }
-        // SAFETY: committing an `MDB_RDONLY` txn publishes `dbi` permanently across `MDB_env`!
-        let rc = unsafe { ffi::mdb_txn_commit(open_txn) };
-        if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, self.inner.map_size, self.inner.max_dbs));
-        }
-        let actual_flags = DbFlags { integer_key: (raw_flags & ffi::MDB_INTEGERKEY) != 0 };
-        cache.by_name.insert(name.to_owned(), (dbi, actual_flags));
-        cache.by_id.insert(dbi, actual_flags);
-        if actual_flags != flags {
-            return Err(StorageError::InvalidState(format!("sub-DB '{name}' opened read-only with mismatched flags")));
-        }
-        Ok(Some(SubDbHandle::from_raw(dbi)))
+        elmdb_storage::KvRead::open_subdb_existing(txn, name, flags)
     }
 
     fn sync(&self) -> Result<(), StorageError> {

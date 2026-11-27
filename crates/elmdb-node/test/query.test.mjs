@@ -36,9 +36,10 @@ const schema = {
 
 test('queries cover filters, ICU order, BM25F, trigram, vector, PPR, Leiden, aggregates, and queryAsync', async (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-v2-q-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = Database.open(dir, { schema, durability: 'unsafe', buildPolicy: 'eager' });
-  t.after(() => db.close());
+  t.after(() => {
+    try { db.close(); } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 
   db.executeWireBatch(buildWireBatch((b) => {
     const a = b.create('Doc', { title: 'Rust Storage', body: 'LMDB copy on write trees', group: 'sys', score: 10 }, 'd1');
@@ -102,4 +103,21 @@ test('queries cover filters, ICU order, BM25F, trigram, vector, PPR, Leiden, agg
     terminal: { kind: 'hits' },
   });
   assert.ok(ppr.hits.some((h) => h.id === 'd2'));
+
+  // Prefix BM25F + lazy UTF-16 SearchHighlights + projected fields on Hits
+  const emojiBody = 'Hi 👋 café authentication 🚀 tokenized';
+  db.executeWireBatch(buildWireBatch((b) => {
+    b.create('Doc', { title: 'Auth Guide', body: emojiBody, group: 'sec', score: 40 }, 'd4');
+  }));
+  const hlAns = db.query({
+    source: { kind: 'type', typeName: 'Doc' },
+    steps: [{ kind: 'score', spec: { kind: 'bm25f', index: 'fts', query: 'auth tok', prefix: true, requireAll: true, topK: 5 } }],
+    terminal: { kind: 'hits', fields: ['title', 'body'], highlights: true },
+  });
+  assert.equal(hlAns.hits.length, 1);
+  assert.equal(hlAns.hits[0].id, 'd4');
+  assert.equal(hlAns.hits[0].row.fields.title, 'Auth Guide');
+  assert.equal(hlAns.hits[0].row.fields.group, undefined);
+  const bodyMarks = hlAns.hits[0].highlights.body.map(([el, s, e]) => [el, emojiBody.slice(s, e)]);
+  assert.deepEqual(bodyMarks, [[0, 'authentication'], [0, 'tokenized']]);
 });

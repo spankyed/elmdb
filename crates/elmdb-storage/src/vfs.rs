@@ -44,9 +44,9 @@ impl OsVfs {
                 if hex.len() == 32 {
                     let mut out = [0u8; 16];
                     let mut ok = true;
-                    for (i, chunk) in hex.as_bytes().chunks_exact(2).enumerate() {
-                        match std::str::from_utf8(chunk).ok().and_then(|s| u8::from_str_radix(s, 16).ok()) {
-                            Some(byte) => out[i] = byte,
+                    for (i, slot) in out.iter_mut().enumerate() {
+                        match hex.get(i * 2..i * 2 + 2).and_then(|s| u8::from_str_radix(s, 16).ok()) {
+                            Some(byte) => *slot = byte,
                             None => {
                                 ok = false;
                                 break;

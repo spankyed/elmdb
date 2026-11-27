@@ -15,10 +15,10 @@ use std::thread::ThreadId;
 
 use elmdb::protocol::{QuerySpec, Schema};
 use elmdb::{
-    BackupInto, BeforeCommitHook, BuildPolicy, DurabilityMode, EdgeDir, ExecBudgets, TypeMask, WatchId, WatchMode,
-    WatchPolicy,
+    BackupInto, BuildPolicy, DurabilityMode, EdgeDir, ExecBudgets, TransactOptions as EngineTransactOptions, TypeMask,
+    WatchId, WatchMode, WatchPolicy,
 };
-use elmdb_wire::{ElmdbError, ErrorCode, decode_batch};
+use elmdb_wire::{ElmdbError, ErrorCode};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -99,6 +99,49 @@ fn to_js_json(env: &Env, v: &impl serde::Serialize) -> Result<Unknown<'static>, 
     let val = serde_json::to_value(v)
         .map_err(|e| napi::Error::new(Code(ErrorCode::Internal.as_str()), format!("serialize failed: {e}")))?;
     env.to_js_value(&val).map_err(|e| napi::Error::new(Code("GenericFailure"), e.reason.clone()))
+}
+
+/// Normalizes exact whole-number JSON floats produced by `napi-rs` for JS `number` values outside `i32`
+/// (such as `Date.now()` timestamps or 53-bit seeds) into JSON integers before typed `serde` parsing.
+/// JSON integers still deserialize losslessly into `f64`/`f32` fields.
+fn normalize_js_numbers(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::Number(n) => {
+            if n.as_i64().is_none()
+                && n.as_u64().is_none()
+                && let Some(f) = n.as_f64()
+                && f.is_finite()
+                && f.fract() == 0.0
+            {
+                if (0.0..=MAX_SAFE_JS_INT).contains(&f) {
+                    *n = serde_json::Number::from(f as u64);
+                } else if (-MAX_SAFE_JS_INT..0.0).contains(&f) {
+                    *n = serde_json::Number::from(f as i64);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize_js_numbers(item);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                normalize_js_numbers(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_query_spec(mut spec: serde_json::Value) -> Result<QuerySpec, Code> {
+    normalize_js_numbers(&mut spec);
+    serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))
+}
+
+fn parse_schema_json(mut schema: serde_json::Value) -> Result<Schema, Code> {
+    normalize_js_numbers(&mut schema);
+    serde_json::from_value(schema).map_err(|e| bad_arg(format!("invalid schema JSON: {e}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -188,6 +231,64 @@ pub struct NextDueWatch {
     pub settled: bool,
 }
 
+/// Options for `Database.transact`.
+#[napi(object)]
+pub struct TransactOptions {
+    /// Whether registered `beforeCommit` hooks run when the outermost transaction commits (default `true`).
+    pub run_before_commit: Option<bool>,
+}
+
+enum ThenableCheck {
+    Value(Unknown<'static>),
+    AsyncForbidden,
+    JsThrown(napi::Error),
+}
+
+fn check_not_thenable(val: Unknown<'static>) -> ThenableCheck {
+    match val.is_promise() {
+        Ok(true) => return ThenableCheck::AsyncForbidden,
+        Ok(false) => {}
+        Err(e) => return ThenableCheck::JsThrown(e),
+    }
+    let vtype = match val.get_type() {
+        Ok(t) => t,
+        Err(e) => return ThenableCheck::JsThrown(e),
+    };
+    if matches!(vtype, ValueType::Object | ValueType::Function) {
+        let obj = match val.coerce_to_object() {
+            Ok(o) => o,
+            Err(e) => return ThenableCheck::JsThrown(e),
+        };
+        let has_then = match obj.has_named_property("then") {
+            Ok(b) => b,
+            Err(e) => return ThenableCheck::JsThrown(e),
+        };
+        if has_then {
+            let then_val: Unknown<'_> = match obj.get_named_property_unchecked("then") {
+                Ok(v) => v,
+                Err(e) => return ThenableCheck::JsThrown(e),
+            };
+            match then_val.get_type() {
+                Ok(ValueType::Function) => return ThenableCheck::AsyncForbidden,
+                Ok(_) => {}
+                Err(e) => return ThenableCheck::JsThrown(e),
+            }
+        }
+        return ThenableCheck::Value(obj.to_unknown());
+    }
+    ThenableCheck::Value(val)
+}
+
+fn counter_to_js_safe(val: u64) -> Result<f64, Code> {
+    if val > MAX_SAFE_JS_INT as u64 {
+        return Err(to_js(ElmdbError::new(
+            ErrorCode::ResourceLimit,
+            format!("counter value {val} exceeds JS safe integer range"),
+        )));
+    }
+    Ok(val as f64)
+}
+
 fn parse_open_options(opts: Option<OpenOptions>) -> Result<(elmdb::OpenOptions, Option<Schema>), Code> {
     let mut out = elmdb::OpenOptions::default();
     let mut schema = None;
@@ -216,7 +317,7 @@ fn parse_open_options(opts: Option<OpenOptions>) -> Result<(elmdb::OpenOptions, 
             if out.read_only {
                 return Err(to_js(ElmdbError::new(ErrorCode::ReadOnly, "cannot apply schema when opening read-only")));
             }
-            let parsed: Schema = serde_json::from_value(s).map_err(|e| bad_arg(format!("invalid schema JSON: {e}")))?;
+            let parsed = parse_schema_json(s)?;
             schema = Some(parsed);
         }
     }
@@ -377,8 +478,7 @@ impl Database {
         #[napi(ts_arg_type = "Schema")] schema: serde_json::Value,
     ) -> Result<Unknown<'static>, Code> {
         self.health.guarded("Database.setSchema", || {
-            let parsed: Schema =
-                serde_json::from_value(schema).map_err(|e| bad_arg(format!("invalid schema JSON: {e}")))?;
+            let parsed = parse_schema_json(schema)?;
             let change = self.inner.set_schema(&parsed).map_err(to_js)?;
             to_js_json(&env, &change)
         })
@@ -426,6 +526,89 @@ impl Database {
         })
     }
 
+    /// Executes a strictly-synchronous callback inside a write transaction (or native LMDB savepoint when nested).
+    ///
+    /// - Reads (`get`, `getEdges`, `query`, `getCounter`) and writes (`executeWireBatch`, `nextCounter`, `setCounter`)
+    ///   see all uncommitted outer and inner writes immediately (RYOW).
+    /// - Throwing rolls back this transaction (or nested savepoint only, preserving outer writes).
+    /// - Returning a Promise or thenable aborts immediately with `ASYNC_CALLBACK_FORBIDDEN`.
+    /// - `beforeCommit` hooks run once on the outermost commit unless `{ runBeforeCommit: false }`.
+    #[napi(ts_return_type = "unknown")]
+    pub fn transact(
+        &self,
+        env: Env,
+        #[napi(ts_arg_type = "() => unknown")] callback: Function<(), Unknown<'static>>,
+        options: Option<TransactOptions>,
+    ) -> napi::Result<Unknown<'static>> {
+        self.health.guarded_raw(&env, "Database.transact", || {
+            let opts =
+                EngineTransactOptions { run_before_commit: options.and_then(|o| o.run_before_commit).unwrap_or(true) };
+            let mut thrown_js: Option<napi::Error> = None;
+            let outcome = self.inner.transact_scoped(opts, || match callback.call(()) {
+                Ok(ret) => match check_not_thenable(ret) {
+                    ThenableCheck::Value(v) => Ok(v),
+                    ThenableCheck::AsyncForbidden => Err(ElmdbError::new(
+                        ErrorCode::AsyncCallbackForbidden,
+                        "synchronous callback must not return a Promise or thenable",
+                    )),
+                    ThenableCheck::JsThrown(js_err) => {
+                        thrown_js = Some(js_err);
+                        Err(ElmdbError::new(ErrorCode::Cancelled, "JS getter threw while inspecting return value"))
+                    }
+                },
+                Err(js_err) => {
+                    thrown_js = Some(js_err);
+                    Err(ElmdbError::new(ErrorCode::Cancelled, "JS transaction callback threw"))
+                }
+            });
+            match outcome {
+                Ok(val) => Ok(val),
+                Err(elmdb_err) => {
+                    if let Some(js_err) = thrown_js {
+                        Err(js_err)
+                    } else {
+                        Err(napi::Error::from(JsError::from(to_js(elmdb_err)).into_unknown(env)))
+                    }
+                }
+            }
+        })
+    }
+
+    /// Returns the pending commit sequence while inside `transact()` or `beforeCommit`, or `null` outside a write txn.
+    #[napi]
+    pub fn pending_commit_seq(&self) -> Result<Option<f64>, Code> {
+        self.health.guarded("Database.pendingCommitSeq", || Ok(self.inner.pending_commit_seq().map(|s| s as f64)))
+    }
+
+    /// Atomically increments and returns the named persistent counter (`1, 2, 3, ...`).
+    /// Participates in the active `transact()` / `beforeCommit` savepoint and rolls back on abort.
+    #[napi]
+    pub fn next_counter(&self, name: String) -> Result<f64, Code> {
+        self.health.guarded("Database.nextCounter", || {
+            let val = self.inner.next_counter(&name).map_err(to_js)?;
+            counter_to_js_safe(val)
+        })
+    }
+
+    /// Reads the current value of the named persistent counter (`0` if unset), with RYOW inside `transact()`.
+    #[napi]
+    pub fn get_counter(&self, name: String) -> Result<f64, Code> {
+        self.health.guarded("Database.getCounter", || {
+            let val = self.inner.get_counter(&name).map_err(to_js)?;
+            counter_to_js_safe(val)
+        })
+    }
+
+    /// Sets the named persistent counter (e.g. preserving imported high-water marks).
+    /// Participates in the active `transact()` / `beforeCommit` savepoint and rolls back on abort.
+    #[napi]
+    pub fn set_counter(&self, name: String, value: f64) -> Result<(), Code> {
+        self.health.guarded("Database.setCounter", || {
+            let val = whole("value", Some(value), 0.0)?.expect("present");
+            self.inner.set_counter(&name, val).map_err(to_js)
+        })
+    }
+
     /// Sets primary vector embeddings for `extId` on `indexName`.
     #[napi]
     pub fn set_embeddings(&self, index_name: String, ext_id: String, vectors: Vec<Vec<f64>>) -> Result<(), Code> {
@@ -456,7 +639,9 @@ impl Database {
 
     /// Registers a synchronous same-thread JS `beforeCommit` hook.
     ///
-    /// The callback receives `{ entities, edges }` inside a native LMDB nested savepoint:
+    /// The callback receives `{ commitSeq, entities, edges }` inside a native LMDB nested savepoint:
+    /// - Full read-your-own-writes (`get`, `getEdges`, `query`, `getCounter`, `nextCounter`, `setCounter`,
+    ///   `pendingCommitSeq`, `executeWireBatch`, and nested `transact`) are available directly inside the hook.
     /// - Throwing an error aborts the commit cleanly with `HOOK_ABORTED`.
     /// - Returning a `Uint8Array`/`Buffer` containing an `elmdb-wire` batch applies those derived writes
     ///   in the same savepoint cascade (up to `MAX_HOOK_ROUNDS`).
@@ -490,69 +675,43 @@ impl Database {
             JS_HOOKS.with(|m| m.borrow_mut().insert(js_key, (env.raw(), func_ref)));
             let expected_thread: ThreadId = std::thread::current().id();
 
-            let register_res = self.inner.register_before_commit(BeforeCommitHook {
+            let register_res = self.inner.register_host_before_commit(
                 wants,
-                callback: Arc::new(move |ctx| {
+                Arc::new(move |delta| {
                     if std::thread::current().id() != expected_thread {
                         return Err(ElmdbError::new(
                             ErrorCode::HookAborted,
                             "JS beforeCommit hook cannot run from an off-thread write",
                         ));
                     }
-                    let sc = ctx.schema().clone();
-                    let entities: Vec<serde_json::Value> = ctx
-                        .entity_deltas()
-                        .into_iter()
+                    let entities: Vec<serde_json::Value> = delta
+                        .entities
+                        .iter()
                         .map(|d| {
-                            let type_name = sc.type_by_id(d.type_id).map(|t| t.name.as_str()).unwrap_or("");
-                            let ext_id =
-                                d.after.as_ref().or(d.before.as_ref()).map(|r| r.header.ext_id.as_str()).unwrap_or("");
-                            let op = match (&d.before, &d.after) {
-                                (None, Some(_)) => "create",
-                                (Some(_), None) => "destroy",
-                                (Some(b), Some(a)) if b.header.is_trashed() != a.header.is_trashed() => {
-                                    if a.header.is_trashed() { "trash" } else { "restore" }
-                                }
-                                _ => "update",
-                            };
                             serde_json::json!({
-                                "id": ext_id,
-                                "typeName": type_name,
-                                "op": op,
+                                "id": d.id,
+                                "typeName": d.type_name,
+                                "op": d.op,
                             })
                         })
                         .collect();
-                    let raw_edges: Vec<_> = ctx
-                        .edge_deltas()
-                        .into_iter()
+                    let edges: Vec<serde_json::Value> = delta
+                        .edges
+                        .iter()
                         .map(|e| {
-                            let rel_kind = sc.relation_by_id(e.kind).map(|r| r.name.clone()).unwrap_or_default();
-                            let op = match (&e.before, &e.after) {
-                                (None, Some(_)) => "link",
-                                (Some(_), None) => "unlink",
-                                _ => "update",
-                            };
-                            let endpoints = e.after.as_ref().or(e.before.as_ref()).map(|pe| (pe.src, pe.dst));
-                            (rel_kind, op, endpoints)
+                            serde_json::json!({
+                                "relKind": e.rel_kind,
+                                "op": e.op,
+                                "sourceId": e.source_id,
+                                "targetId": e.target_id,
+                            })
                         })
                         .collect();
-                    let mut edges = Vec::with_capacity(raw_edges.len());
-                    for (rel_kind, op, endpoints) in raw_edges {
-                        let (source_id, target_id) = match endpoints {
-                            Some((src_key, dst_key)) => (
-                                ctx.resolve_ext_id(src_key)?.unwrap_or_else(|| format!("__deleted:{}", src_key.0)),
-                                ctx.resolve_ext_id(dst_key)?.unwrap_or_else(|| format!("__deleted:{}", dst_key.0)),
-                            ),
-                            None => (String::new(), String::new()),
-                        };
-                        edges.push(serde_json::json!({
-                            "relKind": rel_kind,
-                            "op": op,
-                            "sourceId": source_id,
-                            "targetId": target_id,
-                        }));
-                    }
-                    let payload = serde_json::json!({ "entities": entities, "edges": edges });
+                    let payload = serde_json::json!({
+                        "commitSeq": delta.commit_seq,
+                        "entities": entities,
+                        "edges": edges,
+                    });
 
                     // Extract `raw_env`, then borrow the local `Function` and DROP the `RefCell` borrow BEFORE
                     // calling into JS so re-entrant `registerBeforeCommit` / `unregisterBeforeCommit` / `close` never panics!
@@ -579,6 +738,18 @@ impl Database {
                                     let ret = func
                                         .call(payload)
                                         .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                    let ret = match check_not_thenable(ret) {
+                                        ThenableCheck::Value(v) => v,
+                                        ThenableCheck::AsyncForbidden => {
+                                            return Err(ElmdbError::new(
+                                                ErrorCode::AsyncCallbackForbidden,
+                                                "beforeCommit hooks must be synchronous (Promises and async callbacks are forbidden)",
+                                            ));
+                                        }
+                                        ThenableCheck::JsThrown(e) => {
+                                            return Err(ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()));
+                                        }
+                                    };
                                     let vtype = ret
                                         .get_type()
                                         .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
@@ -587,7 +758,7 @@ impl Database {
                                     } else {
                                         let bytes = Uint8Array::from_unknown(ret).map_err(|e| {
                                             ElmdbError::new(
-                                                ErrorCode::HookAborted,
+                                                ErrorCode::InvalidArgument,
                                                 format!(
                                                     "beforeCommit hook must return void/null or Uint8Array wire batch: {e}"
                                                 ),
@@ -600,13 +771,9 @@ impl Database {
                         }
                     };
 
-                    if let Some(frame) = maybe_frame? {
-                        let decoded = decode_batch(&frame)?;
-                        ctx.exec_batch(&decoded.ops)?;
-                    }
-                    Ok(())
+                    maybe_frame
                 }),
-            });
+            );
 
             let engine_hook_id = match register_res {
                 Ok(id) => id,
@@ -668,8 +835,7 @@ impl Database {
         #[napi(ts_arg_type = "QuerySpec")] spec: serde_json::Value,
     ) -> Result<Unknown<'static>, Code> {
         self.health.guarded("Database.query", || {
-            let parsed: QuerySpec =
-                serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))?;
+            let parsed = parse_query_spec(spec)?;
             let answer = self.inner.execute_query_spec(&parsed, ExecBudgets::default()).map_err(to_js)?;
             to_js_json(&env, &answer)
         })
@@ -682,8 +848,7 @@ impl Database {
         #[napi(ts_arg_type = "QuerySpec")] spec: serde_json::Value,
     ) -> Result<AsyncTask<Job<serde_json::Value, Unknown<'static>>>, Code> {
         self.health.guarded("Database.queryAsync", || {
-            let parsed: QuerySpec =
-                serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))?;
+            let parsed = parse_query_spec(spec)?;
             Ok(AsyncTask::new(Job::new(
                 self.inner.again(),
                 self.health.clone(),
@@ -710,8 +875,7 @@ impl Database {
         now_ms: Option<f64>,
     ) -> Result<WatchRegistration, Code> {
         self.health.guarded("Database.registerWatch", || {
-            let parsed: QuerySpec =
-                serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))?;
+            let parsed = parse_query_spec(spec)?;
             let pol = parse_watch_policy(policy)?;
             let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
             let (wid, ans) = self.inner.register_query_watch(&parsed, pol, now).map_err(to_js)?;
@@ -731,8 +895,7 @@ impl Database {
     ) -> Result<WatchRerun, Code> {
         self.health.guarded("Database.rerunWatch", || {
             let id = WatchId(whole("watchId", Some(watch_id), 1.0)?.expect("present"));
-            let parsed: QuerySpec =
-                serde_json::from_value(spec).map_err(|e| bad_arg(format!("invalid query spec: {e}")))?;
+            let parsed = parse_query_spec(spec)?;
             let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
             let cost = whole("costMs", cost_ms, 0.0)?.unwrap_or(1);
             let (ans, changed) = self.inner.rerun_query_watch(id, &parsed, now, cost).map_err(to_js)?;
@@ -937,12 +1100,15 @@ impl Database {
     #[napi]
     pub fn close(&self) -> Result<(), Code> {
         self.health.unrefused("Database.close", || {
+            // Close the underlying engine FIRST so rejecting `close()` inside `transact()`
+            // never wipes registered JS `beforeCommit` hooks on a live database!
+            self.inner.close().map_err(to_js)?;
             let hooks = std::mem::take(&mut *self.js_hooks.borrow_mut());
             for (engine_id, js_key) in hooks {
                 let _ = self.inner.unregister_before_commit(engine_id);
                 let _ = JS_HOOKS.try_with(|m| m.borrow_mut().remove(&js_key));
             }
-            self.inner.close().map_err(to_js)
+            Ok(())
         })
     }
 }

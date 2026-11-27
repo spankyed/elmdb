@@ -41,9 +41,10 @@ const schema = {
 
 test('WireBatchBuilder encodes all value types, BatchSlot refs, and executes in one crossing', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-client-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const db = Database.open(dir, { schema, durability: 'unsafe', buildPolicy: 'eager' });
-  t.after(() => db.close());
+  t.after(() => {
+    try { db.close(); } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
 
   const frame = buildWireBatch((b) => {
     const a = b.create('Item', {

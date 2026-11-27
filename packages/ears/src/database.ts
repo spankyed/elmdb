@@ -12,6 +12,7 @@ import type {
   Row,
   Schema,
   SchemaChange,
+  TransactOptions,
   WatchPolicyOptions,
   WatchRegistration,
   WatchRerun,
@@ -50,6 +51,7 @@ export interface EdgeDeltaEvent {
 
 /** Per-round primary delta payload passed to a `beforeCommit` hook inside a native LMDB savepoint. */
 export interface CommitDelta {
+  readonly commitSeq: number;
   readonly entities: readonly EntityDeltaEvent[];
   readonly edges: readonly EdgeDeltaEvent[];
 }
@@ -71,6 +73,11 @@ export interface EarsDatabase {
   renameField(typeName: string, oldField: string, newField: string): number;
   renameRelation(oldRel: string, newRel: string): number;
   executeWireBatch(payload: Uint8Array): BatchResult;
+  transact(callback: () => unknown, options?: TransactOptions | undefined | null): unknown;
+  pendingCommitSeq(): number | null;
+  nextCounter(name: string): number;
+  getCounter(name: string): number;
+  setCounter(name: string, value: number): void;
   setEmbeddings(indexName: string, extId: string, vectors: Array<Array<number>>): void;
   purgeArchived(typeName: string): number;
   registerBeforeCommit(

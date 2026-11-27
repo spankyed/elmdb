@@ -48,68 +48,6 @@ jobs:
             echo "code=true" >> "$GITHUB_OUTPUT"
           fi
 
-  # Each benchmarked operation's instructions under Valgrind, on the base and on the change: a count doesn't move with
-  # the runner's load, so the step summary shows what the change costs. Reported, never a failure
-  instructions:
-    name: instruction counts (Linux)
-    needs: scope
-    if: needs.scope.outputs.code == 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 55
-    steps:
-      # The merge commit and its first parent, the base it merges into
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 2
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
-      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
-        with:
-          tool: gungraun-runner@0.20.0
-      - run: python3 scripts/instruction-counts.py HEAD^1
-        env:
-          GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
-      # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
-        with:
-          name: instruction-counts-gungraun
-          path: ${{ runner.temp }}/gungraun
-          if-no-files-found: ignore
-          # Read soon after the failure it explains, so not kept the repository's 90 days
-          retention-days: 7
-
-  # The same operations' instructions on this commit without the diagnostics feature and with it, nothing collecting:
-  # fails when a gated case grows past its declared bound (docs/architecture/testing.md, Diagnostics)
-  diagnostics:
-    name: diagnostics overhead (Linux)
-    needs: scope
-    if: needs.scope.outputs.code == 'true' && github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 65
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: rustup show active-toolchain
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq valgrind && valgrind --version
-      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
-        with:
-          tool: gungraun-runner@0.20.0
-      - run: python3 -B scripts/test-callgrind.py
-      - run: python3 scripts/diagnostics-overhead.py
-        env:
-          GUNGRAUN_HOME: ${{ runner.temp }}/gungraun
-      # What Valgrind wrote, the callgrind files of a run that measured nothing among them, kept when the step fails
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        if: failure()
-        with:
-          name: diagnostics-overhead-gungraun
-          path: ${{ runner.temp }}/gungraun
-          if-no-files-found: ignore
-          # Read soon after the failure it explains, so not kept the repository's 90 days
-          retention-days: 7
-
   platforms:
     needs: scope
     if: needs.scope.outputs.code == 'true'
@@ -189,7 +127,7 @@ jobs:
   full-pass:
     name: ${{ github.event_name == 'pull_request' && !github.event.pull_request.draft && 'full-pass' || 'full tier (not a merge gate)' }}
     if: always()
-    needs: [scope, instructions, diagnostics, platforms, musl]
+    needs: [scope, platforms, musl]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

@@ -276,4 +276,84 @@ describe('@elmdb/ears algebraic QueryBuilder', () => {
     expect(engine.query.of('BlobItem').where('createdAt', { gte: new Date(1_700_000_250_000) }).ids()).toEqual(['b-b']);
     expect(() => engine.query.of('BlobItem').where('createdAt', new Date('invalid'))).toThrow(/Invalid Date/);
   });
+
+  it('supports prefix BM25F search, lazy UTF-16 SearchHighlights, projected fields, and live watchHits', async () => {
+    const msgSchema: Schema = {
+      types: {
+        Message: {
+          fields: {
+            text: { type: 'string' },
+            tags: { type: 'list', of: { type: 'string' }, optional: true },
+            sender: { type: 'string' },
+            timestamp: { type: 'integer' },
+          },
+          indexes: {
+            fts: { kind: 'text', fields: [['text', 3], ['tags', 1]] },
+          },
+        },
+      },
+      relations: {},
+    };
+    const { database } = temps.open({ schema: msgSchema, buildPolicy: 'eager' });
+    const engine = createEarsEngine({ database });
+
+    const text1 = 'Hi 👋 café authentication 🚀 tokenized!';
+    engine.batch((b) => {
+      b.create(
+        'Message',
+        { text: text1, tags: ['misc', 'auth-v2'], sender: 'alice', timestamp: 1_700_000_000_000 },
+        'm-1',
+      );
+      b.create(
+        'Message',
+        { text: 'Authentication only', sender: 'bob', timestamp: 1_700_000_001_000 },
+        'm-2',
+      );
+    });
+
+    const hits = engine.query
+      .of('Message')
+      .search('fts', 'auth tok', { prefix: true, requireAll: true, topK: 5 })
+      .hits({ fields: ['text', 'sender'], highlights: true });
+    expect(hits).toHaveLength(1);
+    expect(hits[0]?.id).toBe('m-1');
+    expect(hits[0]?.row?.fields['sender']).toBe('alice');
+    expect(hits[0]?.row?.fields['timestamp']).toBeUndefined();
+    const marks = (hits[0]?.highlights?.['text'] ?? []).map(([el, s, e]) => [el, text1.slice(s, e)]);
+    expect(marks).toEqual([
+      [0, 'authentication'],
+      [0, 'tokenized'],
+    ]);
+    const tagMarks = hits[0]?.highlights?.['tags'] ?? [];
+    expect(tagMarks).toHaveLength(1);
+    expect(tagMarks[0]?.[0]).toBe(1);
+    expect('auth-v2'.slice(tagMarks[0]![1], tagMarks[0]![2])).toBe('auth');
+
+    // Async + fused BM25F + RecencyDecay preserves highlights
+    const fused = await engine.query
+      .of('Message')
+      .fuse([
+        [{ kind: 'bm25f', index: 'fts', query: 'auth', prefix: true, topK: 5 }, 2.0],
+        [{ kind: 'recencyDecay', field: 'timestamp', nowMs: 1_700_000_002_000, halfLifeMs: 60_000 }, 1.0],
+      ])
+      .hitsAsync({ fields: ['text'], highlights: true });
+    expect(fused).toHaveLength(2);
+    expect(fused.every((h) => h.highlights !== undefined && (h.highlights['text']?.length ?? 0) > 0)).toBe(true);
+
+    // Live watchHits with highlights updates when a matching entity is patched
+    const seen: Array<Array<[number, number, number]>> = [];
+    const handle = engine.query
+      .of('Message')
+      .search('fts', 'tok', { prefix: true, topK: 5 })
+      .watchHits((hs) => seen.push(hs[0]?.highlights?.['text'] ?? []), { fields: ['text'], highlights: true, minGapMs: 0 });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toHaveLength(1);
+
+    engine.patch('m-1', { text: 'token one and token two' });
+    expect(engine.watches.settled()).toBe(false);
+    engine.watches.flushSync(Date.now() + 100);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]).toHaveLength(2);
+    handle.stop();
+  });
 });

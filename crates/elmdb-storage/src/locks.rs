@@ -13,8 +13,9 @@
 
 use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
+use std::sync::Arc;
 
-use parking_lot::{Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{ArcMutexGuard, Mutex, MutexGuard, RawMutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 /// Lock hierarchy rank. Acquiring a lock with rank `<=` any rank currently held
 /// on the calling thread is a lock-order violation.
@@ -189,18 +190,42 @@ impl<T> MapGate<T> {
     }
 }
 
+/// Owned `'static` (but `!Send`) guard for a domain-checked `Mutex`.
+pub struct OrderedArcMutexGuard<T> {
+    guard: ArcMutexGuard<RawMutex, T>,
+    _token: DomainToken,
+}
+
+impl<T> Deref for OrderedArcMutexGuard<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
+impl<T> DerefMut for OrderedArcMutexGuard<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.guard
+    }
+}
+
 /// L3: Exclusive writer serialization lock (LMDB write txn + `DurabilityGate`).
 #[derive(Debug, Default)]
-pub struct WriterLock<T>(Mutex<T>);
+pub struct WriterLock<T>(Arc<Mutex<T>>);
 
 impl<T> WriterLock<T> {
-    pub const fn new(value: T) -> Self {
-        Self(Mutex::new(value))
+    pub fn new(value: T) -> Self {
+        Self(Arc::new(Mutex::new(value)))
     }
 
     pub fn lock(&self) -> OrderedMutexGuard<'_, T> {
         let token = DomainToken::enter(LockDomain::Writer);
         OrderedMutexGuard { guard: self.0.lock(), _token: token }
+    }
+
+    pub fn lock_arc(&self) -> OrderedArcMutexGuard<T> {
+        let token = DomainToken::enter(LockDomain::Writer);
+        OrderedArcMutexGuard { guard: self.0.lock_arc(), _token: token }
     }
 }
 

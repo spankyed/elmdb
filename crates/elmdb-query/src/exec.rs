@@ -114,12 +114,26 @@ pub trait QueryReadRecorder {
 pub struct NoopReadRecorder;
 impl QueryReadRecorder for NoopReadRecorder {}
 
+/// Single UTF-16 code-unit highlight span `(element_index, utf16_start, utf16_end)`.
+pub type HighlightSpan = (u32, usize, usize);
+/// Per-field UTF-16 search highlight spans map.
+pub type SearchHighlights = BTreeMap<String, Vec<HighlightSpan>>;
+
+/// Single scored hit returned by `TerminalSpec::Hits` (optionally carrying a projected row and lazy UTF-16 highlights).
+#[derive(Debug, Clone, PartialEq)]
+pub struct HitOutput {
+    pub key: EntityKey,
+    pub score: f64,
+    pub row: Option<ProjectedRow>,
+    pub highlights: Option<SearchHighlights>,
+}
+
 /// Typed result produced by executing a `LogicalPlan`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QueryResult {
     Ids(Vec<EntityKey>),
     Rows(Vec<ProjectedRow>),
-    Hits(Vec<(EntityKey, f64)>),
+    Hits(Vec<HitOutput>),
     Count(u64),
     Exists(bool),
     Sum(f64),
@@ -151,12 +165,7 @@ pub struct QueryOutput {
 
 /// Batched pull operator trait (L1-resident 256-key batches with `demand` clamping!).
 trait PhysicalOp {
-    fn next_batch<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-        &mut self,
-        ctx: &mut ExecCtx<'_, 't, S, V, C>,
-        demand: u16,
-        out: &mut KeyBatch,
-    ) -> Result<bool>;
+    fn next_batch<R: KvRead>(&mut self, ctx: &mut ExecCtx<'_, R>, demand: u16, out: &mut KeyBatch) -> Result<bool>;
 }
 
 struct VecStreamOp {
@@ -171,12 +180,7 @@ impl VecStreamOp {
 }
 
 impl PhysicalOp for VecStreamOp {
-    fn next_batch<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-        &mut self,
-        ctx: &mut ExecCtx<'_, 't, S, V, C>,
-        demand: u16,
-        out: &mut KeyBatch,
-    ) -> Result<bool> {
+    fn next_batch<R: KvRead>(&mut self, ctx: &mut ExecCtx<'_, R>, demand: u16, out: &mut KeyBatch) -> Result<bool> {
         ctx.check_cancel()?;
         out.clear();
         let cap = (demand as usize).clamp(1, BATCH_SIZE);
@@ -194,10 +198,9 @@ impl PhysicalOp for VecStreamOp {
     }
 }
 
-/// Execution context carrying MVCC RO snapshot, pinned schema, budgets, read recorder, and `EXPLAIN`.
-struct ExecCtx<'a, 't, S: KvStore + 't, V: Vfs, C: Clock> {
-    engine: &'a Engine<S, V, C>,
-    txn: &'a S::RoTxn<'t>,
+/// Execution context carrying MVCC RO or active RW snapshot, pinned schema, budgets, read recorder, and `EXPLAIN`.
+struct ExecCtx<'a, R: KvRead> {
+    txn: &'a R,
     schema: &'a CompiledSchema,
     dbs: SystemDbs,
     collators: &'a CollatorCache,
@@ -209,7 +212,7 @@ struct ExecCtx<'a, 't, S: KvStore + 't, V: Vfs, C: Clock> {
     regex_cache: FxHashMap<String, Regex>,
 }
 
-impl<'a, 't, S: KvStore + 't, V: Vfs, C: Clock> ExecCtx<'a, 't, S, V, C> {
+impl<'a, R: KvRead> ExecCtx<'a, R> {
     #[inline]
     fn check_cancel(&self) -> Result<()> {
         if let Some(flag) = self.budgets.cancel
@@ -242,7 +245,7 @@ impl<'a, 't, S: KvStore + 't, V: Vfs, C: Clock> ExecCtx<'a, 't, S, V, C> {
             .schema
             .index_by_id(index_id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", index_id.0)))?;
-        let handle = self.engine.gate().open_subdb_ro(self.txn, &def.subdb_slot().name(), DbFlags::DEFAULT)?;
+        let handle = self.txn.open_subdb_existing(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
         Ok(handle)
     }
 
@@ -365,11 +368,11 @@ impl QueryEngine {
         self.execute_in_txn(engine, &txn, &schema, plan, budgets, recorder)
     }
 
-    /// Executes `plan` inside an already-open MVCC `RoTxn` (used by tracked watches and `transact`).
-    pub fn execute_in_txn<'t, S: KvStore + 't, V: Vfs, C: Clock>(
+    /// Executes `plan` inside an already-open MVCC `RoTxn` or active `GatedWriteTxn` (RYOW).
+    pub fn execute_in_txn<S: KvStore, V: Vfs, C: Clock, R: KvRead>(
         &self,
         engine: &Engine<S, V, C>,
-        txn: &S::RoTxn<'t>,
+        txn: &R,
         schema: &CompiledSchema,
         plan: &LogicalPlan,
         budgets: ExecBudgets<'_>,
@@ -403,7 +406,6 @@ impl QueryEngine {
         precompile_plan_regexes(&plan.root, &mut regex_cache)?;
 
         let mut ctx = ExecCtx {
-            engine,
             txn,
             schema,
             dbs,
@@ -443,10 +445,7 @@ impl QueryEngine {
 // Recursive plan evaluator (streaming 256-key batches with demand clamping)
 // ---------------------------------------------------------------------------
 
-fn eval_root<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
-    node: &LogicalNode,
-) -> Result<QueryResult> {
+fn eval_root<R: KvRead>(ctx: &mut ExecCtx<'_, R>, node: &LogicalNode) -> Result<QueryResult> {
     match node {
         LogicalNode::GraphAnalyze { input, spec } => eval_graph_analyze(ctx, input, spec),
         LogicalNode::Terminal { input, terminal } => {
@@ -454,7 +453,7 @@ fn eval_root<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             // unless terminal is Ids/Count/Exists/Hits!
             if let LogicalNode::GraphAnalyze { input: g_in, spec } = input.as_ref() {
                 let gres = eval_graph_analyze(ctx, g_in, spec)?;
-                return project_graph_terminal(gres, terminal);
+                return project_graph_terminal(ctx, gres, terminal);
             }
             eval_terminal(ctx, input, terminal)
         }
@@ -468,9 +467,15 @@ fn eval_root<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     }
 }
 
-fn project_graph_terminal(gres: QueryResult, terminal: &TerminalSpec) -> Result<QueryResult> {
+fn project_graph_terminal<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
+    gres: QueryResult,
+    terminal: &TerminalSpec,
+) -> Result<QueryResult> {
     match (gres, terminal) {
-        (QueryResult::GraphPpr(ppr), TerminalSpec::Hits) => Ok(QueryResult::Hits(ppr.scores)),
+        (QueryResult::GraphPpr(ppr), TerminalSpec::Hits { fields, highlights }) => {
+            Ok(QueryResult::Hits(materialize_hits(ctx, ppr.scores, fields.as_ref(), *highlights, &[])?))
+        }
         (QueryResult::GraphPpr(ppr), TerminalSpec::Ids) => {
             Ok(QueryResult::Ids(ppr.scores.into_iter().map(|(k, _)| k).collect()))
         }
@@ -481,8 +486,15 @@ fn project_graph_terminal(gres: QueryResult, terminal: &TerminalSpec) -> Result<
         (QueryResult::GraphTopo(topo), TerminalSpec::Exists) => Ok(QueryResult::Exists(!topo.order.is_empty())),
         (QueryResult::GraphGroups(groups), TerminalSpec::Count) => Ok(QueryResult::Count(groups.len() as u64)),
         (QueryResult::GraphGroups(groups), TerminalSpec::Exists) => Ok(QueryResult::Exists(!groups.is_empty())),
-        (QueryResult::Hits(h), TerminalSpec::Hits) => Ok(QueryResult::Hits(h)),
-        (QueryResult::Hits(h), TerminalSpec::Ids) => Ok(QueryResult::Ids(h.into_iter().map(|(k, _)| k).collect())),
+        (QueryResult::Hits(h), TerminalSpec::Hits { fields, highlights }) => {
+            if fields.is_none() && !highlights {
+                Ok(QueryResult::Hits(h))
+            } else {
+                let pairs: Vec<(EntityKey, f64)> = h.into_iter().map(|x| (x.key, x.score)).collect();
+                Ok(QueryResult::Hits(materialize_hits(ctx, pairs, fields.as_ref(), *highlights, &[])?))
+            }
+        }
+        (QueryResult::Hits(h), TerminalSpec::Ids) => Ok(QueryResult::Ids(h.into_iter().map(|x| x.key).collect())),
         (QueryResult::Hits(h), TerminalSpec::Count) => Ok(QueryResult::Count(h.len() as u64)),
         (QueryResult::Hits(h), TerminalSpec::Exists) => Ok(QueryResult::Exists(!h.is_empty())),
         (_, term) => Err(ElmdbError::new(
@@ -490,6 +502,144 @@ fn project_graph_terminal(gres: QueryResult, terminal: &TerminalSpec) -> Result<
             format!("terminal {term:?} is not supported directly over GraphAnalyze"),
         )),
     }
+}
+
+type Bm25fHighlightSpec<'a> = (IndexId, &'a str, Option<&'a [String]>, bool);
+
+fn collect_bm25f_from_score<'a>(spec: &'a ScoreSpec, out: &mut Vec<Bm25fHighlightSpec<'a>>) {
+    match spec {
+        ScoreSpec::Bm25f { index_id, query, prefix, phrase, .. } => {
+            out.push((*index_id, query.as_str(), phrase.as_deref(), *prefix));
+        }
+        ScoreSpec::Fuse { inputs, .. } => {
+            for (sub, _) in inputs {
+                collect_bm25f_from_score(sub, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_bm25f_specs<'a>(node: &'a LogicalNode, out: &mut Vec<Bm25fHighlightSpec<'a>>) {
+    match node {
+        LogicalNode::Score { input, spec } => {
+            collect_bm25f_from_score(spec, out);
+            collect_bm25f_specs(input, out);
+        }
+        LogicalNode::Filter { input, .. }
+        | LogicalNode::Traverse { input, .. }
+        | LogicalNode::GraphAnalyze { input, .. }
+        | LogicalNode::Distinct { input }
+        | LogicalNode::OrderSlice { input, .. }
+        | LogicalNode::Terminal { input, .. } => collect_bm25f_specs(input, out),
+        LogicalNode::Source(_) => {}
+    }
+}
+
+fn materialize_hits<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
+    pairs: Vec<(EntityKey, f64)>,
+    fields: Option<&FieldMask>,
+    highlights: bool,
+    bm25_specs: &[Bm25fHighlightSpec<'_>],
+) -> Result<Vec<HitOutput>> {
+    if fields.is_none() && !highlights {
+        return Ok(pairs
+            .into_iter()
+            .map(|(key, score)| HitOutput { key, score, row: None, highlights: None })
+            .collect());
+    }
+
+    let mut out = Vec::with_capacity(pairs.len());
+    for (ek, score) in pairs {
+        ctx.check_cancel()?;
+        let row_opt = ctx.load_row(ek)?;
+
+        let proj_row = match fields {
+            Some(fm) => {
+                ctx.recorder.record_point_entity(ek, fm);
+                if let Some(ref row) = row_opt {
+                    let mut proj_fields = BTreeMap::new();
+                    for (&fid, val) in &row.fields {
+                        if fm.contains(fid) {
+                            proj_fields.insert(fid, val.clone());
+                        }
+                    }
+                    let row_bytes = 64
+                        + row.header.ext_id.len()
+                        + proj_fields.values().map(|v| 16 + estimate_value_bytes(v)).sum::<usize>();
+                    ctx.charge_heap(row_bytes)?;
+                    Some(ProjectedRow {
+                        key: ek,
+                        id: row.header.ext_id.clone(),
+                        type_id: row.header.type_id,
+                        trashed: row.header.is_trashed(),
+                        fields: proj_fields,
+                    })
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+
+        let hit_highlights = if highlights {
+            let mut hl_map: BTreeMap<String, Vec<(u32, usize, usize)>> = BTreeMap::new();
+            for &(index_id, query, phrase, prefix) in bm25_specs {
+                let Some(def) = ctx.schema.index_by_id(index_id) else { continue };
+                let IndexKind::Text { fields: idx_fields } = &def.kind else { continue };
+                let Some(tdef) = ctx.schema.type_by_id(def.type_id) else { continue };
+
+                // Record read dependency on every indexed text field so live `watchHits({ highlights: true })` stays sound!
+                let mut text_mask = FieldMask::empty();
+                for &(fid, _) in idx_fields {
+                    text_mask.insert(fid);
+                }
+                ctx.recorder.record_point_entity(ek, &text_mask);
+
+                if let Some(ref row) = row_opt
+                    && row.header.type_id == def.type_id
+                {
+                    let field_defs: Vec<(FieldId, &str)> = idx_fields
+                        .iter()
+                        .filter_map(|&(fid, _)| tdef.field_by_id(fid).map(|f| (fid, f.name.as_str())))
+                        .collect();
+                    let computed = text::compute_highlights(row, &field_defs, None, query, phrase, prefix);
+                    for (fname, spans) in computed {
+                        let entry = hl_map.entry(fname).or_default();
+                        if entry.is_empty() {
+                            *entry = spans;
+                        } else {
+                            entry.extend(spans);
+                            entry.sort_unstable();
+                            let mut merged: Vec<(u32, usize, usize)> = Vec::with_capacity(entry.len());
+                            for (el, s, e) in entry.drain(..) {
+                                if let Some(last) = merged.last_mut()
+                                    && last.0 == el
+                                    && s <= last.2
+                                {
+                                    last.2 = last.2.max(e);
+                                } else {
+                                    merged.push((el, s, e));
+                                }
+                            }
+                            *entry = merged;
+                        }
+                    }
+                }
+            }
+            let hl_bytes: usize = hl_map.iter().map(|(k, v)| 32 + k.len() + v.len() * 24).sum();
+            if hl_bytes > 0 {
+                ctx.charge_heap(hl_bytes)?;
+            }
+            Some(hl_map)
+        } else {
+            None
+        };
+
+        out.push(HitOutput { key: ek, score, row: proj_row, highlights: hit_highlights });
+    }
+    Ok(out)
 }
 
 fn source_includes_trashed(node: &LogicalNode) -> bool {
@@ -508,8 +658,8 @@ fn source_includes_trashed(node: &LogicalNode) -> bool {
     }
 }
 
-fn eval_graph_analyze<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn eval_graph_analyze<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     input: &LogicalNode,
     spec: &GraphAnalyzeSpec,
 ) -> Result<QueryResult> {
@@ -591,7 +741,9 @@ fn eval_graph_analyze<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                 ctx.recorder.record_point_entity(ek, &empty_mask);
             }
             ctx.explain.rows_returned = hits.len() as u64;
-            Ok(QueryResult::Hits(hits))
+            Ok(QueryResult::Hits(
+                hits.into_iter().map(|(key, score)| HitOutput { key, score, row: None, highlights: None }).collect(),
+            ))
         }
         GraphAnalyzeSpec::AdamicAdar { rel_kinds, dir, seed, top_k } => {
             let cand: FxHashSet<EntityKey> = nodes.into_iter().collect();
@@ -617,13 +769,15 @@ fn eval_graph_analyze<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                 ctx.recorder.record_point_entity(ek, &empty_mask);
             }
             ctx.explain.rows_returned = hits.len() as u64;
-            Ok(QueryResult::Hits(hits))
+            Ok(QueryResult::Hits(
+                hits.into_iter().map(|(key, score)| HitOutput { key, score, row: None, highlights: None }).collect(),
+            ))
         }
     }
 }
 
-fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn eval_terminal<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     input: &LogicalNode,
     terminal: &TerminalSpec,
 ) -> Result<QueryResult> {
@@ -653,11 +807,16 @@ fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             ctx.explain.rows_returned = ids.len() as u64;
             Ok(QueryResult::Ids(ids))
         }
-        TerminalSpec::Hits => {
+        TerminalSpec::Hits { fields, highlights } => {
             let stream = eval_stream(ctx, input, None)?;
             let pairs = collect_all_pairs(ctx, stream, BATCH_SIZE as u16)?;
-            ctx.explain.rows_returned = pairs.len() as u64;
-            Ok(QueryResult::Hits(pairs))
+            let mut bm25_specs = Vec::new();
+            if *highlights {
+                collect_bm25f_specs(input, &mut bm25_specs);
+            }
+            let hits = materialize_hits(ctx, pairs, fields.as_ref(), *highlights, &bm25_specs)?;
+            ctx.explain.rows_returned = hits.len() as u64;
+            Ok(QueryResult::Hits(hits))
         }
         TerminalSpec::Rows { fields } => {
             let mut stream = eval_stream(ctx, input, None)?;
@@ -845,8 +1004,8 @@ fn eval_terminal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     }
 }
 
-fn collect_all_pairs<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn collect_all_pairs<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     mut stream: VecStreamOp,
     demand: u16,
 ) -> Result<Vec<(EntityKey, f64)>> {
@@ -863,8 +1022,8 @@ fn collect_all_pairs<'t, S: KvStore + 't, V: Vfs, C: Clock>(
 
 /// Evaluates any stream-producing `LogicalNode` into a `VecStreamOp` with optional `limit_hint`
 /// enabling Top-K, BMW, HNSW, reverse index order, and `demand=1` early stop pushdowns!
-fn eval_stream<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn eval_stream<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     node: &LogicalNode,
     limit_hint: Option<u64>,
 ) -> Result<VecStreamOp> {
@@ -904,11 +1063,7 @@ fn eval_stream<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     }
 }
 
-fn eval_source<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
-    src: &SourceSpec,
-    limit_hint: Option<u64>,
-) -> Result<VecStreamOp> {
+fn eval_source<R: KvRead>(ctx: &mut ExecCtx<'_, R>, src: &SourceSpec, limit_hint: Option<u64>) -> Result<VecStreamOp> {
     let cap = limit_hint.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
     if cap == 0 {
         return Ok(VecStreamOp::new(Vec::new()));
@@ -1027,8 +1182,8 @@ fn eval_source<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     Ok(VecStreamOp::new(out))
 }
 
-fn eval_filter<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn eval_filter<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     input: &LogicalNode,
     expr: &FilterExpr,
     limit_hint: Option<u64>,
@@ -1109,8 +1264,8 @@ fn eval_filter<'t, S: KvStore + 't, V: Vfs, C: Clock>(
 
 /// Attempts to push one `And` conjunct into a Ready Value index, Trigram index, or smaller-side `HasLink` adjacency!
 /// Returns `Some((candidate_keys, needs_residual_verification, explain_label))`.
-fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn try_pushdown_conjunct<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     type_id: TypeId,
     conjunct: &FilterExpr,
 ) -> Result<Option<(Vec<EntityKey>, bool, String)>> {
@@ -1381,11 +1536,7 @@ fn try_pushdown_conjunct<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     }
 }
 
-fn eval_predicate<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
-    key: EntityKey,
-    expr: &FilterExpr,
-) -> Result<bool> {
+fn eval_predicate<R: KvRead>(ctx: &mut ExecCtx<'_, R>, key: EntityKey, expr: &FilterExpr) -> Result<bool> {
     match expr {
         FilterExpr::Eq(field, target) => {
             let mut m = FieldMask::empty();
@@ -1524,8 +1675,8 @@ fn score_index_id(spec: &ScoreSpec) -> Option<IndexId> {
     }
 }
 
-fn eval_score<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn eval_score<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     input: &LogicalNode,
     spec: &ScoreSpec,
     limit_hint: Option<u64>,
@@ -1556,8 +1707,8 @@ fn eval_score<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     Ok(VecStreamOp::new(scored))
 }
 
-fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn eval_score_signal<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     input: &LogicalNode,
     spec: &ScoreSpec,
     candidates: Option<&FxHashSet<EntityKey>>,
@@ -1565,7 +1716,7 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
 ) -> Result<Vec<(EntityKey, f64)>> {
     ctx.check_cancel()?;
     match spec {
-        ScoreSpec::Bm25f { index_id, query, require_all, phrase, top_k } => {
+        ScoreSpec::Bm25f { index_id, query, require_all, prefix, phrase, top_k } => {
             let def = ctx
                 .schema
                 .index_by_id(*index_id)
@@ -1588,20 +1739,8 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
             if k == 0 {
                 return Ok(Vec::new());
             }
-            let normalized_phrase: Option<Vec<String>> = phrase.as_ref().map(|terms| {
-                let mut analyzed = Vec::new();
-                for t in terms {
-                    let toks = text::analyze_text(t, None);
-                    if toks.is_empty() {
-                        analyzed.push(t.to_lowercase());
-                    } else {
-                        for tok in toks {
-                            analyzed.push(tok.term);
-                        }
-                    }
-                }
-                analyzed
-            });
+            let normalized_phrase: Option<Vec<(String, u32)>> =
+                phrase.as_ref().map(|terms| text::analyze_phrase(terms, None));
 
             if let Some(phrase_terms) = normalized_phrase {
                 // Exponential widening ensures zero phrase false negatives even when > 128 higher-scoring
@@ -1609,12 +1748,21 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                 let mut fetch_k = k.saturating_mul(4).clamp(128, 1_048_576);
                 loop {
                     ctx.check_cancel()?;
-                    let (hits, _) = text::search_bmw(ctx.txn, db, query, None, fetch_k, *require_all, candidates)?;
+                    let (hits, _) = text::search_bmw_with_prefix(
+                        ctx.txn,
+                        db,
+                        query,
+                        None,
+                        fetch_k,
+                        *require_all,
+                        *prefix,
+                        candidates,
+                    )?;
                     let exhausted = hits.len() < fetch_k;
                     let mut verified = Vec::new();
                     for h in hits {
                         ctx.check_cancel()?;
-                        if text::matches_phrase(ctx.txn, db, h.key, &phrase_terms)? {
+                        if text::matches_phrase_positions(ctx.txn, db, h.key, &phrase_terms)? {
                             ctx.charge_heap(16)?;
                             verified.push((h.key, h.score));
                             if verified.len() >= k {
@@ -1628,7 +1776,8 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
                     fetch_k = fetch_k.saturating_mul(4);
                 }
             } else {
-                let (hits, _) = text::search_bmw(ctx.txn, db, query, None, k, *require_all, candidates)?;
+                let (hits, _) =
+                    text::search_bmw_with_prefix(ctx.txn, db, query, None, k, *require_all, *prefix, candidates)?;
                 ctx.charge_heap(hits.len().saturating_mul(16))?;
                 Ok(hits.into_iter().map(|h| (h.key, h.score)).collect())
             }
@@ -1892,11 +2041,7 @@ fn eval_score_signal<'t, S: KvStore + 't, V: Vfs, C: Clock>(
     }
 }
 
-fn eval_traverse<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
-    input: &LogicalNode,
-    spec: &TraverseSpec,
-) -> Result<VecStreamOp> {
+fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec: &TraverseSpec) -> Result<VecStreamOp> {
     let stream = eval_stream(ctx, input, None)?;
     let seeds: Vec<EntityKey> =
         collect_all_pairs(ctx, stream, BATCH_SIZE as u16)?.into_iter().map(|(k, _)| k).collect();
@@ -2057,8 +2202,8 @@ fn validate_cursor_matches_order(order: &OrderSpec, after: Option<&Cursor>) -> R
     Ok(())
 }
 
-fn eval_order_slice<'t, S: KvStore + 't, V: Vfs, C: Clock>(
-    ctx: &mut ExecCtx<'_, 't, S, V, C>,
+fn eval_order_slice<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
     input: &LogicalNode,
     order: &OrderSpec,
     after: Option<&Cursor>,
