@@ -1463,10 +1463,7 @@ impl Database {
         // Default to a failure outcome so unwinding on panic never reports `Ok(())` to waiters.
         let mut mark_done = MarkCloseDone {
             db: self,
-            outcome: Some((
-                if self.read_only { ErrorCode::Internal } else { ErrorCode::DurabilityFailed },
-                "database close panicked before completing".to_owned(),
-            )),
+            outcome: Some((ErrorCode::DurabilityFailed, "database close panicked before completing".to_owned())),
         };
 
         self.hub.stop_watches();
@@ -1804,7 +1801,9 @@ mod tests {
                 std::thread::yield_now();
             }
             // Waiter with shorter timeout fails immediately on waiter deadline (writable -> DurabilityFailed).
-            assert_eq!(db.close_within(Some(Duration::from_millis(15))).unwrap_err().code, ErrorCode::DurabilityFailed);
+            let waiter_err = db.close_within(Some(Duration::from_millis(15))).unwrap_err();
+            assert_eq!(waiter_err.code, ErrorCode::DurabilityFailed);
+            assert!(waiter_err.message.contains("concurrent close"), "got: {}", waiter_err.message);
             // `close_at_exit` waiter timing out returns Ok(()).
             db.close_at_exit(Duration::from_millis(15)).unwrap();
             // Unbounded waiter waits for closer to finish and sees the recorded DurabilityFailed.
@@ -1817,6 +1816,26 @@ mod tests {
             assert_eq!(err2.code, ErrorCode::DurabilityFailed);
             db.close_at_exit(Duration::from_millis(10)).unwrap();
             drop(held_op);
+        }
+
+        // 1b. Concurrent waiter with generous timeout waits for a succeeding closer and returns Ok(()).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Arc::new(Database::open(dir.path(), OpenOptions::default()).unwrap());
+            let held_op = db.enter_op().unwrap();
+
+            let db_closer = Arc::clone(&db);
+            let closer = std::thread::spawn(move || db_closer.close_within(Some(Duration::from_millis(500))));
+            while !db.closed.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            let db_waiter = Arc::clone(&db);
+            let waiter = std::thread::spawn(move || db_waiter.close_within(Some(Duration::from_millis(500))));
+            std::thread::sleep(Duration::from_millis(25));
+            drop(held_op);
+
+            closer.join().unwrap().unwrap();
+            waiter.join().unwrap().unwrap();
         }
 
         // 2. First closer via `close_at_exit` on active-op drain timeout returns Ok(()) (does not propagate).
@@ -1843,7 +1862,9 @@ mod tests {
             while !ro.closed.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }
-            assert_eq!(ro.close_within(Some(Duration::from_millis(15))).unwrap_err().code, ErrorCode::DatabaseLocked);
+            let ro_waiter_err = ro.close_within(Some(Duration::from_millis(15))).unwrap_err();
+            assert_eq!(ro_waiter_err.code, ErrorCode::DatabaseLocked);
+            assert!(ro_waiter_err.message.contains("concurrent close"), "got: {}", ro_waiter_err.message);
             let err = closer.join().unwrap().unwrap_err();
             assert_eq!(err.code, ErrorCode::DatabaseLocked);
             assert_eq!(ro.close().unwrap_err().code, ErrorCode::DatabaseLocked);
@@ -1878,6 +1899,19 @@ mod tests {
         );
         assert_eq!(
             crate::fs_publish::ensure_not_self_or_descendant(&src, &src.join("missing/../sub")).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        // `..` starting OUTSIDE `src` and resolving INTO `src` (kills `normalize_absolute`/`ParentDir` mutants on Linux).
+        assert_eq!(
+            crate::fs_publish::ensure_not_self_or_descendant(&src, &dir.path().join("missing/../src_db"))
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            crate::fs_publish::ensure_not_self_or_descendant(&src, &dir.path().join("missing/../src_db/child"))
+                .unwrap_err()
+                .code,
             ErrorCode::InvalidArgument
         );
         assert_eq!(
