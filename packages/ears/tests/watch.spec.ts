@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createEarsEngine, type EarsClock, type EarsError, type Schema } from '../src/index.ts';
+import { EarsError, createEarsEngine, type EarsClock, type Schema } from '../src/index.ts';
 import { createTemporaryDatabases } from '../src/lmdb/index.ts';
 
 const require = createRequire(import.meta.url);
@@ -312,5 +312,152 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     expect(() => engine.query.of('Task').watchCount(() => {})).toThrowError(
       expect.objectContaining({ code: 'CLOSED' }),
     );
+  });
+
+  it('supports AfterClock (@apackdev/clock shape), onSettled(), non-stalling backoff, and 8ms turn-slicing while another watch is backed off (P1-16, P2-10)', () => {
+    // P2-10: Fake AfterClock (`now()` + `after(ms, run) => cancel`)
+    let nowMs = 50_000;
+    let nextTimerId = 1;
+    const timers = new Map<number, { at: number; run: () => void }>();
+    const afterClock = {
+      now: () => nowMs,
+      after: (ms: number, run: () => void) => {
+        const id = nextTimerId++;
+        timers.set(id, { at: nowMs + ms, run });
+        return () => {
+          timers.delete(id);
+        };
+      },
+    };
+    const advanceAfter = (deltaMs: number): void => {
+      const target = nowMs + deltaMs;
+      while (true) {
+        let earliestId: number | undefined;
+        let earliestAt = Infinity;
+        for (const [id, t] of timers) {
+          if (t.at <= target && t.at < earliestAt) {
+            earliestAt = t.at;
+            earliestId = id;
+          }
+        }
+        if (earliestId === undefined) break;
+        const entry = timers.get(earliestId)!;
+        timers.delete(earliestId);
+        nowMs = Math.max(nowMs, entry.at);
+        entry.run();
+      }
+      nowMs = Math.max(nowMs, target);
+    };
+
+    const handle = temps.open({ schema: watchSchema });
+    // Wrap database so we can inject transient errors on a specific watch ID and simulate slow reruns.
+    const realDb = handle.database;
+    let transientFailWatchId: number | undefined;
+    let rerunCostStepMs = 0;
+    const wrappedDb = new Proxy(realDb, {
+      get(target, prop, receiver) {
+        if (prop === 'rerunWatch') {
+          return (watchId: number, spec: unknown, now: number, costMs: number) => {
+            if (watchId === transientFailWatchId) {
+              throw new EarsError('IO', 'transient simulated I/O error');
+            }
+            if (rerunCostStepMs > 0) {
+              nowMs += rerunCostStepMs;
+            }
+            return target.rerunWatch(watchId, spec as Parameters<typeof target.rerunWatch>[1], now, costMs);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const engine = createEarsEngine({ database: wrappedDb, clock: afterClock });
+
+    // P2-10: onSettled() fires immediately when already settled!
+    let immediateSettled = 0;
+    engine.watches.onSettled(() => {
+      immediateSettled++;
+    });
+    expect(immediateSettled).toBe(1);
+
+    const failingErrors: EarsError[] = [];
+    const healthyCounts: number[] = [];
+    const failingWatch = engine.query.of('Task').watchCount(() => {}, {
+      minGapMs: 0,
+      onError: (e) => failingErrors.push(e),
+    });
+    const healthyWatch = engine.query.of('Task').watchCount((c) => healthyCounts.push(c), {
+      minGapMs: 10,
+    });
+    transientFailWatchId = failingWatch.id;
+
+    // Trigger failures on failingWatch so its backoff grows (50ms -> 100ms -> 200ms -> 400ms)!
+    engine.create('Task', { title: 't1', done: false }, 't-1');
+    advanceAfter(10); // failing fails (50ms backoff), healthy runs at +10ms
+    expect(healthyCounts).toEqual([0, 1]);
+    expect(failingErrors).toHaveLength(1);
+
+    // Advance 50ms -> failing fails again (100ms backoff); advance 100ms -> fails again (200ms backoff)
+    advanceAfter(50);
+    expect(failingErrors).toHaveLength(2);
+    advanceAfter(100);
+    expect(failingErrors).toHaveLength(3);
+
+    // Now failingWatch is in 200ms backoff! Mutate a Task -> healthyWatch has minGapMs: 10 and MUST fire
+    // in 10ms, NOT wait 200ms behind failingWatch!
+    engine.create('Task', { title: 't2', done: false }, 't-2');
+    advanceAfter(15);
+    expect(healthyCounts).toEqual([0, 1, 2]);
+
+    // P1-16 (b): Turn-slicing (8ms) is respected even while failingWatch is backed off!
+    const healthy2Counts: number[] = [];
+    const healthy2 = engine.query.of('Task').watchCount((c) => healthy2Counts.push(c), {
+      minGapMs: 0,
+      adaptiveMultiplier: 0,
+    });
+    const healthy3Counts: number[] = [];
+    const healthy3 = engine.query.of('Task').watchCount((c) => healthy3Counts.push(c), {
+      minGapMs: 0,
+      adaptiveMultiplier: 0,
+    });
+    // Make each rerun advance fake clock by 10ms (> 8ms turn slice!)
+    rerunCostStepMs = 10;
+    engine.create('Task', { title: 't3', done: false }, 't-3');
+    // Fire exactly ONE scheduled timer turn — at most 1 healthy watch runs before yielding the 8ms slice!
+    const firstTimerEntry = [...timers.entries()].sort((a, b) => a[1].at - b[1].at)[0]!;
+    timers.delete(firstTimerEntry[0]);
+    nowMs = Math.max(nowMs, firstTimerEntry[1].at);
+    firstTimerEntry[1].run();
+    const ranInSingleTurn =
+      (healthyCounts.includes(3) ? 1 : 0)
+      + (healthy2Counts.includes(3) ? 1 : 0)
+      + (healthy3Counts.includes(3) ? 1 : 0);
+    expect(ranInSingleTurn).toBe(1);
+    // And a continuation timer was armed so remaining healthy watch completes on the next tick!
+    expect(timers.size).toBe(1);
+    rerunCostStepMs = 0;
+
+    // Clear transient fault and verify onSettled() fires once everything settles!
+    transientFailWatchId = undefined;
+    let settledCallbacks = 0;
+    const cancelNever = engine.watches.onSettled(() => {
+      settledCallbacks += 100;
+    });
+    cancelNever();
+    engine.watches.onSettled(() => {
+      settledCallbacks++;
+    });
+    expect(settledCallbacks).toBe(0);
+    advanceAfter(500);
+    expect(engine.watches.settled()).toBe(true);
+    expect(settledCallbacks).toBe(1);
+    expect(healthy2Counts[healthy2Counts.length - 1]).toBe(3);
+    expect(healthy3Counts[healthy3Counts.length - 1]).toBe(3);
+
+    failingWatch.stop();
+    healthyWatch.stop();
+    healthy2.stop();
+    healthy3.stop();
   });
 });

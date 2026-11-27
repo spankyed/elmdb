@@ -238,6 +238,92 @@ pub struct TransactOptions {
     pub run_before_commit: Option<bool>,
 }
 
+fn clear_pending_exception(raw_env: napi::sys::napi_env) {
+    let mut is_pending = false;
+    // SAFETY: `raw_env` is the active N-API environment on the current JS thread.
+    if unsafe { napi::sys::napi_is_exception_pending(raw_env, &mut is_pending) } == napi::sys::Status::napi_ok
+        && is_pending
+    {
+        let mut ignored = std::ptr::null_mut();
+        let _ = unsafe { napi::sys::napi_get_and_clear_last_exception(raw_env, &mut ignored) };
+    }
+}
+
+/// Clears any pending N-API exception raised by a JS `beforeCommit` hook, extracts its `.message`
+/// (or `String(err)` fallback), and returns `ElmdbError(HookAborted, message)` with a clean N-API env.
+fn extract_and_clear_hook_error(env: &Env, err: napi::Error) -> ElmdbError {
+    let raw_env = env.raw();
+    let mut is_pending = false;
+    let mut extracted: Option<String> = None;
+
+    // SAFETY: `raw_env` is the active N-API environment on the current JS thread.
+    if unsafe { napi::sys::napi_is_exception_pending(raw_env, &mut is_pending) } == napi::sys::Status::napi_ok
+        && is_pending
+    {
+        let mut raw_exc = std::ptr::null_mut();
+        if unsafe { napi::sys::napi_get_and_clear_last_exception(raw_env, &mut raw_exc) } == napi::sys::Status::napi_ok
+            && !raw_exc.is_null()
+            && let Ok(exc) = unsafe { Unknown::from_napi_value(raw_env, raw_exc) }
+        {
+            if let Ok(vtype) = exc.get_type()
+                && matches!(vtype, ValueType::Object | ValueType::Function)
+                && let Ok(obj) = exc.coerce_to_object()
+                && let Ok(msg_val) = obj.get_named_property_unchecked::<Unknown<'_>>("message")
+                && matches!(msg_val.get_type(), Ok(ValueType::String))
+                && let Ok(js_str) = msg_val.coerce_to_string()
+                && let Ok(utf8) = js_str.into_utf8()
+                && let Ok(s) = utf8.as_str()
+                && !s.is_empty()
+            {
+                extracted = Some(s.to_owned());
+            }
+            // If reading `.message` threw a hostile getter error, clear it before falling back.
+            clear_pending_exception(raw_env);
+
+            if extracted.is_none() {
+                if let Ok(js_str) = exc.coerce_to_string()
+                    && let Ok(utf8) = js_str.into_utf8()
+                    && let Ok(s) = utf8.as_str()
+                    && !s.is_empty()
+                {
+                    extracted = Some(s.to_owned());
+                }
+                clear_pending_exception(raw_env);
+            }
+        }
+    }
+
+    let message = extracted
+        .or_else(|| (!err.reason.is_empty()).then_some(err.reason))
+        .unwrap_or_else(|| "beforeCommit hook aborted".to_owned());
+    ElmdbError::new(ErrorCode::HookAborted, message)
+}
+
+/// Calls a synchronous JS `beforeCommit` callback via raw `napi_call_function` so any thrown JS value
+/// (Error objects, primitive strings/numbers, or objects with throwing getters) is inspected and cleared
+/// directly without collapsing primitives to `"Create Error reference failed"`.
+fn call_js_hook_sync<'env>(
+    env: &'env Env,
+    func: Function<'env, serde_json::Value, Unknown<'static>>,
+    payload: serde_json::Value,
+) -> elmdb::Result<Unknown<'static>> {
+    let raw_env = env.raw();
+    let arg_val = env.to_js_value(&payload).map_err(|e| extract_and_clear_hook_error(env, e))?;
+    let raw_arg = arg_val.raw();
+    let mut recv = std::ptr::null_mut();
+    let mut ret = std::ptr::null_mut();
+    // SAFETY: `raw_env`, `func.raw()`, and `raw_arg` are valid N-API handles on this JS thread.
+    let status = unsafe {
+        let _ = napi::sys::napi_get_undefined(raw_env, &mut recv);
+        napi::sys::napi_call_function(raw_env, recv, func.raw(), 1, &raw_arg, &mut ret)
+    };
+    if status != napi::sys::Status::napi_ok {
+        return Err(extract_and_clear_hook_error(env, napi::Error::from_status(napi::Status::from(status))));
+    }
+    // SAFETY: `ret` was initialized by a successful `napi_call_function`.
+    unsafe { Unknown::from_napi_value(raw_env, ret) }.map_err(|e| extract_and_clear_hook_error(env, e))
+}
+
 enum ThenableCheck {
     Value(Unknown<'static>),
     AsyncForbidden,
@@ -735,9 +821,7 @@ impl Database {
                             match maybe_func? {
                                 None => Ok(None),
                                 Some(func) => {
-                                    let ret = func
-                                        .call(payload)
-                                        .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                    let ret = call_js_hook_sync(&js_env, func, payload)?;
                                     let ret = match check_not_thenable(ret) {
                                         ThenableCheck::Value(v) => v,
                                         ThenableCheck::AsyncForbidden => {
@@ -747,16 +831,17 @@ impl Database {
                                             ));
                                         }
                                         ThenableCheck::JsThrown(e) => {
-                                            return Err(ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()));
+                                            return Err(extract_and_clear_hook_error(&js_env, e));
                                         }
                                     };
                                     let vtype = ret
                                         .get_type()
-                                        .map_err(|e| ElmdbError::new(ErrorCode::HookAborted, e.reason.clone()))?;
+                                        .map_err(|e| extract_and_clear_hook_error(&js_env, e))?;
                                     if matches!(vtype, ValueType::Undefined | ValueType::Null) {
                                         Ok(None)
                                     } else {
                                         let bytes = Uint8Array::from_unknown(ret).map_err(|e| {
+                                            clear_pending_exception(js_env.raw());
                                             ElmdbError::new(
                                                 ErrorCode::InvalidArgument,
                                                 format!(
@@ -947,6 +1032,23 @@ impl Database {
                 next_wake_delay_ms: nd.next_wake_delay_ms.map(|d| d as f64),
                 settled: nd.settled,
             })
+        })
+    }
+
+    #[napi]
+    pub fn begin_watch_run(&self, watch_id: f64) -> Result<bool, Code> {
+        self.health.guarded("Database.beginWatchRun", || {
+            let id = WatchId(whole("watchId", Some(watch_id), 1.0)?.expect("present"));
+            Ok(self.inner.begin_watch_run(id))
+        })
+    }
+
+    #[napi]
+    pub fn abort_watch_run(&self, watch_id: f64, requeue_dirty: bool, now_ms: Option<f64>) -> Result<bool, Code> {
+        self.health.guarded("Database.abortWatchRun", || {
+            let id = WatchId(whole("watchId", Some(watch_id), 1.0)?.expect("present"));
+            let now = whole("nowMs", now_ms, 0.0)?.unwrap_or_else(now_unix_ms);
+            Ok(self.inner.abort_watch_run(id, requeue_dirty, now))
         })
     }
 

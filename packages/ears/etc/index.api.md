@@ -43,6 +43,14 @@ import { WatchRerun } from 'elmdb';
 import { WatchTick } from 'elmdb';
 
 // @public
+export interface AfterClock {
+    // (undocumented)
+    after(ms: number, run: () => void): () => void;
+    // (undocumented)
+    now(): number;
+}
+
+// @public
 export function asEntityId<TName extends string>(id: string): EARS.EntityId<TName>;
 
 export { BatchResult }
@@ -100,15 +108,16 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine;
 // @public
 export interface CreateEarsEngineOptions {
     // (undocumented)
-    readonly clock?: EarsClock;
+    readonly clock?: EarsClock | AfterClock;
     // (undocumented)
     readonly database: EarsDatabase;
     readonly observer?: EarsOperationObserver;
     readonly onWatchError?: (error: EarsError) => void;
+    readonly watchTurnSliceMs?: number;
 }
 
 // @public
-export function createSystemClock(): EarsClock;
+export function createSystemClock(): EarsClock & AfterClock;
 
 export { DatabaseStats }
 
@@ -206,11 +215,15 @@ export interface EarsClock {
 // @public
 export interface EarsDatabase {
     // (undocumented)
+    abortWatchRun(watchId: number, requeueDirty: boolean, nowMs?: number | undefined | null): boolean;
+    // (undocumented)
     acknowledgeRestore(): void;
     // (undocumented)
     backup(targetDir: string, overwriteBackup?: boolean | undefined | null): void;
     // (undocumented)
     backupAsync(targetDir: string, overwriteBackup?: boolean | undefined | null): Promise<void>;
+    // (undocumented)
+    beginWatchRun(watchId: number): boolean;
     // (undocumented)
     catchUpCrossProcess(nowMs?: number | undefined | null): Array<number>;
     // (undocumented)
@@ -669,7 +682,7 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
     sumAsync(field: string): Promise<number>;
     topoSort(relKinds?: readonly string[]): QueryBuilder<EntityRow>;
     toSpec(terminal?: QueryTerminal, explain?: boolean): QuerySpec;
-    watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle;
+    watch(callback: (rows: TResult[]) => void, opts?: WatchRowsOptions): WatchHandle;
     watchCount(callback: (count: number) => void, opts?: WatchOptions): WatchHandle;
     watchHits(callback: (hits: Hit[]) => void, opts?: WatchHitsOptions): WatchHandle;
     watchIds(callback: (ids: string[]) => void, opts?: WatchOptions): WatchHandle;
@@ -888,6 +901,7 @@ export interface WatchController {
     catchUpCrossProcess(): number[];
     caughtUp(soon?: boolean): boolean;
     flushSync(nowMs?: number): number;
+    onSettled(listener: () => void): () => void;
     settled(): boolean;
     stopAll(): void;
 }
@@ -923,6 +937,11 @@ export { WatchPolicyOptions }
 export { WatchRegistration }
 
 export { WatchRerun }
+
+// @public
+export interface WatchRowsOptions extends WatchOptions {
+    readonly fields?: readonly string[];
+}
 
 export { WatchTick }
 

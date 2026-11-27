@@ -69,6 +69,12 @@ export interface HitsOptions {
 /** Options for `QueryBuilder.watchHits(...)`. */
 export interface WatchHitsOptions extends WatchOptions, HitsOptions {}
 
+/** Options for `QueryBuilder.watch(...)`. */
+export interface WatchRowsOptions extends WatchOptions {
+  /** Optional list of field names to project on delivered rows. */
+  readonly fields?: readonly string[];
+}
+
 /** Options for `QueryBuilder.recency(...)`. */
 export interface RecencyOptions {
   readonly nowMs: number;
@@ -206,6 +212,18 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 function normalizeQueryValue(value: unknown): unknown {
   if (value === undefined) {
     throw new EarsError('INVALID_ARGUMENT', 'Query value cannot be undefined');
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new EarsError('INVALID_ARGUMENT', `Query numeric value must be finite (got ${String(value)})`);
+    }
+    return value;
+  }
+  if (typeof value === 'bigint') {
+    throw new EarsError('INVALID_ARGUMENT', 'BigInt values are not supported in query filters or cursors');
+  }
+  if (typeof value === 'symbol' || typeof value === 'function') {
+    throw new EarsError('INVALID_ARGUMENT', `Unsupported query value type '${typeof value}'`);
   }
   if (value instanceof Uint8Array) {
     // Rust protocol `coerce_json_for_field` decodes `Bytes` fields from JSON `number[]` (0..=255).
@@ -477,7 +495,7 @@ export interface QueryBuilder<TResult extends EntityRow = EntityRow> {
   graphPprAsync(): Promise<GraphPprResult>;
 
   /** Subscribes to live row updates driven by the engine's sans-I/O `WatchPump`. */
-  watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle;
+  watch(callback: (rows: TResult[]) => void, opts?: WatchRowsOptions): WatchHandle;
   /** Subscribes to live ID list updates. */
   watchIds(callback: (ids: string[]) => void, opts?: WatchOptions): WatchHandle;
   /** Subscribes to live scored hit updates (with optional projected fields and UTF-16 highlights). */
@@ -612,17 +630,48 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
         this.#inUnit,
       );
     }
-    const hasScore = this.#steps.some((s) => s.kind === 'score');
-    const created: Extract<QueryStep, { kind: 'orderSlice' }> = {
-      kind: 'orderSlice',
-      by: hasScore ? 'score' : 'id',
-      dir: hasScore ? 'desc' : 'asc',
-      ...(patch.afterId !== undefined && { afterId: patch.afterId }),
-      ...(patch.afterScore !== undefined && { afterScore: patch.afterScore }),
-      ...(patch.afterValue !== undefined && { afterValue: patch.afterValue }),
-      ...(patch.limit !== undefined && { limit: patch.limit }),
-    };
-    return this.#withStep(created, true);
+    // Scan backwards to the most recent order-defining step (score, hops, shortestPath, or prior orderSlice)
+    // so `search().hops().limit(n)` does not reverse hop order AND `orderBy(...).where(...).limit(n)`
+    // preserves the explicit `orderBy(...)` ordering instead of clobbering it with `id asc`!
+    let priorOrder: Extract<QueryStep, { kind: 'orderSlice' }> | undefined;
+    let hasScoreSinceReset = false;
+    for (let i = this.#steps.length - 1; i >= 0; i--) {
+      const s = this.#steps[i];
+      if (!s) continue;
+      if (s.kind === 'score') {
+        hasScoreSinceReset = true;
+        break;
+      }
+      if (s.kind === 'orderSlice') {
+        priorOrder = s;
+        break;
+      }
+      if (s.kind === 'hops' || s.kind === 'shortestPath') {
+        break;
+      }
+    }
+    const created: Extract<QueryStep, { kind: 'orderSlice' }> = priorOrder
+      ? {
+          kind: 'orderSlice',
+          by: priorOrder.by,
+          dir: priorOrder.dir,
+          ...(priorOrder.field !== undefined && { field: priorOrder.field }),
+          ...(priorOrder.locale !== undefined && { locale: priorOrder.locale }),
+          ...(patch.afterId !== undefined && { afterId: patch.afterId }),
+          ...(patch.afterScore !== undefined && { afterScore: patch.afterScore }),
+          ...(patch.afterValue !== undefined && { afterValue: patch.afterValue }),
+          ...(patch.limit !== undefined && { limit: patch.limit }),
+        }
+      : {
+          kind: 'orderSlice',
+          by: hasScoreSinceReset ? 'score' : 'id',
+          dir: hasScoreSinceReset ? 'desc' : 'asc',
+          ...(patch.afterId !== undefined && { afterId: patch.afterId }),
+          ...(patch.afterScore !== undefined && { afterScore: patch.afterScore }),
+          ...(patch.afterValue !== undefined && { afterValue: patch.afterValue }),
+          ...(patch.limit !== undefined && { limit: patch.limit }),
+        };
+    return this.#withStep(created, priorOrder === undefined);
   }
 
   #forbidLocalFilter(terminalName: string): void {
@@ -942,14 +991,18 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
   }
 
   first(fields?: readonly string[]): TResult | null {
-    if (this.#existingZeroLimit()) return null;
-    const rows = this.#localFilters.length === 0 ? this.limit(1).all(fields) : this.all(fields);
+    const rows =
+      this.#localFilters.length === 0 && !this.#existingZeroLimit()
+        ? this.limit(1).all(fields)
+        : this.all(fields);
     return rows[0] ?? null;
   }
 
   async firstAsync(fields?: readonly string[]): Promise<TResult | null> {
-    if (this.#existingZeroLimit()) return null;
-    const rows = this.#localFilters.length === 0 ? await this.limit(1).allAsync(fields) : await this.allAsync(fields);
+    const rows =
+      this.#localFilters.length === 0 && !this.#existingZeroLimit()
+        ? await this.limit(1).allAsync(fields)
+        : await this.allAsync(fields);
     return rows[0] ?? null;
   }
 
@@ -1177,8 +1230,9 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     return { scores: ans.scores, converged: ans.converged, iterations: ans.iterations };
   }
 
-  watch(callback: (rows: TResult[]) => void, opts?: WatchOptions): WatchHandle {
-    const spec = this.toSpec({ kind: 'rows' });
+  watch(callback: (rows: TResult[]) => void, opts?: WatchRowsOptions): WatchHandle {
+    const term: QueryTerminal = opts?.fields === undefined ? { kind: 'rows' } : { kind: 'rows', fields: [...opts.fields] };
+    const spec = this.toSpec(term);
     const localFilters = this.#localFilters;
     const dedupPostFilter = localFilters.length > 0 && opts?.mode !== 'imperative';
     let lastFilteredJson: string | undefined;

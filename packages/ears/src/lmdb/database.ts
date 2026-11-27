@@ -7,7 +7,7 @@ import type { BuildPolicy, DurabilityMode, EarsDatabase } from '../database.ts';
 import { createEarsEngine, type EarsEngine } from '../engine.ts';
 import { toEarsError, type EarsError } from '../errors.ts';
 import type { EarsOperationObserver } from '../observer.ts';
-import type { EarsClock } from '../watch.ts';
+import type { AfterClock, EarsClock } from '../watch.ts';
 
 /** Canonical elmdb v2 on-disk format identifier. */
 export const DATABASE_FORMAT = 'elmdb/2';
@@ -33,7 +33,7 @@ export interface DatabaseOptions {
 
 /** Options for opening an `EarsEngine` directly in one call. */
 export interface OpenEngineOptions extends DatabaseOptions {
-  readonly clock?: EarsClock;
+  readonly clock?: EarsClock | AfterClock;
   readonly onWatchError?: (error: EarsError) => void;
   readonly observer?: EarsOperationObserver;
 }
@@ -83,6 +83,7 @@ export function openEngine(options: OpenEngineOptions): EarsEngine {
       ...(options.clock !== undefined && { clock: options.clock }),
       ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
       ...(options.observer !== undefined && { observer: options.observer }),
+      ...(options.watchTurnSliceMs !== undefined && { watchTurnSliceMs: options.watchTurnSliceMs }),
     });
   } catch (error) {
     try {
@@ -103,6 +104,7 @@ export async function openEngineAsync(options: OpenEngineOptions): Promise<EarsE
       ...(options.clock !== undefined && { clock: options.clock }),
       ...(options.onWatchError !== undefined && { onWatchError: options.onWatchError }),
       ...(options.observer !== undefined && { observer: options.observer }),
+      ...(options.watchTurnSliceMs !== undefined && { watchTurnSliceMs: options.watchTurnSliceMs }),
     });
   } catch (error) {
     try {
