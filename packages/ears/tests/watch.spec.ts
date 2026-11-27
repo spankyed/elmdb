@@ -1,6 +1,12 @@
+import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createEarsEngine, type EarsClock, type EarsError, type Schema } from '../src/index.ts';
-import { createTemporaryDatabases, openDatabase } from '../src/lmdb/index.ts';
+import { createTemporaryDatabases } from '../src/lmdb/index.ts';
+
+const require = createRequire(import.meta.url);
+const nativeElmdbPath = require.resolve('elmdb');
+const clientElmdbPath = require.resolve('elmdb/client');
 
 const watchSchema: Schema = {
   types: {
@@ -117,14 +123,22 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     expect(snapshots).toHaveLength(3); // rows changed (title changed)
     expect(counts).toEqual([0, 1]); // count stayed 1 -> deduplicated!
 
-    // Cross-handle commit (simulating cross-process write)
-    const writer2 = openDatabase({ path: handle.path, durability: 'strict' });
-    try {
-      const e2 = createEarsEngine({ database: writer2 });
-      e2.create('Task', { title: 'From other process', done: false }, 't2');
-    } finally {
-      writer2.close();
-    }
+    // Real cross-process commit caught up via persisted commit_log
+    execFileSync(
+      process.execPath,
+      [
+        '-e',
+        `const { Database } = require(${JSON.stringify(nativeElmdbPath)});
+         const { buildWireBatch } = require(${JSON.stringify(clientElmdbPath)});
+         const db = Database.open(${JSON.stringify(handle.path)}, { durability: 'strict' });
+         try {
+           db.executeWireBatch(buildWireBatch((b) => { b.create('Task', { title: 'From other process', done: false }, 't2'); }));
+         } finally {
+           db.close();
+         }`,
+      ],
+      { stdio: 'inherit' },
+    );
 
     const dirtied = engine.watches.catchUpCrossProcess();
     expect(dirtied.sort((a, b) => a - b)).toEqual([w1.id, w2.id].sort((a, b) => a - b));

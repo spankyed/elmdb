@@ -576,6 +576,9 @@ impl KvStore for SimKvStore {
     type RoTxn<'a> = SimRoTxn;
     type RwTxn<'a> = SimRwTxn;
     type OwnedRwTxn = SimRwTxn;
+    type MapReadGuard = ();
+
+    fn lock_map_read(&self) -> Self::MapReadGuard {}
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
         let inner = self.inner.lock();

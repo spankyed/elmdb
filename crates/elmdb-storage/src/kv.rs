@@ -94,19 +94,45 @@ pub trait KvStore: Send + Sync {
     where
         Self: 'a;
     type OwnedRwTxn: KvWrite + 'static;
+    /// Guard token held on L2 `MapGate` across a write transaction (acquired before L3 `WriterLock`).
+    type MapReadGuard: 'static;
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError>;
     fn begin_write(&self) -> Result<Self::RwTxn<'_>, StorageError>;
     fn begin_write_owned(&self) -> Result<Self::OwnedRwTxn, StorageError>;
+    fn lock_map_read(&self) -> Self::MapReadGuard;
     fn open_subdb_ro(
         &self,
         txn: &Self::RoTxn<'_>,
         name: &str,
         flags: DbFlags,
     ) -> Result<Option<SubDbHandle>, StorageError>;
+    /// Pre-opens any committed named sub-DBs into the environment handle cache in an isolated RO txn.
+    /// Callers MUST invoke this under `WriterLock` (L3) so it never races with `RwTxn::open_subdb`.
+    fn ensure_subdbs_open(&self, _names: &[(&str, DbFlags)]) -> Result<(), StorageError> {
+        Ok(())
+    }
+    /// Returns `Some(target_map_size)` when free headroom is below the proactive growth threshold.
+    fn needs_map_growth(&self) -> Result<Option<usize>, StorageError> {
+        Ok(None)
+    }
+    /// Grows the underlying mmap to at least `min_size` (or doubles current size) under L2 `MapGate::write()`.
+    /// Caller MUST NOT hold any active transaction (`L2` or `L3`).
+    fn grow_map(&self, _min_size: Option<usize>) -> Result<usize, StorageError> {
+        Ok(self.map_size())
+    }
+    /// Adopts an external cross-process map resize (`mdb_env_set_mapsize(env, 0)`) under L2 `MapGate::write()`.
+    /// Caller MUST NOT hold any active transaction (`L2` or `L3`).
+    fn adopt_resized_map(&self) -> Result<usize, StorageError> {
+        Ok(self.map_size())
+    }
     fn sync(&self) -> Result<(), StorageError>;
     fn last_txnid(&self) -> Result<u64, StorageError>;
     fn roots_sha256(&self) -> Result<[u8; 32], StorageError>;
+    /// Atomically reads `(txnid, roots_sha256)` from a single active meta-page snapshot (no TOCTOU).
+    fn active_receipt(&self) -> Result<CommitReceipt, StorageError> {
+        Ok(CommitReceipt { txnid: self.last_txnid()?, roots_sha256: self.roots_sha256()? })
+    }
     fn map_size(&self) -> usize;
     fn page_size(&self) -> usize;
     /// Writes a consistent compacted copy of the store into `target_dir` and returns the copied file's receipt.

@@ -11,18 +11,18 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
 use elmdb_engine::{
-    BatchOutcome, BeforeCommitHook, CompiledSchema, Engine, EntityKey, HookRoundSnapshot, IndexKind, MAX_HOOK_ROUNDS,
-    RawSchema, StoredEdge, StoredRow, TxnCtx, TypeMask, list_counters_in_txn, lookup_ext_id_in_txn, read_commit_seq,
-    read_relations_in_in_txn, read_relations_out_in_txn, read_stored_row, row::decode_row_header, scan_type_keys,
+    BatchOutcome, BeforeCommitHook, CompiledSchema, Engine, EntityKey, HookRoundSnapshot, IndexId, IndexKind,
+    MAX_HOOK_ROUNDS, RawSchema, StoredEdge, StoredRow, TxnCtx, TypeMask, list_counters_in_txn, lookup_ext_id_in_txn,
+    read_commit_seq, read_relations_in_in_txn, read_relations_out_in_txn, read_stored_row, row::decode_row_header,
+    scan_type_keys,
 };
 use elmdb_invalidation::{LiveQueryHub, NextDue, TickResult, WatchId, WatchPolicy, hash_result_128};
 use elmdb_lmdb::{LmdbConfig, LmdbStore};
 use elmdb_projections::{BuildPolicy, ProjectionRegistry, rank};
 use elmdb_query::{EdgeDir, ExecBudgets, LogicalPlan, QueryEngine, QueryOutput};
-use elmdb_storage::{Clock, DurabilityMode, KvCursor, KvRead, OsVfs, SystemClock};
+use elmdb_storage::{Clock, DurabilityMode, KvCursor, KvRead, OsVfs, SystemClock, Vfs};
 use elmdb_vec::{
     DEFAULT_DRAIN_BATCH, VectorProjection, drain_pending_batch, flush as flush_vec, read_entity_embeddings,
-    set_entity_embeddings,
 };
 use elmdb_wire::{ElmdbError, EntityTarget, ErrorCode, Result, WireOp, decode_batch};
 
@@ -91,7 +91,8 @@ struct RegisteredHostHook {
 }
 
 struct ActiveTxnSlot {
-    ctx: TxnCtx<'static, LmdbStore, OsVfs, SystemClock>,
+    ctx: Option<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>>,
+    commit_seq: u64,
     depth: usize,
 }
 
@@ -171,23 +172,29 @@ pub struct Database {
 
 struct OpGuard<'a> {
     db: &'a Database,
-    engine: Arc<EngineHandle>,
+    engine: Option<Arc<EngineHandle>>,
+}
+
+impl OpGuard<'_> {
+    fn arc(&self) -> &Arc<EngineHandle> {
+        self.engine.as_ref().expect("OpGuard engine live until Drop")
+    }
 }
 
 impl Deref for OpGuard<'_> {
     type Target = EngineHandle;
 
     fn deref(&self) -> &Self::Target {
-        &self.engine
+        self.engine.as_ref().expect("OpGuard engine live until Drop")
     }
 }
 
 impl Drop for OpGuard<'_> {
     fn drop(&mut self) {
-        // Release our local `Arc<EngineHandle>` BEFORE decrementing `active_ops` so that when
-        // `close_within` observes `active_ops == 0`, no other thread still holds an `Arc`.
-        // (We drop `self.engine` implicitly right after `drop`, so notify after decrementing
-        // and let `close_within` take the `Option` under `engine.write()`.)
+        // Drop our local `Arc<EngineHandle>` strictly BEFORE decrementing `active_ops` so that when
+        // `close_inner` observes `active_ops == 0`, zero other threads can still hold an `Arc` and
+        // `mdb_env_close()` is guaranteed to complete before `close()` returns!
+        drop(self.engine.take());
         let prev = self.db.active_ops.fetch_sub(1, Ordering::SeqCst);
         if prev == 1 && self.db.closed.load(Ordering::SeqCst) {
             let _lock = self.db.drain_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -235,7 +242,7 @@ impl Database {
         let registry = Arc::new(ProjectionRegistry::new(opts.build_policy).with_external(Arc::new(VectorProjection)));
         let (engine, report) = Engine::open_with_options(
             store,
-            OsVfs,
+            OsVfs::with_boot_id(elmdb_lmdb::platform_boot_id()),
             SystemClock::default(),
             dir.clone(),
             opts.durability,
@@ -281,7 +288,7 @@ impl Database {
         };
         self.active_ops.fetch_add(1, Ordering::SeqCst);
         drop(guard);
-        Ok(OpGuard { db: self, engine })
+        Ok(OpGuard { db: self, engine: Some(engine) })
     }
 
     #[inline]
@@ -294,7 +301,7 @@ impl Database {
 
     #[inline]
     fn has_active_txn(&self) -> bool {
-        ACTIVE_TXNS.try_with(|m| m.borrow().contains_key(&self.id)).unwrap_or(false)
+        ACTIVE_TXNS.try_with(|m| m.try_borrow().map_or(true, |map| map.contains_key(&self.id))).unwrap_or(false)
     }
 
     #[inline]
@@ -313,11 +320,22 @@ impl Database {
         f: impl FnOnce(&TxnCtx<'static, LmdbStore, OsVfs, SystemClock>) -> Result<R>,
     ) -> Result<R> {
         ACTIVE_TXNS.with(|m| {
-            let map = m.borrow();
+            let map = m.try_borrow().map_err(|_| {
+                ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    "cannot call Database methods re-entrantly inside a Rust beforeCommit hook; use the TxnCtx argument instead",
+                )
+            })?;
             let slot = map
                 .get(&self.id)
                 .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "expected active transaction on calling thread"))?;
-            f(&slot.ctx)
+            let ctx = slot.ctx.as_ref().ok_or_else(|| {
+                ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    "cannot call Database methods re-entrantly while a Rust beforeCommit hook owns &mut TxnCtx; use the TxnCtx argument instead",
+                )
+            })?;
+            f(ctx)
         })
     }
 
@@ -326,18 +344,32 @@ impl Database {
         f: impl FnOnce(&mut TxnCtx<'static, LmdbStore, OsVfs, SystemClock>) -> Result<R>,
     ) -> Result<R> {
         ACTIVE_TXNS.with(|m| {
-            let mut map = m.borrow_mut();
+            let mut map = m.try_borrow_mut().map_err(|_| {
+                ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    "cannot call Database methods re-entrantly inside a Rust beforeCommit hook; use the TxnCtx argument instead",
+                )
+            })?;
             let slot = map
                 .get_mut(&self.id)
                 .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "expected active transaction on calling thread"))?;
-            f(&mut slot.ctx)
+            let ctx = slot.ctx.as_mut().ok_or_else(|| {
+                ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    "cannot call Database methods re-entrantly while a Rust beforeCommit hook owns &mut TxnCtx; use the TxnCtx argument instead",
+                )
+            })?;
+            f(ctx)
         })
     }
 
     /// Returns the pending monotonic commit sequence number if currently inside `transact()` or `beforeCommit`,
     /// or `None` outside an active write transaction.
     pub fn pending_commit_seq(&self) -> Option<u64> {
-        ACTIVE_TXNS.with(|m| m.borrow().get(&self.id).map(|slot| slot.ctx.commit_seq()))
+        ACTIVE_TXNS
+            .try_with(|m| m.try_borrow().ok().and_then(|map| map.get(&self.id).map(|slot| slot.commit_seq)))
+            .ok()
+            .flatten()
     }
 
     pub fn dir(&self) -> &Path {
@@ -368,12 +400,17 @@ impl Database {
         &self.hub
     }
 
+    fn fresh_schema(&self, eng: &EngineHandle) -> Result<Arc<CompiledSchema>> {
+        let (_ro, schema) = eng.begin_read_pinned()?;
+        Ok(schema)
+    }
+
     pub fn schema(&self) -> Result<Arc<CompiledSchema>> {
         let eng = self.enter_op()?;
         if self.has_active_txn() {
             return self.with_active_ctx(|ctx| Ok(Arc::clone(ctx.schema())));
         }
-        Ok(eng.schema())
+        self.fresh_schema(&eng)
     }
 
     /// Sets or evolves the database schema (O(1) type/field renames, `Archived` types, deferred index builds).
@@ -459,9 +496,22 @@ impl Database {
 
         if self.has_active_txn() {
             let sp_depth = ACTIVE_TXNS.with(|m| -> Result<u32> {
-                let mut map = m.borrow_mut();
-                let slot = map.get_mut(&self.id).expect("active txn");
-                let depth = slot.ctx.push_savepoint()?;
+                let mut map = m.try_borrow_mut().map_err(|_| {
+                    ElmdbError::new(
+                        ErrorCode::InvalidArgument,
+                        "cannot nest transact() inside a Rust beforeCommit hook; use the TxnCtx argument instead",
+                    )
+                })?;
+                let slot = map
+                    .get_mut(&self.id)
+                    .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "expected active transaction"))?;
+                let ctx = slot.ctx.as_mut().ok_or_else(|| {
+                    ElmdbError::new(
+                        ErrorCode::InvalidArgument,
+                        "cannot nest transact() while a Rust beforeCommit hook owns &mut TxnCtx; use the TxnCtx argument instead",
+                    )
+                })?;
+                let depth = ctx.push_savepoint()?;
                 slot.depth += 1;
                 Ok(depth)
             })?;
@@ -478,7 +528,9 @@ impl Database {
                             if let Ok(mut map) = m.try_borrow_mut()
                                 && let Some(slot) = map.get_mut(&self.db_id)
                             {
-                                slot.ctx.abort_savepoint(self.sp_depth);
+                                if let Some(ctx) = slot.ctx.as_mut() {
+                                    ctx.abort_savepoint(self.sp_depth);
+                                }
                                 slot.depth = slot.depth.saturating_sub(1);
                             }
                         });
@@ -494,7 +546,12 @@ impl Database {
                     ACTIVE_TXNS.with(|m| -> Result<()> {
                         let mut map = m.borrow_mut();
                         let slot = map.get_mut(&self.id).expect("active txn");
-                        let commit_res = slot.ctx.commit_savepoint(sp_depth);
+                        let commit_res = match slot.ctx.as_mut() {
+                            Some(ctx) => ctx.commit_savepoint(sp_depth),
+                            None => {
+                                Err(ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on savepoint commit"))
+                            }
+                        };
                         slot.depth = slot.depth.saturating_sub(1);
                         commit_res
                     })?;
@@ -504,7 +561,9 @@ impl Database {
                     ACTIVE_TXNS.with(|m| {
                         let mut map = m.borrow_mut();
                         if let Some(slot) = map.get_mut(&self.id) {
-                            slot.ctx.abort_savepoint(sp_depth);
+                            if let Some(ctx) = slot.ctx.as_mut() {
+                                ctx.abort_savepoint(sp_depth);
+                            }
                             slot.depth = slot.depth.saturating_sub(1);
                         }
                     });
@@ -514,9 +573,10 @@ impl Database {
         }
 
         // Outermost transaction on this thread: open owned RwTxn and install RAII guard.
-        let ctx = eng.engine.begin_owned_txn()?;
+        let ctx = eng.arc().begin_owned_txn()?;
+        let commit_seq = ctx.commit_seq();
         ACTIVE_TXNS.with(|m| {
-            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx, depth: 1 });
+            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx: Some(ctx), commit_seq, depth: 1 });
         });
 
         struct OuterGuard {
@@ -539,13 +599,14 @@ impl Database {
         let mut guard = OuterGuard { db_id: self.id, armed: true };
         let value = f()?;
         if opts.run_before_commit {
-            self.run_combined_hook_cascade(&eng.engine)?;
+            self.run_combined_hook_cascade(&eng)?;
         }
         guard.armed = false;
         let slot = ACTIVE_TXNS
             .with(|m| m.borrow_mut().remove(&self.id))
             .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
-        let committed = slot.ctx.finish_and_commit(true)?;
+        let ctx = slot.ctx.ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on commit"))?;
+        let committed = ctx.finish_and_commit(true)?;
         let out_meta = match committed {
             Some((seq, receipt, sum)) => {
                 if let Some(ref s) = sum {
@@ -589,14 +650,44 @@ impl Database {
             } else {
                 None
             };
-            if has_rust
-                && let Err(err) = self.with_active_ctx_mut(|ctx| ctx.run_rust_hooks_for_round(&snap.touched_types))
-            {
-                let _ = self.with_active_ctx_mut(|ctx| {
-                    ctx.abort_savepoint(sp);
-                    Ok(())
-                });
-                return Err(err);
+            if has_rust {
+                // Temporarily take `ctx` out of `ACTIVE_TXNS` so NO `RefCell` borrow is held across the
+                // Rust `beforeCommit` callback. Re-entering `&Database` from the callback sees the slot
+                // present (`has_active_txn() == true`) with `ctx == None`, returning `InvalidArgument`
+                // cleanly instead of panicking with `BorrowMutError` or deadlocking on `WriterLock`.
+                struct RestoreCtxGuard {
+                    db_id: u64,
+                    ctx: Option<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>>,
+                }
+                impl Drop for RestoreCtxGuard {
+                    fn drop(&mut self) {
+                        if let Some(ctx) = self.ctx.take() {
+                            let _ = ACTIVE_TXNS.try_with(|m| {
+                                if let Ok(mut map) = m.try_borrow_mut()
+                                    && let Some(slot) = map.get_mut(&self.db_id)
+                                {
+                                    slot.ctx = Some(ctx);
+                                }
+                            });
+                        }
+                    }
+                }
+                let taken_ctx = ACTIVE_TXNS.with(|m| -> Result<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>> {
+                    let mut map = m.borrow_mut();
+                    map.get_mut(&self.id)
+                        .and_then(|slot| slot.ctx.take())
+                        .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing for rust hook"))
+                })?;
+                let mut restore = RestoreCtxGuard { db_id: self.id, ctx: Some(taken_ctx) };
+                let rust_res = restore.ctx.as_mut().expect("taken_ctx").run_rust_hooks_for_round(&snap.touched_types);
+                drop(restore);
+                if let Err(err) = rust_res {
+                    let _ = self.with_active_ctx_mut(|ctx| {
+                        ctx.abort_savepoint(sp);
+                        Ok(())
+                    });
+                    return Err(err);
+                }
             }
             if let Some(ref delta) = host_delta {
                 for cb in matching_host {
@@ -653,9 +744,24 @@ impl Database {
         // Single choke point: standalone batches also route through `transact_scoped_with_receipt` so host/JS
         // `beforeCommit` hooks enjoy identical RYOW `get`/`query`/`nextCounter`/`pendingCommitSeq` and we return
         // the exact committed `(commit_seq, CommitReceipt)` (never a phantom seq on empty/no-op batches!).
-        let (created_ids, committed) = self.transact_scoped_with_receipt(TransactOptions::default(), || {
-            self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(ops))
-        })?;
+        // Retries automatically on `ErrorCode::MapFull` by doubling LMDB `map_size` under L2 `MapGate::write()`.
+        let mut attempts = 0usize;
+        let (created_ids, committed) = loop {
+            match self.transact_scoped_with_receipt(TransactOptions::default(), || {
+                self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(ops))
+            }) {
+                Ok(res) => break res,
+                Err(err) if err.code == ErrorCode::StorageFull && attempts < 8 => {
+                    attempts += 1;
+                    let before = eng.gate().map_size();
+                    let after = eng.gate().grow_map(None)?;
+                    if after <= before {
+                        return Err(err);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        };
         let (commit_seq, receipt) = match committed {
             Some((seq, receipt)) => (seq, receipt),
             None => {
@@ -812,33 +918,21 @@ impl Database {
     }
 
     /// Sets primary vector embeddings for `ext_id` on `index_name` (O(1) commit into `embeddings` + `vec_pending`),
-    /// notifying live vector watches immediately using the post-write active slot.
+    /// resolving `ext_id` and its type-scoped vector index atomically inside ONE write txn (zero TOCTOU / ambiguity)
+    /// and notifying live vector watches immediately using the post-write active slot.
     pub fn set_embeddings(&self, index_name: &str, ext_id: &str, vectors: &[Vec<f32>]) -> Result<()> {
         let eng = self.enter_op()?;
         self.require_writable()?;
         self.forbid_inside_txn("setEmbeddings")?;
-        let schema = eng.schema();
-        let def = schema
-            .indexes
-            .iter()
-            .find(|i| i.name == index_name)
-            .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{index_name}'")))?;
-        if !matches!(&def.kind, IndexKind::Vector { .. }) {
-            return Err(ElmdbError::new(
-                ErrorCode::InvalidArgument,
-                format!("index '{index_name}' is not a vector index"),
-            ));
-        }
-        let Some(row) = eng.get_row(ext_id)? else {
-            return Err(ElmdbError::new(ErrorCode::EntityNotFound, format!("entity '{ext_id}' not found")));
-        };
-        set_entity_embeddings(&eng, def.id, row.key, vectors)?;
+        let (idx_id, _hint) = elmdb_vec::set_entity_embeddings_by_ext_id(&eng, index_name, ext_id, vectors)?;
         let (ro, sc) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
         let txnid = eng.gate().last_txnid()?;
-        let active_slot = sc.index_by_id(def.id).map_or(def.slot, |d| d.slot);
+        let active_slot = sc.index_by_id(idx_id).map(|d| d.slot);
         drop(ro);
-        self.hub.notify_subdb_write_with_txnid(seq, sc.epoch, txnid, active_slot, &[0x01], now_unix_ms());
+        if let Some(slot) = active_slot {
+            self.hub.notify_subdb_write_with_txnid(seq, sc.epoch, txnid, slot, &[0x01], now_unix_ms());
+        }
         Ok(())
     }
 
@@ -1001,7 +1095,7 @@ impl Database {
             more = true;
             rebuilt_any = true;
         }
-        let schema = eng.schema();
+        let schema = self.fresh_schema(&eng)?;
         for def in &schema.indexes {
             match &def.kind {
                 IndexKind::Vector { .. } => {
@@ -1053,7 +1147,7 @@ impl Database {
         }
         let mut touched_slots = Vec::new();
         let mut compacted_any = false;
-        let schema = eng.schema();
+        let schema = self.fresh_schema(&eng)?;
         for def in &schema.indexes {
             match &def.kind {
                 IndexKind::Vector { .. } => {
@@ -1095,7 +1189,7 @@ impl Database {
     pub fn index_status(&self) -> Result<Vec<IndexStatus>> {
         let eng = self.enter_op()?;
         self.forbid_inside_txn("indexStatus")?;
-        let schema = eng.schema();
+        let schema = self.fresh_schema(&eng)?;
         let raw = self.registry.index_status(&eng)?;
         Ok(raw.iter().map(|st| IndexStatus::from_proj(&schema, st)).collect())
     }
@@ -1103,16 +1197,9 @@ impl Database {
     pub fn check(&self, index_name: Option<&str>) -> Result<CheckReport> {
         let eng = self.enter_op()?;
         self.forbid_inside_txn("check")?;
-        let schema = eng.schema();
+        let schema = self.fresh_schema(&eng)?;
         let idx_id = match index_name {
-            Some(name) => {
-                let def = schema
-                    .indexes
-                    .iter()
-                    .find(|i| i.name == name)
-                    .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'")))?;
-                Some(def.id)
-            }
+            Some(name) => Some(resolve_unique_index_id(&schema, name)?),
             None => None,
         };
         let report = self.registry.check(&eng, idx_id)?;
@@ -1123,16 +1210,9 @@ impl Database {
         let eng = self.enter_op()?;
         self.require_writable()?;
         self.forbid_inside_txn("rebuild")?;
-        let schema = eng.schema();
+        let schema = self.fresh_schema(&eng)?;
         let idx_id = match index_name {
-            Some(name) => {
-                let def = schema
-                    .indexes
-                    .iter()
-                    .find(|i| i.name == name)
-                    .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'")))?;
-                Some(def.id)
-            }
+            Some(name) => Some(resolve_unique_index_id(&schema, name)?),
             None => None,
         };
         self.registry.rebuild(&eng, idx_id)?;
@@ -1250,8 +1330,17 @@ impl Database {
         let mut cleanup = DirCleanupGuard(Some(staging.clone()));
 
         eng.gate().copy_compacted(&staging)?;
-        fs::write(staging.join(BACKUP_MARKER), b"elmdb-v2-backup\n")
-            .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot write backup marker: {e}")))?;
+        {
+            use std::io::Write;
+            let mut marker = fs::File::create(staging.join(BACKUP_MARKER))
+                .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot create backup marker: {e}")))?;
+            marker
+                .write_all(b"elmdb-v2-backup\n")
+                .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot write backup marker: {e}")))?;
+            marker.sync_all().map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot sync backup marker: {e}")))?;
+        }
+        let vfs = OsVfs::new();
+        vfs.sync_dir(&staging)?;
 
         if target.exists() {
             // Atomic swap: move old target aside, move staging into place (rolling back if rename fails), then delete old.
@@ -1263,11 +1352,13 @@ impl Database {
                 return Err(ElmdbError::new(ErrorCode::Io, format!("cannot move backup into place: {e}")));
             }
             cleanup.disarm();
+            vfs.sync_dir(parent)?;
             let _ = fs::remove_dir_all(&old_aside);
         } else {
             fs::rename(&staging, target)
                 .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot move backup into place: {e}")))?;
             cleanup.disarm();
+            vfs.sync_dir(parent)?;
         }
         Ok(())
     }
@@ -1541,6 +1632,41 @@ fn build_host_hook_delta(
         edges.push(HostEdgeDelta { rel_kind, op, source_id, target_id });
     }
     Ok(HostHookDelta { commit_seq: snap.commit_seq, entities, edges })
+}
+
+fn resolve_unique_index_id(schema: &CompiledSchema, name: &str) -> Result<IndexId> {
+    if let Some((type_name, idx_name)) = name.split_once('.') {
+        let tdef = schema
+            .type_by_name_any(type_name)
+            .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{type_name}'")))?;
+        return schema
+            .indexes
+            .iter()
+            .find(|i| i.type_id == tdef.id && i.name == idx_name)
+            .map(|i| i.id)
+            .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'")));
+    }
+    let matches: Vec<_> = schema.indexes.iter().filter(|i| i.name == name).collect();
+    match matches.as_slice() {
+        [] => Err(ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'"))),
+        [single] => Ok(single.id),
+        many => {
+            let qualified: Vec<String> = many
+                .iter()
+                .map(|i| {
+                    let tn = schema.type_by_id(i.type_id).map_or("?", |t| t.name.as_str());
+                    format!("{tn}.{}", i.name)
+                })
+                .collect();
+            Err(ElmdbError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "ambiguous index name '{name}' matches multiple types ({}); qualify as 'TypeName.{name}'",
+                    qualified.join(", ")
+                ),
+            ))
+        }
+    }
 }
 
 fn lookup_key_ext_id_in_txn<R: KvRead>(

@@ -992,8 +992,8 @@ fn review_regressions_atomic_batch_in_transact_lock_guards_noop_seq_cross_proc_a
     assert!(db.get_row_resolved("t-ok").unwrap().is_some());
     assert!(db.check(None).unwrap().is_clean(), "derived indexes must be 100% consistent after caught UniqueViolation");
 
-    // P1 #10: Second already-open handle sees new index added by first handle and writes inside nested savepoint!
-    let db2 = Database::open(
+    // P0-5: Second in-process open of the same directory MUST fail with `DatabaseLocked`!
+    let dup_err = Database::open(
         &db_dir,
         OpenOptions {
             durability: DurabilityMode::Strict,
@@ -1001,7 +1001,12 @@ fn review_regressions_atomic_batch_in_transact_lock_guards_noop_seq_cross_proc_a
             ..Default::default()
         },
     )
-    .unwrap();
+    .err()
+    .expect("second in-process open must fail with DatabaseLocked");
+    assert_eq!(dup_err.code, ErrorCode::DatabaseLocked);
+
+    // P0-4 / P1 #10: Real child process adds a new index while THIS process holds `db` open,
+    // and THIS already-open handle sees the new index and writes inside a nested savepoint cleanly!
     let mut schema2 = schema.clone();
     schema2
         .types
@@ -1009,11 +1014,17 @@ fn review_regressions_atomic_batch_in_transact_lock_guards_noop_seq_cross_proc_a
         .unwrap()
         .indexes
         .insert("by_body_val".into(), IndexDefinition::Value { fields: vec!["body".into()], unique: false });
-    db.set_schema(&schema2).unwrap();
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_add_ticket_body_index_helper", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_E2E_DIR", &db_dir)
+        .env("ELMDB_TEST_E2E_SCHEMA", serde_json::to_string(&schema2).unwrap())
+        .status()
+        .unwrap();
+    assert!(status.success(), "child schema evolution failed: {status}");
 
-    db2.transact_scoped(elmdb::TransactOptions::default(), || {
-        db2.transact_scoped(elmdb::TransactOptions::default(), || {
-            db2.execute_batch(&[WireOp::Create {
+    db.transact_scoped(elmdb::TransactOptions::default(), || {
+        db.transact_scoped(elmdb::TransactOptions::default(), || {
+            db.execute_batch(&[WireOp::Create {
                 type_name: "Ticket".into(),
                 external_id: Some("t-xproc".into()),
                 fields: vec![
@@ -1026,10 +1037,28 @@ fn review_regressions_atomic_batch_in_transact_lock_guards_noop_seq_cross_proc_a
         Ok(())
     })
     .unwrap();
-    assert!(db2.get_row_resolved("t-xproc").unwrap().is_some());
-    assert!(db2.check(None).unwrap().is_clean());
+    assert!(db.get_row_resolved("t-xproc").unwrap().is_some());
+    assert!(db.check(None).unwrap().is_clean());
 
-    db2.close().unwrap();
+    db.close().unwrap();
+}
+
+#[test]
+#[ignore = "child process helper invoked by review_regressions_atomic_batch_in_transact_lock_guards_noop_seq_cross_proc_and_code_phrase"]
+fn child_add_ticket_body_index_helper() {
+    let db_dir = std::path::PathBuf::from(std::env::var("ELMDB_TEST_E2E_DIR").expect("ELMDB_TEST_E2E_DIR"));
+    let schema2: elmdb::protocol::Schema =
+        serde_json::from_str(&std::env::var("ELMDB_TEST_E2E_SCHEMA").expect("ELMDB_TEST_E2E_SCHEMA")).unwrap();
+    let db = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_schema(&schema2).unwrap();
     db.close().unwrap();
 }
 
@@ -1300,4 +1329,378 @@ fn batch1_dump_load_refs_list_refs_archived_fields_timestamps_and_protocol_guard
 
     assert!(loaded.check(None).unwrap().is_clean());
     loaded.close().unwrap();
+}
+
+#[test]
+#[ignore = "child process helper invoked by batch2_map_growth_cross_proc_resize_sidecar_race_opguard_hooks_and_index_disambiguation"]
+fn child_batch2_worker() {
+    use elmdb::protocol::{FieldDefinition, FieldSpec, IndexDefinition, TypeDefinition, compiled_to_raw_schema};
+
+    let db_dir = std::path::PathBuf::from(std::env::var("ELMDB_TEST_B2_DIR").expect("ELMDB_TEST_B2_DIR"));
+    let action = std::env::var("ELMDB_TEST_B2_ACTION").expect("ELMDB_TEST_B2_ACTION");
+    match action.as_str() {
+        "grow_map" => {
+            let db = Database::open(
+                &db_dir,
+                OpenOptions {
+                    durability: DurabilityMode::Strict,
+                    build_policy: BuildPolicy::EagerInSchemaChange,
+                    map_size: Some(256 * 1024),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let blob = "G".repeat(32 * 1024);
+            let ops: Vec<WireOp> = (0..40)
+                .map(|i| WireOp::Create {
+                    type_name: "Doc".into(),
+                    external_id: Some(format!("child-big-{i}")),
+                    fields: vec![
+                        ("tag".into(), CanonicalValue::String(format!("t-{i}"))),
+                        ("body".into(), CanonicalValue::String(blob.clone())),
+                    ],
+                })
+                .collect();
+            db.execute_batch(&ops).unwrap();
+            assert!(db.stats().unwrap().map_size_bytes > 256 * 1024);
+            db.close().unwrap();
+        }
+        "strict_race" => {
+            let worker_id = std::env::var("ELMDB_TEST_B2_WORKER").expect("ELMDB_TEST_B2_WORKER");
+            let db = Database::open(
+                &db_dir,
+                OpenOptions {
+                    durability: DurabilityMode::Strict,
+                    build_policy: BuildPolicy::EagerInSchemaChange,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            for i in 0..15 {
+                db.execute_batch(&[WireOp::Create {
+                    type_name: "Doc".into(),
+                    external_id: Some(format!("race-{worker_id}-{i}")),
+                    fields: vec![
+                        ("tag".into(), CanonicalValue::String(format!("w{worker_id}"))),
+                        ("body".into(), CanonicalValue::String(format!("payload-{i}"))),
+                    ],
+                }])
+                .unwrap();
+            }
+            db.close().unwrap();
+        }
+        "schema_bump" => {
+            let db = Database::open(
+                &db_dir,
+                OpenOptions {
+                    durability: DurabilityMode::Strict,
+                    build_policy: BuildPolicy::EagerInSchemaChange,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let raw = compiled_to_raw_schema(&db.schema().unwrap());
+            let mut schema = elmdb::protocol::Schema::default();
+            for (tname, tdef) in raw.types {
+                let mut td = TypeDefinition::default();
+                for (fname, fdef) in tdef.fields {
+                    let kind = match fdef.kind {
+                        elmdb_engine::RawFieldKind::String => FieldSpec::String,
+                        _ => continue,
+                    };
+                    td.fields.insert(fname, FieldDefinition { kind, optional: fdef.optional, nullable: fdef.nullable });
+                }
+                for (iname, idef) in tdef.indexes {
+                    let def = match idef.kind {
+                        elmdb_engine::RawIndexKind::Value { fields, unique } => {
+                            IndexDefinition::Value { fields, unique }
+                        }
+                        elmdb_engine::RawIndexKind::Vector { dims, quantization, fields } => {
+                            IndexDefinition::Vector { dims, quantization, fields }
+                        }
+                        _ => continue,
+                    };
+                    td.indexes.insert(iname, def);
+                }
+                schema.types.insert(tname, td);
+            }
+            let mut extra = TypeDefinition::default();
+            extra
+                .fields
+                .insert("label".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+            extra
+                .indexes
+                .insert("by_label".into(), IndexDefinition::Value { fields: vec!["label".into()], unique: false });
+            schema.types.insert("Extra".into(), extra);
+            db.set_schema(&schema).unwrap();
+            db.close().unwrap();
+        }
+        other => panic!("unknown child_batch2_worker action: {other}"),
+    }
+}
+
+#[test]
+fn batch2_map_growth_cross_proc_resize_sidecar_race_opguard_hooks_and_index_disambiguation() {
+    use elmdb::protocol::{FieldDefinition, FieldSpec, IndexDefinition, Schema, TypeDefinition};
+    use elmdb_engine::{BeforeCommitHook, TypeMask};
+    use std::sync::{Arc, Barrier};
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Build schema with two types (`Doc` and `Note`) sharing identical index names (`emb` and `by_tag`)
+    // to exercise P1-3 cross-type disambiguation and TOCTOU-free `set_embeddings`.
+    let mut schema = Schema::default();
+    for tname in ["Doc", "Note"] {
+        let mut td = TypeDefinition::default();
+        td.fields.insert("tag".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+        td.fields.insert("body".into(), FieldDefinition { kind: FieldSpec::String, optional: true, nullable: false });
+        td.indexes.insert("by_tag".into(), IndexDefinition::Value { fields: vec!["tag".into()], unique: false });
+        td.indexes.insert(
+            "emb".into(),
+            IndexDefinition::Vector { dims: 4, quantization: "f32".into(), fields: vec!["body".into()] },
+        );
+        schema.types.insert(tname.into(), td);
+    }
+
+    // -------------------------------------------------------------------------
+    // 1. P0-8: Tiny 256 KiB map auto-grows cleanly on single huge batch AND
+    //    parent adopts cross-process `MDB_MAP_RESIZED` on both reads & writes!
+    // -------------------------------------------------------------------------
+    let growth_dir = tmp.path().join("growth_db");
+    let db = Database::open(
+        &growth_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            map_size: Some(256 * 1024),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_schema(&schema).unwrap();
+    assert_eq!(db.stats().unwrap().map_size_bytes, 256 * 1024);
+
+    // Spawn real child process that grows the map well past 256 KiB while parent stays open at 256 KiB!
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_batch2_worker", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_B2_DIR", &growth_dir)
+        .env("ELMDB_TEST_B2_ACTION", "grow_map")
+        .status()
+        .unwrap();
+    assert!(status.success(), "child_batch2_worker grow_map failed: {status}");
+
+    // Parent immediately reads AND writes — MUST transparently adopt `MDB_MAP_RESIZED`!
+    assert!(db.get_row_resolved("child-big-39").unwrap().is_some(), "parent read must adopt MDB_MAP_RESIZED");
+    assert!(db.stats().unwrap().map_size_bytes > 256 * 1024);
+
+    // Now force ANOTHER local `MDB_MAP_FULL` growth inside the parent in one large incompressible batch!
+    let prev_map = db.stats().unwrap().map_size_bytes;
+    let parent_big_ops: Vec<WireOp> = (0..64u64)
+        .map(|i| {
+            // Deterministic LCG hex payload so zstd cannot compress it down to a few bytes.
+            let mut state = 0x9E37_79B9_7F4A_7C15u64.wrapping_mul(i + 1);
+            let mut body = String::with_capacity(32 * 1024);
+            for _ in 0..(32 * 1024 / 16) {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                use std::fmt::Write;
+                let _ = write!(&mut body, "{state:016x}");
+            }
+            WireOp::Create {
+                type_name: "Doc".into(),
+                external_id: Some(format!("parent-big-{i}")),
+                fields: vec![
+                    ("tag".into(), CanonicalValue::String("parent".into())),
+                    ("body".into(), CanonicalValue::String(body)),
+                ],
+            }
+        })
+        .collect();
+    db.execute_batch(&parent_big_ops).unwrap();
+    assert!(db.stats().unwrap().map_size_bytes > prev_map, "parent must grow map_size on MDB_MAP_FULL");
+    assert!(db.get_row_resolved("parent-big-63").unwrap().is_some());
+
+    // -------------------------------------------------------------------------
+    // 2. P1-3: Cross-type `set_embeddings` disambiguation, `check`/`rebuild`
+    //    ambiguity rejection, and cross-process `schema()` / `index_status()` refresh!
+    // -------------------------------------------------------------------------
+    db.execute_batch(&[
+        WireOp::Create {
+            type_name: "Doc".into(),
+            external_id: Some("doc-1".into()),
+            fields: vec![("tag".into(), CanonicalValue::String("alpha".into()))],
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("note-1".into()),
+            fields: vec![("tag".into(), CanonicalValue::String("beta".into()))],
+        },
+    ])
+    .unwrap();
+    // Unqualified `emb` resolves against each entity's own type atomically inside the write txn!
+    db.set_embeddings("emb", "doc-1", &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    db.set_embeddings("emb", "note-1", &[vec![0.0, 1.0, 0.0, 0.0]]).unwrap();
+    // Type-qualified wrong type fails cleanly instead of corrupting the wrong index!
+    let mismatch = db.set_embeddings("Doc.emb", "note-1", &[vec![0.0, 0.0, 1.0, 0.0]]).unwrap_err();
+    assert_eq!(mismatch.code, ErrorCode::EndpointMismatch);
+    // Ambiguous unqualified `check`/`rebuild` is rejected; type-qualified succeeds!
+    assert_eq!(db.check(Some("by_tag")).unwrap_err().code, ErrorCode::InvalidArgument);
+    assert_eq!(db.rebuild(Some("by_tag")).unwrap_err().code, ErrorCode::InvalidArgument);
+    assert!(db.check(Some("Doc.by_tag")).unwrap().is_clean());
+    db.rebuild(Some("Note.by_tag")).unwrap();
+
+    // Child bumps schema to add `Extra` type + `by_label` index; parent immediately sees it via `schema()` & `index_status()`!
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_batch2_worker", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_B2_DIR", &growth_dir)
+        .env("ELMDB_TEST_B2_ACTION", "schema_bump")
+        .status()
+        .unwrap();
+    assert!(status.success(), "child_batch2_worker schema_bump failed: {status}");
+    assert!(db.schema().unwrap().type_by_name("Extra").is_some(), "db.schema() must refresh cross-process epoch");
+    assert!(
+        db.index_status().unwrap().iter().any(|s| s.name == "by_label"),
+        "db.index_status() must refresh cross-process epoch"
+    );
+
+    // -------------------------------------------------------------------------
+    // 3. P1-2: Rust `beforeCommit` hook touching `&Database` returns clean
+    //    `InvalidArgument` (zero BorrowMutError panic, zero WriterLock deadlock)!
+    // -------------------------------------------------------------------------
+    let db = Arc::new(db);
+    let db_hook = Arc::clone(&db);
+    let hook_checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let hook_checked_cl = Arc::clone(&hook_checked);
+    let mut wants = TypeMask::empty();
+    wants.insert(db.schema().unwrap().type_by_name("Doc").unwrap().id);
+    let hook_id = db
+        .register_before_commit(BeforeCommitHook {
+            wants,
+            callback: Arc::new(move |ctx| {
+                // Re-entering `&Database` must return InvalidArgument, never panic or deadlock!
+                assert_eq!(db_hook.get_row("doc-1").unwrap_err().code, ErrorCode::InvalidArgument);
+                assert_eq!(
+                    db_hook
+                        .execute_batch(&[WireOp::Create {
+                            type_name: "Doc".into(),
+                            external_id: Some("reenter-fail".into()),
+                            fields: vec![("tag".into(), CanonicalValue::String("x".into()))],
+                        }])
+                        .unwrap_err()
+                        .code,
+                    ErrorCode::InvalidArgument
+                );
+                assert_eq!(
+                    db_hook.transact_scoped(elmdb::TransactOptions::default(), || Ok(())).unwrap_err().code,
+                    ErrorCode::InvalidArgument
+                );
+                assert_eq!(db_hook.close().unwrap_err().code, ErrorCode::InvalidArgument);
+                // `pending_commit_seq()` remains safely readable and matches `ctx.commit_seq()`!
+                assert_eq!(db_hook.pending_commit_seq(), Some(ctx.commit_seq()));
+                hook_checked_cl.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }),
+        })
+        .unwrap();
+    db.execute_batch(&[WireOp::Create {
+        type_name: "Doc".into(),
+        external_id: Some("hook-trigger".into()),
+        fields: vec![("tag".into(), CanonicalValue::String("hooked".into()))],
+    }])
+    .unwrap();
+    assert!(hook_checked.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(db.unregister_before_commit(hook_id));
+
+    // P2-4: Backup writes & fsyncs `.elmdb-backup` marker and allows BackupInto::Backups overwrite.
+    let backup_dir = tmp.path().join("b2_backup");
+    db.backup_into(&backup_dir, BackupInto::New).unwrap();
+    assert_eq!(std::fs::read_to_string(backup_dir.join(".elmdb-backup")).unwrap(), "elmdb-v2-backup\n");
+    db.backup_into(&backup_dir, BackupInto::Backups).unwrap();
+
+    db.close().unwrap();
+
+    // -------------------------------------------------------------------------
+    // 4. P0-6: Concurrent multi-process Strict writers racing on `synced.v2`
+    //    sidecar never corrupt slots or regress `txnid`!
+    // -------------------------------------------------------------------------
+    let race_dir = tmp.path().join("sidecar_race_db");
+    let race_db = Database::open(
+        &race_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    race_db.set_schema(&schema).unwrap();
+
+    let mut child1 = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_batch2_worker", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_B2_DIR", &race_dir)
+        .env("ELMDB_TEST_B2_ACTION", "strict_race")
+        .env("ELMDB_TEST_B2_WORKER", "1")
+        .spawn()
+        .unwrap();
+    let mut child2 = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_batch2_worker", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_B2_DIR", &race_dir)
+        .env("ELMDB_TEST_B2_ACTION", "strict_race")
+        .env("ELMDB_TEST_B2_WORKER", "2")
+        .spawn()
+        .unwrap();
+    for i in 0..15 {
+        race_db
+            .execute_batch(&[WireOp::Create {
+                type_name: "Doc".into(),
+                external_id: Some(format!("race-parent-{i}")),
+                fields: vec![("tag".into(), CanonicalValue::String("parent".into()))],
+            }])
+            .unwrap();
+    }
+    assert!(child1.wait().unwrap().success());
+    assert!(child2.wait().unwrap().success());
+    race_db.close().unwrap();
+
+    // Reopen MUST recover `Clean` with all 45 entities intact!
+    let verified =
+        Database::open(&race_dir, OpenOptions { durability: DurabilityMode::Strict, ..Default::default() }).unwrap();
+    assert_eq!(verified.open_report().status, "clean");
+    for prefix in ["race-parent", "race-1", "race-2"] {
+        for i in 0..15 {
+            assert!(verified.get_row_resolved(&format!("{prefix}-{i}")).unwrap().is_some());
+        }
+    }
+    verified.close().unwrap();
+
+    // -------------------------------------------------------------------------
+    // 5. P0-7: `OpGuard::drop` drops `Arc<EngineHandle>` BEFORE `active_ops -= 1`,
+    //    so immediate reopen after `close()` NEVER races with `DatabaseLocked`!
+    // -------------------------------------------------------------------------
+    let close_dir = tmp.path().join("opguard_close_db");
+    for iter in 0..20 {
+        let handle = Arc::new(
+            Database::open(&close_dir, OpenOptions { durability: DurabilityMode::Unsafe, ..Default::default() })
+                .unwrap_or_else(|e| panic!("reopen failed on iter {iter}: {e:?}")),
+        );
+        if iter == 0 {
+            handle.set_schema(&schema).unwrap();
+        }
+        let barrier = Arc::new(Barrier::new(2));
+        let h_read = Arc::clone(&handle);
+        let b_read = Arc::clone(&barrier);
+        let reader = std::thread::spawn(move || {
+            b_read.wait();
+            for _ in 0..5 {
+                let _ = h_read.stats();
+            }
+        });
+        barrier.wait();
+        handle.close().unwrap();
+        // Immediately reopen on the VERY NEXT LINE — `mdb_env_close()` MUST already have finished!
+        let reopened =
+            Database::open(&close_dir, OpenOptions { durability: DurabilityMode::Unsafe, ..Default::default() })
+                .unwrap_or_else(|e| panic!("immediate post-close reopen raced on iter {iter}: {e:?}"));
+        reader.join().unwrap();
+        reopened.close().unwrap();
+    }
 }

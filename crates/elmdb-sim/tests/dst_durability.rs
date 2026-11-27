@@ -285,3 +285,45 @@ fn dst_mvcc_reader_survives_ping_pong_slot_truncate() {
     assert_eq!(reader2.get(db_a, b"term").unwrap(), None);
     assert_eq!(reader2.get(db_b, b"term").unwrap(), Some(b"new_postings".as_slice()));
 }
+
+#[test]
+fn dst_zero_byte_sidecar_recovers_as_unsynced_and_grouped_sync_failure_poisons() {
+    // P0-6: A 0-byte `synced.v2` (from a crash right after initial file creation before rename)
+    // must recover as `UnsyncedAfterReboot` instead of permanently bricking with `Corrupted`.
+    let dir = Path::new("/sim/zero_sidecar");
+    let store = SimKvStore::default();
+    let vfs = SimVfs::default();
+    let mut rng = SimRng::seeded(7);
+    let (gate, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
+    let mut txn = gate.begin_write().unwrap();
+    let db = txn.open_subdb("meta", DbFlags::DEFAULT).unwrap();
+    txn.put(db, b"k", b"v").unwrap();
+    txn.commit().unwrap();
+    drop(gate);
+
+    // Simulate a 0-byte truncated initial sidecar on disk and reboot.
+    vfs.write_all(&dir.join(SYNC_SIDECAR_NAME), &[]).unwrap();
+    vfs.sync_file(&dir.join(SYNC_SIDECAR_NAME)).unwrap();
+    vfs.crash_power_loss(&mut rng, true);
+
+    let (reopened, report) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
+    assert_eq!(report.status, RecoveryStatus::UnsyncedAfterReboot);
+    assert_eq!(report.valid_slots, 0);
+
+    // Calling `sync()` atomically heals the sidecar so the next open is Clean!
+    reopened.sync().unwrap();
+    drop(reopened);
+    let (healed, report2) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
+    assert_eq!(report2.status, RecoveryStatus::Clean);
+    assert_eq!(report2.valid_slots, 1);
+
+    // P2-3: Post-commit I/O failure in Grouped `sync()` permanently poisons the gate!
+    let mut txn = healed.begin_write().unwrap();
+    txn.put(db, b"k2", b"v2").unwrap();
+    txn.commit().unwrap();
+    store.inject_sync_failures(1);
+    let err = healed.sync().unwrap_err();
+    assert!(matches!(err, StorageError::DurabilityFailed(_)));
+    assert!(healed.is_poisoned());
+    assert!(matches!(healed.begin_read(), Err(StorageError::Poisoned(_))));
+}

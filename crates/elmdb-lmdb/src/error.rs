@@ -11,6 +11,7 @@ pub(crate) fn map_mdb_err(rc: c_int, map_size: usize, max_dbs: u32) -> StorageEr
         ffi::MDB_NOTFOUND => StorageError::NotFound,
         ffi::MDB_KEYEXIST => StorageError::KeyExist,
         ffi::MDB_MAP_FULL => StorageError::MapFull { map_size },
+        ffi::MDB_MAP_RESIZED => StorageError::MapResized,
         ffi::MDB_DBS_FULL => StorageError::DbsFull { max_dbs },
         ffi::MDB_READERS_FULL | ffi::MDB_TLS_FULL => StorageError::ReadersFull,
         ffi::MDB_TXN_FULL => StorageError::TxnFull,

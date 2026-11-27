@@ -362,15 +362,23 @@ fn lmdb_ping_pong_subdb_pool_never_hits_dbs_full_and_preserves_mvcc() {
         assert_eq!(pinned_reader.get(active_db, b"gen").unwrap(), Some(prev_epoch.as_bytes()));
 
         let staging_slot = pool.allocate().unwrap();
-        let staging_db = {
-            let mut tx = gate.begin_write().unwrap();
-            let db = tx.open_subdb(&staging_slot.name(), DbFlags::DEFAULT).unwrap();
-            let cur_epoch = format!("{epoch}");
-            tx.put(db, b"gen", cur_epoch.as_bytes()).unwrap();
-            tx.truncate(active_db).unwrap();
-            tx.commit().unwrap();
-            db
-        };
+        // Run the writer on a separate OS thread while `pinned_reader` stays open on this thread,
+        // exercising true cross-thread MVCC isolation alongside strict non-recursive L2 `MapGate`.
+        let staging_db = std::thread::scope(|s| {
+            let gate_ref = &gate;
+            let slot_name = staging_slot.name();
+            s.spawn(move || {
+                let mut tx = gate_ref.begin_write().unwrap();
+                let db = tx.open_subdb(&slot_name, DbFlags::DEFAULT).unwrap();
+                let cur_epoch = format!("{epoch}");
+                tx.put(db, b"gen", cur_epoch.as_bytes()).unwrap();
+                tx.truncate(active_db).unwrap();
+                tx.commit().unwrap();
+                db
+            })
+            .join()
+            .unwrap()
+        });
 
         assert_eq!(pinned_reader.get(active_db, b"gen").unwrap(), Some(prev_epoch.as_bytes()));
         drop(pinned_reader);
@@ -409,4 +417,81 @@ fn lmdb_aborted_subdb_creation_does_not_poison_dbi_cache() {
     let ro = lmdb.begin_read().unwrap();
     let db_ro = lmdb.open_subdb_ro(&ro, "ephemeral", DbFlags::DEFAULT).unwrap().unwrap();
     assert_eq!(ro.get(db_ro, b"a").unwrap(), Some(b"2".as_slice()));
+}
+
+#[test]
+#[ignore = "child process helper invoked by lmdb_batch2_single_open_boot_id_truncation_reader_check_and_zero_hash_raw_commit"]
+fn child_print_boot_id_and_read_helper() {
+    let dir = std::path::PathBuf::from(std::env::var("ELMDB_TEST_LMDB_DIR").expect("ELMDB_TEST_LMDB_DIR"));
+    let bid = elmdb_lmdb::platform_boot_id();
+    let hex: String = bid.0.iter().map(|b| format!("{b:02x}")).collect();
+    println!("BOOT_ID={hex}");
+    let lmdb = LmdbStore::open(&dir, LmdbConfig { max_readers: 4, ..LmdbConfig::default() }).unwrap();
+    let ro = lmdb.begin_read().unwrap();
+    let db = lmdb.open_subdb_ro(&ro, "data", DbFlags::DEFAULT).unwrap().unwrap();
+    assert_eq!(ro.get(db, b"hello").unwrap(), Some(b"world".as_slice()));
+}
+
+#[test]
+fn lmdb_batch2_single_open_boot_id_truncation_reader_check_and_zero_hash_raw_commit() {
+    use elmdb_storage::BootId;
+
+    let tmp = TempDir::new().unwrap();
+    let lmdb =
+        LmdbStore::open(tmp.path(), LmdbConfig { map_size: 4 * 1024 * 1024, max_readers: 4, ..LmdbConfig::default() })
+            .unwrap();
+
+    // P0-5: Second in-process open of the same directory MUST fail with DatabaseLocked.
+    assert!(matches!(LmdbStore::open(tmp.path(), LmdbConfig::default()), Err(StorageError::DatabaseLocked(_))));
+
+    // P2-3: `commit_raw` returns exact `txnid` from RAM with zero SHA-256 (`[0u8; 32]`),
+    // while `active_receipt()` returns the matching `txnid` and real non-zero `roots_sha256`.
+    let mut tx = lmdb.begin_write().unwrap();
+    let db = tx.open_subdb("data", DbFlags::DEFAULT).unwrap();
+    tx.put(db, b"hello", b"world").unwrap();
+    for i in 0..40u32 {
+        let key = format!("pad-{i:04}");
+        let val = vec![0xABu8; 2048];
+        tx.put(db, key.as_bytes(), &val).unwrap();
+    }
+    let raw_receipt = tx.commit_raw().unwrap();
+    assert!(raw_receipt.txnid >= 1);
+    assert_eq!(raw_receipt.roots_sha256, [0u8; 32], "commit_raw must not hash data.mdb on Grouped/Unsafe commits");
+    let full_receipt = lmdb.active_receipt().unwrap();
+    assert_eq!(full_receipt.txnid, raw_receipt.txnid);
+    assert_ne!(full_receipt.roots_sha256, [0u8; 32], "active_receipt must compute real roots_sha256");
+
+    // P0-9 + P1-1: Real child processes return identical non-zero OS BootId and never exhaust tiny `max_readers = 4`.
+    let parent_bid = elmdb_lmdb::platform_boot_id();
+    assert_ne!(parent_bid, BootId([0u8; 16]), "OS boot_id must be non-zero");
+    let parent_hex: String = parent_bid.0.iter().map(|b| format!("{b:02x}")).collect();
+    for _ in 0..6 {
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "child_print_boot_id_and_read_helper", "--ignored", "--nocapture"])
+            .env("ELMDB_TEST_LMDB_DIR", tmp.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "child helper failed: {}", String::from_utf8_lossy(&out.stderr));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let child_hex = stdout.lines().find_map(|l| l.strip_prefix("BOOT_ID=")).expect("child must print BOOT_ID");
+        assert_eq!(child_hex, parent_hex, "platform_boot_id() must be stable across independent OS processes");
+    }
+
+    // Drop `lmdb` -> single-open lock released AFTER mdb_env_close -> immediate reopen works!
+    drop(lmdb);
+    let reopened = LmdbStore::open(tmp.path(), LmdbConfig::default()).unwrap();
+    let page_size = reopened.page_size();
+    drop(reopened);
+
+    // P2-1: Truncating `data.mdb` to 2 pages (keeping valid meta pages 0 & 1 intact, but below `meta.last_pg`)
+    // MUST be rejected with `StorageError::Corrupted` BEFORE `mdb_env_open` (no SIGBUS!).
+    let data_path = tmp.path().join("data.mdb");
+    let orig_len = std::fs::metadata(&data_path).unwrap().len();
+    assert!(orig_len > (page_size as u64) * 3, "expected data.mdb > 3 pages, got {orig_len}");
+    std::fs::OpenOptions::new().write(true).open(&data_path).unwrap().set_len((page_size as u64) * 2).unwrap();
+    let trunc_err = LmdbStore::open(tmp.path(), LmdbConfig::default()).err().expect("truncated data.mdb must fail");
+    assert!(
+        matches!(trunc_err, StorageError::Corrupted(_)),
+        "expected StorageError::Corrupted on truncated data.mdb, got {trunc_err:?}"
+    );
 }

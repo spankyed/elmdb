@@ -15,7 +15,10 @@ use std::marker::PhantomData;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use parking_lot::{ArcMutexGuard, Mutex, MutexGuard, RawMutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use parking_lot::{
+    ArcMutexGuard, ArcRwLockReadGuard, Mutex, MutexGuard, RawMutex, RawRwLock, RwLock, RwLockReadGuard,
+    RwLockWriteGuard,
+};
 
 /// Lock hierarchy rank. Acquiring a lock with rank `<=` any rank currently held
 /// on the calling thread is a lock-order violation.
@@ -170,18 +173,36 @@ impl<T> SchemaEpochLock<T> {
     }
 }
 
+/// Owned `'static` (but `!Send`) read guard for a domain-checked `RwLock`.
+pub struct OrderedArcReadGuard<T> {
+    guard: ArcRwLockReadGuard<RawRwLock, T>,
+    _token: DomainToken,
+}
+
+impl<T> Deref for OrderedArcReadGuard<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.guard
+    }
+}
+
 /// L2: Non-recursive gate guarding LMDB map growth.
 #[derive(Debug, Default)]
-pub struct MapGate<T>(RwLock<T>);
+pub struct MapGate<T>(Arc<RwLock<T>>);
 
 impl<T> MapGate<T> {
-    pub const fn new(value: T) -> Self {
-        Self(RwLock::new(value))
+    pub fn new(value: T) -> Self {
+        Self(Arc::new(RwLock::new(value)))
     }
 
     pub fn read(&self) -> OrderedReadGuard<'_, T> {
         let token = DomainToken::enter(LockDomain::MapGate);
         OrderedReadGuard { guard: self.0.read(), _token: token }
+    }
+
+    pub fn read_arc(&self) -> OrderedArcReadGuard<T> {
+        let token = DomainToken::enter(LockDomain::MapGate);
+        OrderedArcReadGuard { guard: self.0.read_arc(), _token: token }
     }
 
     pub fn write(&self) -> OrderedWriteGuard<'_, T> {

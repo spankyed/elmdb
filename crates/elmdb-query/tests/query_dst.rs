@@ -1221,7 +1221,7 @@ fn live_lmdb_end_to_end_query_suite() {
         Arc::new(ProjectionRegistry::new(BuildPolicy::EagerInSchemaChange).with_external(Arc::new(VectorProjection)));
     let (engine, _) = Engine::open_with_projections(
         store,
-        OsVfs,
+        OsVfs::new(),
         SystemClock::default(),
         db_dir,
         DurabilityMode::Strict,

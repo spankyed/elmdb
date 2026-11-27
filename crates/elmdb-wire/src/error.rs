@@ -189,13 +189,15 @@ impl From<StorageError> for ElmdbError {
             StorageError::MapFull { .. } | StorageError::DbsFull { .. } | StorageError::TxnFull => {
                 ErrorCode::StorageFull
             }
+            StorageError::DatabaseLocked(_) => ErrorCode::DatabaseLocked,
             StorageError::ReadersFull => ErrorCode::ResourceLimit,
             StorageError::BadValSize { .. } => ErrorCode::InvalidArgument,
             StorageError::Corrupted(_) => ErrorCode::Corrupted,
             StorageError::Poisoned(_) => ErrorCode::Poisoned,
             StorageError::DurabilityFailed(_) => ErrorCode::DurabilityFailed,
             StorageError::Io(_) => ErrorCode::Io,
-            StorageError::InvalidSubDb { .. }
+            StorageError::MapResized
+            | StorageError::InvalidSubDb { .. }
             | StorageError::SavepointMismatch { .. }
             | StorageError::InvalidState(_) => ErrorCode::Internal,
         };

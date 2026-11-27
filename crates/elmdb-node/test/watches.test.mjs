@@ -1,12 +1,15 @@
 // Sans-I/O live query watch hub over N-API: registerWatch, tickWatches, nextDueWatch, rerunWatch, cross-process catch-up.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+const nativePath = require.resolve('../index.js');
+const clientPath = require.resolve('../client.js');
 const { Database } = require('../index.js');
 const { buildWireBatch } = require('../client.js');
 
@@ -28,18 +31,21 @@ const schema = {
   relations: {},
 };
 
-test('live watches invalidate selectively, dedup unchanged results, and catch up cross-handle commits', (t) => {
+test('live watches invalidate selectively, dedup unchanged results, and catch up cross-process commits', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'elmdb-v2-watch-'));
   let db1 = null;
-  let db2 = null;
   t.after(() => {
-    try { db2?.close(); } finally {
-      try { db1?.close(); } finally {
-        rmSync(dir, { recursive: true, force: true });
-      }
+    try { db1?.close(); } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
   db1 = Database.open(dir, { schema, durability: 'strict', buildPolicy: 'eager' });
+
+  // Single-open guard rejects opening the same DB twice in the same process.
+  assert.throws(
+    () => Database.open(dir, { durability: 'strict' }),
+    (err) => err.code === 'DATABASE_LOCKED',
+  );
 
   const openTasksSpec = {
     source: { kind: 'type', typeName: 'Task' },
@@ -67,9 +73,22 @@ test('live watches invalidate selectively, dedup unchanged results, and catch up
   assert.deepEqual(rerun.answer.ids, ['t1']);
   assert.equal(db1.watchesSettled(), true);
 
-  // Cross-handle (simulating cross-process) write caught up selectively via persisted commit_log!
-  db2 = Database.open(dir, { durability: 'strict' });
-  db2.executeWireBatch(buildWireBatch((b) => { b.create('Task', { title: 'Cross-proc', done: false }, 't2'); }));
+  // Real cross-process write caught up selectively via persisted commit_log!
+  execFileSync(
+    process.execPath,
+    [
+      '-e',
+      `const { Database } = require(${JSON.stringify(nativePath)});
+       const { buildWireBatch } = require(${JSON.stringify(clientPath)});
+       const db2 = Database.open(${JSON.stringify(dir)}, { durability: 'strict' });
+       try {
+         db2.executeWireBatch(buildWireBatch((b) => { b.create('Task', { title: 'Cross-proc', done: false }, 't2'); }));
+       } finally {
+         db2.close();
+       }`,
+    ],
+    { stdio: 'inherit' },
+  );
 
   const future2 = future1 + 60_000;
   const dirty = db1.catchUpCrossProcess(future2);
