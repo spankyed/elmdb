@@ -311,9 +311,25 @@ fn dst_zero_byte_sidecar_recovers_as_unsynced_and_grouped_sync_failure_poisons()
     assert_eq!(report.valid_slots, 0);
     assert!(reopened.has_unacked_reboot());
 
-    // B1: Routine `sync()` MUST NOT overwrite `synced.v2` while `unacked_reboot` is set!
+    // B1: Routine `sync()` in Grouped mode flushes `data.mdb` (`store.sync`) WITHOUT overwriting `synced.v2`!
     assert_eq!(reopened.sync().unwrap(), None);
     assert!(reopened.has_unacked_reboot());
+    {
+        let (re_sync_fail, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Grouped).unwrap();
+        assert!(re_sync_fail.has_unacked_reboot());
+        store.inject_sync_failures(1);
+        assert!(matches!(re_sync_fail.sync(), Err(StorageError::DurabilityFailed(_))));
+        assert!(re_sync_fail.is_poisoned());
+    }
+    // B1: Unsafe mode `acknowledge_restore()` clears an actual `unacked_reboot == true` and returns `Ok(None)`.
+    {
+        let (unsafe_unacked, u_rep) =
+            DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Unsafe).unwrap();
+        assert_eq!(u_rep.status, RecoveryStatus::UnsyncedAfterReboot);
+        assert!(unsafe_unacked.has_unacked_reboot());
+        assert_eq!(unsafe_unacked.acknowledge_restore().unwrap(), None);
+        assert!(!unsafe_unacked.has_unacked_reboot());
+    }
     drop(reopened);
     let (still_unacked, report_still) =
         DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Strict).unwrap();
@@ -346,6 +362,7 @@ fn dst_zero_byte_sidecar_recovers_as_unsynced_and_grouped_sync_failure_poisons()
         assert!(matches!(re_ack_fail.acknowledge_restore(), Err(StorageError::DurabilityFailed(_))));
         assert!(re_ack_fail.has_unacked_reboot());
         assert!(re_ack_fail.is_poisoned());
+        assert!(matches!(re_ack_fail.acknowledge_restore(), Err(StorageError::Poisoned(_))));
     }
 
     // B1: Explicit `acknowledge_restore()` seals `synced.v2` and clears `unacked_reboot` so next open is Clean!
@@ -358,22 +375,18 @@ fn dst_zero_byte_sidecar_recovers_as_unsynced_and_grouped_sync_failure_poisons()
     assert!(!healed.has_unacked_reboot());
     assert!(!healed.is_read_only());
 
-    // B3: Read-only gate refuses writes, sync, and acknowledge_restore with `StorageError::ReadOnly`.
+    // B3: Read-only gate refuses writes, sync, grow_map, and acknowledge_restore with `StorageError::ReadOnly`.
     let (ro_gate, ro_rep) =
         DurabilityGate::open_with_options(store.clone(), vfs.clone(), dir, DurabilityMode::Strict, true).unwrap();
     assert!(ro_gate.is_read_only());
     assert_eq!(ro_rep.status, RecoveryStatus::Clean);
     assert!(matches!(ro_gate.begin_write(), Err(StorageError::ReadOnly)));
+    assert!(matches!(ro_gate.grow_map(None), Err(StorageError::ReadOnly)));
     let ro_arc = std::sync::Arc::new(ro_gate);
     assert!(matches!(ro_arc.begin_write_owned(), Err(StorageError::ReadOnly)));
     assert!(matches!(ro_arc.sync(), Err(StorageError::ReadOnly)));
     assert!(matches!(ro_arc.acknowledge_restore(), Err(StorageError::ReadOnly)));
     drop(ro_arc);
-
-    // B1: Unsafe mode `acknowledge_restore()` clears `unacked_reboot` and returns `Ok(None)`.
-    let (unsafe_gate, _) = DurabilityGate::open(store.clone(), vfs.clone(), dir, DurabilityMode::Unsafe).unwrap();
-    assert_eq!(unsafe_gate.acknowledge_restore().unwrap(), None);
-    assert!(!unsafe_gate.has_unacked_reboot());
 
     // B1: Calling `acknowledge_restore()` on an unrecovered gate fails with InvalidState.
     let unrec = DurabilityGate::new_unrecovered(store.clone(), vfs.clone(), dir, DurabilityMode::Strict);

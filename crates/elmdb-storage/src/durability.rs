@@ -291,6 +291,9 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// Caller MUST NOT hold any open read or write transaction on the calling thread.
     pub fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
         self.check_poisoned()?;
+        if self.read_only {
+            return Err(StorageError::ReadOnly);
+        }
         match self.store.grow_map(min_size) {
             Ok(size) => Ok(size),
             Err(StorageError::Corrupted(msg)) => Err(self.poison_corrupted(msg)),
@@ -363,16 +366,19 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             None
         };
 
-        let receipt = self.store.active_receipt()?;
-        let observed_txnid = receipt.txnid;
-        let observed_roots = receipt.roots_sha256;
-
+        // Read the sidecar strictly BEFORE `active_receipt()`! Because writers always commit `data.mdb`
+        // before updating `synced.v2`, reading the sidecar first guarantees `durable.txnid <= observed_txnid`
+        // even for read-only opens when `synced.v2.lock` does not yet exist (`_sidecar_lock.is_none()`).
         let (sidecar_exists, valid_slots, best, empty_file) = self.read_sidecar_best()?;
         if sidecar_exists && !empty_file && valid_slots == 0 {
             return Err(StorageError::Corrupted(
                 "durability sidecar exists but neither 4 KiB slot has a valid checksum".into(),
             ));
         }
+
+        let receipt = self.store.active_receipt()?;
+        let observed_txnid = receipt.txnid;
+        let observed_roots = receipt.roots_sha256;
 
         let current_boot = self.vfs.boot_id();
         let status = match best {
@@ -531,7 +537,17 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
                 "DurabilityGate::recover() must succeed before calling sync()".into(),
             ));
         }
-        if self.mode == DurabilityMode::Unsafe || self.unacked_reboot.load(Ordering::Acquire) {
+        if self.mode == DurabilityMode::Unsafe {
+            return Ok(None);
+        }
+        if self.unacked_reboot.load(Ordering::Acquire) {
+            // Flush LMDB pages so Grouped-mode writes are not lost, without sealing `synced.v2`
+            // until the caller explicitly invokes `acknowledge_restore()`.
+            if let Err(err) = self.store.sync(&map_guard) {
+                return Err(self.poison(format!("store sync failed: {err}")));
+            }
+            drop(guard);
+            drop(map_guard);
             return Ok(None);
         }
         let slot = self.persist_durable_locked(&mut guard, &map_guard, None)?;

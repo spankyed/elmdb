@@ -1411,8 +1411,36 @@ impl Database {
         }
         if self.closed.swap(true, Ordering::SeqCst) {
             let mut st = self.close_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let deadline = timeout.map(|d| std::time::Instant::now() + d);
             while !st.done {
-                st = self.close_cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
+                match deadline {
+                    Some(dl) => {
+                        let now = std::time::Instant::now();
+                        if now >= dl {
+                            return if !propagate_sync_err {
+                                Ok(())
+                            } else if self.read_only {
+                                Err(ElmdbError::new(
+                                    ErrorCode::DatabaseLocked,
+                                    "database close timed out waiting for concurrent close",
+                                ))
+                            } else {
+                                Err(ElmdbError::new(
+                                    ErrorCode::DurabilityFailed,
+                                    "database close timed out waiting for concurrent close",
+                                ))
+                            };
+                        }
+                        let (next_st, _) = self
+                            .close_cv
+                            .wait_timeout(st, dl.saturating_duration_since(now))
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        st = next_st;
+                    }
+                    None => {
+                        st = self.close_cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
+                    }
+                }
             }
             if propagate_sync_err && let Some((code, msg)) = &st.outcome {
                 return Err(ElmdbError::new(*code, msg.clone()));
@@ -1432,7 +1460,14 @@ impl Database {
                 self.db.close_cv.notify_all();
             }
         }
-        let mut mark_done = MarkCloseDone { db: self, outcome: None };
+        // Default to a failure outcome so unwinding on panic never reports `Ok(())` to waiters.
+        let mut mark_done = MarkCloseDone {
+            db: self,
+            outcome: Some((
+                if self.read_only { ErrorCode::Internal } else { ErrorCode::DurabilityFailed },
+                "database close panicked before completing".to_owned(),
+            )),
+        };
 
         self.hub.stop_watches();
 
@@ -1491,9 +1526,7 @@ impl Database {
             Ok(())
         };
 
-        if let Err(ref err) = outcome {
-            mark_done.outcome = Some((err.code, err.message.clone()));
-        }
+        mark_done.outcome = outcome.as_ref().err().map(|err| (err.code, err.message.clone()));
         drop(mark_done);
         if propagate_sync_err { outcome } else { Ok(()) }
     }
@@ -1758,48 +1791,66 @@ mod tests {
     #[test]
     fn batch_b_close_within_timeout_reports_error_for_writable_readonly_and_concurrent_waiters() {
         // 1. Writable DB: active op blocks drain -> `close_within` returns DurabilityFailed,
-        //    concurrent waiter sees DurabilityFailed, and `close_at_exit` returns Ok(()).
+        //    concurrent waiter with shorter timeout times out cleanly, concurrent waiter without
+        //    shorter timeout sees recorded DurabilityFailed, and `close_at_exit` returns Ok(()).
         {
             let dir = tempfile::tempdir().unwrap();
             let db = Arc::new(Database::open(dir.path(), OpenOptions::default()).unwrap());
             let held_op = db.enter_op().unwrap();
 
-            let db_waiter = Arc::clone(&db);
             let db_closer = Arc::clone(&db);
-            let (tx_started, rx_started) = std::sync::mpsc::channel();
-            let closer = std::thread::spawn(move || {
-                tx_started.send(()).unwrap();
-                db_closer.close_within(Some(Duration::from_millis(40)))
-            });
-            rx_started.recv().unwrap();
-            std::thread::sleep(Duration::from_millis(10));
+            let closer = std::thread::spawn(move || db_closer.close_within(Some(Duration::from_millis(120))));
+            while !db.closed.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            // Waiter with shorter timeout fails immediately on waiter deadline (writable -> DurabilityFailed).
+            assert_eq!(db.close_within(Some(Duration::from_millis(15))).unwrap_err().code, ErrorCode::DurabilityFailed);
+            // `close_at_exit` waiter timing out returns Ok(()).
+            db.close_at_exit(Duration::from_millis(15)).unwrap();
+            // Unbounded waiter waits for closer to finish and sees the recorded DurabilityFailed.
+            let db_waiter = Arc::clone(&db);
             let waiter = std::thread::spawn(move || db_waiter.close());
 
             let err1 = closer.join().unwrap().unwrap_err();
             assert_eq!(err1.code, ErrorCode::DurabilityFailed);
             let err2 = waiter.join().unwrap().unwrap_err();
             assert_eq!(err2.code, ErrorCode::DurabilityFailed);
-            // Subsequent `close_at_exit` never propagates sync/drain error.
             db.close_at_exit(Duration::from_millis(10)).unwrap();
             drop(held_op);
         }
 
-        // 2. Read-only DB: active op blocks drain -> `close_within` returns DatabaseLocked.
+        // 2. First closer via `close_at_exit` on active-op drain timeout returns Ok(()) (does not propagate).
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let db = Database::open(dir.path(), OpenOptions::default()).unwrap();
+            let held_op = db.enter_op().unwrap();
+            db.close_at_exit(Duration::from_millis(15)).unwrap();
+            assert_eq!(db.close().unwrap_err().code, ErrorCode::DurabilityFailed);
+            drop(held_op);
+        }
+
+        // 3. Read-only DB: active op blocks drain -> `close_within` and concurrent waiter return DatabaseLocked.
         {
             let dir = tempfile::tempdir().unwrap();
             let rw = Database::open(dir.path(), OpenOptions::default()).unwrap();
             rw.close().unwrap();
 
-            let ro = Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap();
+            let ro =
+                Arc::new(Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap());
             let held_op = ro.enter_op().unwrap();
-            let err = ro.close_within(Some(Duration::from_millis(20))).unwrap_err();
+            let ro_closer = Arc::clone(&ro);
+            let closer = std::thread::spawn(move || ro_closer.close_within(Some(Duration::from_millis(80))));
+            while !ro.closed.load(Ordering::SeqCst) {
+                std::thread::yield_now();
+            }
+            assert_eq!(ro.close_within(Some(Duration::from_millis(15))).unwrap_err().code, ErrorCode::DatabaseLocked);
+            let err = closer.join().unwrap().unwrap_err();
             assert_eq!(err.code, ErrorCode::DatabaseLocked);
-            // Idempotent close on an already-failed close still reports the error (when propagate_sync_err).
             assert_eq!(ro.close().unwrap_err().code, ErrorCode::DatabaseLocked);
             drop(held_op);
         }
 
-        // 3. Clean drain on writable DB succeeds and second `close()` is idempotent Ok(()).
+        // 4. Clean drain on writable DB succeeds and second `close()` is idempotent Ok(()).
         {
             let dir = tempfile::tempdir().unwrap();
             let db = Database::open(dir.path(), OpenOptions::default()).unwrap();
@@ -1816,13 +1867,21 @@ mod tests {
         fs::create_dir_all(&src).unwrap();
         fs::create_dir_all(&sibling).unwrap();
 
-        // Self and descendant rejected; sibling on same filesystem allowed.
+        // Self, descendant, lexical `..` into self, and ancestor rejected; sibling on same filesystem allowed.
         assert_eq!(
             crate::fs_publish::ensure_not_self_or_descendant(&src, &src).unwrap_err().code,
             ErrorCode::InvalidArgument
         );
         assert_eq!(
             crate::fs_publish::ensure_not_self_or_descendant(&src, &src.join("nested/sub")).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            crate::fs_publish::ensure_not_self_or_descendant(&src, &src.join("missing/../sub")).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            crate::fs_publish::ensure_not_self_or_descendant(&src, dir.path()).unwrap_err().code,
             ErrorCode::InvalidArgument
         );
         crate::fs_publish::ensure_not_self_or_descendant(&src, &sibling).unwrap();
@@ -1843,22 +1902,30 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), b"first", "existing target file must remain intact");
         let _ = fs::remove_file(&tmp2);
 
-        // Non-AlreadyExists errors (missing source) map to Io, not AlreadyExists.
+        // Non-AlreadyExists errors map to Io (missing source file / missing target parent / regular file on Windows).
         assert_eq!(
             crate::fs_publish::atomic_publish_file_no_overwrite(&dir.path().join("no_such_tmp"), &dir.path().join("x"))
                 .unwrap_err()
                 .code,
             ErrorCode::Io
         );
+        let stage_io = dir.path().join("stage_io");
+        fs::create_dir_all(&stage_io).unwrap();
         assert_eq!(
-            crate::fs_publish::atomic_publish_dir_new(&dir.path().join("no_such_stage"), &dir.path().join("y"))
+            crate::fs_publish::atomic_publish_dir_new(&stage_io, &dir.path().join("no_such_parent/child"))
                 .unwrap_err()
                 .code,
             ErrorCode::Io
         );
+        let reg_file = dir.path().join("regular_file.txt");
+        fs::write(&reg_file, b"file").unwrap();
+        let reg_err = crate::fs_publish::atomic_publish_dir_new(&stage_io, &reg_file).unwrap_err();
+        #[cfg(unix)]
+        assert_eq!(reg_err.code, ErrorCode::AlreadyExists);
+        #[cfg(not(unix))]
+        assert_eq!(reg_err.code, ErrorCode::Io);
 
-        // `atomic_publish_dir_new` directly rejects non-empty target dir with AlreadyExists,
-        // and `atomic_publish_dir_replace` publishes into non-existent target dir cleanly.
+        // `atomic_publish_dir_new` directly rejects non-empty target dir with AlreadyExists.
         let non_empty = dir.path().join("non_empty_dir");
         fs::create_dir_all(&non_empty).unwrap();
         fs::write(non_empty.join("f.txt"), b"x").unwrap();
@@ -1868,9 +1935,37 @@ mod tests {
             crate::fs_publish::atomic_publish_dir_new(&stage_ne, &non_empty).unwrap_err().code,
             ErrorCode::AlreadyExists
         );
+
+        // `atomic_publish_dir_replace` publishes into non-existent target, existing empty target,
+        // rejects non-backup non-empty target, and rejects symlink target.
         let fresh_target = dir.path().join("fresh_replace_target");
         crate::fs_publish::atomic_publish_dir_replace(&stage_ne, &fresh_target, BACKUP_MARKER, 1).unwrap();
         assert!(fresh_target.exists());
+
+        let empty_replace_target = dir.path().join("empty_replace_target");
+        fs::create_dir_all(&empty_replace_target).unwrap();
+        let stage_empty = dir.path().join("stage_empty");
+        fs::create_dir_all(&stage_empty).unwrap();
+        fs::write(stage_empty.join("ok.txt"), b"ok").unwrap();
+        crate::fs_publish::atomic_publish_dir_replace(&stage_empty, &empty_replace_target, BACKUP_MARKER, 2).unwrap();
+        assert_eq!(fs::read(empty_replace_target.join("ok.txt")).unwrap(), b"ok");
+
+        assert_eq!(
+            crate::fs_publish::atomic_publish_dir_replace(&stage_io, &non_empty, BACKUP_MARKER, 3).unwrap_err().code,
+            ErrorCode::AlreadyExists
+        );
+
+        #[cfg(unix)]
+        {
+            let link_target = dir.path().join("symlink_backup");
+            std::os::unix::fs::symlink(&fresh_target, &link_target).unwrap();
+            assert_eq!(
+                crate::fs_publish::atomic_publish_dir_replace(&stage_io, &link_target, BACKUP_MARKER, 4)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+        }
 
         // `parent_dir` returns `.` for bare filenames and real parent for nested paths.
         assert_eq!(crate::fs_publish::parent_dir(Path::new("dump.json")), Path::new("."));

@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use elmdb_storage::{OsVfs, Vfs};
 use elmdb_wire::{ElmdbError, ErrorCode, Result};
@@ -13,21 +13,35 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
     }
 }
 
+/// Lexically normalizes `.` and `..` components onto an absolute path without requiring
+/// intermediate segments to exist on disk.
+fn normalize_absolute(path: &Path) -> Result<PathBuf> {
+    let abs = std::env::current_dir()
+        .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot resolve current directory: {e}")))?
+        .join(path);
+    let mut out = PathBuf::new();
+    for comp in abs.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    Ok(out)
+}
+
 /// Resolves `path` to a canonicalized path even if trailing path components do not exist yet,
-/// by canonicalizing the deepest existing ancestor and re-appending the remaining suffix.
+/// by lexically normalizing `.`/`..`, canonicalizing the deepest existing ancestor, and
+/// re-appending the remaining suffix.
 fn resolve_path_preserving_missing(path: &Path) -> Result<PathBuf> {
     if let Ok(canon) = fs::canonicalize(path) {
         return Ok(canon);
     }
-    let abs = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot resolve current directory: {e}")))?
-            .join(path)
-    };
+    let normalized = normalize_absolute(path)?;
     let mut missing = Vec::new();
-    let mut cur = abs.as_path();
+    let mut cur = normalized.as_path();
     loop {
         if let Ok(canon) = fs::canonicalize(cur) {
             let mut out = canon;
@@ -37,22 +51,23 @@ fn resolve_path_preserving_missing(path: &Path) -> Result<PathBuf> {
             return Ok(out);
         }
         let Some(name) = cur.file_name() else {
-            return Ok(abs);
+            return Ok(normalized);
         };
         missing.push(name.to_os_string());
         let Some(parent) = cur.parent() else {
-            return Ok(abs);
+            return Ok(normalized);
         };
         cur = parent;
     }
 }
 
-/// Rejects publishing into `source_dir` itself or any descendant path inside `source_dir`.
+/// Rejects publishing into `source_dir` itself, any descendant inside `source_dir`,
+/// or any ancestor containing `source_dir`.
 pub(crate) fn ensure_not_self_or_descendant(source_dir: &Path, target: &Path) -> Result<()> {
     #[cfg(unix)]
     if let (Ok(sm), Ok(tm)) = (fs::metadata(source_dir), fs::metadata(target)) {
         use std::os::unix::fs::MetadataExt;
-        if sm.dev() == tm.dev() && sm.ino() == tm.ino() {
+        if (sm.dev(), sm.ino()) == (tm.dev(), tm.ino()) {
             return Err(ElmdbError::new(
                 ErrorCode::InvalidArgument,
                 format!("cannot publish into live database directory '{}'", target.display()),
@@ -63,10 +78,10 @@ pub(crate) fn ensure_not_self_or_descendant(source_dir: &Path, target: &Path) ->
     let src_canon = fs::canonicalize(source_dir)
         .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot canonicalize database directory: {e}")))?;
     let target_resolved = resolve_path_preserving_missing(target)?;
-    if target_resolved.starts_with(&src_canon) {
+    if target_resolved.starts_with(&src_canon) || src_canon.starts_with(&target_resolved) {
         return Err(ElmdbError::new(
             ErrorCode::InvalidArgument,
-            format!("cannot publish into live database directory or subdirectory '{}'", target.display()),
+            format!("cannot publish into live database directory, ancestor, or subdirectory '{}'", target.display()),
         ));
     }
     Ok(())
@@ -97,10 +112,15 @@ pub(crate) fn atomic_publish_dir_new(staging: &Path, target_dir: &Path) -> Resul
     #[cfg(unix)]
     {
         // POSIX `rename(2)` atomically replaces an existing empty directory in a single syscall
-        // and rejects a non-empty directory with `ENOTEMPTY` / `EEXIST` (no delete-before-rename window).
+        // and rejects a non-empty directory or non-directory with `ENOTEMPTY` / `EEXIST` / `ENOTDIR`.
         match fs::rename(staging, target_dir) {
             Ok(()) => {}
-            Err(e) if matches!(e.kind(), ErrorKind::DirectoryNotEmpty | ErrorKind::AlreadyExists) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    ErrorKind::DirectoryNotEmpty | ErrorKind::AlreadyExists | ErrorKind::NotADirectory
+                ) =>
+            {
                 return Err(ElmdbError::new(
                     ErrorCode::AlreadyExists,
                     format!("target directory '{}' is not empty", target_dir.display()),
@@ -140,8 +160,13 @@ pub(crate) fn atomic_publish_dir_new(staging: &Path, target_dir: &Path) -> Resul
             if removed_empty {
                 let _ = fs::create_dir(target_dir);
             }
+            let code = if matches!(e.kind(), ErrorKind::DirectoryNotEmpty | ErrorKind::AlreadyExists) {
+                ErrorCode::AlreadyExists
+            } else {
+                ErrorCode::Io
+            };
             return Err(ElmdbError::new(
-                ErrorCode::Io,
+                code,
                 format!("cannot move directory into place '{}': {e}", target_dir.display()),
             ));
         }
@@ -159,13 +184,27 @@ pub(crate) fn atomic_publish_dir_replace(
     backup_marker: &str,
     nonce: u64,
 ) -> Result<()> {
-    if !target_dir.exists() {
-        return atomic_publish_dir_new(staging, target_dir);
+    match fs::symlink_metadata(target_dir) {
+        Err(e) if e.kind() == ErrorKind::NotFound => return atomic_publish_dir_new(staging, target_dir),
+        Err(e) => {
+            return Err(ElmdbError::new(ErrorCode::Io, format!("cannot inspect backup target: {e}")));
+        }
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(ElmdbError::new(
+                ErrorCode::InvalidArgument,
+                format!("refusing to replace symlink backup target '{}'", target_dir.display()),
+            ));
+        }
+        Ok(_) => {}
     }
 
-    let mut entries = fs::read_dir(target_dir)
-        .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot read backup target: {e}")))?;
-    if entries.next().is_none() {
+    // Drop `ReadDir` immediately before renaming/removing so Windows never hits `ERROR_ACCESS_DENIED`
+    // / `ERROR_SHARING_VIOLATION` from an open directory search handle.
+    let is_empty = fs::read_dir(target_dir)
+        .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot read backup target: {e}")))?
+        .next()
+        .is_none();
+    if is_empty {
         return atomic_publish_dir_new(staging, target_dir);
     }
 
