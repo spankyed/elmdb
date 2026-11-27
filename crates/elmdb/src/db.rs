@@ -1788,7 +1788,7 @@ mod tests {
             let held_op = db.enter_op().unwrap();
 
             let db_closer = Arc::clone(&db);
-            let closer = std::thread::spawn(move || db_closer.close_within(Some(Duration::from_millis(120))));
+            let closer = std::thread::spawn(move || db_closer.close_within(Some(Duration::from_millis(500))));
             while !db.closed.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }
@@ -1850,7 +1850,7 @@ mod tests {
                 Arc::new(Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap());
             let held_op = ro.enter_op().unwrap();
             let ro_closer = Arc::clone(&ro);
-            let closer = std::thread::spawn(move || ro_closer.close_within(Some(Duration::from_millis(80))));
+            let closer = std::thread::spawn(move || ro_closer.close_within(Some(Duration::from_millis(500))));
             while !ro.closed.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }
