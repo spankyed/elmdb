@@ -544,5 +544,50 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     const alreadyLoaded = toEarsError({ code: 'ALREADY_LOADED', message: 'another binary claimed process' });
     expect(alreadyLoaded.code).toBe('ALREADY_LOADED');
     expect(alreadyLoaded.message).toContain('another binary');
+
+    // F3: Empty 0-op executeWireBatch inside transact() reads real op_count = 0 (no phantom sequence!)
+    //     and non-empty executeWireBatch (including non-zero byteOffset slice) reports exact op_count.
+    const beforeEmptyWire = events.length;
+    engine.transact(() => {
+      engine.executeWireBatch(encodeBatch(() => {}));
+    });
+    const emptyWireEvents = events.slice(beforeEmptyWire);
+    const emptyWireWrite = emptyWireEvents.find((e) => e.op.kind === 'write');
+    const emptyWireUnit = emptyWireEvents.find((e) => e.op.kind === 'unit');
+    expect(emptyWireWrite?.op.ops).toBe(0);
+    expect(emptyWireUnit?.res.outcome).toBe('ok');
+    expect(emptyWireUnit?.res.sequence).toBeUndefined();
+
+    const twoOpFrame = encodeBatch((b) => {
+      b.create('Task', { title: 'w1', done: false }, 'f3-1');
+      b.create('Task', { title: 'w2', done: true }, 'f3-2');
+    });
+    const padded = new Uint8Array(twoOpFrame.byteLength + 8);
+    padded.set(twoOpFrame, 4);
+    const slicedView = padded.subarray(4, 4 + twoOpFrame.byteLength);
+    const beforeTwoWire = events.length;
+    engine.executeWireBatch(slicedView);
+    const twoWireWrite = events.slice(beforeTwoWire).find((e) => e.op.kind === 'write');
+    expect(twoWireWrite?.op.ops).toBe(2);
+
+    // F4: Hostile throwing `.then` getter on returned object is wrapped as EarsError('INVALID_ARGUMENT')
+    //     while real Promises/thenables preserve EarsError('ASYNC_CALLBACK_FORBIDDEN') in both encodeBatch & batch.
+    const hostileThenable = Object.defineProperty({}, 'then', {
+      get() {
+        throw new Error('hostile .then getter');
+      },
+    });
+    expect(() =>
+      encodeBatch((() => hostileThenable) as unknown as (b: Parameters<typeof encodeBatch>[0] extends (x: infer W) => void ? W : never) => void),
+    ).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT', message: expect.stringContaining('hostile .then') }));
+    expect(() =>
+      engine.batch((() => hostileThenable) as unknown as Parameters<typeof engine.batch>[0]),
+    ).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT', message: expect.stringContaining('hostile .then') }));
+    expect(() =>
+      encodeBatch((async () => {}) as unknown as Parameters<typeof encodeBatch>[0]),
+    ).toThrowError(expect.objectContaining({ code: 'ASYNC_CALLBACK_FORBIDDEN' }));
+    expect(() =>
+      engine.batch((async () => {}) as unknown as Parameters<typeof engine.batch>[0]),
+    ).toThrowError(expect.objectContaining({ code: 'ASYNC_CALLBACK_FORBIDDEN' }));
   });
 });

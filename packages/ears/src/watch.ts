@@ -202,6 +202,7 @@ export class WatchPump implements WatchController {
     spec: QuerySpec,
     deliver: (answer: QueryAnswer) => void,
     options?: WatchOptions,
+    onSuppressImmediate?: (answer: QueryAnswer) => void,
   ): WatchHandle {
     if (this.#stopped) {
       throw new EarsError('CLOSED', 'Cannot register a watch after the engine has stopped');
@@ -243,6 +244,18 @@ export class WatchPump implements WatchController {
           this.#reportError(entry, toEarsError(error), false);
         } catch (handlerError) {
           // Never leak the registered watch if the caller's error handler rethrows before we return WatchHandle.
+          this.#unregister(entry.id);
+          throw handlerError;
+        }
+      }
+    } else if (onSuppressImmediate !== undefined) {
+      try {
+        onSuppressImmediate(reg.answer);
+      } catch (error) {
+        try {
+          this.#reportError(entry, toEarsError(error), false);
+        } catch (handlerError) {
+          // Never leak the registered watch if seeding/error handler throws before we return WatchHandle.
           this.#unregister(entry.id);
           throw handlerError;
         }

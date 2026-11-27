@@ -10,7 +10,7 @@ import type {
   SchemaChange,
   TransactOptions,
 } from 'elmdb';
-import { createBatchWriter, encodeBatch, isThenable, type BatchWriter, type LinkOptions } from './batch.ts';
+import { createBatchWriter, encodeBatch, isThenable, runSyncCallback, type BatchWriter, type LinkOptions } from './batch.ts';
 import type { CommitDelta, EarsDatabase, EdgeDirection } from './database.ts';
 import { EarsError, hasKnownErrorCode, toEarsError } from './errors.ts';
 import type { EarsOperationObserver } from './observer.ts';
@@ -128,6 +128,22 @@ export interface EarsEngine {
   beforeCommit(typeNames: readonly string[] | null, callback: BeforeCommitHook): () => void;
 }
 
+/** Reads the `u32 LE` op count at byte offset `5..9` of an `EWB2` binary wire batch frame. */
+function wireBatchOpCount(payload: Uint8Array): number {
+  if (
+    !(payload instanceof Uint8Array)
+    || payload.byteLength < 9
+    || payload[0] !== 0x45
+    || payload[1] !== 0x57
+    || payload[2] !== 0x42
+    || payload[3] !== 0x32
+  ) {
+    return 0;
+  }
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  return view.getUint32(5, true);
+}
+
 /** Creates an instance-scoped EARS v2 engine over an open `EarsDatabase`. */
 export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
   const db = options.database;
@@ -172,18 +188,11 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
 
   const batch = (fn: (b: BatchWriter) => void): BatchResult => {
     const writer = createBatchWriter();
-    let returned: unknown;
-    try {
-      returned = fn(writer);
-    } catch (error) {
-      throw toEarsError(error, 'INVALID_ARGUMENT');
-    }
-    if (isThenable(returned)) {
-      throw new EarsError(
-        'ASYNC_CALLBACK_FORBIDDEN',
-        'Batch callbacks must be synchronous (Promises and async callbacks are forbidden)',
-      );
-    }
+    runSyncCallback(
+      fn,
+      writer,
+      'Batch callbacks must be synchronous (Promises and async callbacks are forbidden)',
+    );
     return runBatchPayload(writer.encode(), writer.length);
   };
 
@@ -460,7 +469,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       pump.notifyMutation();
     },
     batch,
-    executeWireBatch: (payload: Uint8Array): BatchResult => runBatchPayload(payload, 1),
+    executeWireBatch: (payload: Uint8Array): BatchResult => runBatchPayload(payload, wireBatchOpCount(payload)),
     transact<T>(fn: () => T, opts?: TransactOptions): T {
       const isOuter = !isInWriteTxn();
       const finish = isOuter

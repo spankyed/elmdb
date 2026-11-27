@@ -209,15 +209,24 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-function normalizeQueryValue(value: unknown): unknown {
-  if (value === undefined) {
-    throw new EarsError('INVALID_ARGUMENT', 'Query value cannot be undefined');
+const MAX_QUERY_VALUE_DEPTH = 64;
+
+function normalizeQueryValue(
+  value: unknown,
+  seen: Set<object> = new Set(),
+  depth = 0,
+): unknown {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return value;
   }
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) {
       throw new EarsError('INVALID_ARGUMENT', `Query numeric value must be finite (got ${String(value)})`);
     }
     return value;
+  }
+  if (value === undefined) {
+    throw new EarsError('INVALID_ARGUMENT', 'Query value cannot be undefined');
   }
   if (typeof value === 'bigint') {
     throw new EarsError('INVALID_ARGUMENT', 'BigInt values are not supported in query filters or cursors');
@@ -238,20 +247,56 @@ function normalizeQueryValue(value: unknown): unknown {
     return ms;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => normalizeQueryValue(item));
+    if (depth >= MAX_QUERY_VALUE_DEPTH) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        `Query value exceeds maximum nesting depth (${MAX_QUERY_VALUE_DEPTH})`,
+      );
+    }
+    if (seen.has(value)) {
+      throw new EarsError('INVALID_ARGUMENT', 'Cyclic reference in query value');
+    }
+    seen.add(value);
+    try {
+      const out: unknown[] = [];
+      for (let i = 0; i < value.length; i++) {
+        out.push(normalizeQueryValue(value[i], seen, depth + 1));
+      }
+      return out;
+    } finally {
+      seen.delete(value);
+    }
   }
   if (isPlainRecord(value)) {
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(value)) {
-      if (key === '__proto__') {
-        throw new EarsError('INVALID_ARGUMENT', "Reserved key '__proto__' is not allowed in query values");
-      }
-      const v = value[key];
-      if (v !== undefined) out[key] = normalizeQueryValue(v);
+    if (depth >= MAX_QUERY_VALUE_DEPTH) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        `Query value exceeds maximum nesting depth (${MAX_QUERY_VALUE_DEPTH})`,
+      );
     }
-    return out;
+    if (seen.has(value)) {
+      throw new EarsError('INVALID_ARGUMENT', 'Cyclic reference in query value');
+    }
+    seen.add(value);
+    try {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(value)) {
+        if (key === '__proto__') {
+          throw new EarsError('INVALID_ARGUMENT', "Reserved key '__proto__' is not allowed in query values");
+        }
+        const v = value[key];
+        if (v !== undefined) out[key] = normalizeQueryValue(v, seen, depth + 1);
+      }
+      return out;
+    } finally {
+      seen.delete(value);
+    }
   }
-  return value;
+  const ctorName =
+    typeof value === 'object' && value.constructor && typeof value.constructor.name === 'string'
+      ? value.constructor.name
+      : typeof value;
+  throw new EarsError('INVALID_ARGUMENT', `Unsupported non-plain query value of type '${ctorName}'`);
 }
 
 function compileFieldPredicate(field: string, valueOrPredicate: WhereInput): QueryFilter {
@@ -1236,14 +1281,17 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
     const localFilters = this.#localFilters;
     const dedupPostFilter = localFilters.length > 0 && opts?.mode !== 'imperative';
     let lastFilteredJson: string | undefined;
+    const computeFiltered = (answer: QueryAnswer): TResult[] => {
+      if (answer.kind !== 'rows') {
+        throw new EarsError('INTERNAL', `Expected 'rows' watch answer, got '${answer.kind}'`);
+      }
+      const typed = answer.rows as unknown as TResult[];
+      return localFilters.length === 0 ? [...typed] : typed.filter((r) => localFilters.every((fn) => fn(r)));
+    };
     return this.#pump.register(
       spec,
       (answer) => {
-        if (answer.kind !== 'rows') {
-          throw new EarsError('INTERNAL', `Expected 'rows' watch answer, got '${answer.kind}'`);
-        }
-        const typed = answer.rows as unknown as TResult[];
-        const filtered = localFilters.length === 0 ? [...typed] : typed.filter((r) => localFilters.every((fn) => fn(r)));
+        const filtered = computeFiltered(answer);
         if (dedupPostFilter) {
           const serialized = JSON.stringify(filtered);
           if (serialized === lastFilteredJson) return;
@@ -1252,6 +1300,11 @@ class QueryBuilderImpl<TResult extends EntityRow> implements QueryBuilder<TResul
         callback(filtered);
       },
       opts,
+      dedupPostFilter
+        ? (initialAnswer) => {
+            lastFilteredJson = JSON.stringify(computeFiltered(initialAnswer));
+          }
+        : undefined,
     );
   }
 

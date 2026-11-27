@@ -437,4 +437,51 @@ describe('@elmdb/ears algebraic QueryBuilder', () => {
       code: 'UNKNOWN_TYPE',
     });
   });
+
+  it('rejects cyclic values, deep nesting (> 64), and non-plain objects in normalizeQueryValue while allowing DAGs (F1)', () => {
+    const handle = temps.open({ schema: querySchema });
+    const engine = createEarsEngine({ database: handle.database });
+
+    // 1. Cyclic array & cyclic object throw EarsError('INVALID_ARGUMENT') instead of RangeError.
+    const cyclicArr: unknown[] = [];
+    cyclicArr.push(cyclicArr);
+    expect(() => engine.query.of('Doc').where('title', cyclicArr as unknown as string)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT', message: expect.stringContaining('Cyclic') }),
+    );
+    const cyclicObj: Record<string, unknown> = {};
+    cyclicObj['self'] = cyclicObj;
+    expect(() => engine.query.of('Doc').where('title', { eq: cyclicObj })).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT', message: expect.stringContaining('Cyclic') }),
+    );
+
+    // 2. Nesting depth > 64 throws EarsError('INVALID_ARGUMENT').
+    let deep: unknown = 'leaf';
+    for (let i = 0; i < 66; i++) {
+      deep = [deep];
+    }
+    expect(() => engine.query.of('Doc').where('title', deep as unknown as string)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT', message: expect.stringContaining('depth') }),
+    );
+
+    // 3. Non-plain objects (Map, Set, RegExp, custom class instances, Int32Array) throw INVALID_ARGUMENT.
+    class CustomBox {
+      readonly v = 1;
+    }
+    for (const nonPlain of [new Map([['a', 1]]), new Set([1]), /abc/i, new CustomBox(), new Int32Array([1, 2])]) {
+      expect(() => engine.query.of('Doc').where('title', nonPlain as unknown as string)).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+      );
+      expect(() => engine.query.of('Doc').where('title', { eq: nonPlain })).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+      );
+    }
+
+    // 4. Shared non-cyclic DAG references, Uint8Array, valid Date, and allowlisted primitives succeed cleanly.
+    const shared = { nested: 'ok' };
+    const dagSpec = engine.query
+      .of('Doc')
+      .where('title', { eq: [shared, shared, new Uint8Array([1, 2]), new Date(1_700_000_000_000), null, true, 42] })
+      .toSpec();
+    expect(dagSpec.steps).toHaveLength(1);
+  });
 });
