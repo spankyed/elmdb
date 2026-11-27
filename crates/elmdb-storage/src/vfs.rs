@@ -67,6 +67,7 @@ impl OsVfs {
         Self { boot_id_override: Some(boot_id) }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn parse_uuid_boot_id(text: &str) -> Option<BootId> {
         let hex: String = text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
         if hex.len() != 32 {

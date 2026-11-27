@@ -56,11 +56,12 @@ impl LiveQueryHub {
         }
     }
 
-    /// Initializes a `LiveQueryHub` pinned to `engine`'s current `(commit_seq, schema_epoch, last_txnid)`.
+    /// Initializes a `LiveQueryHub` pinned to `engine`'s current `(commit_seq, schema_epoch, txnid)`.
     pub fn from_engine<S: KvStore, V: Vfs, C: Clock>(engine: &Engine<S, V, C>, turn_slice_ms: u64) -> Result<Self> {
+        use elmdb_storage::KvRead;
         let (ro, schema) = engine.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &engine.dbs())?;
-        let txnid = engine.gate().last_txnid()?;
+        let txnid = ro.txnid();
         let epoch = schema.epoch;
         drop(ro);
         Ok(Self {

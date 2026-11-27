@@ -16,6 +16,8 @@ pub mod meta;
 mod txn;
 
 pub use cursor::LmdbCursor;
-pub use env::{DEFAULT_MAP_SIZE, DEFAULT_MAX_DBS, DEFAULT_MAX_READERS, LmdbConfig, LmdbStore, platform_boot_id};
+pub use env::{
+    DEFAULT_MAP_SIZE, DEFAULT_MAX_DBS, DEFAULT_MAX_READERS, LmdbConfig, LmdbMapReadGuard, LmdbStore, platform_boot_id,
+};
 pub use meta::{MetaPageInfo, read_active_meta_page, verify_data_file_headers};
 pub use txn::{LmdbRoTxn, LmdbRwTxn};

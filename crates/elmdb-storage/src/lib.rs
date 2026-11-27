@@ -21,6 +21,6 @@ pub use durability::{
 };
 pub use error::StorageError;
 pub use kv::{CommitReceipt, DbFlags, KvCursor, KvEntry, KvRead, KvStore, KvWrite, SubDbHandle, with_savepoint};
-pub use locks::{LockDomain, MapGate, MetaLock, OrderedArcReadGuard, SchemaEpochLock, WriterLock};
+pub use locks::{LockDomain, MapGate, MetaLock, MetaRwLock, OrderedArcReadGuard, SchemaEpochLock, WriterLock};
 pub use slot::{MAX_POOLED_SLOTS, SubDbPool, SubDbSlot};
 pub use vfs::{BootId, OsVfs, Vfs, VfsLockGuard};

@@ -179,6 +179,11 @@ impl ElmdbError {
         self.declared_by = Some(declared_by.into());
         self
     }
+
+    /// Returns `true` strictly for LMDB `MDB_MAP_FULL` (never `DbsFull`, `TxnFull`, or vector generation exhaustion).
+    pub fn is_map_full(&self) -> bool {
+        self.code == ErrorCode::StorageFull && self.message.starts_with("storage map is full")
+    }
 }
 
 impl From<StorageError> for ElmdbError {

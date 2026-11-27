@@ -1350,15 +1350,24 @@ fn child_batch2_worker() {
                 },
             )
             .unwrap();
-            let blob = "G".repeat(32 * 1024);
-            let ops: Vec<WireOp> = (0..40)
-                .map(|i| WireOp::Create {
-                    type_name: "Doc".into(),
-                    external_id: Some(format!("child-big-{i}")),
-                    fields: vec![
-                        ("tag".into(), CanonicalValue::String(format!("t-{i}"))),
-                        ("body".into(), CanonicalValue::String(blob.clone())),
-                    ],
+            // Deterministic incompressible LCG hex payload so zstd cannot shrink it below 256 KiB on 4 KiB Windows pages.
+            let ops: Vec<WireOp> = (0..40u64)
+                .map(|i| {
+                    let mut state = 0xD1B5_4A32_D192_ED03u64.wrapping_mul(i + 1);
+                    let mut body = String::with_capacity(16 * 1024);
+                    for _ in 0..(16 * 1024 / 16) {
+                        state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                        use std::fmt::Write;
+                        let _ = write!(&mut body, "{state:016x}");
+                    }
+                    WireOp::Create {
+                        type_name: "Doc".into(),
+                        external_id: Some(format!("child-big-{i}")),
+                        fields: vec![
+                            ("tag".into(), CanonicalValue::String(format!("t-{i}"))),
+                            ("body".into(), CanonicalValue::String(body)),
+                        ],
+                    }
                 })
                 .collect();
             db.execute_batch(&ops).unwrap();
@@ -1489,7 +1498,10 @@ fn batch2_map_growth_cross_proc_resize_sidecar_race_opguard_hooks_and_index_disa
         .unwrap();
     assert!(status.success(), "child_batch2_worker grow_map failed: {status}");
 
-    // Parent immediately reads AND writes — MUST transparently adopt `MDB_MAP_RESIZED`!
+    // Parent immediately runs `backup_into` BEFORE any other read — MUST transparently adopt `MDB_MAP_RESIZED` (P1-5)!
+    let resized_backup = tmp.path().join("resized_backup");
+    db.backup_into(&resized_backup, BackupInto::New).unwrap();
+    // Parent also reads AND writes — MUST transparently adopt `MDB_MAP_RESIZED`!
     assert!(db.get_row_resolved("child-big-39").unwrap().is_some(), "parent read must adopt MDB_MAP_RESIZED");
     assert!(db.stats().unwrap().map_size_bytes > 256 * 1024);
 
@@ -1609,6 +1621,15 @@ fn batch2_map_growth_cross_proc_resize_sidecar_race_opguard_hooks_and_index_disa
     .unwrap();
     assert!(hook_checked.load(std::sync::atomic::Ordering::SeqCst));
     assert!(db.unregister_before_commit(hook_id));
+
+    // P1-7: Re-entering `&Database` inside `Database::transact(|tx| ...)` returns InvalidArgument (zero deadlock/panic).
+    let db_reenter = Arc::clone(&db);
+    db.transact(|_tx| {
+        assert_eq!(db_reenter.get_row("doc-1").unwrap_err().code, ErrorCode::InvalidArgument);
+        assert_eq!(db_reenter.close().unwrap_err().code, ErrorCode::InvalidArgument);
+        Ok(())
+    })
+    .unwrap();
 
     // P2-4: Backup writes & fsyncs `.elmdb-backup` marker and allows BackupInto::Backups overwrite.
     let backup_dir = tmp.path().join("b2_backup");

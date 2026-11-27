@@ -571,7 +571,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         Ok(())
     }
 
-    /// Retries a pure write closure on `StorageFull` (`MDB_MAP_FULL`), doubling the LMDB map size
+    /// Retries a pure write closure strictly on LMDB `MDB_MAP_FULL`, doubling the map size
     /// under L2 `MapGate::write()` between attempts (when zero transactions are open).
     fn retry_on_map_full<T, F>(&self, mut f: F) -> Result<T>
     where
@@ -579,11 +579,12 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     {
         const MAX_GROWTH_RETRIES: usize = 8;
         for attempt in 0..=MAX_GROWTH_RETRIES {
+            let before = self.gate.map_size();
             match f() {
                 Ok(v) => return Ok(v),
-                Err(err) if err.code == ErrorCode::StorageFull && attempt < MAX_GROWTH_RETRIES => {
-                    let before = self.gate.map_size();
-                    let after = self.gate.grow_map(None)?;
+                Err(err) if err.is_map_full() && attempt < MAX_GROWTH_RETRIES => {
+                    let target = before.saturating_mul(2);
+                    let after = self.gate.grow_map(Some(target))?;
                     if after <= before {
                         return Err(err);
                     }

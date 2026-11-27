@@ -265,6 +265,26 @@ impl<T> MetaLock<T> {
     }
 }
 
+/// L4: Short-lived read-mostly metadata `RwLock` (e.g. LMDB `MDB_dbi` table & `mdb_txn_begin` barrier).
+#[derive(Debug, Default)]
+pub struct MetaRwLock<T>(RwLock<T>);
+
+impl<T> MetaRwLock<T> {
+    pub const fn new(value: T) -> Self {
+        Self(RwLock::new(value))
+    }
+
+    pub fn read(&self) -> OrderedReadGuard<'_, T> {
+        let token = DomainToken::enter(LockDomain::Meta);
+        OrderedReadGuard { guard: self.0.read(), _token: token }
+    }
+
+    pub fn write(&self) -> OrderedWriteGuard<'_, T> {
+        let token = DomainToken::enter(LockDomain::Meta);
+        OrderedWriteGuard { guard: self.0.write(), _token: token }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

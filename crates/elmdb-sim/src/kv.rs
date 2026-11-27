@@ -380,6 +380,10 @@ impl KvRead for SimRoTxn {
         read_entries(&self.snapshot, db)
     }
 
+    fn txnid(&self) -> u64 {
+        self.snapshot.txnid
+    }
+
     fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError> {
         read_open_subdb_existing(&self.snapshot, name, flags)
     }
@@ -413,12 +417,17 @@ impl KvRead for SimRwTxn {
         read_entries(self.top(), db)
     }
 
+    fn txnid(&self) -> u64 {
+        self.top().txnid
+    }
+
     fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError> {
         read_open_subdb_existing(self.top(), name, flags)
     }
 }
 
 impl KvWrite for SimRwTxn {
+    type MapReadGuard = ();
     fn open_subdb(&mut self, name: &str, flags: DbFlags) -> Result<SubDbHandle, StorageError> {
         validate_subdb_name(name)?;
         let max_dbs = self.inner.lock().config.max_dbs;
@@ -537,7 +546,7 @@ impl KvWrite for SimRwTxn {
         u32::try_from(self.stack.len().saturating_sub(1)).expect("depth fits u32")
     }
 
-    fn commit_raw(mut self) -> Result<CommitReceipt, StorageError> {
+    fn commit_raw(mut self) -> Result<(CommitReceipt, Self::MapReadGuard), StorageError> {
         let depth = self.savepoint_depth();
         if depth != 0 {
             return Err(StorageError::SavepointMismatch { expected: 0, actual: depth });
@@ -552,7 +561,7 @@ impl KvWrite for SimRwTxn {
         inner.committed = Arc::new(final_snap);
         inner.writer_active = false;
         self.finished = true;
-        Ok(receipt)
+        Ok((receipt, ()))
     }
 
     fn abort(mut self) {
@@ -585,11 +594,11 @@ impl KvStore for SimKvStore {
         Ok(SimRoTxn { snapshot: Arc::clone(&inner.committed) })
     }
 
-    fn begin_write(&self) -> Result<Self::RwTxn<'_>, StorageError> {
-        self.begin_write_owned()
+    fn begin_write(&self, map_guard: Self::MapReadGuard) -> Result<Self::RwTxn<'_>, StorageError> {
+        self.begin_write_owned(map_guard)
     }
 
-    fn begin_write_owned(&self) -> Result<Self::OwnedRwTxn, StorageError> {
+    fn begin_write_owned(&self, _map_guard: Self::MapReadGuard) -> Result<Self::OwnedRwTxn, StorageError> {
         let mut inner = self.inner.lock();
         if inner.writer_active {
             return Err(StorageError::InvalidState("concurrent write transaction already active".into()));
@@ -609,7 +618,7 @@ impl KvStore for SimKvStore {
         txn.open_subdb_existing(name, flags)
     }
 
-    fn sync(&self) -> Result<(), StorageError> {
+    fn sync(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
         if self.fail_next_sync.try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1)).is_ok()
         {
             return Err(StorageError::DurabilityFailed("injected sim store sync failure".into()));

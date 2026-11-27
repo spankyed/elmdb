@@ -3,13 +3,14 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use elmdb_storage::{
-    BootId, CommitReceipt, DbFlags, KvStore, MapGate, MetaLock, OrderedArcReadGuard, StorageError, SubDbHandle,
+    BootId, CommitReceipt, DbFlags, KvStore, MapGate, MetaRwLock, OrderedArcReadGuard, StorageError, SubDbHandle,
 };
 use lmdb_master_sys as ffi;
+#[cfg(any(target_os = "macos", windows))]
 use sha2::{Digest, Sha256};
 
 use crate::cursor::mdb_val_to_slice;
@@ -136,6 +137,7 @@ fn macos_boot_id() -> Option<BootId> {
 #[cfg(windows)]
 fn windows_boot_id() -> Option<BootId> {
     #[repr(C)]
+    #[allow(dead_code)]
     struct SystemTimeOfDayInformation {
         boot_time: i64,
         current_time: i64,
@@ -166,7 +168,7 @@ fn windows_boot_id() -> Option<BootId> {
             &mut ret_len,
         )
     };
-    if status >= 0 {
+    if status >= 0 && (ret_len as usize) >= std::mem::size_of::<SystemTimeOfDayInformation>() {
         // SAFETY: `NtQuerySystemInformation` succeeded (`NT_SUCCESS(status)`).
         let info = unsafe { info.assume_init() };
         let mut h = Sha256::new();
@@ -215,6 +217,12 @@ impl Default for LmdbConfig {
     }
 }
 
+/// Witness token proving the holder currently holds L2 `MapGate::read()` for a specific `LmdbStore`.
+pub struct LmdbMapReadGuard {
+    _guard: OrderedArcReadGuard<()>,
+    env_ptr: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct DbiCache {
     pub(crate) by_name: HashMap<String, (ffi::MDB_dbi, DbFlags)>,
@@ -232,8 +240,14 @@ pub(crate) struct LmdbEnvInner {
     pub(crate) main_dbi: ffi::MDB_dbi,
     /// L2 gate guarding dynamic LMDB `mdb_env_set_mapsize` growth & external resize adoption.
     pub(crate) map_gate: MapGate<()>,
-    /// Monotonically populated DBI cache. Handles are NEVER passed to `mdb_dbi_close()`.
-    pub(crate) dbis: MetaLock<DbiCache>,
+    /// Set to `true` if `mdb_env_set_mapsize` unmaps `me_map` and fails to remap; all FFI
+    /// entrypoints fail closed with `StorageError::Corrupted` instead of dereferencing dangling `me_metas`.
+    pub(crate) map_broken: AtomicBool,
+    /// Number of active write transactions holding uncommitted `mdb_dbi_open` handles (`0` or `1`).
+    pub(crate) rw_uncommitted_dbis: AtomicUsize,
+    /// L4 reader-writer lock guarding both the DBI handle cache AND LMDB's internal `me_numdbs`/`me_dbflags`
+    /// table across `LmdbRoTxn::begin()` (L4 read) vs `commit_raw`/`ensure_subdbs_open` (L4 write).
+    pub(crate) dbis: MetaRwLock<DbiCache>,
     /// Held until strictly AFTER `mdb_env_close` completes so duplicate opens are blocked cleanly.
     env_identity: EnvIdentity,
 }
@@ -242,6 +256,26 @@ impl LmdbEnvInner {
     #[inline]
     pub(crate) fn current_map_size(&self) -> usize {
         self.map_size.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    pub(crate) fn check_map_ok(&self) -> Result<(), StorageError> {
+        if self.map_broken.load(Ordering::Acquire) {
+            return Err(StorageError::Corrupted(
+                "LMDB memory map failed to remap; environment is permanently unusable".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn assert_map_guard(&self, guard: &LmdbMapReadGuard) -> Result<(), StorageError> {
+        if guard.env_ptr != self.env.as_ptr() as usize {
+            return Err(StorageError::InvalidState(
+                "MapReadGuard does not belong to this LmdbStore environment".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -298,7 +332,10 @@ impl LmdbStore {
         let mut reg_guard = OpenEnvRegistration(Some(identity));
 
         let data_mdb = dir.join("data.mdb");
-        verify_data_file_headers(&data_mdb)?;
+        let existing_meta = verify_data_file_headers(&data_mdb)?;
+        // Never shrink an already-grown on-disk `mm_mapsize` when opening with a smaller default `map_size`.
+        let effective_map_size = existing_meta
+            .map_or(config.map_size, |m| config.map_size.max(usize::try_from(m.map_size).unwrap_or(config.map_size)));
 
         let path_cstr = path_to_cstring(dir)?;
 
@@ -306,15 +343,15 @@ impl LmdbStore {
         // SAFETY: `raw_env` is a valid out-pointer; `mdb_env_create` allocates an `MDB_env`.
         let rc = unsafe { ffi::mdb_env_create(&mut raw_env) };
         if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, config.map_size, config.max_dbs));
+            return Err(map_mdb_err(rc, effective_map_size, config.max_dbs));
         }
         let env = NonNull::new(raw_env).ok_or_else(|| StorageError::InvalidState("null MDB_env".into()))?;
 
         let init_result = (|| -> Result<(usize, usize, ffi::MDB_dbi, DbiCache), StorageError> {
             // SAFETY: `env` is a newly created, unopened `MDB_env`.
-            let rc = unsafe { ffi::mdb_env_set_mapsize(env.as_ptr(), config.map_size) };
+            let rc = unsafe { ffi::mdb_env_set_mapsize(env.as_ptr(), effective_map_size) };
             if rc != ffi::MDB_SUCCESS {
-                return Err(map_mdb_err(rc, config.map_size, config.max_dbs));
+                return Err(map_mdb_err(rc, effective_map_size, config.max_dbs));
             }
             // SAFETY: `env` is unopened.
             let rc = unsafe { ffi::mdb_env_set_maxdbs(env.as_ptr(), config.max_dbs) };
@@ -394,7 +431,9 @@ impl LmdbStore {
                 page_size,
                 main_dbi,
                 map_gate: MapGate::new(()),
-                dbis: MetaLock::new(cache),
+                map_broken: AtomicBool::new(false),
+                rw_uncommitted_dbis: AtomicUsize::new(0),
+                dbis: MetaRwLock::new(cache),
                 env_identity,
             }),
         })
@@ -402,6 +441,8 @@ impl LmdbStore {
 
     /// Reclaims stale reader slots left behind by crashed processes. Returns the number reclaimed.
     pub fn reader_check(&self) -> Result<i32, StorageError> {
+        let _map_guard = self.inner.map_gate.read();
+        self.inner.check_map_ok()?;
         let mut dead: libc::c_int = 0;
         // SAFETY: `self.inner.env` is an open `MDB_env` and `dead` is a valid out-pointer.
         let rc = unsafe { ffi::mdb_reader_check(self.inner.env.as_ptr(), &mut dead) };
@@ -422,13 +463,25 @@ impl LmdbStore {
         let target_dir = target_dir.as_ref();
         fs::create_dir_all(target_dir)?;
         let c_path = path_to_cstring(target_dir)?;
-        let _map_guard = self.inner.map_gate.read();
-        // SAFETY: `self.inner.env` is an open `MDB_env` and `c_path` is a valid NUL-terminated path.
-        let rc = unsafe { ffi::mdb_env_copy2(self.inner.env.as_ptr(), c_path.as_ptr(), ffi::MDB_CP_COMPACT) };
-        if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
-        }
         let copied_data = target_dir.join("data.mdb");
+        {
+            let _map_guard = self.inner.map_gate.read();
+            self.inner.check_map_ok()?;
+            // SAFETY: `self.inner.env` is an open `MDB_env` protected by L2 `map_gate.read()` and `c_path` is NUL-terminated.
+            let mut rc = unsafe { ffi::mdb_env_copy2(self.inner.env.as_ptr(), c_path.as_ptr(), ffi::MDB_CP_COMPACT) };
+            if rc == ffi::MDB_READERS_FULL {
+                let mut dead: libc::c_int = 0;
+                // SAFETY: Reclaim stale reader slots and retry once after removing any partial `data.mdb`.
+                if unsafe { ffi::mdb_reader_check(self.inner.env.as_ptr(), &mut dead) } == ffi::MDB_SUCCESS && dead > 0
+                {
+                    let _ = fs::remove_file(&copied_data);
+                    rc = unsafe { ffi::mdb_env_copy2(self.inner.env.as_ptr(), c_path.as_ptr(), ffi::MDB_CP_COMPACT) };
+                }
+            }
+            if rc != ffi::MDB_SUCCESS {
+                return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
+            }
+        }
         {
             // Windows FlushFileBuffers (File::sync_all) requires GENERIC_WRITE access.
             let f = fs::OpenOptions::new().read(true).write(true).open(&copied_data)?;
@@ -550,22 +603,22 @@ impl KvStore for LmdbStore {
     type RoTxn<'a> = LmdbRoTxn<'a>;
     type RwTxn<'a> = LmdbRwTxn<'a>;
     type OwnedRwTxn = LmdbRwTxn<'static>;
-    type MapReadGuard = OrderedArcReadGuard<()>;
+    type MapReadGuard = LmdbMapReadGuard;
 
     fn lock_map_read(&self) -> Self::MapReadGuard {
-        self.inner.map_gate.read_arc()
+        LmdbMapReadGuard { _guard: self.inner.map_gate.read_arc(), env_ptr: self.inner.env.as_ptr() as usize }
     }
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
         LmdbRoTxn::begin(self)
     }
 
-    fn begin_write(&self) -> Result<Self::RwTxn<'_>, StorageError> {
-        LmdbRwTxn::begin(self)
+    fn begin_write(&self, map_guard: Self::MapReadGuard) -> Result<Self::RwTxn<'_>, StorageError> {
+        LmdbRwTxn::begin(self, map_guard)
     }
 
-    fn begin_write_owned(&self) -> Result<Self::OwnedRwTxn, StorageError> {
-        LmdbRwTxn::begin_owned(self)
+    fn begin_write_owned(&self, map_guard: Self::MapReadGuard) -> Result<Self::OwnedRwTxn, StorageError> {
+        LmdbRwTxn::begin_owned(self, map_guard)
     }
 
     fn open_subdb_ro(
@@ -577,20 +630,49 @@ impl KvStore for LmdbStore {
         elmdb_storage::KvRead::open_subdb_existing(txn, name, flags)
     }
 
-    fn ensure_subdbs_open(&self, names: &[(&str, DbFlags)]) -> Result<(), StorageError> {
-        let missing: Vec<(&str, DbFlags)> = {
-            let cache = self.inner.dbis.lock();
-            names.iter().copied().filter(|(name, _)| !cache.by_name.contains_key(*name)).collect()
-        };
+    fn ensure_subdbs_open(
+        &self,
+        map_guard: &Self::MapReadGuard,
+        names: &[(&str, DbFlags)],
+    ) -> Result<(), StorageError> {
+        self.inner.assert_map_guard(map_guard)?;
+        self.inner.check_map_ok()?;
+        {
+            let cache = self.inner.dbis.read();
+            if names.iter().all(|(name, _)| cache.by_name.contains_key(*name)) {
+                return Ok(());
+            }
+        }
+
+        // Hold L4 write lock across the entire `mdb_txn_begin(RDONLY) -> mdb_dbi_open -> mdb_txn_commit`
+        // + cache insertion so no concurrent `ensure_subdbs_open` or `LmdbRoTxn::begin()` can race with
+        // LMDB's non-atomic `env->me_numdbs` / `env->me_dbflags` updates!
+        let mut cache = self.inner.dbis.write();
+        if self.inner.rw_uncommitted_dbis.load(Ordering::Acquire) != 0 {
+            return Err(StorageError::InvalidState(
+                "cannot call ensure_subdbs_open while a write transaction holds uncommitted sub-DB handles".into(),
+            ));
+        }
+        let missing: Vec<(&str, DbFlags)> =
+            names.iter().copied().filter(|(name, _)| !cache.by_name.contains_key(*name)).collect();
         if missing.is_empty() {
             return Ok(());
         }
 
         let map_size = self.inner.current_map_size();
         let mut open_txn: *mut ffi::MDB_txn = ptr::null_mut();
-        // SAFETY: Caller holds L2 read + L3 WriterLock, so no `LmdbRwTxn` is active or calling `mdb_dbi_open`.
-        let rc =
+        // SAFETY: L2 `map_guard` + L4 `dbis.write()` are held and `rw_uncommitted_dbis == 0`.
+        let mut rc =
             unsafe { ffi::mdb_txn_begin(self.inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut open_txn) };
+        if rc == ffi::MDB_READERS_FULL {
+            let mut dead: libc::c_int = 0;
+            // SAFETY: Reclaim stale reader slots and retry once.
+            if unsafe { ffi::mdb_reader_check(self.inner.env.as_ptr(), &mut dead) } == ffi::MDB_SUCCESS && dead > 0 {
+                rc = unsafe {
+                    ffi::mdb_txn_begin(self.inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut open_txn)
+                };
+            }
+        }
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, map_size, self.inner.max_dbs));
         }
@@ -632,25 +714,25 @@ impl KvStore for LmdbStore {
             return Err(err);
         }
 
-        // SAFETY: Committing an `MDB_RDONLY` txn permanently publishes opened DBIs into `MDB_env`.
+        // SAFETY: Committing an `MDB_RDONLY` txn permanently publishes opened DBIs into `MDB_env`
+        // while `dbis.write()` prevents concurrent readers from observing torn `me_numdbs`/`me_dbflags`.
         let rc = unsafe { ffi::mdb_txn_commit(open_txn) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, map_size, self.inner.max_dbs));
         }
 
-        if !opened.is_empty() {
-            let mut cache = self.inner.dbis.lock();
-            for (name, dbi, flags) in opened {
-                cache.by_name.insert(name, (dbi, flags));
-                cache.by_id.insert(dbi, flags);
-            }
+        for (name, dbi, flags) in opened {
+            cache.by_name.insert(name, (dbi, flags));
+            cache.by_id.insert(dbi, flags);
         }
         Ok(())
     }
 
     fn needs_map_growth(&self) -> Result<Option<usize>, StorageError> {
+        let _gate = self.inner.map_gate.read();
+        self.inner.check_map_ok()?;
         let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
-        // SAFETY: `self.inner.env` is open; `info` is a valid out-pointer.
+        // SAFETY: `self.inner.env` is open and protected by L2 `map_gate.read()`.
         let rc = unsafe { ffi::mdb_env_info(self.inner.env.as_ptr(), info.as_mut_ptr()) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
@@ -670,46 +752,81 @@ impl KvStore for LmdbStore {
     }
 
     fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
-        // Acquire L2 exclusive write lock so ZERO read or write transactions are active in this process.
+        // Acquire L2 exclusive write lock so ZERO read/write txns, `mdb_env_info`, `mdb_env_sync`,
+        // or `mdb_env_copy2` calls are active in this process.
         let _gate = self.inner.map_gate.write();
+        self.inner.check_map_ok()?;
         let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
-        // SAFETY: `self.inner.env` is open and no transactions are active in this process under L2 write.
+        // SAFETY: `self.inner.env` is open and protected by L2 `map_gate.write()`.
         let rc = unsafe { ffi::mdb_env_info(self.inner.env.as_ptr(), info.as_mut_ptr()) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
         }
         // SAFETY: `mdb_env_info` succeeded.
         let cur = unsafe { info.assume_init() }.me_mapsize;
-        let doubled = cur.saturating_mul(2).max(self.inner.page_size * 16);
-        let requested = min_size.unwrap_or(doubled).max(doubled);
+        // Also read on-disk `mm_mapsize` so we NEVER shrink a map already grown by a peer process.
+        let disk_map = read_active_meta_page(&self.inner.data_mdb)
+            .ok()
+            .and_then(|m| usize::try_from(m.map_size).ok())
+            .unwrap_or(cur);
+        let base = cur.max(disk_map);
+        let doubled = base.saturating_mul(2).max(self.inner.page_size * 16);
+        let requested = min_size.unwrap_or(doubled).max(disk_map);
         let page = self.inner.page_size.max(4096);
         let aligned = requested.saturating_add(page - 1) / page * page;
-        if aligned <= cur {
+        if aligned <= cur && cur >= disk_map {
             self.inner.map_size.store(cur, Ordering::Release);
             return Ok(cur);
         }
-        // SAFETY: L2 `map_gate.write()` guarantees zero active transactions in this process.
+        // SAFETY: L2 `map_gate.write()` guarantees zero active transactions or `me_metas` readers in this process.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), aligned) };
         if rc != ffi::MDB_SUCCESS {
+            // `mdb_env_set_mapsize` unmaps BEFORE remapping; attempt rollback to `cur` and fail closed if unmapped!
+            let rollback_rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), cur) };
+            if rollback_rc != ffi::MDB_SUCCESS {
+                self.inner.map_broken.store(true, Ordering::SeqCst);
+                return Err(StorageError::Corrupted(format!(
+                    "mdb_env_set_mapsize({aligned}) failed (rc={rc}) and rollback to {cur} failed (rc={rollback_rc})"
+                )));
+            }
             return Err(map_mdb_err(rc, aligned, self.inner.max_dbs));
         }
-        self.inner.map_size.store(aligned, Ordering::Release);
-        Ok(aligned)
+        // Re-read `me_mapsize` in case LMDB clamped `aligned` upward to `minsize`.
+        let mut after_info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
+        // SAFETY: `self.inner.env` is open and remapped.
+        let actual =
+            if unsafe { ffi::mdb_env_info(self.inner.env.as_ptr(), after_info.as_mut_ptr()) } == ffi::MDB_SUCCESS {
+                // SAFETY: `mdb_env_info` succeeded.
+                unsafe { after_info.assume_init() }.me_mapsize
+            } else {
+                aligned
+            };
+        self.inner.map_size.store(actual, Ordering::Release);
+        Ok(actual)
     }
 
     fn adopt_resized_map(&self) -> Result<usize, StorageError> {
-        // Acquire L2 exclusive write lock so ZERO read or write transactions are active in this process.
+        // Acquire L2 exclusive write lock so ZERO read/write txns or `me_metas` readers are active.
         let _gate = self.inner.map_gate.write();
+        self.inner.check_map_ok()?;
+        let cur = self.inner.current_map_size();
         // SAFETY: `size = 0` tells LMDB to adopt the external cross-process map size cleanly.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), 0) };
         if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
+            let rollback_rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), cur) };
+            if rollback_rc != ffi::MDB_SUCCESS {
+                self.inner.map_broken.store(true, Ordering::SeqCst);
+                return Err(StorageError::Corrupted(format!(
+                    "mdb_env_set_mapsize(0) failed (rc={rc}) and rollback to {cur} failed (rc={rollback_rc})"
+                )));
+            }
+            return Err(map_mdb_err(rc, cur, self.inner.max_dbs));
         }
         let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
         // SAFETY: `self.inner.env` is open.
         let rc = unsafe { ffi::mdb_env_info(self.inner.env.as_ptr(), info.as_mut_ptr()) };
         if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
+            return Err(map_mdb_err(rc, cur, self.inner.max_dbs));
         }
         // SAFETY: `mdb_env_info` succeeded.
         let actual = unsafe { info.assume_init() }.me_mapsize;
@@ -717,8 +834,10 @@ impl KvStore for LmdbStore {
         Ok(actual)
     }
 
-    fn sync(&self) -> Result<(), StorageError> {
-        // SAFETY: `self.inner.env` is an open `MDB_env`; `force = 1` flushes even under `MDB_NOSYNC`.
+    fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+        self.inner.assert_map_guard(map_guard)?;
+        self.inner.check_map_ok()?;
+        // SAFETY: `self.inner.env` is open and protected by L2 `map_guard`; `force = 1` flushes even under `MDB_NOSYNC`.
         let rc = unsafe { ffi::mdb_env_sync(self.inner.env.as_ptr(), 1) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
@@ -727,8 +846,10 @@ impl KvStore for LmdbStore {
     }
 
     fn last_txnid(&self) -> Result<u64, StorageError> {
+        let _gate = self.inner.map_gate.read();
+        self.inner.check_map_ok()?;
         let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
-        // SAFETY: `self.inner.env` is open; `info` is a valid out-pointer.
+        // SAFETY: `self.inner.env` is open and protected by L2 `map_gate.read()`.
         let rc = unsafe { ffi::mdb_env_info(self.inner.env.as_ptr(), info.as_mut_ptr()) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));

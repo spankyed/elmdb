@@ -183,9 +183,20 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
 
     /// Creates a consistent compacted copy of the store in `target_dir` and writes + fsyncs
     /// a verified `synced.v2` sidecar matching the copied `data.mdb` active meta page.
+    /// Automatically adopts cross-process `MDB_MAP_RESIZED` and retries if needed.
     pub fn copy_compacted(&self, target_dir: &Path) -> Result<(), StorageError> {
-        self.check_poisoned()?;
-        let receipt = self.store.copy_compacted(target_dir)?;
+        let receipt = loop {
+            self.check_poisoned()?;
+            match self.store.copy_compacted(target_dir) {
+                Ok(r) => break r,
+                Err(StorageError::MapResized) => {
+                    let _ = self.vfs.remove_file(&target_dir.join("data.mdb"));
+                    self.adopt_resized_map_checked()?;
+                    continue;
+                }
+                Err(err) => return Err(err),
+            }
+        };
         let slot =
             SyncSlot { seq: 1, txnid: receipt.txnid, boot_id: self.vfs.boot_id(), roots_sha256: receipt.roots_sha256 };
         let encoded = slot.encode();
@@ -225,12 +236,12 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             let map_guard = self.store.lock_map_read();
             let writer_guard = self.writer.lock();
             self.check_poisoned()?;
-            match self.store.ensure_subdbs_open(names) {
+            match self.store.ensure_subdbs_open(&map_guard, names) {
                 Ok(()) => return Ok(()),
                 Err(StorageError::MapResized) => {
                     drop(writer_guard);
                     drop(map_guard);
-                    self.store.adopt_resized_map()?;
+                    self.adopt_resized_map_checked()?;
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -242,7 +253,19 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// Caller MUST NOT hold any open read or write transaction on the calling thread.
     pub fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
         self.check_poisoned()?;
-        self.store.grow_map(min_size)
+        match self.store.grow_map(min_size) {
+            Ok(size) => Ok(size),
+            Err(StorageError::Corrupted(msg)) => Err(self.poison_corrupted(msg)),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn adopt_resized_map_checked(&self) -> Result<usize, StorageError> {
+        match self.store.adopt_resized_map() {
+            Ok(size) => Ok(size),
+            Err(StorageError::Corrupted(msg)) => Err(self.poison_corrupted(msg)),
+            Err(err) => Err(err),
+        }
     }
 
     fn read_sidecar_best(&self) -> Result<(bool, u8, Option<SyncSlot>, bool), StorageError> {
@@ -356,7 +379,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             match self.store.begin_read() {
                 Ok(ro) => return Ok(ro),
                 Err(StorageError::MapResized) => {
-                    self.store.adopt_resized_map()?;
+                    self.adopt_resized_map_checked()?;
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -370,7 +393,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         loop {
             self.check_poisoned()?;
             if let Some(target) = self.store.needs_map_growth()? {
-                self.store.grow_map(Some(target))?;
+                self.grow_map(Some(target))?;
             }
             let map_guard = self.store.lock_map_read();
             let guard = self.writer.lock();
@@ -380,19 +403,17 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
                     "DurabilityGate::recover() must succeed before beginning a write transaction".into(),
                 ));
             }
-            match self.store.begin_write() {
+            match self.store.begin_write(map_guard) {
                 Ok(txn) => {
                     return Ok(GatedWriteTxn {
                         txn: Some(RwTxnRef::Borrowed(txn)),
                         writer_guard: WriterGuardRef::Borrowed(guard),
-                        _map_guard: map_guard,
                         gate: GateRef::Borrowed(self),
                     });
                 }
                 Err(StorageError::MapResized) => {
                     drop(guard);
-                    drop(map_guard);
-                    self.store.adopt_resized_map()?;
+                    self.adopt_resized_map_checked()?;
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -410,7 +431,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         loop {
             self.check_poisoned()?;
             if let Some(target) = self.store.needs_map_growth()? {
-                self.store.grow_map(Some(target))?;
+                self.grow_map(Some(target))?;
             }
             let map_guard = self.store.lock_map_read();
             let guard = self.writer.lock_arc();
@@ -420,19 +441,17 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
                     "DurabilityGate::recover() must succeed before beginning a write transaction".into(),
                 ));
             }
-            match self.store.begin_write_owned() {
+            match self.store.begin_write_owned(map_guard) {
                 Ok(txn) => {
                     return Ok(GatedWriteTxn {
                         txn: Some(RwTxnRef::Owned(txn)),
                         writer_guard: WriterGuardRef::Owned(guard),
-                        _map_guard: map_guard,
                         gate: GateRef::Owned(Arc::clone(self)),
                     });
                 }
                 Err(StorageError::MapResized) => {
                     drop(guard);
-                    drop(map_guard);
-                    self.store.adopt_resized_map()?;
+                    self.adopt_resized_map_checked()?;
                     continue;
                 }
                 Err(err) => return Err(err),
@@ -446,6 +465,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// an uncertain durability boundary.
     pub fn sync(&self) -> Result<Option<SyncSlot>, StorageError> {
         self.check_poisoned()?;
+        let map_guard = self.store.lock_map_read();
         let mut guard = self.writer.lock();
         self.check_poisoned()?;
         if !guard.recovered {
@@ -456,7 +476,9 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if self.mode == DurabilityMode::Unsafe {
             return Ok(None);
         }
-        let slot = self.persist_durable_locked(&mut guard, None)?;
+        let slot = self.persist_durable_locked(&mut guard, &map_guard, None)?;
+        drop(guard);
+        drop(map_guard);
         Ok(Some(slot))
     }
 
@@ -474,22 +496,29 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         StorageError::DurabilityFailed(reason)
     }
 
+    fn poison_corrupted(&self, reason: String) -> StorageError {
+        *self.poison_reason.lock() = Some(reason.clone());
+        self.poisoned.store(true, Ordering::Release);
+        StorageError::Corrupted(reason)
+    }
+
     fn persist_durable_locked(
         &self,
         state: &mut WriterState,
+        map_guard: &S::MapReadGuard,
         hint_txnid: Option<u64>,
     ) -> Result<SyncSlot, StorageError> {
-        if let Err(err) = self.store.sync() {
-            return Err(self.poison(format!("store sync failed: {err}")));
-        }
-
+        // 1. Acquire cross-process sidecar lock FIRST so no peer can interleave slot updates.
         let _sidecar_lock = match self.vfs.lock_file(&self.sidecar_lock_path) {
             Ok(guard) => guard,
             Err(err) => return Err(self.poison(format!("sidecar lock failed: {err}"))),
         };
 
-        // Read `(txnid, roots_sha256)` atomically from one active meta-page snapshot AFTER `store.sync()`
-        // and UNDER the cross-process sidecar lock so multi-process syncs can never pair mismatched roots.
+        // 2. Read `(txnid, roots_sha256)` from the active meta page BEFORE `store.sync(map_guard)`!
+        //    Because LMDB writes all data pages before the meta page, calling `fdatasync(data.mdb)`
+        //    strictly AFTER reading `receipt` guarantees every byte of `receipt.txnid` (and every
+        //    concurrent peer commit included in `receipt`) is durable on disk before `synced.v2`
+        //    records `receipt.txnid`. (Prevents multi-process durability inversion on power loss.)
         let receipt = match self.store.active_receipt() {
             Ok(r) => r,
             Err(err) => return Err(self.poison(format!("reading active meta page during sync failed: {err}"))),
@@ -497,24 +526,34 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if let Some(expected_min) = hint_txnid
             && receipt.txnid < expected_min
         {
-            return Err(self.poison(format!(
+            return Err(self.poison_corrupted(format!(
                 "active meta txnid {} regressed below committed txnid {expected_min}",
                 receipt.txnid
             )));
         }
 
-        let (sidecar_exists, _valid_slots, disk_best, empty_file) = match self.read_sidecar_best() {
+        // 3. Flush `data.mdb` to stable storage while holding L2 `map_guard` (prevents `munmap` race).
+        if let Err(err) = self.store.sync(map_guard) {
+            return Err(self.poison(format!("store sync failed: {err}")));
+        }
+
+        // 4. Inspect existing sidecar under `_sidecar_lock`: fail closed if corrupted or rolled back!
+        let (sidecar_exists, valid_slots, disk_best, empty_file) = match self.read_sidecar_best() {
             Ok(res) => res,
             Err(err) => return Err(self.poison(format!("reading sidecar during sync failed: {err}"))),
         };
-
-        // Never regress a higher cross-process durable txnid already recorded on disk.
+        if sidecar_exists && !empty_file && valid_slots == 0 {
+            return Err(
+                self.poison_corrupted("durability sidecar exists but neither 4 KiB slot has a valid checksum".into())
+            );
+        }
         if let Some(best) = disk_best
             && best.txnid > receipt.txnid
         {
-            state.next_seq = best.seq.saturating_add(1).max(state.next_seq);
-            state.last_durable = Some(best);
-            return Ok(best);
+            return Err(self.poison_corrupted(format!(
+                "storage rollback detected during sync: active txnid {} < durable sidecar txnid {}",
+                receipt.txnid, best.txnid
+            )));
         }
 
         let seq = match disk_best {
@@ -654,15 +693,13 @@ impl<'txn, C1: KvCursor<'txn>, C2: KvCursor<'txn>> KvCursor<'txn> for GatedCurso
 
 /// Affine write transaction handle whose sole commit path is `DurabilityGate`.
 ///
-/// Field drop order is strictly LIFO with respect to lock acquisition:
-/// 1. `txn` aborts any live `MDB_txn` first,
+/// Field drop order ensures:
+/// 1. `txn` aborts any live `MDB_txn` first (and releases its owned L2 `MapReadGuard`),
 /// 2. `writer_guard` releases L3 `WriterLock`,
-/// 3. `_map_guard` releases L2 `MapGate`,
-/// 4. `gate` drops the `DurabilityGate` reference.
+/// 3. `gate` drops the `DurabilityGate` reference.
 pub struct GatedWriteTxn<'a, S: KvStore + 'a, V: Vfs> {
     txn: Option<RwTxnRef<'a, S>>,
     writer_guard: WriterGuardRef<'a>,
-    _map_guard: S::MapReadGuard,
     gate: GateRef<'a, S, V>,
 }
 
@@ -770,7 +807,7 @@ impl<'a, S: KvStore + 'a, V: Vfs> GatedWriteTxn<'a, S, V> {
             RwTxnRef::Borrowed(t) => t.commit_raw(),
             RwTxnRef::Owned(t) => t.commit_raw(),
         };
-        let receipt = match commit_res {
+        let (receipt, map_guard) = match commit_res {
             Ok(r) => r,
             Err(err) => {
                 // If an error occurred on a fatal/IO boundary after commit may have landed,
@@ -783,11 +820,16 @@ impl<'a, S: KvStore + 'a, V: Vfs> GatedWriteTxn<'a, S, V> {
                 return Err(err);
             }
         };
-        if gate.mode == DurabilityMode::Strict {
-            let slot = gate.persist_durable_locked(self.writer_guard.state_mut(), Some(receipt.txnid))?;
-            return Ok(CommitReceipt { txnid: receipt.txnid, roots_sha256: slot.roots_sha256 });
-        }
-        Ok(receipt)
+        let out = if gate.mode == DurabilityMode::Strict {
+            let slot = gate.persist_durable_locked(self.writer_guard.state_mut(), &map_guard, Some(receipt.txnid))?;
+            CommitReceipt { txnid: slot.txnid, roots_sha256: slot.roots_sha256 }
+        } else {
+            receipt
+        };
+        // Release L3 `writer_guard` (`self`) strictly BEFORE releasing L2 `map_guard`.
+        drop(self);
+        drop(map_guard);
+        Ok(out)
     }
 
     /// Explicitly aborts the transaction.
@@ -825,6 +867,13 @@ impl<'a, S: KvStore + 'a, V: Vfs> KvRead for GatedWriteTxn<'a, S, V> {
         match self.inner() {
             RwTxnRef::Borrowed(t) => t.entries(db),
             RwTxnRef::Owned(t) => t.entries(db),
+        }
+    }
+
+    fn txnid(&self) -> u64 {
+        match self.inner() {
+            RwTxnRef::Borrowed(t) => t.txnid(),
+            RwTxnRef::Owned(t) => t.txnid(),
         }
     }
 

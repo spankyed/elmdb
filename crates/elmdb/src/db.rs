@@ -426,7 +426,7 @@ impl Database {
         let (compiled, diff) = eng.set_schema(raw)?;
         let (ro, _) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = eng.gate().last_txnid()?;
+        let txnid = ro.txnid();
         drop(ro);
         self.hub.notify_schema_change_with_txnid(seq, compiled.epoch, txnid, now_unix_ms());
         self.query_engine.clear_cache();
@@ -440,7 +440,7 @@ impl Database {
         let compiled = eng.rename_type(old_type, new_type, rewrite_ids)?;
         let (ro, _) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = eng.gate().last_txnid()?;
+        let txnid = ro.txnid();
         drop(ro);
         self.hub.notify_schema_change_with_txnid(seq, compiled.epoch, txnid, now_unix_ms());
         self.query_engine.clear_cache();
@@ -454,7 +454,7 @@ impl Database {
         let compiled = eng.rename_field(type_name, old_field, new_field)?;
         let (ro, _) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = eng.gate().last_txnid()?;
+        let txnid = ro.txnid();
         drop(ro);
         self.hub.notify_schema_change_with_txnid(seq, compiled.epoch, txnid, now_unix_ms());
         self.query_engine.clear_cache();
@@ -468,7 +468,7 @@ impl Database {
         let compiled = eng.rename_relation(old_rel, new_rel)?;
         let (ro, _) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = eng.gate().last_txnid()?;
+        let txnid = ro.txnid();
         drop(ro);
         self.hub.notify_schema_change_with_txnid(seq, compiled.epoch, txnid, now_unix_ms());
         self.query_engine.clear_cache();
@@ -744,17 +744,18 @@ impl Database {
         // Single choke point: standalone batches also route through `transact_scoped_with_receipt` so host/JS
         // `beforeCommit` hooks enjoy identical RYOW `get`/`query`/`nextCounter`/`pendingCommitSeq` and we return
         // the exact committed `(commit_seq, CommitReceipt)` (never a phantom seq on empty/no-op batches!).
-        // Retries automatically on `ErrorCode::MapFull` by doubling LMDB `map_size` under L2 `MapGate::write()`.
+        // Retries automatically strictly on LMDB `MDB_MAP_FULL` by doubling `map_size` under L2 `MapGate::write()`.
         let mut attempts = 0usize;
         let (created_ids, committed) = loop {
+            let before = eng.gate().map_size();
             match self.transact_scoped_with_receipt(TransactOptions::default(), || {
                 self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(ops))
             }) {
                 Ok(res) => break res,
-                Err(err) if err.code == ErrorCode::StorageFull && attempts < 8 => {
+                Err(err) if err.is_map_full() && attempts < 8 => {
                     attempts += 1;
-                    let before = eng.gate().map_size();
-                    let after = eng.gate().grow_map(None)?;
+                    let target = before.saturating_mul(2);
+                    let after = eng.gate().grow_map(Some(target))?;
                     if after <= before {
                         return Err(err);
                     }
@@ -767,8 +768,8 @@ impl Database {
             None => {
                 let (ro, _) = eng.begin_read_pinned()?;
                 let seq = read_commit_seq(&ro, &eng.dbs())?;
+                let txnid = ro.txnid();
                 drop(ro);
-                let txnid = eng.gate().last_txnid()?;
                 (seq, elmdb_storage::CommitReceipt { txnid, roots_sha256: [0u8; 32] })
             }
         };
@@ -824,9 +825,20 @@ impl Database {
         let eng = self.enter_op()?;
         self.require_writable()?;
         self.forbid_inside_txn("transact")?;
+        // Install an RAII sentinel slot (`ctx: None`) so any re-entrant `&Database` call inside `f` or
+        // a Rust `beforeCommit` hook returns `InvalidArgument` cleanly instead of deadlocking on `WriterLock`.
+        let _sentinel = self.enter_borrowed_txn_sentinel();
         let (res, _receipt) = eng.transact(f)?;
+        drop(_sentinel);
         self.hub.catch_up_cross_process(&eng, now_unix_ms())?;
         Ok(res)
+    }
+
+    fn enter_borrowed_txn_sentinel(&self) -> BorrowedTxnSentinelGuard {
+        ACTIVE_TXNS.with(|m| {
+            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx: None, commit_seq: 0, depth: 1 });
+        });
+        BorrowedTxnSentinelGuard { db_id: self.id }
     }
 
     pub fn register_before_commit(&self, hook: BeforeCommitHook<LmdbStore, OsVfs, SystemClock>) -> Result<u64> {
@@ -927,7 +939,7 @@ impl Database {
         let (idx_id, _hint) = elmdb_vec::set_entity_embeddings_by_ext_id(&eng, index_name, ext_id, vectors)?;
         let (ro, sc) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = eng.gate().last_txnid()?;
+        let txnid = ro.txnid();
         let active_slot = sc.index_by_id(idx_id).map(|d| d.slot);
         drop(ro);
         if let Some(slot) = active_slot {
@@ -1119,7 +1131,7 @@ impl Database {
         if compacted_any || rebuilt_any || !touched_slots.is_empty() {
             let (ro, sc) = eng.begin_read_pinned()?;
             let seq = read_commit_seq(&ro, &eng.dbs())?;
-            let txnid = eng.gate().last_txnid()?;
+            let txnid = ro.txnid();
             drop(ro);
             let now_ms = now_unix_ms();
             if compacted_any {
@@ -1170,7 +1182,7 @@ impl Database {
         if compacted_any || built_any || !touched_slots.is_empty() {
             let (ro, sc) = eng.begin_read_pinned()?;
             let seq = read_commit_seq(&ro, &eng.dbs())?;
-            let txnid = eng.gate().last_txnid()?;
+            let txnid = ro.txnid();
             drop(ro);
             let now_ms = now_unix_ms();
             if compacted_any {
@@ -1218,7 +1230,7 @@ impl Database {
         self.registry.rebuild(&eng, idx_id)?;
         let (ro, sc) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = eng.gate().last_txnid()?;
+        let txnid = ro.txnid();
         drop(ro);
         self.hub.notify_full_rebuild_with_txnid(seq, sc.epoch, txnid, now_unix_ms());
         Ok(())
@@ -1229,6 +1241,7 @@ impl Database {
         let eng = self.enter_op()?;
         self.require_writable()?;
         self.forbid_inside_txn("purgeArchived")?;
+        let _sentinel = self.enter_borrowed_txn_sentinel();
         let (purged, _receipt) =
             eng.transact(|tx| {
                 let td =
@@ -1248,6 +1261,7 @@ impl Database {
                 }
                 Ok(count)
             })?;
+        drop(_sentinel);
         self.hub.catch_up_cross_process(&eng, now_unix_ms())?;
         Ok(purged)
     }
@@ -1258,7 +1272,7 @@ impl Database {
         let (ro, schema) = eng.begin_read_pinned()?;
         let dbs = eng.dbs();
         let commit_seq = read_commit_seq(&ro, &dbs)?;
-        let txnid = eng.gate().last_txnid()?;
+        let txnid = ro.txnid();
         let mut type_counts = BTreeMap::new();
         for td in &schema.types {
             let cnt = scan_type_keys(&ro, &dbs, td.id)?.len() as u64;
@@ -1343,6 +1357,32 @@ impl Database {
         vfs.sync_dir(&staging)?;
 
         if target.exists() {
+            // Re-validate overwrite policy right before swapping so a concurrent creation during
+            // `copy_compacted` cannot bypass `BackupInto::New` or the `.elmdb-backup` marker check.
+            let mut entries = fs::read_dir(target)
+                .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot read backup target: {e}")))?;
+            let is_empty = entries.next().is_none();
+            if !is_empty {
+                match into {
+                    BackupInto::New => {
+                        return Err(ElmdbError::new(
+                            ErrorCode::AlreadyExists,
+                            format!("backup target '{}' is not empty", target.display()),
+                        ));
+                    }
+                    BackupInto::Backups => {
+                        if !target.join(BACKUP_MARKER).exists() {
+                            return Err(ElmdbError::new(
+                                ErrorCode::AlreadyExists,
+                                format!(
+                                    "refusing to overwrite non-backup directory '{}' (missing {BACKUP_MARKER})",
+                                    target.display()
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
             // Atomic swap: move old target aside, move staging into place (rolling back if rename fails), then delete old.
             let old_aside = parent.join(format!(".elmdb-backup-old-{}-{nonce}", std::process::id()));
             fs::rename(target, &old_aside)
@@ -1634,7 +1674,42 @@ fn build_host_hook_delta(
     Ok(HostHookDelta { commit_seq: snap.commit_seq, entities, edges })
 }
 
+struct BorrowedTxnSentinelGuard {
+    db_id: u64,
+}
+
+impl Drop for BorrowedTxnSentinelGuard {
+    fn drop(&mut self) {
+        let _ = ACTIVE_TXNS.try_with(|m| {
+            if let Ok(mut map) = m.try_borrow_mut() {
+                let _ = map.remove(&self.db_id);
+            }
+        });
+    }
+}
+
 fn resolve_unique_index_id(schema: &CompiledSchema, name: &str) -> Result<IndexId> {
+    // Check exact unqualified matches first so dotted index names (e.g. `v1.emb`) resolve cleanly.
+    let exact: Vec<_> = schema.indexes.iter().filter(|i| i.name == name).collect();
+    if exact.len() == 1 {
+        return Ok(exact[0].id);
+    }
+    if exact.len() > 1 {
+        let qualified: Vec<String> = exact
+            .iter()
+            .map(|i| {
+                let tn = schema.type_by_id(i.type_id).map_or("?", |t| t.name.as_str());
+                format!("{tn}.{}", i.name)
+            })
+            .collect();
+        return Err(ElmdbError::new(
+            ErrorCode::InvalidArgument,
+            format!(
+                "ambiguous index name '{name}' matches multiple types ({}); qualify as 'TypeName.{name}'",
+                qualified.join(", ")
+            ),
+        ));
+    }
     if let Some((type_name, idx_name)) = name.split_once('.') {
         let tdef = schema
             .type_by_name_any(type_name)
@@ -1646,27 +1721,7 @@ fn resolve_unique_index_id(schema: &CompiledSchema, name: &str) -> Result<IndexI
             .map(|i| i.id)
             .ok_or_else(|| ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'")));
     }
-    let matches: Vec<_> = schema.indexes.iter().filter(|i| i.name == name).collect();
-    match matches.as_slice() {
-        [] => Err(ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'"))),
-        [single] => Ok(single.id),
-        many => {
-            let qualified: Vec<String> = many
-                .iter()
-                .map(|i| {
-                    let tn = schema.type_by_id(i.type_id).map_or("?", |t| t.name.as_str());
-                    format!("{tn}.{}", i.name)
-                })
-                .collect();
-            Err(ElmdbError::new(
-                ErrorCode::InvalidArgument,
-                format!(
-                    "ambiguous index name '{name}' matches multiple types ({}); qualify as 'TypeName.{name}'",
-                    qualified.join(", ")
-                ),
-            ))
-        }
-    }
+    Err(ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{name}'")))
 }
 
 fn lookup_key_ext_id_in_txn<R: KvRead>(

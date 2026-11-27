@@ -550,30 +550,38 @@ pub fn set_entity_embeddings_by_ext_id<S: KvStore, V: Vfs, C: Clock>(
             return Err(ElmdbError::new(ErrorCode::EntityTrashed, "cannot embed trashed entity"));
         }
 
-        let (req_type_name, short_name) = match index_name.split_once('.') {
-            Some((t, n)) => (Some(t), n),
-            None => (None, index_name),
-        };
-        if let Some(tn) = req_type_name {
-            let td = schema
-                .type_by_id(row.header.type_id)
-                .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
-            if td.name != tn {
-                return Err(ElmdbError::new(
-                    ErrorCode::EndpointMismatch,
-                    format!("entity '{ext_id}' has type '{}', not '{tn}'", td.name),
-                ));
-            }
-        }
-        let def = schema.indexes.iter().find(|i| i.type_id == row.header.type_id && i.name == short_name).ok_or_else(
-            || {
-                if schema.indexes.iter().any(|i| i.name == short_name) {
-                    ElmdbError::new(ErrorCode::EndpointMismatch, "entity type does not match vector index")
-                } else {
-                    ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{index_name}'"))
+        // Check exact unqualified index name on this entity's type first (supports dotted index names like `v1.emb`),
+        // then fall back to `TypeName.indexName` qualification.
+        let def = if let Some(exact) =
+            schema.indexes.iter().find(|i| i.type_id == row.header.type_id && i.name == index_name)
+        {
+            exact
+        } else {
+            let (req_type_name, short_name) = match index_name.split_once('.') {
+                Some((t, n)) => (Some(t), n),
+                None => (None, index_name),
+            };
+            if let Some(tn) = req_type_name {
+                let td = schema
+                    .type_by_id(row.header.type_id)
+                    .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
+                if td.name != tn {
+                    return Err(ElmdbError::new(
+                        ErrorCode::EndpointMismatch,
+                        format!("entity '{ext_id}' has type '{}', not '{tn}'", td.name),
+                    ));
                 }
-            },
-        )?;
+            }
+            schema.indexes.iter().find(|i| i.type_id == row.header.type_id && i.name == short_name).ok_or_else(
+                || {
+                    if schema.indexes.iter().any(|i| i.name == short_name || i.name == index_name) {
+                        ElmdbError::new(ErrorCode::EndpointMismatch, "entity type does not match vector index")
+                    } else {
+                        ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index '{index_name}'"))
+                    }
+                },
+            )?
+        };
         let IndexKind::Vector { dims, .. } = &def.kind else {
             return Err(ElmdbError::new(
                 ErrorCode::InvalidArgument,

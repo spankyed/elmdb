@@ -85,22 +85,22 @@ proptest! {
         let sim = SimKvStore::new(SimKvConfig::default());
 
         let (l_bytes, l_ints) = {
-            let mut tx = lmdb.begin_write().unwrap();
+            let mut tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
             let b = tx.open_subdb("bytes", DbFlags::DEFAULT).unwrap();
             let i = tx.open_subdb("ints", DbFlags::INTEGER_KEY).unwrap();
-            tx.commit_raw().unwrap();
+            let (_, _g) = tx.commit_raw().unwrap();
             (b, i)
         };
         let (s_bytes, s_ints) = {
-            let mut tx = sim.begin_write().unwrap();
+            let mut tx = sim.begin_write(()).unwrap();
             let b = tx.open_subdb("bytes", DbFlags::DEFAULT).unwrap();
             let i = tx.open_subdb("ints", DbFlags::INTEGER_KEY).unwrap();
-            tx.commit_raw().unwrap();
+            let (_, _g) = tx.commit_raw().unwrap();
             (b, i)
         };
 
-        let mut l_tx = lmdb.begin_write().unwrap();
-        let mut s_tx = sim.begin_write().unwrap();
+        let mut l_tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
+        let mut s_tx = sim.begin_write(()).unwrap();
 
         for op in ops {
             match op {
@@ -165,8 +165,9 @@ proptest! {
                         l_tx.commit_savepoint(d).unwrap();
                         s_tx.commit_savepoint(d).unwrap();
                     }
-                    l_tx.commit_raw().unwrap();
-                    s_tx.commit_raw().unwrap();
+                    let (_, g_l) = l_tx.commit_raw().unwrap();
+                    drop(g_l);
+                    let _ = s_tx.commit_raw().unwrap();
 
                     let l_ro = lmdb.begin_read().unwrap();
                     let s_ro = sim.begin_read().unwrap();
@@ -175,14 +176,14 @@ proptest! {
                     drop(l_ro);
                     drop(s_ro);
 
-                    l_tx = lmdb.begin_write().unwrap();
-                    s_tx = sim.begin_write().unwrap();
+                    l_tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
+                    s_tx = sim.begin_write(()).unwrap();
                 }
                 Op::AbortTxn => {
                     l_tx.abort();
                     s_tx.abort();
-                    l_tx = lmdb.begin_write().unwrap();
-                    s_tx = sim.begin_write().unwrap();
+                    l_tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
+                    s_tx = sim.begin_write(()).unwrap();
                 }
                 Op::CheckSeekBytes(k) => {
                     let key = [b'k', k];
@@ -218,8 +219,9 @@ proptest! {
             l_tx.commit_savepoint(d).unwrap();
             s_tx.commit_savepoint(d).unwrap();
         }
-        l_tx.commit_raw().unwrap();
-        s_tx.commit_raw().unwrap();
+        let (_, g_l) = l_tx.commit_raw().unwrap();
+        drop(g_l);
+        let _ = s_tx.commit_raw().unwrap();
 
         let l_ro = lmdb.begin_read().unwrap();
         let s_ro = sim.begin_read().unwrap();
@@ -231,7 +233,7 @@ proptest! {
 #[test]
 fn lmdb_empty_values_and_fixed_8_byte_int_keys_parity() {
     fn exercise<S: KvStore>(store: &S) {
-        let mut tx = store.begin_write().unwrap();
+        let mut tx = store.begin_write(store.lock_map_read()).unwrap();
         let b = tx.open_subdb("bytes", DbFlags::DEFAULT).unwrap();
         let i = tx.open_subdb("ints", DbFlags::INTEGER_KEY).unwrap();
         // Empty value must succeed cleanly without C NULL memcpy UB.
@@ -242,7 +244,7 @@ fn lmdb_empty_values_and_fixed_8_byte_int_keys_parity() {
         // Invalid sub-DB names must fail identically.
         assert!(matches!(tx.open_subdb("", DbFlags::DEFAULT), Err(StorageError::BadValSize { len: 0 })));
         assert!(matches!(tx.open_subdb("a\0b", DbFlags::DEFAULT), Err(StorageError::InvalidState(_))));
-        tx.commit_raw().unwrap();
+        let (_, _g) = tx.commit_raw().unwrap();
     }
 
     let tmp = TempDir::new().unwrap();
@@ -254,8 +256,9 @@ fn lmdb_empty_values_and_fixed_8_byte_int_keys_parity() {
     // Empty write txn parity: txnid must NOT increment on no-op commit!
     let l_before = lmdb.last_txnid().unwrap();
     let s_before = sim.last_txnid().unwrap();
-    lmdb.begin_write().unwrap().commit_raw().unwrap();
-    sim.begin_write().unwrap().commit_raw().unwrap();
+    let (_, g_l) = lmdb.begin_write(lmdb.lock_map_read()).unwrap().commit_raw().unwrap();
+    drop(g_l);
+    let _ = sim.begin_write(()).unwrap().commit_raw().unwrap();
     assert_eq!(lmdb.last_txnid().unwrap(), l_before);
     assert_eq!(sim.last_txnid().unwrap(), s_before);
 }
@@ -267,12 +270,12 @@ fn lmdb_reopen_preopens_subdbs_safely_across_ro_drops_threads_and_flag_checks() 
 
     {
         let lmdb = LmdbStore::open(tmp.path(), cfg.clone()).unwrap();
-        let mut tx = lmdb.begin_write().unwrap();
+        let mut tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
         let b = tx.open_subdb("bytes", DbFlags::DEFAULT).unwrap();
         let i = tx.open_subdb("ints", DbFlags::INTEGER_KEY).unwrap();
         tx.put(b, b"k", b"v").unwrap();
         tx.put(i, &42u64.to_ne_bytes(), b"row42").unwrap();
-        tx.commit_raw().unwrap();
+        let (_, _g) = tx.commit_raw().unwrap();
     }
 
     // Reopen fresh LmdbStore -> cold cache!
@@ -297,19 +300,24 @@ fn lmdb_reopen_preopens_subdbs_safely_across_ro_drops_threads_and_flag_checks() 
 
     // 2. Write-side flag mismatch on existing sub-DB MUST be rejected!
     {
-        let mut rw = lmdb.begin_write().unwrap();
+        let mut rw = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
         assert!(matches!(rw.open_subdb("ints", DbFlags::DEFAULT), Err(StorageError::InvalidState(_))));
         rw.abort();
     }
 
     // 3. MVCC snapshot visibility: sub-DB created AFTER `ro_old` started returns None on `ro_old`!
     let ro_old = lmdb.begin_read().unwrap();
-    {
-        let mut rw = lmdb.begin_write().unwrap();
-        let late = rw.open_subdb("late_db", DbFlags::DEFAULT).unwrap();
-        rw.put(late, b"x", b"1").unwrap();
-        rw.commit_raw().unwrap();
-    }
+    std::thread::scope(|s| {
+        let lmdb_w = Arc::clone(&lmdb);
+        s.spawn(move || {
+            let mut rw = lmdb_w.begin_write(lmdb_w.lock_map_read()).unwrap();
+            let late = rw.open_subdb("late_db", DbFlags::DEFAULT).unwrap();
+            rw.put(late, b"x", b"1").unwrap();
+            let (_, _g) = rw.commit_raw().unwrap();
+        })
+        .join()
+        .unwrap();
+    });
     assert_eq!(lmdb.open_subdb_ro(&ro_old, "late_db", DbFlags::DEFAULT).unwrap(), None);
     drop(ro_old);
 
@@ -399,7 +407,7 @@ fn lmdb_aborted_subdb_creation_does_not_poison_dbi_cache() {
     let lmdb = LmdbStore::open(tmp.path(), LmdbConfig { map_size: 4 * 1024 * 1024, ..LmdbConfig::default() }).unwrap();
 
     {
-        let mut tx = lmdb.begin_write().unwrap();
+        let mut tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
         let db = tx.open_subdb("ephemeral", DbFlags::DEFAULT).unwrap();
         tx.put(db, b"a", b"1").unwrap();
         tx.abort();
@@ -409,10 +417,11 @@ fn lmdb_aborted_subdb_creation_does_not_poison_dbi_cache() {
     assert_eq!(lmdb.open_subdb_ro(&ro, "ephemeral", DbFlags::DEFAULT).unwrap(), None);
     drop(ro);
 
-    let mut tx = lmdb.begin_write().unwrap();
+    let mut tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
     let db = tx.open_subdb("ephemeral", DbFlags::DEFAULT).unwrap();
     tx.put(db, b"a", b"2").unwrap();
-    tx.commit_raw().unwrap();
+    let (_, g) = tx.commit_raw().unwrap();
+    drop(g);
 
     let ro = lmdb.begin_read().unwrap();
     let db_ro = lmdb.open_subdb_ro(&ro, "ephemeral", DbFlags::DEFAULT).unwrap().unwrap();
@@ -446,7 +455,7 @@ fn lmdb_batch2_single_open_boot_id_truncation_reader_check_and_zero_hash_raw_com
 
     // P2-3: `commit_raw` returns exact `txnid` from RAM with zero SHA-256 (`[0u8; 32]`),
     // while `active_receipt()` returns the matching `txnid` and real non-zero `roots_sha256`.
-    let mut tx = lmdb.begin_write().unwrap();
+    let mut tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
     let db = tx.open_subdb("data", DbFlags::DEFAULT).unwrap();
     tx.put(db, b"hello", b"world").unwrap();
     for i in 0..40u32 {
@@ -454,7 +463,8 @@ fn lmdb_batch2_single_open_boot_id_truncation_reader_check_and_zero_hash_raw_com
         let val = vec![0xABu8; 2048];
         tx.put(db, key.as_bytes(), &val).unwrap();
     }
-    let raw_receipt = tx.commit_raw().unwrap();
+    let (raw_receipt, g) = tx.commit_raw().unwrap();
+    drop(g);
     assert!(raw_receipt.txnid >= 1);
     assert_eq!(raw_receipt.roots_sha256, [0u8; 32], "commit_raw must not hash data.mdb on Grouped/Unsafe commits");
     let full_receipt = lmdb.active_receipt().unwrap();
@@ -493,5 +503,110 @@ fn lmdb_batch2_single_open_boot_id_truncation_reader_check_and_zero_hash_raw_com
     assert!(
         matches!(trunc_err, StorageError::Corrupted(_)),
         "expected StorageError::Corrupted on truncated data.mdb, got {trunc_err:?}"
+    );
+}
+
+#[test]
+fn lmdb_batch2_review_stress_concurrent_grow_sync_dbi_commit_thundering_herd_and_reopen_mapsize() {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // 1. P0-1 + P1-3: Concurrent `grow_map(Some(target))` thundering herd + `sync()` / `last_txnid()` / `needs_map_growth()`
+    //    must NEVER SIGSEGV or exponentially over-grow past `target`!
+    let tmp = TempDir::new().unwrap();
+    let initial_map = 256 * 1024;
+    let lmdb = LmdbStore::open(tmp.path(), LmdbConfig { map_size: initial_map, ..LmdbConfig::default() }).unwrap();
+    let (gate, _) = DurabilityGate::open(lmdb.clone(), OsVfs::new(), tmp.path(), DurabilityMode::Grouped).unwrap();
+    let gate = Arc::new(gate);
+
+    {
+        let mut tx = gate.begin_write().unwrap();
+        let db = tx.open_subdb("seed", DbFlags::DEFAULT).unwrap();
+        tx.put(db, b"k", b"v").unwrap();
+        tx.commit().unwrap();
+    }
+
+    // 8 threads race `grow_map(Some(1 MiB))` while another thread hammers `sync()` + `last_txnid()` + `needs_map_growth()`.
+    let target_1m = 1024 * 1024;
+    let barrier = Arc::new(Barrier::new(9));
+    let done = Arc::new(AtomicBool::new(false));
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let g = Arc::clone(&gate);
+        let b = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            b.wait();
+            g.grow_map(Some(target_1m)).unwrap()
+        }));
+    }
+    {
+        let g = Arc::clone(&gate);
+        let s = lmdb.clone();
+        let b = Arc::clone(&barrier);
+        let d = Arc::clone(&done);
+        handles.push(std::thread::spawn(move || {
+            b.wait();
+            while !d.load(Ordering::Relaxed) {
+                let _ = g.sync().unwrap();
+                let _ = g.last_txnid().unwrap();
+                let _ = s.needs_map_growth().unwrap();
+            }
+            0
+        }));
+    }
+    let mut grown_sizes = Vec::new();
+    for h in handles.drain(..8) {
+        grown_sizes.push(h.join().unwrap());
+    }
+    done.store(true, Ordering::Relaxed);
+    handles.pop().unwrap().join().unwrap();
+    assert!(
+        grown_sizes.iter().all(|&sz| sz == target_1m),
+        "thundering herd must grow once to 1 MiB, got {grown_sizes:?}"
+    );
+    assert_eq!(gate.map_size(), target_1m);
+
+    // 2. P0-2: Tight-loop concurrent `LmdbRoTxn::begin()` + `open_subdb_existing()` + `get()`
+    //    vs `LmdbRwTxn::open_subdb()` + `commit_raw()` across 120 brand-new sub-DBs must NEVER hit EINVAL!
+    let stop_readers = Arc::new(AtomicBool::new(false));
+    let mut reader_threads = Vec::new();
+    for _ in 0..4 {
+        let s = lmdb.clone();
+        let stop = Arc::clone(&stop_readers);
+        reader_threads.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Acquire) {
+                let ro = s.begin_read().unwrap();
+                for i in (0..120u32).rev() {
+                    let name = format!("dyn_db_{i}");
+                    if let Some(db) = s.open_subdb_ro(&ro, &name, DbFlags::DEFAULT).unwrap() {
+                        assert_eq!(ro.get(db, b"v").unwrap(), Some(name.as_bytes()));
+                        break;
+                    }
+                }
+            }
+        }));
+    }
+    for i in 0..120u32 {
+        let name = format!("dyn_db_{i}");
+        let mut tx = gate.begin_write().unwrap();
+        let db = tx.open_subdb(&name, DbFlags::DEFAULT).unwrap();
+        tx.put(db, b"v", name.as_bytes()).unwrap();
+        tx.commit().unwrap();
+    }
+    stop_readers.store(true, Ordering::Release);
+    for h in reader_threads {
+        h.join().unwrap();
+    }
+
+    // 3. P1-2: Reopening the 1 MiB grown DB with a smaller requested `map_size` (256 KiB) MUST preserve
+    //    the on-disk 1 MiB `mm_mapsize` instead of shrinking it!
+    gate.sync().unwrap();
+    drop(gate);
+    drop(lmdb);
+    let reopened = LmdbStore::open(tmp.path(), LmdbConfig { map_size: initial_map, ..LmdbConfig::default() }).unwrap();
+    assert!(
+        reopened.map_size() >= target_1m,
+        "reopen with smaller map_size must preserve on-disk mm_mapsize >= {target_1m}, got {}",
+        reopened.map_size()
     );
 }
