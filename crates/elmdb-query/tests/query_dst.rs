@@ -1941,3 +1941,460 @@ fn graph_analyze_filters_soft_trashed_literal_keys_and_records_read_set() {
     };
     assert_eq!(wc_all, vec![vec![ka, kb, kc]]);
 }
+
+#[test]
+fn batch_d_bm25f_unbounded_query_succeeds_without_overflow() {
+    let (engine, _reg, ids) = open_sim(BuildPolicy::EagerInSchemaChange);
+    let qe = QueryEngine::default();
+
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("bm1".into()),
+                fields: vec![("title".into(), CanonicalValue::String("nebula drift".into()))],
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("bm2".into()),
+                fields: vec![("title".into(), CanonicalValue::String("nebula cloud".into()))],
+            },
+        ])
+        .unwrap();
+
+    // ScoreSpec::Bm25f with `top_k: None` and no OrderSlice limit passes `usize::MAX` into BMW search.
+    let plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            spec: ScoreSpec::Bm25f {
+                index_id: ids.idx_text,
+                query: "nebula".into(),
+                require_all: false,
+                prefix: false,
+                phrase: None,
+                top_k: None,
+            },
+        }),
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
+    });
+    let QueryResult::Hits(hits) = qe.execute(&engine, &plan, ExecBudgets::default()).unwrap().result else {
+        panic!("expected Hits");
+    };
+    assert_eq!(hits.len(), 2);
+}
+
+#[test]
+fn batch_d_literal_keys_soft_trash_filtered_in_degrees_has_link_and_traversals() {
+    let (engine, _reg, ids) = open_sim(BuildPolicy::EagerInSchemaChange);
+    let qe = QueryEngine::default();
+
+    engine
+        .execute_batch(&[
+            WireOp::Create { type_name: "Note".into(), external_id: Some("A".into()), fields: vec![] },
+            WireOp::Create { type_name: "Note".into(), external_id: Some("B".into()), fields: vec![] },
+            WireOp::Create { type_name: "Note".into(), external_id: Some("C".into()), fields: vec![] },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("A".into()),
+                target: EntityTarget::ExternalId("B".into()),
+                weight: Some(1.0f64.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("B".into()),
+                target: EntityTarget::ExternalId("C".into()),
+                weight: Some(1.0f64.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("A".into()),
+                target: EntityTarget::ExternalId("C".into()),
+                weight: Some(1.0f64.to_bits()),
+                info: None,
+            },
+            WireOp::Trash { target: EntityTarget::ExternalId("B".into()) },
+        ])
+        .unwrap();
+
+    let ka = engine.get_row("A").unwrap().unwrap().key;
+    let kb = engine.get_row("B").unwrap().unwrap().key;
+    let kc = engine.get_row("C").unwrap().unwrap().key;
+
+    // 1. Degrees over LiteralKeys([A, B, C]) skips trashed B and counts only live edges (A->C = 1 each).
+    let deg_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![ka, kb, kc]))),
+        terminal: TerminalSpec::Degrees { rel_kinds: vec![ids.cites], dir: EdgeDir::Both },
+    });
+    let mut rec_deg = FullAuditRecorder::default();
+    let deg_out = qe.execute_tracked(&engine, &deg_plan, ExecBudgets::default(), &mut rec_deg).unwrap();
+    assert_eq!(deg_out.result, QueryResult::Degrees(vec![(ka, 1), (kc, 1)]));
+    assert!(rec_deg.point_masks.iter().any(|(k, _)| *k == kb), "Degrees must track trashed subject for restore");
+
+    // 2. HasLink over LiteralKeys([B]) returns empty even though B->C points to live C!
+    let hl_any = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![ka, kb]))),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, target: None },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    let mut rec_hl = FullAuditRecorder::default();
+    let hl_out = qe.execute_tracked(&engine, &hl_any, ExecBudgets::default(), &mut rec_hl).unwrap();
+    assert_eq!(hl_out.result, QueryResult::Ids(vec![ka]));
+    assert!(rec_hl.point_masks.iter().any(|(k, _)| *k == kb), "HasLink must track trashed subject for restore");
+
+    let hl_target = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![ka, kb]))),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, target: Some(kc) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hl_target, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![ka]));
+
+    // EdgeDir::In with explicit targets (live, trashed, and non-matching) on LiteralKeys([kc]).
+    let hl_in_live = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![kc]))),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::In, target: Some(ka) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hl_in_live, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![kc]));
+
+    let hl_in_trashed = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![kc]))),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::In, target: Some(kb) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hl_in_trashed, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![]));
+
+    let hl_in_mismatch = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![kc]))),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::In, target: Some(kc) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hl_in_mismatch, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![]));
+
+    // Live Type source pushes HasLink { target: Some(kc) } into `HasLinkDriveFromTarget`.
+    let hl_pushdown = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, target: Some(kc) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    let hl_push_out = qe.execute(&engine, &hl_pushdown, ExecBudgets::default()).unwrap();
+    assert_eq!(hl_push_out.result, QueryResult::Ids(vec![ka]));
+    assert!(
+        hl_push_out.explain.pushed_filters.iter().any(|s| s == "HasLinkDriveFromTarget"),
+        "live Type HasLink with explicit target must push down via HasLinkDriveFromTarget: {:?}",
+        hl_push_out.explain.pushed_filters
+    );
+
+    // 3. Hops & ShortestPath from LiteralKeys([B]) return empty while include_trashed: true includes B.
+    let hops_trashed = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Traverse {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![kb]))),
+            spec: TraverseSpec::Hops { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, min_hops: 0, max_hops: 2 },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hops_trashed, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![]));
+
+    let sp_trashed = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Traverse {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![kb]))),
+            spec: TraverseSpec::ShortestPath { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, target: kc, max_hops: 2 },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &sp_trashed, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![]));
+
+    // 4. Explicit `include_trashed: true` DOES include B in Degrees and HasLink.
+    let deg_incl = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: true })),
+        terminal: TerminalSpec::Degrees { rel_kinds: vec![ids.cites], dir: EdgeDir::Both },
+    });
+    assert_eq!(
+        qe.execute(&engine, &deg_incl, ExecBudgets::default()).unwrap().result,
+        QueryResult::Degrees(vec![(ka, 2), (kb, 2), (kc, 2)])
+    );
+
+    let hl_incl = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: true })),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, target: Some(kc) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hl_incl, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![ka, kb]));
+}
+
+#[test]
+fn batch_d_plan_cache_skips_failed_index_and_invalidates_on_maint_seq() {
+    // 1. Direct PlanCache unit tests for `(schema_epoch, maint_seq)` versioning & stale put rejection.
+    let cache = elmdb_query::PlanCache::new(16);
+    let plan_a = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::AllEntities { include_trashed: false })),
+        terminal: TerminalSpec::Count,
+    });
+    let plan_b = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::AllEntities { include_trashed: false })),
+        terminal: TerminalSpec::Ids,
+    });
+    let strat_a = elmdb_query::CachedStrategy {
+        access_label: "A".into(),
+        chosen_index: None,
+        use_count_pushdown: false,
+        use_index_order: None,
+        use_trigram_index: None,
+    };
+    let strat_b = elmdb_query::CachedStrategy {
+        access_label: "B".into(),
+        chosen_index: None,
+        use_count_pushdown: false,
+        use_index_order: None,
+        use_trigram_index: None,
+    };
+    let ka_m0 = elmdb_query::PlanShapeKey::from_plan(1, 0, &plan_a);
+    let kb_m0 = elmdb_query::PlanShapeKey::from_plan(1, 0, &plan_b);
+    cache.put(ka_m0.clone(), strat_a.clone());
+    cache.put(kb_m0.clone(), strat_b.clone());
+    assert_eq!(cache.stats().entries, 2);
+    assert_eq!(cache.get(&ka_m0), Some(strat_a.clone()));
+    assert_eq!(cache.get(&kb_m0), Some(strat_b));
+    assert_eq!(cache.stats().hits, 2);
+
+    // Advancing `maint_seq` within the same `schema_epoch` clears prior entries automatically.
+    let ka_m1 = elmdb_query::PlanShapeKey::from_plan(1, 1, &plan_a);
+    assert_eq!(cache.get(&ka_m1), None);
+    assert_eq!(cache.stats().entries, 0);
+    assert_eq!(cache.stats().maint_seq, 1);
+    cache.put(ka_m1.clone(), strat_a.clone());
+    assert_eq!(cache.stats().entries, 1);
+
+    // Stale `put` / `get` from an older `maint_seq` must be ignored and must not pollute the cache.
+    cache.put(kb_m0.clone(), strat_a.clone());
+    assert_eq!(cache.stats().entries, 1);
+    assert_eq!(cache.get(&ka_m0), None);
+    assert_eq!(cache.get(&ka_m1), Some(strat_a.clone()));
+
+    // Advancing `maint_seq` directly via `put()` clears old entries and updates version.
+    let kb_m2 = elmdb_query::PlanShapeKey::from_plan(1, 2, &plan_b);
+    cache.put(kb_m2.clone(), strat_a.clone());
+    assert_eq!(cache.stats().entries, 1);
+    assert_eq!(cache.stats().maint_seq, 2);
+    assert_eq!(cache.get(&ka_m1), None);
+    assert_eq!(cache.get(&kb_m2), Some(strat_a));
+
+    // 2. End-to-end: BuildState::Failed must not poison PlanCache; rebuild restores O1CountPushdown.
+    let (engine, reg, ids) = open_sim(BuildPolicy::EagerInSchemaChange);
+    let qe = QueryEngine::default();
+    let idx_tag = engine.schema().indexes.iter().find(|i| i.name == "note_tag").unwrap().id;
+    engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("f1".into()),
+            fields: vec![("tag".into(), CanonicalValue::String("alpha".into()))],
+        }])
+        .unwrap();
+
+    // Force `note_tag` index into BuildState::Failed at the current schema_epoch.
+    engine
+        .run_maintenance_write(|txn, _schema, dbs| {
+            elmdb_projections::state::write_build_state(
+                txn,
+                dbs,
+                idx_tag,
+                &elmdb_projections::BuildState::Failed {
+                    code: ErrorCode::InvalidArgument,
+                    message: "simulated failure".into(),
+                },
+            )
+        })
+        .unwrap();
+
+    let count_eq = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            expr: FilterExpr::Eq(ids.tag, CanonicalValue::String("alpha".into())),
+        }),
+        terminal: TerminalSpec::Count,
+    });
+    let degraded = qe.execute(&engine, &count_eq, ExecBudgets::default()).unwrap();
+    assert!(!degraded.explain.count_pushdown);
+    assert_eq!(degraded.result, QueryResult::Count(1));
+    assert_eq!(qe.cache_stats().entries, 0, "degraded plan must not be cached while an index is Failed");
+
+    // Rebuild index (same schema_epoch, advances maint_seq) -> O1CountPushdown immediately restored & cached!
+    reg.rebuild(&engine, Some(idx_tag)).unwrap();
+    let recovered = qe.execute(&engine, &count_eq, ExecBudgets::default()).unwrap();
+    assert!(recovered.explain.count_pushdown, "O1CountPushdown must be restored immediately after rebuild");
+    assert!(!recovered.explain.plan_cache_hit);
+    assert_eq!(recovered.result, QueryResult::Count(1));
+    let hit = qe.execute(&engine, &count_eq, ExecBudgets::default()).unwrap();
+    assert!(hit.explain.plan_cache_hit);
+    assert!(hit.explain.count_pushdown);
+
+    // Maintenance write bumping `maint_seq` without calling `qe.clear_cache()` still invalidates PlanCache!
+    engine.run_maintenance_write(|_txn, _schema, _dbs| Ok(())).unwrap();
+    let post_maint = qe.execute(&engine, &count_eq, ExecBudgets::default()).unwrap();
+    assert!(!post_maint.explain.plan_cache_hit, "PlanCache must self-invalidate on maint_seq advance");
+    assert!(post_maint.explain.count_pushdown);
+}
+
+#[test]
+fn batch_d_leiden_normalizes_extreme_weights_without_overflow() {
+    let (engine, _reg, ids) = open_sim(BuildPolicy::EagerInSchemaChange);
+    let qe = QueryEngine::default();
+
+    engine
+        .execute_batch(&[
+            WireOp::Create { type_name: "Note".into(), external_id: Some("L1".into()), fields: vec![] },
+            WireOp::Create { type_name: "Note".into(), external_id: Some("L2".into()), fields: vec![] },
+            WireOp::Create { type_name: "Note".into(), external_id: Some("L3".into()), fields: vec![] },
+            WireOp::Create { type_name: "Note".into(), external_id: Some("L4".into()), fields: vec![] },
+            // Mutual f64::MAX edges sum to f64::INFINITY without max_w normalization!
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("L1".into()),
+                target: EntityTarget::ExternalId("L2".into()),
+                weight: Some(f64::MAX.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("L2".into()),
+                target: EntityTarget::ExternalId("L1".into()),
+                weight: Some(f64::MAX.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("L3".into()),
+                target: EntityTarget::ExternalId("L4".into()),
+                weight: Some(f64::MAX.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("L4".into()),
+                target: EntityTarget::ExternalId("L3".into()),
+                weight: Some(f64::MAX.to_bits()),
+                info: None,
+            },
+            // Tiny bridge underflows to 0.0 under max_w scaling and is safely skipped.
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("L2".into()),
+                target: EntityTarget::ExternalId("L3".into()),
+                weight: Some(f64::MIN_POSITIVE.to_bits()),
+                info: None,
+            },
+        ])
+        .unwrap();
+
+    let k1 = engine.get_row("L1").unwrap().unwrap().key;
+    let k2 = engine.get_row("L2").unwrap().unwrap().key;
+    let k3 = engine.get_row("L3").unwrap().unwrap().key;
+    let k4 = engine.get_row("L4").unwrap().unwrap().key;
+
+    let weighted_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1, k2, k3, k4]))),
+        spec: GraphAnalyzeSpec::Leiden {
+            rel_kinds: vec![ids.cites],
+            weighted: true,
+            resolution: 1.0,
+            seed: 7,
+            iterations: 5,
+        },
+    });
+    let QueryResult::GraphGroups(groups) = qe.execute(&engine, &weighted_plan, ExecBudgets::default()).unwrap().result
+    else {
+        panic!("expected GraphGroups");
+    };
+    assert_eq!(groups, vec![vec![k1, k2], vec![k3, k4]]);
+
+    // Unweighted Leiden still groups connected edges cleanly (guards `max_w > 0.0` fallback to `scale = 1.0`).
+    let unweighted_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1, k2, k3, k4]))),
+        spec: GraphAnalyzeSpec::Leiden {
+            rel_kinds: vec![ids.cites],
+            weighted: false,
+            resolution: 1.0,
+            seed: 7,
+            iterations: 5,
+        },
+    });
+    let QueryResult::GraphGroups(unweighted_groups) =
+        qe.execute(&engine, &unweighted_plan, ExecBudgets::default()).unwrap().result
+    else {
+        panic!("expected GraphGroups");
+    };
+    assert!(
+        unweighted_groups.iter().any(|g| g.len() > 1),
+        "unweighted Leiden must retain edges instead of returning all singletons: {unweighted_groups:?}"
+    );
+
+    // Direct CsrGraph with an injected f64::INFINITY weight must not poison `max_w` and drop finite edges.
+    let manual = elmdb_query::CsrGraph {
+        keys: vec![k1, k2, k3],
+        key_to_idx: [(k1, 0), (k2, 1), (k3, 2)].into_iter().collect(),
+        offsets: vec![0, 2, 3, 3],
+        targets: vec![1, 2, 0],
+        weights: Some(vec![10.0, f64::INFINITY, 10.0]),
+    };
+    let manual_groups = elmdb_query::leiden_communities(&manual, 1.0, 7, 5).unwrap();
+    assert_eq!(manual_groups, vec![vec![k1, k2], vec![k3]]);
+}
+
+#[test]
+fn batch_d_order_index_checks_collator_stamp_when_limit_within_missing_keys() {
+    let (engine, _reg, ids) = open_sim(BuildPolicy::EagerInSchemaChange);
+    let qe = QueryEngine::default();
+
+    // 3 rows with missing title (in TAG_MISSING) + 1 row with string title (in TAG_ORDER).
+    engine
+        .execute_batch(&[
+            WireOp::Create { type_name: "Note".into(), external_id: Some("m1".into()), fields: vec![] },
+            WireOp::Create { type_name: "Note".into(), external_id: Some("m2".into()), fields: vec![] },
+            WireOp::Create { type_name: "Note".into(), external_id: Some("m3".into()), fields: vec![] },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("s1".into()),
+                fields: vec![("title".into(), CanonicalValue::String("Zebra".into()))],
+            },
+        ])
+        .unwrap();
+
+    // Corrupt TAG_STAMP (`0x00`) in the Order index sub-DB.
+    let order_idx = engine.schema().indexes.iter().find(|i| i.name == "note_title_order").unwrap().clone();
+    engine
+        .run_maintenance_write(|txn, _schema, _dbs| {
+            let db = txn.open_subdb(&order_idx.subdb_slot().name(), elmdb_storage::DbFlags::DEFAULT)?;
+            txn.put(db, &[0x00], &[0xAA; 32])?;
+            Ok(())
+        })
+        .unwrap();
+
+    // Asc order with `limit: Some(2)` (<= 3 missing keys) never invokes `scan_ordered`,
+    // yet MUST still reject the corrupted collator stamp with `IndexNotReady`!
+    let plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::OrderSlice {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            order: OrderSpec::Field { field: ids.title, dir: OrderDir::Asc, locale: Some("en-US".into()) },
+            after: None,
+            limit: Some(2),
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    let err = qe.execute(&engine, &plan, ExecBudgets::default()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::IndexNotReady);
+}

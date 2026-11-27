@@ -1,7 +1,9 @@
 //! Rule & cost optimizer, regex-HIR trigram literal extraction, `Spread`-adaptive
 //! multi-index Leapfrog intersection, and structured `ExplainPlan` telemetry.
 
-use elmdb_engine::{CompiledSchema, EntityKey, FieldId, IndexDef, IndexId, IndexKind, SystemDbs, TypeId};
+use elmdb_engine::{
+    CompiledSchema, EntityKey, FieldId, IndexDef, IndexId, IndexKind, SystemDbs, TypeId, read_maint_seq,
+};
 use elmdb_projections::{BuildState, state::read_build_state, trigram};
 use elmdb_storage::KvRead;
 use elmdb_wire::Result;
@@ -334,7 +336,8 @@ pub fn optimize_plan<R: KvRead>(
     plan: &LogicalPlan,
     cache: Option<&PlanCache>,
 ) -> Result<(CachedStrategy, bool)> {
-    let shape_key = PlanShapeKey::from_plan(schema.epoch, plan);
+    let maint_seq = read_maint_seq(txn, dbs)?;
+    let shape_key = PlanShapeKey::from_plan(schema.epoch, maint_seq, plan);
     if let Some(c) = cache
         && let Some(hit) = c.get(&shape_key)
     {
@@ -347,23 +350,23 @@ pub fn optimize_plan<R: KvRead>(
         }
     }
 
-    let (strategy, any_building) = compute_strategy(txn, dbs, schema, &plan.root)?;
+    let (strategy, any_not_ready) = compute_strategy(txn, dbs, schema, &plan.root)?;
     if let Some(c) = cache
-        && !any_building
+        && !any_not_ready
     {
         c.put(shape_key, strategy.clone());
     }
     Ok((strategy, false))
 }
 
-fn any_index_building_for_type<R: KvRead>(
+fn any_index_not_ready_for_type<R: KvRead>(
     txn: &R,
     dbs: &SystemDbs,
     schema: &CompiledSchema,
     type_id: TypeId,
 ) -> Result<bool> {
     for idx in &schema.indexes {
-        if idx.type_id == type_id && matches!(read_build_state(txn, dbs, idx.id)?, Some(BuildState::Building { .. })) {
+        if idx.type_id == type_id && !is_index_ready(txn, dbs, idx.id)? {
             return Ok(true);
         }
     }
@@ -388,7 +391,7 @@ fn compute_strategy<R: KvRead>(
         && let Some(idx) = find_ready_value_index(txn, dbs, schema, *type_id, *field)?
         && matches!(&idx.kind, IndexKind::Value { fields, .. } if fields.len() == 1)
     {
-        let any_building = any_index_building_for_type(txn, dbs, schema, *type_id)?;
+        let any_not_ready = any_index_not_ready_for_type(txn, dbs, schema, *type_id)?;
         return Ok((
             CachedStrategy {
                 access_label: format!("O1CountPushdown({})", idx.name),
@@ -397,7 +400,7 @@ fn compute_strategy<R: KvRead>(
                 use_index_order: None,
                 use_trigram_index: None,
             },
-            any_building,
+            any_not_ready,
         ));
     }
 
@@ -486,12 +489,12 @@ fn compute_strategy<R: KvRead>(
         }
     }
 
-    let any_building = match base_type {
-        Some(tid) => any_index_building_for_type(txn, dbs, schema, tid)?,
+    let any_not_ready = match base_type {
+        Some(tid) => any_index_not_ready_for_type(txn, dbs, schema, tid)?,
         None => false,
     };
     Ok((
         CachedStrategy { access_label, chosen_index, use_count_pushdown: false, use_index_order, use_trigram_index },
-        any_building,
+        any_not_ready,
     ))
 }

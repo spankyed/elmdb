@@ -561,11 +561,17 @@ pub fn leiden_communities(
     if !resolution.is_finite() || resolution <= 0.0 {
         return Err(ElmdbError::new(ErrorCode::InvalidArgument, "Leiden resolution must be > 0"));
     }
+    let max_w = (0..n)
+        .filter_map(|u| graph.out_weights(u))
+        .flat_map(|ws| ws.iter().copied())
+        .filter(|w| w.is_finite())
+        .fold(0.0f64, f64::max);
+    let scale = if max_w > 0.0 { max_w } else { 1.0 };
     let mut builder = leiden_rs::GraphDataBuilder::new(n);
     for u in 0..n {
         let ws = graph.out_weights(u);
         for (idx, &v) in graph.out(u).iter().enumerate() {
-            let w = ws.map_or(1.0, |weights| weights[idx]);
+            let w = ws.map_or(1.0, |weights| weights[idx]) / scale;
             if w > 0.0 && w.is_finite() {
                 // Canonicalize `(a <= b)` so mutual directed edges `u->v` & `v->u` merge cleanly in undirected CSR.
                 let (a, b) = if u <= v as usize { (u, v as usize) } else { (v as usize, u) };
