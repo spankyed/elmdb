@@ -103,11 +103,16 @@ pub trait KvStore: Send + Sync {
     type OwnedRwTxn: KvWrite<MapReadGuard = Self::MapReadGuard> + 'static;
     /// Guard token proving the caller holds L2 `MapGate::read()` for this environment.
     type MapReadGuard: 'static;
+    /// Guard token proving the caller holds exclusive L2 `MapGate::write()` for this environment.
+    type MapWriteGuard<'a>
+    where
+        Self: 'a;
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError>;
     fn begin_write(&self, map_guard: Self::MapReadGuard) -> Result<Self::RwTxn<'_>, StorageError>;
     fn begin_write_owned(&self, map_guard: Self::MapReadGuard) -> Result<Self::OwnedRwTxn, StorageError>;
     fn lock_map_read(&self) -> Self::MapReadGuard;
+    fn lock_map_write(&self) -> Self::MapWriteGuard<'_>;
     fn open_subdb_ro(
         &self,
         txn: &Self::RoTxn<'_>,
@@ -129,15 +134,40 @@ pub trait KvStore: Send + Sync {
     }
     /// Grows the underlying mmap to at least `min_size` (or doubles current size) under L2 `MapGate::write()`.
     /// Caller MUST NOT hold any active transaction (`L2` or `L3`).
-    fn grow_map(&self, _min_size: Option<usize>) -> Result<usize, StorageError> {
+    fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
+        let map_guard = self.lock_map_write();
+        self.grow_map_locked(&map_guard, min_size, false)
+    }
+    /// Grows the underlying mmap while the caller ALREADY holds exclusive L2 `MapWriteGuard`,
+    /// releasing any active durable pin before `mdb_env_set_mapsize` and acquiring a fresh pin
+    /// before returning whenever `pin_after == true`.
+    fn grow_map_locked(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+        _min_size: Option<usize>,
+        _pin_after: bool,
+    ) -> Result<usize, StorageError> {
         Ok(self.map_size())
     }
     /// Adopts an external cross-process map resize (`mdb_env_set_mapsize(env, 0)`) under L2 `MapGate::write()`.
     /// Caller MUST NOT hold any active transaction (`L2` or `L3`).
     fn adopt_resized_map(&self) -> Result<usize, StorageError> {
+        let map_guard = self.lock_map_write();
+        self.adopt_resized_map_locked(&map_guard, false)
+    }
+    /// Adopts an external cross-process map resize while the caller ALREADY holds exclusive L2
+    /// `MapWriteGuard`, releasing any active durable pin before `mdb_env_set_mapsize(0)` and
+    /// acquiring a fresh pin before returning whenever `pin_after == true`.
+    fn adopt_resized_map_locked(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+        _pin_after: bool,
+    ) -> Result<usize, StorageError> {
         Ok(self.map_size())
     }
     fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError>;
+    /// Flushes the store to stable storage while the caller holds exclusive L2 `MapWriteGuard`.
+    fn sync_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError>;
     /// Pins (or refreshes the pin on) the current committed snapshot so the storage backend's
     /// freelist cannot recycle pages belonging to the last durable snapshot under `MDB_NOSYNC`.
     ///
@@ -146,6 +176,10 @@ pub trait KvStore: Send + Sync {
     /// across the pin's lifetime, so `grow_map`/`adopt_resized_map` never deadlock), and MUST
     /// release and re-acquire the pin around `mdb_env_set_mapsize`.
     fn refresh_durable_pin(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+        Ok(())
+    }
+    /// Overlaps a fresh durable pin before releasing any prior pin while holding exclusive L2 `MapWriteGuard`.
+    fn refresh_durable_pin_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
         Ok(())
     }
     /// Returns the debug lock-hierarchy scope ID for this store instance so higher layers

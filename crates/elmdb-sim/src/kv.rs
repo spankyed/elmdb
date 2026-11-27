@@ -160,6 +160,7 @@ impl StoreInner {
 pub struct SimKvStore {
     inner: Arc<Mutex<StoreInner>>,
     fail_next_sync: Arc<AtomicU32>,
+    fail_next_pin: Arc<AtomicU32>,
 }
 
 impl SimKvStore {
@@ -179,12 +180,18 @@ impl SimKvStore {
                 tree_corrupted_after_crash: false,
             })),
             fail_next_sync: Arc::new(AtomicU32::new(0)),
+            fail_next_pin: Arc::new(AtomicU32::new(0)),
         }
     }
 
     /// Injects `count` upcoming `sync()` failures to verify `DurabilityGate` poisoning.
     pub fn inject_sync_failures(&self, count: u32) {
         self.fail_next_sync.store(count, AtomicOrdering::Release);
+    }
+
+    /// Injects `count` upcoming `refresh_durable_pin` / post-remap re-pin failures (e.g. `ReadersFull`).
+    pub fn inject_pin_failures(&self, count: u32) {
+        self.fail_next_pin.store(count, AtomicOrdering::Release);
     }
 
     /// Simulates power loss: drops all uncommitted and unsynced commits, reverting the store
@@ -679,8 +686,11 @@ impl KvStore for SimKvStore {
     type RwTxn<'a> = SimRwTxn;
     type OwnedRwTxn = SimRwTxn;
     type MapReadGuard = ();
+    type MapWriteGuard<'a> = ();
 
     fn lock_map_read(&self) -> Self::MapReadGuard {}
+
+    fn lock_map_write(&self) -> Self::MapWriteGuard<'_> {}
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
         let mut inner = self.inner.lock();
@@ -715,6 +725,10 @@ impl KvStore for SimKvStore {
     }
 
     fn sync(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+        self.sync_under_write(&())
+    }
+
+    fn sync_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
         if self.fail_next_sync.try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1)).is_ok()
         {
             return Err(StorageError::DurabilityFailed("injected sim store sync failure".into()));
@@ -723,11 +737,18 @@ impl KvStore for SimKvStore {
         inner.durable = Arc::clone(&inner.committed);
         inner.durable_freed_at = None;
         inner.durable_tree_corrupted = false;
-        inner.tree_corrupted_after_crash = false;
         Ok(())
     }
 
     fn refresh_durable_pin(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+        self.refresh_durable_pin_under_write(&())
+    }
+
+    fn refresh_durable_pin_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
+        if self.fail_next_pin.try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1)).is_ok()
+        {
+            return Err(StorageError::ReadersFull);
+        }
         let mut inner = self.inner.lock();
         inner.pinned_txnid = Some(inner.committed.txnid);
         Ok(())
@@ -749,11 +770,39 @@ impl KvStore for SimKvStore {
         self.inner.lock().config.map_size
     }
 
-    fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
-        let mut inner = self.inner.lock();
-        let target = min_size.unwrap_or_else(|| inner.config.map_size.saturating_mul(2));
-        inner.config.map_size = inner.config.map_size.max(target);
-        Ok(inner.config.map_size)
+    fn grow_map_locked(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+        min_size: Option<usize>,
+        pin_after: bool,
+    ) -> Result<usize, StorageError> {
+        let new_size = {
+            let mut inner = self.inner.lock();
+            inner.pinned_txnid = None;
+            let target = min_size.unwrap_or_else(|| inner.config.map_size.saturating_mul(2));
+            inner.config.map_size = inner.config.map_size.max(target);
+            inner.config.map_size
+        };
+        if pin_after {
+            self.refresh_durable_pin_under_write(&())?;
+        }
+        Ok(new_size)
+    }
+
+    fn adopt_resized_map_locked(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+        pin_after: bool,
+    ) -> Result<usize, StorageError> {
+        let size = {
+            let mut inner = self.inner.lock();
+            inner.pinned_txnid = None;
+            inner.config.map_size
+        };
+        if pin_after {
+            self.refresh_durable_pin_under_write(&())?;
+        }
+        Ok(size)
     }
 
     fn page_size(&self) -> usize {

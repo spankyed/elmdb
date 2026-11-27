@@ -575,12 +575,14 @@ impl Database {
             };
         }
 
-        // Outermost transaction on this thread: capture `map_size` BEFORE opening the txn so that
-        // if this attempt aborts with `MDB_MAP_FULL`, concurrent threads all target the same
-        // idempotent `before * 2` growth size after `OuterGuard` drops and releases L2 + L3.
-        let map_size_before = eng.gate().map_size();
+        // Outermost transaction on this thread: capture `map_size` right after `begin_owned_txn()`
+        // succeeds (capturing any proactive map growth) so if this attempt aborts with `MDB_MAP_FULL`,
+        // concurrent threads target the exact overflowed `before * 2` idempotently after `OuterGuard`
+        // drops and releases L2 + L3.
+        let mut map_size_before = eng.gate().map_size();
         let result = (|| -> Result<(R, Option<(u64, elmdb_storage::CommitReceipt)>)> {
             let ctx = eng.arc().begin_owned_txn()?;
+            map_size_before = eng.gate().map_size();
             let commit_seq = ctx.commit_seq();
             ACTIVE_TXNS.with(|m| {
                 m.borrow_mut()
@@ -2007,9 +2009,25 @@ mod tests {
                     .code,
                 ErrorCode::InvalidArgument
             );
-            // Item 1.6: `atomic_publish_dir_new` ALSO rejects symlink target without removing it!
+            // Item 1.6 + P2-1: `atomic_publish_dir_new` & `atomic_publish_dir_replace` ALSO reject symlink
+            // targets WITH OR WITHOUT trailing path separators without removing or following the symlink!
+            let link_with_slash = PathBuf::from(format!("{}/", link_target.display()));
             assert_eq!(
                 crate::fs_publish::atomic_publish_dir_new(&stage_io, &link_target).unwrap_err().code,
+                ErrorCode::InvalidArgument
+            );
+            assert_eq!(
+                crate::fs_publish::atomic_publish_dir_new(&stage_io, &link_with_slash).unwrap_err().code,
+                ErrorCode::InvalidArgument
+            );
+            assert_eq!(
+                crate::fs_publish::atomic_publish_dir_replace(&stage_io, &link_with_slash, BACKUP_MARKER, 5)
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            assert_eq!(
+                crate::fs_publish::atomic_publish_dir_new(&stage_io, &dir.path().join(".")).unwrap_err().code,
                 ErrorCode::InvalidArgument
             );
             assert!(
@@ -2086,8 +2104,10 @@ mod tests {
         db1.set_schema(&schema).unwrap();
 
         let initial_map = db1.stats().unwrap().map_size_bytes;
-        let big_payload = "x".repeat(48 * 1024);
+        let pad = "x".repeat(32 * 1024);
         let mut calls = 0usize;
+        // Use distinct per-doc payloads so content-addressed blob deduplication does not collapse them;
+        // 8 * 32 KiB = 256 KiB overflows a 128 KiB map on BOTH 4 KiB (Linux/Windows) and 16 KiB (Apple Silicon) pages.
         let first_err = db1
             .transact_scoped(TransactOptions::default(), || {
                 calls += 1;
@@ -2095,7 +2115,7 @@ mod tests {
                     db1.execute_batch(&[WireOp::Create {
                         type_name: "doc".into(),
                         external_id: Some(format!("doc_{i}")),
-                        fields: vec![("body".into(), CanonicalValue::String(big_payload.clone()))],
+                        fields: vec![("body".into(), CanonicalValue::String(format!("doc_{i}_{pad}")))],
                     }])?;
                 }
                 Ok(())
@@ -2108,18 +2128,27 @@ mod tests {
             "transact_scoped() must grow map_size after outermost MapFull abort"
         );
 
-        // Immediate retry now succeeds cleanly!
-        db1.transact_scoped(TransactOptions::default(), || {
-            for i in 0..8 {
-                db1.execute_batch(&[WireOp::Create {
-                    type_name: "doc".into(),
-                    external_id: Some(format!("doc_{i}")),
-                    fields: vec![("body".into(), CanonicalValue::String(big_payload.clone()))],
-                }])?;
+        // Retry (growing further if needed on 16 KiB pages where 8*32 KiB exceeds 256 KiB) now makes forward progress and succeeds!
+        let mut retries = 0usize;
+        loop {
+            match db1.transact_scoped(TransactOptions::default(), || {
+                for i in 0..8 {
+                    db1.execute_batch(&[WireOp::Create {
+                        type_name: "doc".into(),
+                        external_id: Some(format!("doc_{i}")),
+                        fields: vec![("body".into(), CanonicalValue::String(format!("doc_{i}_{pad}")))],
+                    }])?;
+                }
+                Ok(())
+            }) {
+                Ok(()) => break,
+                Err(err) if err.is_map_full() && retries < 3 => {
+                    retries += 1;
+                    continue;
+                }
+                Err(err) => panic!("unexpected transact retry failure: {err:?}"),
             }
-            Ok(())
-        })
-        .unwrap();
+        }
         assert!(db1.get_row("doc_7").unwrap().is_some());
 
         // 2. Item 1.8: Cross-DB nested read inside `db1.transact_scoped()` works in debug builds without lock-tracker panic!

@@ -1081,8 +1081,10 @@ mod tests {
             tx.commit().unwrap();
             db
         };
-        gate.sync().unwrap();
-        assert!(store.has_durable_pin(), "Grouped sync() must acquire durable pin");
+        // P0-1: Even on a Fresh Grouped DB (before any explicit `sync()`), `grow_map` MUST seal AND pin!
+        // Test the idempotent no-op `grow_map(Some(1))` path first, then a real growth to 512 KiB.
+        let _ = gate.grow_map(Some(1)).unwrap();
+        assert!(store.has_durable_pin(), "idempotent grow_map on Fresh Grouped DB must acquire durable pin");
 
         // Local `grow_map` drops pin before `mdb_env_set_mapsize` and immediately re-pins without deadlocking!
         let new_size = gate.grow_map(Some(512 * 1024)).unwrap();

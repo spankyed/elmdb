@@ -8,7 +8,7 @@ use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use elmdb_storage::{
     BootId, CommitReceipt, DbFlags, DbiPublishGate, KvStore, LockScopeId, MapGate, MetaLock, MetaRwLock,
-    OrderedArcReadGuard, OrderedReadGuard, StorageError, SubDbHandle,
+    OrderedArcReadGuard, OrderedReadGuard, OrderedWriteGuard, StorageError, SubDbHandle,
 };
 use lmdb_master_sys as ffi;
 #[cfg(any(target_os = "macos", windows))]
@@ -224,6 +224,12 @@ pub struct LmdbMapReadGuard {
     env_ptr: usize,
 }
 
+/// Witness token proving the holder currently holds exclusive L2 `MapGate::write()` for a specific `LmdbStore`.
+pub struct LmdbMapWriteGuard<'a> {
+    _guard: OrderedWriteGuard<'a, ()>,
+    env_ptr: usize,
+}
+
 #[derive(Default)]
 pub(crate) struct DbiCache {
     pub(crate) by_name: HashMap<String, (ffi::MDB_dbi, DbFlags)>,
@@ -370,11 +376,63 @@ impl LmdbEnvInner {
         Ok(())
     }
 
+    /// Drops any active durable pin and asserts the slot is empty before `mdb_env_set_mapsize`.
+    /// Caller MUST hold exclusive L2 `MapGate::write()`.
+    pub(crate) fn clear_durable_pin_before_remap(&self) {
+        let old = {
+            let mut slot = self.durable_pin.lock();
+            let old = slot.take();
+            assert!(slot.is_none(), "durable pin must be cleared before mdb_env_set_mapsize");
+            old
+        };
+        drop(old);
+    }
+
+    /// Acquires a durable pin under exclusive L2 `MapGate::write()`, retrying `mdb_env_set_mapsize(0)`
+    /// inline if a concurrent cross-process writer resized the map again right after our remap.
+    pub(crate) fn acquire_pin_retrying_resize_under_write(&self) -> Result<(), StorageError> {
+        for _ in 0..4 {
+            match self.refresh_durable_pin_under_map_lock() {
+                Ok(()) => return Ok(()),
+                Err(StorageError::MapResized) => {
+                    self.clear_durable_pin_before_remap();
+                    // SAFETY: Caller holds exclusive L2 `MapGate::write()` and `durable_pin` is cleared.
+                    let rc = unsafe { ffi::mdb_env_set_mapsize(self.env.as_ptr(), 0) };
+                    if rc != ffi::MDB_SUCCESS {
+                        self.map_broken.store(true, Ordering::SeqCst);
+                        return Err(StorageError::Corrupted(format!(
+                            "mdb_env_set_mapsize(0) during pin retry failed (rc={rc}); environment is unusable"
+                        )));
+                    }
+                    let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
+                    // SAFETY: `self.env` is open and remapped.
+                    if unsafe { ffi::mdb_env_info(self.env.as_ptr(), info.as_mut_ptr()) } == ffi::MDB_SUCCESS {
+                        // SAFETY: `mdb_env_info` succeeded.
+                        let actual = unsafe { info.assume_init() }.me_mapsize;
+                        self.map_size.store(actual, Ordering::Release);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        Err(StorageError::MapResized)
+    }
+
     #[inline]
     pub(crate) fn assert_map_guard(&self, guard: &LmdbMapReadGuard) -> Result<(), StorageError> {
         if guard.env_ptr != self.env.as_ptr() as usize {
             return Err(StorageError::InvalidState(
                 "MapReadGuard does not belong to this LmdbStore environment".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    #[inline]
+    pub(crate) fn assert_map_write_guard(&self, guard: &LmdbMapWriteGuard<'_>) -> Result<(), StorageError> {
+        if guard.env_ptr != self.env.as_ptr() as usize {
+            return Err(StorageError::InvalidState(
+                "MapWriteGuard does not belong to this LmdbStore environment".into(),
             ));
         }
         Ok(())
@@ -730,9 +788,14 @@ impl KvStore for LmdbStore {
     type RwTxn<'a> = LmdbRwTxn<'a>;
     type OwnedRwTxn = LmdbRwTxn<'static>;
     type MapReadGuard = LmdbMapReadGuard;
+    type MapWriteGuard<'a> = LmdbMapWriteGuard<'a>;
 
     fn lock_map_read(&self) -> Self::MapReadGuard {
         LmdbMapReadGuard { _guard: self.inner.map_gate.read_arc(), env_ptr: self.inner.env.as_ptr() as usize }
+    }
+
+    fn lock_map_write(&self) -> Self::MapWriteGuard<'_> {
+        LmdbMapWriteGuard { _guard: self.inner.map_gate.write(), env_ptr: self.inner.env.as_ptr() as usize }
     }
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
@@ -879,13 +942,16 @@ impl KvStore for LmdbStore {
         }
     }
 
-    fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
-        // Acquire L2 exclusive write lock so ZERO read/write txns, `mdb_env_info`, `mdb_env_sync`,
-        // or `mdb_env_copy2` calls are active in this process.
-        let _gate = self.inner.map_gate.write();
+    fn grow_map_locked(
+        &self,
+        map_guard: &Self::MapWriteGuard<'_>,
+        min_size: Option<usize>,
+        pin_after: bool,
+    ) -> Result<usize, StorageError> {
+        self.inner.assert_map_write_guard(map_guard)?;
         self.inner.check_map_ok()?;
         let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
-        // SAFETY: `self.inner.env` is open and protected by L2 `map_gate.write()`.
+        // SAFETY: `self.inner.env` is open and protected by exclusive L2 `map_guard`.
         let rc = unsafe { ffi::mdb_env_info(self.inner.env.as_ptr(), info.as_mut_ptr()) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
@@ -904,21 +970,16 @@ impl KvStore for LmdbStore {
         let aligned = requested.saturating_add(page - 1) / page * page;
         if aligned <= cur && cur >= disk_map {
             self.inner.map_size.store(cur, Ordering::Release);
+            if pin_after {
+                self.inner.acquire_pin_retrying_resize_under_write()?;
+            }
             return Ok(cur);
         }
         // Release any Grouped durable pin strictly BEFORE `mdb_env_set_mapsize` unmaps `me_map`
         // so its `MDB_txn` never holds dangling `me_metas` pointers.
-        let had_pin = {
-            let mut slot = self.inner.durable_pin.lock();
-            let old = slot.take();
-            assert!(slot.is_none(), "durable pin must be cleared before mdb_env_set_mapsize");
-            drop(slot);
-            let had = old.is_some();
-            drop(old);
-            had
-        };
-        // SAFETY: L2 `map_gate.write()` guarantees zero active transactions (`env->me_txn == NULL`),
-        // zero `me_metas` readers, and `durable_pin` has been aborted above.
+        self.inner.clear_durable_pin_before_remap();
+        // SAFETY: Exclusive L2 `map_guard` guarantees zero active transactions (`env->me_txn == NULL`),
+        // zero `me_metas` readers, and `durable_pin` has been cleared above.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), aligned) };
         if rc != ffi::MDB_SUCCESS {
             // Under `map_gate.write()`, `env->me_txn` is guaranteed NULL, so any failure (including
@@ -940,29 +1001,24 @@ impl KvStore for LmdbStore {
                 aligned
             };
         self.inner.map_size.store(actual, Ordering::Release);
-        if had_pin {
-            self.inner.refresh_durable_pin_under_map_lock()?;
+        if pin_after {
+            self.inner.acquire_pin_retrying_resize_under_write()?;
         }
         Ok(actual)
     }
 
-    fn adopt_resized_map(&self) -> Result<usize, StorageError> {
-        // Acquire L2 exclusive write lock so ZERO read/write txns (`env->me_txn == NULL`) or `me_metas` readers are active.
-        let _gate = self.inner.map_gate.write();
+    fn adopt_resized_map_locked(
+        &self,
+        map_guard: &Self::MapWriteGuard<'_>,
+        pin_after: bool,
+    ) -> Result<usize, StorageError> {
+        self.inner.assert_map_write_guard(map_guard)?;
         self.inner.check_map_ok()?;
         let cur = self.inner.current_map_size();
         // Release any Grouped durable pin strictly BEFORE `mdb_env_set_mapsize(0)` unmaps `me_map`.
-        let had_pin = {
-            let mut slot = self.inner.durable_pin.lock();
-            let old = slot.take();
-            assert!(slot.is_none(), "durable pin must be cleared before mdb_env_set_mapsize(0)");
-            drop(slot);
-            let had = old.is_some();
-            drop(old);
-            had
-        };
+        self.inner.clear_durable_pin_before_remap();
         // SAFETY: `size = 0` tells LMDB to adopt the external cross-process map size cleanly;
-        // L2 `map_gate.write()` and `durable_pin.is_none()` guarantee zero live transactions.
+        // exclusive L2 `map_guard` and `durable_pin.is_none()` guarantee zero live transactions.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), 0) };
         if rc != ffi::MDB_SUCCESS {
             self.inner.map_broken.store(true, Ordering::SeqCst);
@@ -979,8 +1035,8 @@ impl KvStore for LmdbStore {
         // SAFETY: `mdb_env_info` succeeded.
         let actual = unsafe { info.assume_init() }.me_mapsize;
         self.inner.map_size.store(actual, Ordering::Release);
-        if had_pin {
-            self.inner.refresh_durable_pin_under_map_lock()?;
+        if pin_after {
+            self.inner.acquire_pin_retrying_resize_under_write()?;
         }
         Ok(actual)
     }
@@ -996,8 +1052,24 @@ impl KvStore for LmdbStore {
         Ok(())
     }
 
+    fn sync_under_write(&self, map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
+        self.inner.assert_map_write_guard(map_guard)?;
+        self.inner.check_map_ok()?;
+        // SAFETY: `self.inner.env` is open and protected by exclusive L2 `map_guard`; `force = 1` flushes even under `MDB_NOSYNC`.
+        let rc = unsafe { ffi::mdb_env_sync(self.inner.env.as_ptr(), 1) };
+        if rc != ffi::MDB_SUCCESS {
+            return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
+        }
+        Ok(())
+    }
+
     fn refresh_durable_pin(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
         self.inner.assert_map_guard(map_guard)?;
+        self.inner.refresh_durable_pin_under_map_lock()
+    }
+
+    fn refresh_durable_pin_under_write(&self, map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
+        self.inner.assert_map_write_guard(map_guard)?;
         self.inner.refresh_durable_pin_under_map_lock()
     }
 

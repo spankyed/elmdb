@@ -550,4 +550,53 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
     assert_eq!(store.pinned_txnid(), None);
     let store2 = SimKvStore::new(SimKvConfig::default());
     assert_ne!(store.lock_scope_id(), store2.lock_scope_id());
+
+    // Part E (P0-1 + P1-1): Fresh Grouped DB -> commit WITHOUT `sync()` -> `grow_map()` MUST BOTH seal
+    // `synced.v2` AND acquire the durable pin so subsequent unsynced commits + power loss stay intact;
+    // AND if post-remap re-pin fails, `DurabilityGate` MUST poison fail-closed instead of running unpinned!
+    {
+        let vfs_e = SimVfs::new(BootId([0x77; 16]));
+        let store_e = SimKvStore::new(SimKvConfig::default());
+        let dir_e = PathBuf::from("/sim-fresh-grow-pin");
+        let (gate_e, rep_e) =
+            DurabilityGate::open(store_e.clone(), vfs_e.clone(), &dir_e, DurabilityMode::Grouped).unwrap();
+        assert_eq!(rep_e.status, RecoveryStatus::Fresh);
+        assert_eq!(store_e.pinned_txnid(), None);
+
+        let db_e = {
+            let mut tx = gate_e.begin_write().unwrap();
+            let db_e = tx.open_subdb("data", DbFlags::DEFAULT).unwrap();
+            tx.put(db_e, b"k", b"before_grow").unwrap();
+            tx.commit().unwrap();
+            db_e
+        };
+        let tx_before_grow = gate_e.last_txnid().unwrap();
+        // `grow_map` on Fresh/unpinned Grouped DB seals AND pins `tx_before_grow`!
+        let _ = gate_e.grow_map(Some(128 * 1024 * 1024)).unwrap();
+        assert_eq!(store_e.durable_txnid(), tx_before_grow);
+        assert_eq!(store_e.pinned_txnid(), Some(tx_before_grow), "grow_map on Fresh Grouped DB MUST acquire pin");
+
+        // 5 unsynced commits + power loss -> D (`before_grow`) stays 100% intact!
+        for i in 1..=5 {
+            let mut tx = gate_e.begin_write().unwrap();
+            tx.put(db_e, b"k", format!("after_grow_{i}").as_bytes()).unwrap();
+            tx.commit().unwrap();
+        }
+        drop(gate_e);
+        store_e.crash_power_loss();
+        vfs_e.crash_power_loss(&mut rng, true);
+        let (re_e, rep_after) =
+            DurabilityGate::open(store_e.clone(), vfs_e.clone(), &dir_e, DurabilityMode::Grouped).unwrap();
+        assert_eq!(rep_after.status, RecoveryStatus::RebootVerified);
+        let ro_e = re_e.begin_read().unwrap();
+        assert_eq!(ro_e.get(db_e, b"k").unwrap(), Some(b"before_grow".as_slice()));
+        drop(ro_e);
+
+        // P1-1: If post-remap re-pin fails inside `grow_map()`, the gate MUST permanently poison fail-closed!
+        store_e.inject_pin_failures(1);
+        let grow_err = re_e.grow_map(Some(256 * 1024 * 1024)).unwrap_err();
+        assert!(matches!(grow_err, StorageError::DurabilityFailed(_)), "expected DurabilityFailed, got {grow_err:?}");
+        assert!(re_e.is_poisoned(), "failed post-remap re-pin MUST poison Grouped DurabilityGate");
+        assert!(matches!(re_e.begin_read(), Err(StorageError::Poisoned(_))));
+    }
 }

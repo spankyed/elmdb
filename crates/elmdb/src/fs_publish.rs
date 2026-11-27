@@ -122,17 +122,53 @@ pub(crate) fn atomic_publish_file_no_overwrite(tmp_path: &Path, target: &Path) -
     }
 }
 
+/// Strips trailing path separators and rejects targets ending in `.`, `..`, root, or a symlink.
+///
+/// Checking `symlink_metadata` on the trailing-separator-stripped path ensures `lstat(2)` / Win32
+/// inspects the symlink itself instead of following `link/` to its target directory.
+fn normalize_non_symlink_target_dir(target_dir: &Path) -> Result<(PathBuf, Option<fs::Metadata>)> {
+    // Reject trailing `.` explicitly because `Path::components()` silently drops non-leading `CurDir`.
+    let raw = target_dir.to_string_lossy();
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || trimmed == "." || trimmed.ends_with("/.") || trimmed.ends_with("\\.") {
+        return Err(ElmdbError::new(
+            ErrorCode::InvalidArgument,
+            format!("invalid publish target directory '{}'", target_dir.display()),
+        ));
+    }
+    match target_dir.components().next_back() {
+        Some(Component::Normal(_)) => {}
+        _ => {
+            return Err(ElmdbError::new(
+                ErrorCode::InvalidArgument,
+                format!("invalid publish target directory '{}'", target_dir.display()),
+            ));
+        }
+    }
+    let clean: PathBuf = target_dir.components().collect();
+    match fs::symlink_metadata(&clean) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("refusing to publish into symlink target '{}'", target_dir.display()),
+                ));
+            }
+            Ok((clean, Some(meta)))
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok((clean, None)),
+        Err(e) => Err(ElmdbError::new(
+            ErrorCode::Io,
+            format!("cannot inspect target directory '{}': {e}", target_dir.display()),
+        )),
+    }
+}
+
 /// Atomically publishes a pre-synced sibling staging directory `staging` to `target_dir`,
 /// accepting only a non-existent or empty `target_dir`, and fsyncs both `staging` and `parent`.
 pub(crate) fn atomic_publish_dir_new(staging: &Path, target_dir: &Path) -> Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(target_dir)
-        && meta.file_type().is_symlink()
-    {
-        return Err(ElmdbError::new(
-            ErrorCode::InvalidArgument,
-            format!("refusing to publish into symlink target '{}'", target_dir.display()),
-        ));
-    }
+    let (clean_target, _existing) = normalize_non_symlink_target_dir(target_dir)?;
+    let target_dir = clean_target.as_path();
 
     let vfs = OsVfs::new();
     vfs.sync_dir(staging)?;
@@ -212,14 +248,9 @@ pub(crate) fn atomic_publish_dir_replace(
     backup_marker: &str,
     nonce: u64,
 ) -> Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(target_dir) {
-        if meta.file_type().is_symlink() {
-            return Err(ElmdbError::new(
-                ErrorCode::InvalidArgument,
-                format!("refusing to replace symlink backup target '{}'", target_dir.display()),
-            ));
-        }
-    } else {
+    let (clean_target, existing) = normalize_non_symlink_target_dir(target_dir)?;
+    let target_dir = clean_target.as_path();
+    if existing.is_none() {
         return atomic_publish_dir_new(staging, target_dir);
     }
 
