@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use elmdb_storage::{
-    BootId, CommitReceipt, DbFlags, KvStore, MapGate, MetaRwLock, OrderedArcReadGuard, StorageError, SubDbHandle,
+    BootId, CommitReceipt, DbFlags, KvStore, MapGate, MetaRwLock, OrderedArcReadGuard, OrderedReadGuard, StorageError,
+    SubDbHandle,
 };
 use lmdb_master_sys as ffi;
 #[cfg(any(target_os = "macos", windows))]
@@ -253,7 +254,34 @@ pub(crate) struct LmdbEnvInner {
     env_identity: EnvIdentity,
 }
 
+/// Unified RAII guard holding L2 `map_gate.read_arc()` and L4 `dbis.read()` in canonical
+/// ascending lock order (`L2 -> L4`), releasing L4 before L2 on drop.
+///
+/// Every LMDB C call that opens or renews a read transaction (`mdb_txn_begin(..., MDB_RDONLY)`,
+/// `mdb_env_copy2`, etc.) MUST acquire `EnvReadGuard` via `LmdbEnvInner::lock_env_read` so
+/// LMDB's non-atomic `env->me_numdbs` / `env->me_dbflags` loads never race `commit_raw` or
+/// `ensure_subdbs_open`.
+pub(crate) struct EnvReadGuard<'a> {
+    _dbi_guard: OrderedReadGuard<'a, DbiCache>,
+    map_guard: OrderedArcReadGuard<()>,
+}
+
+impl EnvReadGuard<'_> {
+    /// Drops L4 `dbis.read()` while retaining L2 `map_gate.read_arc()` for a live `LmdbRoTxn`.
+    pub(crate) fn into_map_guard(self) -> OrderedArcReadGuard<()> {
+        self.map_guard
+    }
+}
+
 impl LmdbEnvInner {
+    /// Acquires `EnvReadGuard` (`L2 map_gate.read_arc()` + `check_map_ok()` + `L4 dbis.read()`).
+    pub(crate) fn lock_env_read(&self) -> Result<EnvReadGuard<'_>, StorageError> {
+        let map_guard = self.map_gate.read_arc();
+        self.check_map_ok()?;
+        let dbi_guard = self.dbis.read();
+        Ok(EnvReadGuard { _dbi_guard: dbi_guard, map_guard })
+    }
+
     #[inline]
     pub(crate) fn current_map_size(&self) -> usize {
         self.map_size.load(Ordering::Acquire)
@@ -475,9 +503,9 @@ impl LmdbStore {
         let c_path = path_to_cstring(target_dir)?;
         let copied_data = target_dir.join("data.mdb");
         {
-            let _map_guard = self.inner.map_gate.read();
-            self.inner.check_map_ok()?;
-            // SAFETY: `self.inner.env` is an open `MDB_env` protected by L2 `map_gate.read()` and `c_path` is NUL-terminated.
+            let _env_guard = self.inner.lock_env_read()?;
+            // SAFETY: `self.inner.env` is an open `MDB_env` protected by L2 `map_gate.read()` + L4 `dbis.read()`,
+            // preventing concurrent `mdb_dbis_update` from racing `mdb_env_copy2`'s internal `mdb_txn_renew0`.
             let mut rc = unsafe { ffi::mdb_env_copy2(self.inner.env.as_ptr(), c_path.as_ptr(), ffi::MDB_CP_COMPACT) };
             if rc == ffi::MDB_READERS_FULL {
                 let mut dead: libc::c_int = 0;
@@ -573,9 +601,12 @@ fn preopen_existing_subdbs(
             let mut dbi: ffi::MDB_dbi = 0;
             // SAFETY: `txn` is live; opening without `MDB_CREATE` only succeeds for genuine sub-DBs.
             let rc = unsafe { ffi::mdb_dbi_open(txn, cname.as_ptr(), 0, &mut dbi) };
-            if rc != ffi::MDB_SUCCESS {
+            if rc == ffi::MDB_INCOMPATIBLE {
                 // Non-sub-DB entries in MAIN_DBI (if any) return MDB_INCOMPATIBLE; skip them safely.
                 continue;
+            }
+            if rc != ffi::MDB_SUCCESS {
+                return Err(map_mdb_err(rc, map_size, max_dbs));
             }
             let mut raw_flags: libc::c_uint = 0;
             // SAFETY: `txn` and `dbi` are live.

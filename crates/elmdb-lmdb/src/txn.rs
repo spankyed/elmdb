@@ -26,26 +26,20 @@ pub struct LmdbRoTxn<'env> {
 impl<'env> LmdbRoTxn<'env> {
     pub(crate) fn begin(store: &'env LmdbStore) -> Result<Self, StorageError> {
         let inner = Arc::clone(store.inner());
-        let map_guard = inner.map_gate.read_arc();
-        inner.check_map_ok()?;
+        let env_guard = inner.lock_env_read()?;
         let mut raw: *mut ffi::MDB_txn = ptr::null_mut();
-        // Acquire L4 read lock across `mdb_txn_begin(..., MDB_RDONLY)` (strict L2 -> L4 order) so
-        // `mdb_txn_renew0` NEVER observes a torn `env->me_numdbs` / `env->me_dbflags` table during
-        // `LmdbRwTxn::commit_raw()` or `ensure_subdbs_open()`.
-        let mut rc = {
-            let _dbi_read = inner.dbis.read();
-            // SAFETY: `inner.env` is open, L2 `map_guard` + L4 `dbis.read()` are held.
-            unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) }
-        };
+        // SAFETY: `inner.env` is open and protected by `EnvReadGuard` (L2 `map_gate` + L4 `dbis.read()`),
+        // preventing `mdb_txn_renew0` from racing `LmdbRwTxn::commit_raw()` or `ensure_subdbs_open()`.
+        let mut rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
         if rc == ffi::MDB_READERS_FULL {
             let mut dead: libc::c_int = 0;
             // SAFETY: Reclaim stale reader slots from crashed processes and retry once if any were freed.
             if unsafe { ffi::mdb_reader_check(inner.env.as_ptr(), &mut dead) } == ffi::MDB_SUCCESS && dead > 0 {
-                let _dbi_read = inner.dbis.read();
-                // SAFETY: `inner.env` is open; retrying `MDB_RDONLY` txn after reclaiming stale slots.
+                // SAFETY: `inner.env` is open and `env_guard` is still held; retrying `MDB_RDONLY` txn.
                 rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
             }
         }
+        let map_guard = env_guard.into_map_guard();
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, inner.current_map_size(), inner.max_dbs));
         }
@@ -321,10 +315,10 @@ impl KvWrite for LmdbRwTxn<'_> {
 
     fn put(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<(), StorageError> {
         let flags = self.lookup_flags(db)?;
-        validate_key(flags, key)?;
-        let mut k = to_mdb_val(key);
+        let key = MdbKey::new(flags, key)?;
+        let mut k = key.as_mdb_val();
         let mut v = to_mdb_val(val);
-        // SAFETY: `active_raw()` is a live write `MDB_txn`; `k` and `v` have valid non-null pointers.
+        // SAFETY: `active_raw()` is a live write `MDB_txn`; `key` outlives `k` and `v` has a valid non-null pointer.
         let rc = unsafe { ffi::mdb_put(self.active_raw(), db.raw(), &mut k, &mut v, 0) };
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
@@ -334,10 +328,10 @@ impl KvWrite for LmdbRwTxn<'_> {
 
     fn put_no_overwrite(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<bool, StorageError> {
         let flags = self.lookup_flags(db)?;
-        validate_key(flags, key)?;
-        let mut k = to_mdb_val(key);
+        let key = MdbKey::new(flags, key)?;
+        let mut k = key.as_mdb_val();
         let mut v = to_mdb_val(val);
-        // SAFETY: `active_raw()` is a live write `MDB_txn`; `MDB_NOOVERWRITE` does not modify existing values.
+        // SAFETY: `active_raw()` is a live write `MDB_txn`; `key` outlives `k`, `MDB_NOOVERWRITE` does not modify existing values.
         let rc = unsafe { ffi::mdb_put(self.active_raw(), db.raw(), &mut k, &mut v, ffi::MDB_NOOVERWRITE) };
         match rc {
             ffi::MDB_SUCCESS => Ok(true),
@@ -348,9 +342,9 @@ impl KvWrite for LmdbRwTxn<'_> {
 
     fn del(&mut self, db: SubDbHandle, key: &[u8]) -> Result<bool, StorageError> {
         let flags = self.lookup_flags(db)?;
-        validate_key(flags, key)?;
-        let mut k = to_mdb_val(key);
-        // SAFETY: `active_raw()` is a live write `MDB_txn`; null data pointer deletes by key.
+        let key = MdbKey::new(flags, key)?;
+        let mut k = key.as_mdb_val();
+        // SAFETY: `active_raw()` is a live write `MDB_txn`; `key` outlives `k`, null data pointer deletes by key.
         let rc = unsafe { ffi::mdb_del(self.active_raw(), db.raw(), &mut k, ptr::null_mut()) };
         match rc {
             ffi::MDB_SUCCESS => Ok(true),
@@ -480,16 +474,40 @@ pub(crate) fn validate_subdb_name(name: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-pub(crate) fn validate_key(flags: DbFlags, key: &[u8]) -> Result<(), StorageError> {
-    if flags.integer_key {
-        // Fixed 8-byte native `u64` only: prevents LMDB `mdb_cmp_cint` OOB reads when mixing key widths.
-        if key.len() != 8 {
-            return Err(StorageError::BadValSize { len: key.len() });
+/// Validated, alignment-safe LMDB key wrapper.
+///
+/// For `MDB_INTEGERKEY` sub-DBs, LMDB's `mdb_cmp_cint` casts `mv_data` to `unsigned short *`
+/// (requiring >= 2-byte alignment). Copying the validated 8-byte key into a stack-aligned `u64`
+/// guarantees 8-byte alignment for every LMDB call (`get`, `put`, `del`, `cursor.seek_*`)
+/// regardless of caller slice alignment.
+pub(crate) enum MdbKey<'a> {
+    Bytes(&'a [u8]),
+    Int(u64),
+}
+
+impl<'a> MdbKey<'a> {
+    pub(crate) fn new(flags: DbFlags, key: &'a [u8]) -> Result<Self, StorageError> {
+        if flags.integer_key {
+            // Fixed 8-byte native `u64` only: prevents LMDB `mdb_cmp_cint` OOB & unaligned reads.
+            let bytes: [u8; 8] = key.try_into().map_err(|_| StorageError::BadValSize { len: key.len() })?;
+            Ok(Self::Int(u64::from_ne_bytes(bytes)))
+        } else if key.is_empty() || key.len() > 511 {
+            Err(StorageError::BadValSize { len: key.len() })
+        } else {
+            Ok(Self::Bytes(key))
         }
-    } else if key.is_empty() || key.len() > 511 {
-        return Err(StorageError::BadValSize { len: key.len() });
     }
-    Ok(())
+
+    #[inline]
+    pub(crate) fn as_mdb_val(&self) -> ffi::MDB_val {
+        match self {
+            Self::Bytes(bytes) => to_mdb_val(bytes),
+            Self::Int(val) => ffi::MDB_val {
+                mv_size: std::mem::size_of::<u64>(),
+                mv_data: (&raw const *val).cast_mut().cast::<libc::c_void>(),
+            },
+        }
+    }
 }
 
 fn lookup_flags(inner: &LmdbEnvInner, db: SubDbHandle) -> Result<DbFlags, StorageError> {
@@ -519,10 +537,10 @@ fn raw_get_with_flags<'a>(
     flags: DbFlags,
     key: &[u8],
 ) -> Result<Option<&'a [u8]>, StorageError> {
-    validate_key(flags, key)?;
-    let mut k = to_mdb_val(key);
+    let key = MdbKey::new(flags, key)?;
+    let mut k = key.as_mdb_val();
     let mut v = ffi::MDB_val { mv_size: 0, mv_data: ptr::null_mut() };
-    // SAFETY: `txn` is live for the caller's borrow `'a`, `k` points to readable bytes, and
+    // SAFETY: `txn` is live for the caller's borrow `'a`, `key` outlives `k`, and
     // `v` receives a pointer into LMDB's MVCC pages valid until `txn` mutates or ends.
     let rc = unsafe { ffi::mdb_get(txn, db.raw(), &mut k, &mut v) };
     match rc {
@@ -609,5 +627,119 @@ mod tests {
 
         let recovered = read_active_meta_page(&data_path).unwrap();
         assert_eq!(recovered.slot, 1);
+    }
+
+    #[test]
+    fn batch_a_integer_key_aligns_odd_slices_across_all_ops_and_rejects_bad_lengths() {
+        use elmdb_storage::KvCursor;
+
+        let tmp = TempDir::new().unwrap();
+        let store =
+            LmdbStore::open(tmp.path(), LmdbConfig { map_size: 4 * 1024 * 1024, ..LmdbConfig::default() }).unwrap();
+
+        let mut buf = [0u8; 17];
+        // Pick an odd-addressed 8-byte slice guaranteed not to be 2-byte aligned.
+        let offset = if (buf.as_ptr() as usize).is_multiple_of(2) { 1 } else { 0 };
+        let odd_slice_1 = &mut buf[offset..offset + 8];
+        assert_eq!((odd_slice_1.as_ptr() as usize) & 1, 1);
+        odd_slice_1.copy_from_slice(&42u64.to_ne_bytes());
+        let odd_key_1 = &buf[offset..offset + 8];
+
+        // Verify `MdbKey::new` produces an 8-byte aligned pointer for `MDB_INTEGERKEY`.
+        let wrapped = MdbKey::new(DbFlags::INTEGER_KEY, odd_key_1).unwrap();
+        let val = wrapped.as_mdb_val();
+        assert_eq!(val.mv_size, 8);
+        assert_eq!((val.mv_data as usize) % std::mem::align_of::<u64>(), 0);
+
+        // Verify bad key lengths are rejected for both integer-key and byte-key sub-DBs.
+        assert!(matches!(MdbKey::new(DbFlags::INTEGER_KEY, &[0u8; 7]), Err(StorageError::BadValSize { len: 7 })));
+        assert!(matches!(MdbKey::new(DbFlags::INTEGER_KEY, &[0u8; 9]), Err(StorageError::BadValSize { len: 9 })));
+        assert!(matches!(MdbKey::new(DbFlags::DEFAULT, &[]), Err(StorageError::BadValSize { len: 0 })));
+        assert!(matches!(MdbKey::new(DbFlags::DEFAULT, &[0u8; 512]), Err(StorageError::BadValSize { len: 512 })));
+
+        let mut rw = store.begin_write(store.lock_map_read()).unwrap();
+        let db = rw.open_subdb("ints", DbFlags::INTEGER_KEY).unwrap();
+        assert!(rw.put_no_overwrite(db, odd_key_1, b"v42").unwrap());
+        assert!(!rw.put_no_overwrite(db, odd_key_1, b"v42-dup").unwrap());
+        rw.put(db, odd_key_1, b"v42-upd").unwrap();
+        assert_eq!(rw.get(db, odd_key_1).unwrap(), Some(b"v42-upd".as_slice()));
+        {
+            let mut cur = rw.cursor(db).unwrap();
+            let (k, v) = cur.seek_ge(odd_key_1).unwrap().unwrap();
+            assert_eq!(k, odd_key_1);
+            assert_eq!(v, b"v42-upd");
+            assert_eq!(cur.seek_exact(odd_key_1).unwrap(), Some(b"v42-upd".as_slice()));
+        }
+        let (_, mg) = rw.commit_raw().unwrap();
+        drop(mg);
+
+        let ro = store.begin_read().unwrap();
+        assert_eq!(ro.get(db, odd_key_1).unwrap(), Some(b"v42-upd".as_slice()));
+        {
+            let mut cur = ro.cursor(db).unwrap();
+            assert_eq!(cur.seek_exact(odd_key_1).unwrap(), Some(b"v42-upd".as_slice()));
+        }
+        drop(ro);
+
+        let mut rw = store.begin_write(store.lock_map_read()).unwrap();
+        assert!(rw.del(db, odd_key_1).unwrap());
+        assert_eq!(rw.get(db, odd_key_1).unwrap(), None);
+        let (_, mg) = rw.commit_raw().unwrap();
+        drop(mg);
+    }
+
+    #[test]
+    fn batch_a_preopen_existing_subdbs_propagates_dbs_full_instead_of_swallowing() {
+        let tmp = TempDir::new().unwrap();
+        {
+            let store = LmdbStore::open(
+                tmp.path(),
+                LmdbConfig { map_size: 4 * 1024 * 1024, max_dbs: 32, ..LmdbConfig::default() },
+            )
+            .unwrap();
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
+            for i in 0..8 {
+                let db = rw.open_subdb(&format!("sub_{i}"), DbFlags::DEFAULT).unwrap();
+                rw.put(db, b"k", b"v").unwrap();
+            }
+            let (_, mg) = rw.commit_raw().unwrap();
+            drop(mg);
+        }
+
+        // Reopening with `max_dbs` too small to fit all existing named sub-DBs MUST fail with `DbsFull`.
+        let err =
+            LmdbStore::open(tmp.path(), LmdbConfig { map_size: 4 * 1024 * 1024, max_dbs: 4, ..LmdbConfig::default() })
+                .err()
+                .expect("reopen with max_dbs=4 over 8 existing sub-DBs must fail");
+        assert!(matches!(err, StorageError::DbsFull { max_dbs: 4 }), "expected DbsFull, got {err:?}");
+    }
+
+    #[test]
+    fn batch_a_copy_compacted_concurrent_with_new_subdb_commits_is_race_free() {
+        let tmp = TempDir::new().unwrap();
+        let db_dir = tmp.path().join("db");
+        let store = Arc::new(
+            LmdbStore::open(&db_dir, LmdbConfig { map_size: 8 * 1024 * 1024, max_dbs: 128, ..LmdbConfig::default() })
+                .unwrap(),
+        );
+        let writer_store = Arc::clone(&store);
+        let writer = std::thread::spawn(move || {
+            for i in 0..32 {
+                let mut rw = writer_store.begin_write(writer_store.lock_map_read()).unwrap();
+                let db = rw.open_subdb(&format!("dyn_{i}"), DbFlags::DEFAULT).unwrap();
+                rw.put(db, b"k", b"v").unwrap();
+                let (_, mg) = rw.commit_raw().unwrap();
+                drop(mg);
+            }
+        });
+
+        for i in 0..16 {
+            let bak_dir = tmp.path().join(format!("bak_{i}"));
+            let receipt = store.copy_compacted(&bak_dir).unwrap();
+            assert!(bak_dir.join("data.mdb").exists());
+            let _ = receipt.txnid;
+            let _ro = store.begin_read().unwrap();
+        }
+        writer.join().unwrap();
     }
 }

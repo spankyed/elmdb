@@ -6,7 +6,7 @@ use elmdb_storage::{DbFlags, KvCursor, KvEntry, StorageError};
 use lmdb_master_sys as ffi;
 
 use crate::error::map_mdb_err;
-use crate::txn::validate_key;
+use crate::txn::MdbKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CursorState {
@@ -54,11 +54,9 @@ impl<'txn> LmdbCursor<'txn> {
         key_in: Option<&[u8]>,
         not_found_state: CursorState,
     ) -> Result<Option<KvEntry<'txn>>, StorageError> {
-        let mut key_val = match key_in {
-            Some(bytes) => {
-                validate_key(self.flags, bytes)?;
-                ffi::MDB_val { mv_size: bytes.len(), mv_data: bytes.as_ptr() as *mut libc::c_void }
-            }
+        let key_storage = key_in.map(|bytes| MdbKey::new(self.flags, bytes)).transpose()?;
+        let mut key_val = match &key_storage {
+            Some(key) => key.as_mdb_val(),
             None => ffi::MDB_val { mv_size: 0, mv_data: ptr::null_mut() },
         };
         let mut data_val = ffi::MDB_val { mv_size: 0, mv_data: ptr::null_mut() };
