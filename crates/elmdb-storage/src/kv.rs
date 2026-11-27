@@ -1,4 +1,5 @@
 use crate::error::StorageError;
+use crate::locks::LockScopeId;
 
 /// Flags controlling key ordering of a named sub-database.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -137,6 +138,21 @@ pub trait KvStore: Send + Sync {
         Ok(self.map_size())
     }
     fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError>;
+    /// Pins (or refreshes the pin on) the current committed snapshot so the storage backend's
+    /// freelist cannot recycle pages belonging to the last durable snapshot under `MDB_NOSYNC`.
+    ///
+    /// Implementations MUST open the new read-only snapshot pin *before* releasing any prior pin
+    /// (zero unpinned window), MUST require L2 `MapGate::read()` while opening the pin (never
+    /// across the pin's lifetime, so `grow_map`/`adopt_resized_map` never deadlock), and MUST
+    /// release and re-acquire the pin around `mdb_env_set_mapsize`.
+    fn refresh_durable_pin(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+        Ok(())
+    }
+    /// Returns the debug lock-hierarchy scope ID for this store instance so higher layers
+    /// (`DurabilityGate`, `Engine`) bind their L1–L5 locks to the same per-database scope.
+    fn lock_scope_id(&self) -> LockScopeId {
+        LockScopeId::DEFAULT
+    }
     fn last_txnid(&self) -> Result<u64, StorageError>;
     fn roots_sha256(&self) -> Result<[u8; 32], StorageError>;
     /// Atomically reads `(txnid, roots_sha256)` from a single active meta-page snapshot (no TOCTOU).

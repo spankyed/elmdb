@@ -7,8 +7,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use elmdb_storage::{
-    BootId, CommitReceipt, DbFlags, DbiPublishGate, KvStore, MapGate, MetaRwLock, OrderedArcReadGuard,
-    OrderedReadGuard, StorageError, SubDbHandle,
+    BootId, CommitReceipt, DbFlags, DbiPublishGate, KvStore, LockScopeId, MapGate, MetaLock, MetaRwLock,
+    OrderedArcReadGuard, OrderedReadGuard, StorageError, SubDbHandle,
 };
 use lmdb_master_sys as ffi;
 #[cfg(any(target_os = "macos", windows))]
@@ -230,12 +230,38 @@ pub(crate) struct DbiCache {
     pub(crate) by_id: HashMap<ffi::MDB_dbi, DbFlags>,
 }
 
+/// Long-lived raw `MDB_RDONLY` transaction pinning the last durable snapshot `D` in `lock.mdb`
+/// under `Grouped` (`MDB_NOSYNC`) mode so LMDB's freelist cannot recycle `D`'s pages across
+/// subsequent unsynced commits `D+1..D+k`.
+///
+/// Legal across threads because `LmdbStore` opens with `MDB_NOTLS`. Does NOT hold L2 `MapGate::read()`
+/// so `grow_map` / `adopt_resized_map` never deadlock; instead, both remap paths drop any active pin
+/// and `assert!(slot.is_none())` under L2 `MapGate::write()` strictly before `mdb_env_set_mapsize`,
+/// and immediately re-acquire a fresh pin before releasing `MapGate::write()`.
+pub(crate) struct DurablePinTxn(NonNull<ffi::MDB_txn>);
+
+// SAFETY: `LmdbStore` opens with `MDB_NOTLS`, so an `MDB_RDONLY` transaction's reader slot is
+// tied to the `MDB_txn` struct rather than TLS and may be held and aborted from any synchronized thread.
+unsafe impl Send for DurablePinTxn {}
+
+impl Drop for DurablePinTxn {
+    fn drop(&mut self) {
+        // SAFETY: `self.0` is a live `MDB_RDONLY` `MDB_txn` owned exclusively by this wrapper;
+        // `LmdbEnvInner::drop` and both `mdb_env_set_mapsize` paths drop all pins before unmapping/closing `MDB_env`.
+        unsafe {
+            ffi::mdb_txn_abort(self.0.as_ptr());
+        }
+    }
+}
+
 pub(crate) struct LmdbEnvInner {
     pub(crate) env: NonNull<ffi::MDB_env>,
     pub(crate) data_mdb: PathBuf,
     pub(crate) map_size: AtomicUsize,
     pub(crate) max_dbs: u32,
     pub(crate) page_size: usize,
+    /// Per-environment debug lock-hierarchy scope ID shared with `DurabilityGate` and `Engine`.
+    pub(crate) lock_scope: LockScopeId,
     /// Handle to LMDB's unnamed `MAIN_DBI` (committed during `LmdbStore::open`) used to check
     /// exact MVCC snapshot visibility of named sub-DBs without calling `mdb_dbi_open`.
     pub(crate) main_dbi: ffi::MDB_dbi,
@@ -254,6 +280,8 @@ pub(crate) struct LmdbEnvInner {
     pub(crate) dbi_publish_gate: DbiPublishGate,
     /// L5 reader-writer lock guarding the Rust `DbiCache` (`by_name`/`by_id`) and `active_rw_txns`.
     pub(crate) dbis: MetaRwLock<DbiCache>,
+    /// L5 mutex holding the active `Grouped`-mode durable snapshot pin (`MDB_RDONLY` txn in `lock.mdb`).
+    pub(crate) durable_pin: MetaLock<Option<DurablePinTxn>>,
     /// Held until strictly AFTER `mdb_env_close` completes so duplicate opens are blocked cleanly.
     env_identity: EnvIdentity,
 }
@@ -309,6 +337,39 @@ impl LmdbEnvInner {
         Ok(())
     }
 
+    /// Opens a fresh `MDB_RDONLY` durable-pin transaction while the caller holds L2 `MapGate`
+    /// (read or write), serializing against DBI publication via L4 `dbi_publish_gate.read_txn()`.
+    pub(crate) fn open_durable_pin_txn(&self) -> Result<DurablePinTxn, StorageError> {
+        self.check_map_ok()?;
+        let _publish = self.dbi_publish_gate.read_txn();
+        let mut raw: *mut ffi::MDB_txn = ptr::null_mut();
+        // SAFETY: `self.env` is open and protected by L2 `MapGate` + L4 `dbi_publish_gate.read_txn()`.
+        let mut rc = unsafe { ffi::mdb_txn_begin(self.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
+        if rc == ffi::MDB_READERS_FULL {
+            let mut dead: libc::c_int = 0;
+            // SAFETY: Reclaim stale reader slots from crashed processes and retry once.
+            let _ = unsafe { ffi::mdb_reader_check(self.env.as_ptr(), &mut dead) };
+            rc = unsafe { ffi::mdb_txn_begin(self.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
+        }
+        if rc != ffi::MDB_SUCCESS {
+            return Err(map_mdb_err(rc, self.current_map_size(), self.max_dbs));
+        }
+        let txn = NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null durable pin MDB_txn".into()))?;
+        Ok(DurablePinTxn(txn))
+    }
+
+    /// Opens a new durable pin at the current tip *before* aborting the previous pin (zero unpinned window).
+    /// Caller MUST hold L2 `MapGate` (read or write).
+    pub(crate) fn refresh_durable_pin_under_map_lock(&self) -> Result<(), StorageError> {
+        let new_pin = self.open_durable_pin_txn()?;
+        let old_pin = {
+            let mut slot = self.durable_pin.lock();
+            slot.replace(new_pin)
+        };
+        drop(old_pin);
+        Ok(())
+    }
+
     #[inline]
     pub(crate) fn assert_map_guard(&self, guard: &LmdbMapReadGuard) -> Result<(), StorageError> {
         if guard.env_ptr != self.env.as_ptr() as usize {
@@ -328,6 +389,8 @@ unsafe impl Sync for LmdbEnvInner {}
 
 impl Drop for LmdbEnvInner {
     fn drop(&mut self) {
+        // Abort any active Grouped durable pin strictly BEFORE `mdb_env_close`.
+        drop(self.durable_pin.get_mut().take());
         // SAFETY: `LmdbEnvInner` is held inside `Arc`, so `Drop` only runs after every
         // `LmdbRoTxn`, `LmdbRwTxn`, and `LmdbStore` handle has been dropped.
         unsafe {
@@ -463,6 +526,7 @@ impl LmdbStore {
         };
 
         let env_identity = reg_guard.0.take().expect("registered");
+        let lock_scope = LockScopeId::fresh();
         Ok(Self {
             inner: Arc::new(LmdbEnvInner {
                 env,
@@ -470,15 +534,22 @@ impl LmdbStore {
                 map_size: AtomicUsize::new(actual_map_size),
                 max_dbs: config.max_dbs,
                 page_size,
+                lock_scope,
                 main_dbi,
-                map_gate: MapGate::new(()),
+                map_gate: MapGate::new_in_scope(lock_scope, ()),
                 map_broken: AtomicBool::new(false),
                 active_rw_txns: AtomicUsize::new(0),
-                dbi_publish_gate: DbiPublishGate::new(),
-                dbis: MetaRwLock::new(cache),
+                dbi_publish_gate: DbiPublishGate::new_in_scope(lock_scope),
+                dbis: MetaRwLock::new_in_scope(lock_scope, cache),
+                durable_pin: MetaLock::new_in_scope(lock_scope, None),
                 env_identity,
             }),
         })
+    }
+
+    /// Returns whether this environment currently holds a `Grouped`-mode durable snapshot pin.
+    pub fn has_durable_pin(&self) -> bool {
+        self.inner.durable_pin.lock().is_some()
     }
 
     /// Reclaims stale reader slots left behind by crashed processes. Returns the number reclaimed.
@@ -835,7 +906,19 @@ impl KvStore for LmdbStore {
             self.inner.map_size.store(cur, Ordering::Release);
             return Ok(cur);
         }
-        // SAFETY: L2 `map_gate.write()` guarantees zero active transactions (`env->me_txn == NULL`) or `me_metas` readers.
+        // Release any Grouped durable pin strictly BEFORE `mdb_env_set_mapsize` unmaps `me_map`
+        // so its `MDB_txn` never holds dangling `me_metas` pointers.
+        let had_pin = {
+            let mut slot = self.inner.durable_pin.lock();
+            let old = slot.take();
+            assert!(slot.is_none(), "durable pin must be cleared before mdb_env_set_mapsize");
+            drop(slot);
+            let had = old.is_some();
+            drop(old);
+            had
+        };
+        // SAFETY: L2 `map_gate.write()` guarantees zero active transactions (`env->me_txn == NULL`),
+        // zero `me_metas` readers, and `durable_pin` has been aborted above.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), aligned) };
         if rc != ffi::MDB_SUCCESS {
             // Under `map_gate.write()`, `env->me_txn` is guaranteed NULL, so any failure (including
@@ -857,6 +940,9 @@ impl KvStore for LmdbStore {
                 aligned
             };
         self.inner.map_size.store(actual, Ordering::Release);
+        if had_pin {
+            self.inner.refresh_durable_pin_under_map_lock()?;
+        }
         Ok(actual)
     }
 
@@ -865,7 +951,18 @@ impl KvStore for LmdbStore {
         let _gate = self.inner.map_gate.write();
         self.inner.check_map_ok()?;
         let cur = self.inner.current_map_size();
-        // SAFETY: `size = 0` tells LMDB to adopt the external cross-process map size cleanly.
+        // Release any Grouped durable pin strictly BEFORE `mdb_env_set_mapsize(0)` unmaps `me_map`.
+        let had_pin = {
+            let mut slot = self.inner.durable_pin.lock();
+            let old = slot.take();
+            assert!(slot.is_none(), "durable pin must be cleared before mdb_env_set_mapsize(0)");
+            drop(slot);
+            let had = old.is_some();
+            drop(old);
+            had
+        };
+        // SAFETY: `size = 0` tells LMDB to adopt the external cross-process map size cleanly;
+        // L2 `map_gate.write()` and `durable_pin.is_none()` guarantee zero live transactions.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), 0) };
         if rc != ffi::MDB_SUCCESS {
             self.inner.map_broken.store(true, Ordering::SeqCst);
@@ -882,6 +979,9 @@ impl KvStore for LmdbStore {
         // SAFETY: `mdb_env_info` succeeded.
         let actual = unsafe { info.assume_init() }.me_mapsize;
         self.inner.map_size.store(actual, Ordering::Release);
+        if had_pin {
+            self.inner.refresh_durable_pin_under_map_lock()?;
+        }
         Ok(actual)
     }
 
@@ -894,6 +994,15 @@ impl KvStore for LmdbStore {
             return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
         }
         Ok(())
+    }
+
+    fn refresh_durable_pin(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+        self.inner.assert_map_guard(map_guard)?;
+        self.inner.refresh_durable_pin_under_map_lock()
+    }
+
+    fn lock_scope_id(&self) -> LockScopeId {
+        self.inner.lock_scope
     }
 
     fn last_txnid(&self) -> Result<u64, StorageError> {

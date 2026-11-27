@@ -575,52 +575,67 @@ impl Database {
             };
         }
 
-        // Outermost transaction on this thread: open owned RwTxn and install RAII guard.
-        let ctx = eng.arc().begin_owned_txn()?;
-        let commit_seq = ctx.commit_seq();
-        ACTIVE_TXNS.with(|m| {
-            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx: Some(ctx), commit_seq: Some(commit_seq), depth: 1 });
-        });
+        // Outermost transaction on this thread: capture `map_size` BEFORE opening the txn so that
+        // if this attempt aborts with `MDB_MAP_FULL`, concurrent threads all target the same
+        // idempotent `before * 2` growth size after `OuterGuard` drops and releases L2 + L3.
+        let map_size_before = eng.gate().map_size();
+        let result = (|| -> Result<(R, Option<(u64, elmdb_storage::CommitReceipt)>)> {
+            let ctx = eng.arc().begin_owned_txn()?;
+            let commit_seq = ctx.commit_seq();
+            ACTIVE_TXNS.with(|m| {
+                m.borrow_mut()
+                    .insert(self.id, ActiveTxnSlot { ctx: Some(ctx), commit_seq: Some(commit_seq), depth: 1 });
+            });
 
-        struct OuterGuard {
-            db_id: u64,
-            armed: bool,
-        }
-        impl Drop for OuterGuard {
-            fn drop(&mut self) {
-                if self.armed {
-                    let _ = ACTIVE_TXNS.try_with(|m| {
-                        if let Ok(mut map) = m.try_borrow_mut() {
-                            // Dropping `ActiveTxnSlot` aborts the root LMDB RwTxn and releases WriterLock.
-                            let _ = map.remove(&self.db_id);
-                        }
-                    });
+            struct OuterGuard {
+                db_id: u64,
+                armed: bool,
+            }
+            impl Drop for OuterGuard {
+                fn drop(&mut self) {
+                    if self.armed {
+                        let _ = ACTIVE_TXNS.try_with(|m| {
+                            if let Ok(mut map) = m.try_borrow_mut() {
+                                // Dropping `ActiveTxnSlot` aborts the root LMDB RwTxn and releases WriterLock.
+                                let _ = map.remove(&self.db_id);
+                            }
+                        });
+                    }
                 }
             }
-        }
 
-        let mut guard = OuterGuard { db_id: self.id, armed: true };
-        let value = f()?;
-        if opts.run_before_commit {
-            self.run_combined_hook_cascade(&eng)?;
-        }
-        guard.armed = false;
-        let slot = ACTIVE_TXNS
-            .with(|m| m.borrow_mut().remove(&self.id))
-            .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
-        let ctx = slot.ctx.ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on commit"))?;
-        let committed_schema = Arc::clone(ctx.schema());
-        let committed = ctx.finish_and_commit(true)?;
-        let out_meta = match committed {
-            Some((seq, receipt, sum)) => {
-                if let Some(ref s) = sum {
-                    self.hub.notify_commit(&committed_schema, s, now_unix_ms());
-                }
-                Some((seq, receipt))
+            let mut guard = OuterGuard { db_id: self.id, armed: true };
+            let value = f()?;
+            if opts.run_before_commit {
+                self.run_combined_hook_cascade(&eng)?;
             }
-            None => None,
-        };
-        Ok((value, out_meta))
+            guard.armed = false;
+            let slot = ACTIVE_TXNS
+                .with(|m| m.borrow_mut().remove(&self.id))
+                .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
+            let ctx =
+                slot.ctx.ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on commit"))?;
+            let committed_schema = Arc::clone(ctx.schema());
+            let committed = ctx.finish_and_commit(true)?;
+            let out_meta = match committed {
+                Some((seq, receipt, sum)) => {
+                    if let Some(ref s) = sum {
+                        self.hub.notify_commit(&committed_schema, s, now_unix_ms());
+                    }
+                    Some((seq, receipt))
+                }
+                None => None,
+            };
+            Ok((value, out_meta))
+        })();
+        if let Err(ref err) = result
+            && err.is_map_full()
+        {
+            // `OuterGuard` has dropped and released L2 + L3; grow idempotently so caller retry succeeds
+            // without silently re-executing the user's closure.
+            let _ = eng.gate().grow_map(Some(map_size_before.saturating_mul(2)));
+        }
+        result
     }
 
     fn run_combined_hook_cascade(&self, eng: &EngineHandle) -> Result<()> {
@@ -1992,10 +2007,177 @@ mod tests {
                     .code,
                 ErrorCode::InvalidArgument
             );
+            // Item 1.6: `atomic_publish_dir_new` ALSO rejects symlink target without removing it!
+            assert_eq!(
+                crate::fs_publish::atomic_publish_dir_new(&stage_io, &link_target).unwrap_err().code,
+                ErrorCode::InvalidArgument
+            );
+            assert!(
+                fs::symlink_metadata(&link_target).unwrap().file_type().is_symlink(),
+                "symlink target must remain intact after failed atomic_publish_dir_new"
+            );
+
+            // Item 1.5: Symlink into `src/sub` + `../nonexistent_leaf` MUST be caught BEFORE lexical `..`!
+            let src_sub = src.join("sub");
+            fs::create_dir_all(&src_sub).unwrap();
+            let sym_into_src = dir.path().join("sym_to_src_sub");
+            std::os::unix::fs::symlink(&src_sub, &sym_into_src).unwrap();
+            assert_eq!(
+                crate::fs_publish::ensure_not_self_or_descendant(&src, &sym_into_src.join("../new_leaf"))
+                    .unwrap_err()
+                    .code,
+                ErrorCode::InvalidArgument
+            );
+            assert_eq!(
+                crate::fs_publish::ensure_not_self_or_descendant(&src, &sym_into_src.join("..")).unwrap_err().code,
+                ErrorCode::InvalidArgument
+            );
+            // Dangling symlink pointing into `src` must also be rejected fail-closed!
+            let dangling = dir.path().join("dangling_into_src");
+            std::os::unix::fs::symlink(src.join("nonexistent_child"), &dangling).unwrap();
+            assert_eq!(
+                crate::fs_publish::ensure_not_self_or_descendant(&src, &dangling).unwrap_err().code,
+                ErrorCode::InvalidArgument
+            );
+            // Symlink to a valid sibling + `../other_nonexistent` is ALLOWED.
+            let sib_sub = sibling.join("nested");
+            fs::create_dir_all(&sib_sub).unwrap();
+            let sym_sib = dir.path().join("sym_sib");
+            std::os::unix::fs::symlink(&sib_sub, &sym_sib).unwrap();
+            crate::fs_publish::ensure_not_self_or_descendant(&src, &sym_sib.join("../ok_leaf")).unwrap();
         }
 
         // `parent_dir` returns `.` for bare filenames and real parent for nested paths.
         assert_eq!(crate::fs_publish::parent_dir(Path::new("dump.json")), Path::new("."));
         assert_eq!(crate::fs_publish::parent_dir(&target), dir.path());
+    }
+
+    #[test]
+    fn pr268_batch1_transact_map_full_grows_for_retry_and_cross_db_nested_locks_and_backup_unacked() {
+        use std::collections::BTreeMap;
+
+        use elmdb_wire::{CanonicalValue, WireOp};
+
+        use crate::protocol::{FieldDefinition, FieldSpec, Schema, TypeDefinition};
+
+        // 1. Item 1.4: `transact_scoped()` hitting `MDB_MAP_FULL` grows the map after aborting (without re-running
+        //    the closure) so an immediate caller retry succeeds cleanly!
+        let dir1 = tempfile::tempdir().unwrap();
+        let db1 = Database::open(
+            dir1.path(),
+            OpenOptions { map_size: Some(128 * 1024), durability: DurabilityMode::Grouped, ..OpenOptions::default() },
+        )
+        .unwrap();
+        let mut fields_def = BTreeMap::new();
+        fields_def.insert("body".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+        let mut types = BTreeMap::new();
+        types.insert(
+            "doc".into(),
+            TypeDefinition {
+                fields: fields_def,
+                indexes: BTreeMap::new(),
+                additional_fields: false,
+                short_code: None,
+                change_order: false,
+                declared_by: None,
+            },
+        );
+        let schema = Schema { dollar_schema: None, types, relations: BTreeMap::new() };
+        db1.set_schema(&schema).unwrap();
+
+        let initial_map = db1.stats().unwrap().map_size_bytes;
+        let big_payload = "x".repeat(48 * 1024);
+        let mut calls = 0usize;
+        let first_err = db1
+            .transact_scoped(TransactOptions::default(), || {
+                calls += 1;
+                for i in 0..8 {
+                    db1.execute_batch(&[WireOp::Create {
+                        type_name: "doc".into(),
+                        external_id: Some(format!("doc_{i}")),
+                        fields: vec![("body".into(), CanonicalValue::String(big_payload.clone()))],
+                    }])?;
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(first_err.is_map_full(), "expected MapFull/StorageFull, got {first_err:?}");
+        assert_eq!(calls, 1, "transact_scoped() must NOT silently re-execute user closure on MapFull");
+        assert!(
+            db1.stats().unwrap().map_size_bytes > initial_map,
+            "transact_scoped() must grow map_size after outermost MapFull abort"
+        );
+
+        // Immediate retry now succeeds cleanly!
+        db1.transact_scoped(TransactOptions::default(), || {
+            for i in 0..8 {
+                db1.execute_batch(&[WireOp::Create {
+                    type_name: "doc".into(),
+                    external_id: Some(format!("doc_{i}")),
+                    fields: vec![("body".into(), CanonicalValue::String(big_payload.clone()))],
+                }])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(db1.get_row("doc_7").unwrap().is_some());
+
+        // 2. Item 1.8: Cross-DB nested read inside `db1.transact_scoped()` works in debug builds without lock-tracker panic!
+        let dir2 = tempfile::tempdir().unwrap();
+        let db2 = Database::open(dir2.path(), OpenOptions::default()).unwrap();
+        db2.set_schema(&schema).unwrap();
+        db2.execute_batch(&[WireOp::Create {
+            type_name: "doc".into(),
+            external_id: Some("other".into()),
+            fields: vec![("body".into(), CanonicalValue::String("from_db2".into()))],
+        }])
+        .unwrap();
+
+        let read_body = db1
+            .transact_scoped(TransactOptions::default(), || {
+                let fetched = db2.get_row("other")?.expect("db2 row visible inside db1.transact_scoped()");
+                let text = match fetched.fields.get("body") {
+                    Some(CanonicalValue::String(s)) => s.clone(),
+                    other => panic!("unexpected value: {other:?}"),
+                };
+                db1.execute_batch(&[WireOp::Create {
+                    type_name: "doc".into(),
+                    external_id: Some("copied".into()),
+                    fields: vec![("body".into(), CanonicalValue::String(text.clone()))],
+                }])?;
+                Ok(text)
+            })
+            .unwrap();
+        assert_eq!(read_body, "from_db2");
+        assert!(db1.get_row("copied").unwrap().is_some());
+
+        // 3. Item 1.3: `Database::backup_into` refuses to seal a Clean backup over an `UnsyncedAfterReboot` DB!
+        let dir3 = tempfile::tempdir().unwrap();
+        {
+            let db3 = Database::open(
+                dir3.path(),
+                OpenOptions { durability: DurabilityMode::Grouped, ..OpenOptions::default() },
+            )
+            .unwrap();
+            db3.set_schema(&schema).unwrap();
+            db3.flush().unwrap();
+            db3.close().unwrap();
+        }
+        // Simulate unacknowledged reboot by removing sidecar while DB has committed txns.
+        fs::remove_file(dir3.path().join(elmdb_storage::SYNC_SIDECAR_NAME)).unwrap();
+        let db3 =
+            Database::open(dir3.path(), OpenOptions { durability: DurabilityMode::Grouped, ..OpenOptions::default() })
+                .unwrap();
+        assert_eq!(db3.open_report().status, "unsyncedAfterReboot");
+        let bak_dir = tempfile::tempdir().unwrap();
+        let bak_target = bak_dir.path().join("bak");
+        let bak_err = db3.backup_into(&bak_target, BackupInto::New).unwrap_err();
+        assert_eq!(bak_err.code, ErrorCode::DurabilityFailed);
+        assert!(!bak_target.exists(), "failed backup must not publish target directory");
+
+        // After `acknowledge_restore()`, `backup_into` succeeds!
+        db3.acknowledge_restore().unwrap();
+        db3.backup_into(&bak_target, BackupInto::New).unwrap();
+        assert!(bak_target.join("data.mdb").exists());
     }
 }
