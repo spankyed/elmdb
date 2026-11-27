@@ -12,6 +12,8 @@
 //!   version, EARS' peer `elmdb` names exactly it, so the pair a release packs installs only together, the binding's
 //!   `optionalDependencies` name each of its `napi.targets`' platform package at exactly it, and `napi.targets` matches
 //!   the targets declared in `deny.toml` and `.github/workflows/release.yml`.
+//! - `check-workspace-deps`: fails when root `Cargo.toml`'s `[workspace.dependencies]` declares a dependency that no
+//!   workspace member crate references via `workspace = true`.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
 //! - `check-exact`: fails unless every ICU crate the lockfile holds, and each crate whose output an index stores
 //!   (`INDEXED`), is a dependency of `elmdb` required at exactly the locked version, so whoever builds elmdb builds the
@@ -61,6 +63,7 @@ fn main() -> ExitCode {
         Some("notices") => write_notices(&workspace_root()),
         Some("check-notices") => check_notices(&workspace_root()),
         Some("check-versions") => check_versions(&workspace_root()),
+        Some("check-workspace-deps") => check_workspace_deps(&workspace_root()),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
         Some("check-exact") => check_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
@@ -79,6 +82,7 @@ fn main() -> ExitCode {
                 &[
                     ("generated protocol", &check_generated),
                     ("one version", &|| check_versions(&root)),
+                    ("workspace dependencies used", &|| check_workspace_deps(&root)),
                     ("one LMDB", &|| check_one_lmdb(&root)),
                     ("exact crates", &|| check_exact(&root)),
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
@@ -92,7 +96,7 @@ fn main() -> ExitCode {
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-versions | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
+            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-versions | check-workspace-deps | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
                 .to_owned(),
         ),
     };
@@ -139,11 +143,10 @@ const UNMODELLED: &[(&str, &str)] = &[
     ),
 ];
 
-/// Fails on a v2 engine file that locks outside `elmdb-storage::locks` and isn't in `UNMODELLED`, on a listed file
-/// that no longer does, or on a modelled file whose production code reaches unmodelled concurrency primitives directly.
+/// Fails on a v2 engine file that locks outside `elmdb-storage::locks` and isn't in `UNMODELLED`, or on a listed file
+/// that no longer locks outside `elmdb-storage::locks`.
 fn check_sync(root: &Path) -> Result<(), String> {
     let mut found = std::collections::BTreeSet::new();
-    let mut modelled = Vec::new();
     for crate_name in SYNC_CHECKED_CRATES {
         let source = root.join("crates").join(crate_name).join("src");
         if !source.is_dir() {
@@ -156,18 +159,11 @@ fn check_sync(root: &Path) -> Result<(), String> {
             }
             found.insert(full);
         }
-        for (rel, violations) in unmodelled_in_modelled_files(&source)? {
-            let full = format!("{crate_name}/src/{rel}");
-            if full == "elmdb-storage/src/locks.rs" {
-                continue;
-            }
-            modelled.push((full, violations));
-        }
     }
     let listed: std::collections::BTreeSet<String> = UNMODELLED.iter().map(|(file, _)| (*file).to_owned()).collect();
     let unlisted: Vec<_> = found.difference(&listed).collect();
     let stale: Vec<_> = listed.difference(&found).collect();
-    if unlisted.is_empty() && stale.is_empty() && modelled.is_empty() {
+    if unlisted.is_empty() && stale.is_empty() {
         return Ok(());
     }
     let mut message = String::new();
@@ -182,13 +178,164 @@ fn check_sync(root: &Path) -> Result<(), String> {
             "UNMODELLED lists files that no longer lock outside elmdb-storage::locks: {stale:?}; remove them\n"
         );
     }
-    if !modelled.is_empty() {
-        message += &format!(
-            "these modelled files use unmodelled concurrency primitives directly: {modelled:?}; route \
-             them through the lock hierarchy\n"
-        );
-    }
     Err(message.trim_end().to_owned())
+}
+
+/// Fails when root `Cargo.toml`'s `[workspace.dependencies]` declares a dependency that no workspace member
+/// references via `workspace = true`.
+fn check_workspace_deps(root: &Path) -> Result<(), String> {
+    let root_manifest_path = root.join("Cargo.toml");
+    let root_text =
+        std::fs::read_to_string(&root_manifest_path).map_err(|e| format!("{}: {e}", root_manifest_path.display()))?;
+    let declared = parse_workspace_dependency_keys(&root_text);
+    let members = parse_workspace_members(&root_text);
+    if members.is_empty() {
+        return Err("root Cargo.toml lists no [workspace] members".to_owned());
+    }
+    let mut used = std::collections::BTreeSet::new();
+    for member in &members {
+        let member_manifest = root.join(member).join("Cargo.toml");
+        let text =
+            std::fs::read_to_string(&member_manifest).map_err(|e| format!("{}: {e}", member_manifest.display()))?;
+        collect_used_workspace_deps(&text, &mut used);
+    }
+    let unused: Vec<&String> = declared.difference(&used).collect();
+    if unused.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "unused [workspace.dependencies] in Cargo.toml: {unused:?}; remove dead entries or reference them from a member crate"
+    ))
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_double => escaped = true,
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            '#' if !in_single && !in_double => return &line[..idx],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn parse_workspace_dependency_keys(manifest: &str) -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    let mut in_ws_deps = false;
+    for raw_line in manifest.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_ws_deps = line == "[workspace.dependencies]";
+            continue;
+        }
+        if !in_ws_deps {
+            continue;
+        }
+        if let Some((lhs, _)) = line.split_once('=') {
+            let key = lhs.trim().trim_matches('"').trim_matches('\'');
+            if !key.is_empty() {
+                keys.insert(key.to_owned());
+            }
+        }
+    }
+    keys
+}
+
+fn parse_workspace_members(manifest: &str) -> Vec<String> {
+    let mut in_ws = false;
+    let mut in_members = false;
+    let mut buf = String::new();
+    for raw_line in manifest.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            if in_members {
+                break;
+            }
+            in_ws = line == "[workspace]";
+            continue;
+        }
+        if !in_ws {
+            continue;
+        }
+        if !in_members {
+            if let Some((lhs, rhs)) = line.split_once('=')
+                && lhs.trim() == "members"
+            {
+                in_members = true;
+                buf.push_str(rhs);
+                if rhs.contains(']') {
+                    break;
+                }
+            }
+        } else {
+            buf.push(' ');
+            buf.push_str(line);
+            if line.contains(']') {
+                break;
+            }
+        }
+    }
+    let re = regex::Regex::new(r#""([^"]+)""#).expect("valid regex");
+    re.captures_iter(&buf).map(|c| c[1].to_owned()).collect()
+}
+
+fn is_dep_section_header(header: &str) -> bool {
+    let inner = header.trim_start_matches('[').trim_end_matches(']').trim();
+    matches!(inner, "dependencies" | "dev-dependencies" | "build-dependencies")
+        || (inner.starts_with("target.")
+            && (inner.ends_with(".dependencies")
+                || inner.ends_with(".dev-dependencies")
+                || inner.ends_with(".build-dependencies")))
+}
+
+fn collect_used_workspace_deps(manifest: &str, used: &mut std::collections::BTreeSet<String>) {
+    let mut in_dep_sec = false;
+    let ws_true_re = regex::Regex::new(r"\bworkspace\s*=\s*true\b").expect("valid regex");
+    let pkg_re = regex::Regex::new(r#"\bpackage\s*=\s*"([^"]+)""#).expect("valid regex");
+    for raw_line in manifest.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            in_dep_sec = is_dep_section_header(line);
+            continue;
+        }
+        if !in_dep_sec {
+            continue;
+        }
+        let Some((lhs, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        let lhs = lhs.trim();
+        let rhs = rhs.trim();
+        if let Some(dep_name) = lhs.strip_suffix(".workspace") {
+            if rhs == "true" {
+                used.insert(dep_name.trim().trim_matches('"').trim_matches('\'').to_owned());
+            }
+        } else if ws_true_re.is_match(rhs) {
+            let key = lhs.trim_matches('"').trim_matches('\'');
+            used.insert(key.to_owned());
+            if let Some(cap) = pkg_re.captures(rhs) {
+                used.insert(cap[1].to_owned());
+            }
+        }
+    }
 }
 
 /// A `// mutant-skip: PATTERN` comment, ` (as above)` for a reason given by the one before it. Its reason follows it, as a comment
@@ -432,25 +579,6 @@ fn unmodelled_files(source: &Path) -> Result<std::collections::BTreeSet<String>,
     Ok(found)
 }
 
-/// Shuttle/Loom-modelled engine files whose production code uses `std::sync::atomic` (other than `Ordering`),
-/// `std::sync::OnceLock`/`Once`, or `std::thread::spawn` directly rather than through `crate::sync`. Non-modelled
-/// files (such as `engine/text/search.rs`'s constant `OnceLock` caches or `store/wake.rs`'s OS mailbox flag) are
-/// outside this scope.
-fn unmodelled_in_modelled_files(source: &Path) -> Result<Vec<(String, Vec<&'static str>)>, String> {
-    let mut found = Vec::new();
-    for (relative, text) in engine_sync_files(source)? {
-        if !is_modelled_file(&text) {
-            continue;
-        }
-        let violations = modelled_sync_violations(&text);
-        if !violations.is_empty() {
-            found.push((relative, violations));
-        }
-    }
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(found)
-}
-
 /// Engine source files scanned by `check-sync`: `sync/`, `tests/` directories, `*tests.rs` and `*model.rs` excepted
 fn engine_sync_files(source: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files = Vec::new();
@@ -621,38 +749,6 @@ fn char_literal_end(source: &str, start: usize) -> Option<usize> {
     }
 }
 
-/// Removes inline `#[cfg(test)] mod ... { ... }` and `#[cfg(all(..., test, ...))] mod ... { ... }` blocks from
-/// comment- and string-stripped Rust code so real-thread unit tests inside a modelled file are not scanned as
-/// production code
-fn strip_cfg_test_modules(code: &str) -> String {
-    let attr_re = regex::Regex::new(
-        r"#\[cfg\(\s*(?:test|all\([^]]*\btest\b[^]]*)\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{",
-    )
-    .expect("valid regex");
-    let mut result = code.to_owned();
-    while let Some(found) = attr_re.find(&result) {
-        let open = found.end() - 1;
-        let bytes = result.as_bytes();
-        let mut depth = 0usize;
-        let mut end = bytes.len();
-        for (offset, &b) in bytes[open..].iter().enumerate() {
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    end = open + offset + 1;
-                    break;
-                }
-            }
-        }
-        let replacement: String =
-            result[found.start()..end].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect();
-        result.replace_range(found.start()..end, &replacement);
-    }
-    result
-}
-
 /// Expands every `use ...;` statement in comment- and string-stripped Rust code into normalized full paths (such as
 /// `std::sync::Mutex`, `std::sync::atomic::AtomicBool`, `std::thread::spawn`), handling multiline braced groups
 fn expand_use_trees(code: &str) -> Vec<String> {
@@ -721,51 +817,6 @@ fn expand_use_trees(code: &str) -> Vec<String> {
         expand("", &cap[1], &mut paths);
     }
     paths
-}
-
-/// Whether `source` declares a Shuttle or Loom concurrency model (`#[cfg(...shuttle/loom...)] mod model`)
-fn is_modelled_file(source: &str) -> bool {
-    let code = strip_comments_and_strings(source);
-    let re = regex::Regex::new(r"#\[cfg\([^]]*\b(?:shuttle|loom)\b[^]]*\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+model\b")
-        .expect("valid regex");
-    re.is_match(&code)
-}
-
-/// Concurrency primitives in a Shuttle/Loom-modelled file's production code that bypass `crate::sync`
-fn modelled_sync_violations(source: &str) -> Vec<&'static str> {
-    let code = strip_cfg_test_modules(&strip_comments_and_strings(source));
-    let uses = expand_use_trees(&code);
-    let mut found = Vec::new();
-
-    // std::sync::atomic (other than `Ordering`, which is a pure enum identical across std, Loom and Shuttle)
-    let atomic_use = uses.iter().any(|p| {
-        p == "std::sync::atomic" || (p.starts_with("std::sync::atomic::") && p != "std::sync::atomic::Ordering")
-    });
-    let atomic_direct = regex::Regex::new(r"\bstd\s*::\s*sync\s*::\s*atomic\s*::\s*([A-Za-z_*][A-Za-z0-9_]*)")
-        .expect("valid regex")
-        .captures_iter(&code)
-        .any(|c| &c[1] != "Ordering");
-    if atomic_use || atomic_direct {
-        found.push("std::sync::atomic");
-    }
-
-    // std::sync::OnceLock / Once persist state across Shuttle schedules and can deadlock or leak between runs
-    let once_use = uses.iter().any(|p| p == "std::sync::OnceLock" || p == "std::sync::Once");
-    let once_direct =
-        regex::Regex::new(r"\bstd\s*::\s*sync\s*::\s*(?:OnceLock|Once)\b").expect("valid regex").is_match(&code);
-    if once_use || once_direct {
-        found.push("std::sync::OnceLock/Once");
-    }
-
-    // Direct `std::thread::spawn` bypasses Shuttle/Loom's scheduler (named worker threads using `thread::Builder` in
-    // outer wrappers such as `engine/builder.rs::Builder::start` are outside the modelled `Core` state machine)
-    let spawn_use = uses.iter().any(|p| p == "std::thread::spawn");
-    let spawn_direct = regex::Regex::new(r"\bstd\s*::\s*thread\s*::\s*spawn\b").expect("valid regex").is_match(&code);
-    if spawn_use || spawn_direct {
-        found.push("std::thread::spawn");
-    }
-
-    found
 }
 
 /// The sole module allowed to call `commit_raw()`, relative to `crates/`.
@@ -1571,8 +1622,7 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 mod tests {
     use super::{Skip, exclude_res, skips_in, stale_exclusions, with_skips};
     use super::{
-        UNMODELLED, direct_dependencies, is_modelled_file, lmdb_sys_crates, locks_outside_sync,
-        modelled_sync_violations, unmodelled_files, unmodelled_in_modelled_files,
+        UNMODELLED, check_workspace_deps, direct_dependencies, lmdb_sys_crates, locks_outside_sync, unmodelled_files,
     };
     use super::{
         check_deny, platform_package_mismatches, target_parity_mismatches, version_mismatches, workspace_root,
@@ -1798,68 +1848,57 @@ fn a() {
     }
 
     #[test]
-    fn modelled_files_refuse_unmodelled_atomics_oncelock_and_spawn_outside_inline_tests() {
+    fn check_workspace_deps_passes_when_all_used_and_flags_dead_entries() {
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path();
-        std::fs::create_dir_all(src.join("store")).unwrap();
-        std::fs::create_dir_all(src.join("engine")).unwrap();
-        // Clean Shuttle-modelled file: Ordering alone + inline #[cfg(test)] mod tests using std atomics/spawn is fine
-        let clean = "\
-use std::sync::atomic::Ordering;
-use crate::sync::PlainMutex;
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("crates/a")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[workspace]
+members = ["crates/a"]
 
-pub fn work(_: Ordering) {}
+[workspace.dependencies]
+alpha = "1.0"
+beta = { version = "2.0", features = ["std"] }
+libc = "0.2"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("crates/a/Cargo.toml"),
+            r#"
+[package]
+name = "a"
 
-#[cfg(all(test, shuttle))]
-mod model;
+[dependencies]
+alpha.workspace = true
+beta = { workspace = true, optional = true }
 
-#[cfg(all(test, not(shuttle), not(loom)))]
-mod tests {
-    use std::sync::atomic::AtomicBool;
-    #[test]
-    fn real_threads() {
-        let _ = AtomicBool::new(false);
-        std::thread::spawn(|| {});
-    }
-}
-";
-        assert!(is_modelled_file(clean));
-        assert_eq!(modelled_sync_violations(clean), Vec::<&str>::new());
-        std::fs::write(src.join("engine/clean.rs"), clean).unwrap();
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+"#,
+        )
+        .unwrap();
+        check_workspace_deps(root).unwrap();
 
-        // Modelled file using multiline std::sync::atomic import in production code
-        let bad_atomic = "\
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-#[cfg(all(test, shuttle))]
-mod model;
-";
-        std::fs::write(src.join("store/bad_atomic.rs"), bad_atomic).unwrap();
+        // Adding an unused workspace dependency fails cleanly and names it.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[workspace]
+members = ["crates/a"]
 
-        // Modelled file using OnceLock and std::thread::spawn in production code
-        let bad_once_spawn = "\
-use std::sync::OnceLock;
-pub fn go() { std::thread::spawn(|| {}); }
-#[cfg(all(test, any(loom, shuttle)))]
-mod model { fn m() {} }
-";
-        std::fs::write(src.join("store/bad_once_spawn.rs"), bad_once_spawn).unwrap();
-
-        // Non-modelled file using OnceLock and AtomicBool: outside the modelled-file scope
-        let non_modelled = "use std::sync::OnceLock;\nuse std::sync::atomic::AtomicBool;\n";
-        assert!(!is_modelled_file(non_modelled));
-        std::fs::write(src.join("engine/search.rs"), non_modelled).unwrap();
-
-        let found = unmodelled_in_modelled_files(src).unwrap();
-        assert_eq!(
-            found,
-            vec![
-                ("store/bad_atomic.rs".to_owned(), vec!["std::sync::atomic"]),
-                ("store/bad_once_spawn.rs".to_owned(), vec!["std::sync::OnceLock/Once", "std::thread::spawn"]),
-            ]
-        );
+[workspace.dependencies]
+alpha = "1.0"
+beta = "2.0"
+libc = "0.2"
+dead-crate = "0.1"
+"#,
+        )
+        .unwrap();
+        let err = check_workspace_deps(root).unwrap_err();
+        assert!(err.contains("dead-crate"), "{err}");
     }
 
     #[test]

@@ -49,6 +49,7 @@ pub enum ErrorCode {
     DatabaseLocked = 38,
     AlreadyExists = 39,
     Panicked = 40,
+    AlreadyLoaded = 41,
 }
 
 impl ErrorCode {
@@ -93,6 +94,7 @@ impl ErrorCode {
         Self::DatabaseLocked,
         Self::AlreadyExists,
         Self::Panicked,
+        Self::AlreadyLoaded,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -137,6 +139,7 @@ impl ErrorCode {
             Self::DatabaseLocked => "DATABASE_LOCKED",
             Self::AlreadyExists => "ALREADY_EXISTS",
             Self::Panicked => "PANICKED",
+            Self::AlreadyLoaded => "ALREADY_LOADED",
         }
     }
 

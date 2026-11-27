@@ -2350,5 +2350,36 @@ fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_a
     assert!(db.watches_settled(), "idle flush() with no vector work must not dirty settled watches");
     db.unregister_watch(idle_wid);
 
+    // 9. Standalone counter writes (non-query LMDB txns) must NOT spuriously dirty settled watches
+    //    either via catch_up_cross_process or on the next unrelated commit!
+    let note_ids_spec = QuerySpec {
+        source: QuerySource::Type { type_name: "Note".into(), include_trashed: false },
+        steps: vec![],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let (note_wid, _) = db
+        .register_query_watch(
+            &note_ids_spec,
+            WatchPolicy { min_gap_ms: 0, adaptive_multiplier: 0, ..Default::default() },
+            5200,
+        )
+        .unwrap();
+    assert!(db.watches_settled());
+    assert_eq!(db.next_counter("STANDALONE").unwrap(), 1);
+    db.set_counter("STANDALONE", 42).unwrap();
+    assert!(db.catch_up_cross_process(5250).unwrap().is_empty());
+    assert!(db.watches_settled());
+    db.execute_batch(&[WireOp::Patch {
+        target: EntityTarget::ExternalId("a1".into()),
+        fields: vec![("name".into(), CanonicalValue::String("Alice-updated".into()))],
+    }])
+    .unwrap();
+    assert!(
+        db.watches_settled(),
+        "unrelated Author write after standalone counter writes must not trigger false-positive Note watch invalidation"
+    );
+    db.unregister_watch(note_wid);
+
     db.close().unwrap();
 }

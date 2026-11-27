@@ -174,10 +174,10 @@ fn refusal(claimed: io::Result<()>) -> std::result::Result<(), (&'static str, St
             let message = format!(
                 "Another elmdb binary already claimed this process, so {mine} can't open a database. Load one elmdb package"
             );
-            Err(("ALREADY_LOADED", message))
+            Err((elmdb::ErrorCode::AlreadyLoaded.as_str(), message))
         }
         Err(error) => Err((
-            "IO",
+            elmdb::ErrorCode::Io.as_str(),
             format!("Cannot claim this process: {error}. Ensure the operating system permits the process claim"),
         )),
     }

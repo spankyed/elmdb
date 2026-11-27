@@ -1154,13 +1154,13 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         .summary
         .unwrap();
 
-    let mut idx = InvalidationIndex::new_with_txnid(base_sum.seq, base_sum.schema_epoch, base_sum.txnid);
+    let mut idx = InvalidationIndex::new_with_maint_seq(base_sum.seq, base_sum.schema_epoch, base_sum.maint_seq);
     let note_plan = LogicalPlan::new(LogicalNode::Terminal {
         input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
         terminal: TerminalSpec::Ids,
     });
-    let (s0, t0, e0, _o, rs0) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
-    assert!(!idx.register_after_read_with_txnid(WatchId(1), s0, t0, e0, &rs0, &engine.schema()));
+    let (s0, m0, e0, _o, rs0) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
+    assert!(!idx.register_after_read_with_maint(WatchId(1), s0, m0, e0, &rs0, &engine.schema()));
 
     // Produce two commits: seq S+1 (touches Note) and seq S+2 (touches Author).
     let sum1 = engine
@@ -1187,10 +1187,31 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
     assert!(d1.is_empty(), "late out-of-order sum1 must not corrupt ring or spuriously re-invalidate");
 
     // A fresh reader at S+2 MUST register cleanly as NOT stale!
-    let (s2, t2, e2, _o2, rs2) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
-    assert!(!idx.register_after_read_with_txnid(WatchId(1), s2, t2, e2, &rs2, &engine.schema()));
+    let (s2, m2, e2, _o2, rs2) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
+    assert!(!idx.register_after_read_with_maint(WatchId(1), s2, m2, e2, &rs2, &engine.schema()));
 
-    // Now commit seq S+3 WITHOUT calling notify_commit yet, and fire notify_subdb_write at seq S+3:
+    // Standalone counter writes advance LMDB txnid without bumping commit_seq or maint_seq:
+    // neither catch_up_cross_process nor a subsequent unrelated Author commit may falsely invalidate WatchId(1)!
+    assert_eq!(engine.next_counter("TICKET").unwrap(), 1);
+    engine.set_counter("TICKET", 50).unwrap();
+    assert!(
+        idx.catch_up_cross_process(&engine).unwrap().is_empty(),
+        "standalone counter writes must NOT trigger cross-process watch invalidation"
+    );
+    let author_sum = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("a1".into()),
+            fields: vec![("name".into(), CanonicalValue::String("A1-v3".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    assert!(
+        idx.notify_commit(&engine.schema(), &author_sum).is_empty(),
+        "unrelated Author commit after standalone counter writes must NOT falsely invalidate Note watch"
+    );
+
+    // Now commit seq S+4 WITHOUT calling notify_commit yet, and fire notify_subdb_write at seq S+4:
     // Because SubDbWrite carries no commit summary, `seq > prev_seq` MUST fail-safe invalidate WatchId(1)!
     let sum3 = engine
         .execute_batch(&[WireOp::Patch {
@@ -1200,30 +1221,37 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         .unwrap()
         .summary
         .unwrap();
-    let d_sub = idx.notify_subdb_write_at_txnid(sum3.seq, sum3.schema_epoch, sum3.txnid + 1, ids.idx_vec_slot, &[0x01]);
+    let d_sub =
+        idx.notify_subdb_write_at_maint(sum3.seq, sum3.schema_epoch, sum3.maint_seq + 1, 1, ids.idx_vec_slot, &[0x01]);
     assert!(
         d_sub.contains(&WatchId(1)),
         "notify_subdb_write observing an unseen normal commit seq MUST fail-safe invalidate all watches"
     );
 
-    // Review P1-1 regression: `notify_full_rebuild(seq, epoch)` (txnid == 0) at same `seq == latest_seq`
+    // Review P1-1 regression: `notify_full_rebuild(seq, epoch)` at same `seq == latest_seq`
     // MUST mark a concurrent reader at `seq` as stale (not hit early fast-path return false)!
-    let (s3, _t3, e3, _o3, rs3) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
-    let mut idx_rb = InvalidationIndex::new(s3, e3);
+    let (s3, m3, e3, _o3, rs3) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
+    let mut idx_rb = InvalidationIndex::new_with_maint_seq(s3, e3, m3);
     idx_rb.notify_full_rebuild(s3, e3);
     assert!(
-        idx_rb.register_after_read(WatchId(42), s3, e3, &rs3, &engine.schema()),
-        "same-seq txnid-less notify_full_rebuild MUST mark concurrent reader stale"
+        idx_rb.register_after_read_with_maint(WatchId(42), s3, m3, e3, &rs3, &engine.schema()),
+        "same-seq notify_full_rebuild MUST mark concurrent reader stale"
     );
 
-    // Review P0-1 regression: `notify_subdb_write_at_txnid` observing `txnid > prev_txnid + 1`
-    // (indicating an unseen cross-process maintenance write on another slot) MUST invalidate all watches!
-    let (s4, t4, e4, _o4, rs4) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
-    let mut idx_mg = InvalidationIndex::new_with_txnid(s4, e4, t4);
-    assert!(!idx_mg.register_after_read_with_txnid(WatchId(77), s4, t4, e4, &rs4, &engine.schema()));
-    let d_mg = idx_mg.notify_subdb_write_at_txnid(s4, e4, t4 + 2, ids.idx_vec_slot, &[0x01]);
+    // Orthogonal `maint_seq` multi-chunk & gap tests:
+    let (s4, m4, e4, _o4, rs4) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
+    let mut idx_mg = InvalidationIndex::new_with_maint_seq(s4, e4, m4);
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4, e4, &rs4, &engine.schema()));
+    // Multi-chunk local flush (`maint_commits = 3`, `m4 -> m4 + 3`) on an unrelated vector slot does NOT invalidate Note watch!
+    let d_multi = idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 3, 3, ids.idx_vec_slot, &[0x01]);
+    assert!(d_multi.is_empty(), "multi-chunk flush on unrelated slot must stay selective");
+    // Reader opened before or mid-flush on Note is still NOT stale (slot doesn't match), and at m4+3 settles!
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 1, e4, &rs4, &engine.schema()));
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 3, e4, &rs4, &engine.schema()));
+    // Unseen cross-process maintenance write (`m4 + 3 -> m4 + 5` with `maint_commits = 1`) MUST fail-safe invalidate all watches!
+    let d_mg = idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 5, 1, ids.idx_vec_slot, &[0x01]);
     assert!(
         d_mg.contains(&WatchId(77)),
-        "notify_subdb_write_at_txnid with txnid gap (> prev_txnid + 1) MUST fail-safe invalidate all watches"
+        "notify_subdb_write_at_maint with maint_seq gap (> prev_maint + commits) MUST fail-safe invalidate all watches"
     );
 }

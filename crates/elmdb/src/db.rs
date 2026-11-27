@@ -13,17 +13,15 @@ use std::time::Duration;
 use elmdb_engine::{
     BatchOutcome, BeforeCommitHook, CompiledSchema, Engine, EntityKey, HookRoundSnapshot, IndexId, IndexKind,
     MAX_HOOK_ROUNDS, RawSchema, StoredEdge, StoredRow, TxnCtx, TypeMask, list_counters_in_txn, lookup_ext_id_in_txn,
-    read_commit_seq, read_relations_in_in_txn, read_relations_out_in_txn, read_stored_row, row::decode_row_header,
-    scan_type_keys,
+    read_commit_seq, read_maint_seq, read_relations_in_in_txn, read_relations_out_in_txn, read_stored_row,
+    row::decode_row_header, scan_type_keys,
 };
 use elmdb_invalidation::{LiveQueryHub, NextDue, TickResult, WatchId, WatchPolicy, hash_result_128};
 use elmdb_lmdb::{LmdbConfig, LmdbStore};
 use elmdb_projections::{BuildPolicy, ProjectionRegistry, rank};
 use elmdb_query::{EdgeDir, ExecBudgets, LogicalPlan, QueryEngine, QueryOutput};
 use elmdb_storage::{Clock, DurabilityMode, KvCursor, KvRead, OsVfs, SystemClock, Vfs};
-use elmdb_vec::{
-    DEFAULT_DRAIN_BATCH, VectorProjection, drain_pending_batch, flush as flush_vec, read_entity_embeddings,
-};
+use elmdb_vec::{DEFAULT_DRAIN_BATCH, VectorProjection, drain_pending_batch, read_entity_embeddings};
 use elmdb_wire::{ElmdbError, EntityTarget, ErrorCode, Result, WireOp, decode_batch};
 
 use crate::protocol::{
@@ -430,9 +428,9 @@ impl Database {
         let (compiled, diff) = eng.set_schema(raw)?;
         let (ro, ro_schema) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = ro.txnid();
+        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
         drop(ro);
-        self.hub.notify_schema_change_with_txnid(seq, ro_schema.epoch, txnid, now_unix_ms());
+        self.hub.notify_schema_change_with_maint(seq, ro_schema.epoch, maint_seq, now_unix_ms());
         self.query_engine.clear_cache();
         Ok(SchemaChange::from_diff(&compiled, &diff))
     }
@@ -444,9 +442,9 @@ impl Database {
         let compiled = eng.rename_type(old_type, new_type, rewrite_ids)?;
         let (ro, ro_schema) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = ro.txnid();
+        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
         drop(ro);
-        self.hub.notify_schema_change_with_txnid(seq, ro_schema.epoch, txnid, now_unix_ms());
+        self.hub.notify_schema_change_with_maint(seq, ro_schema.epoch, maint_seq, now_unix_ms());
         self.query_engine.clear_cache();
         Ok(compiled.epoch)
     }
@@ -458,9 +456,9 @@ impl Database {
         let compiled = eng.rename_field(type_name, old_field, new_field)?;
         let (ro, ro_schema) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = ro.txnid();
+        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
         drop(ro);
-        self.hub.notify_schema_change_with_txnid(seq, ro_schema.epoch, txnid, now_unix_ms());
+        self.hub.notify_schema_change_with_maint(seq, ro_schema.epoch, maint_seq, now_unix_ms());
         self.query_engine.clear_cache();
         Ok(compiled.epoch)
     }
@@ -472,9 +470,9 @@ impl Database {
         let compiled = eng.rename_relation(old_rel, new_rel)?;
         let (ro, ro_schema) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = ro.txnid();
+        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
         drop(ro);
-        self.hub.notify_schema_change_with_txnid(seq, ro_schema.epoch, txnid, now_unix_ms());
+        self.hub.notify_schema_change_with_maint(seq, ro_schema.epoch, maint_seq, now_unix_ms());
         self.query_engine.clear_cache();
         Ok(compiled.epoch)
     }
@@ -944,11 +942,11 @@ impl Database {
         let (idx_id, _hint) = elmdb_vec::set_entity_embeddings_by_ext_id(&eng, index_name, ext_id, vectors)?;
         let (ro, sc) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = ro.txnid();
+        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
         let active_slot = sc.index_by_id(idx_id).map(|d| d.slot);
         drop(ro);
         if let Some(slot) = active_slot {
-            self.hub.notify_subdb_write_with_txnid(seq, sc.epoch, txnid, slot, &[0x01], now_unix_ms());
+            self.hub.notify_subdb_write_with_maint(seq, sc.epoch, maint_seq, 1, slot, &[0x01], now_unix_ms());
         }
         Ok(())
     }
@@ -1116,13 +1114,15 @@ impl Database {
         self.require_writable()?;
         self.forbid_inside_txn("driveBackgroundWork")?;
         let mut more = false;
-        let mut rebuilt_any = false;
-        let mut touched_slots: Vec<u16> = Vec::new();
-        let mut compacted_any = false;
+        let now_ms = now_unix_ms();
 
         if self.registry.drive_build_chunk(&eng, max_entities.max(1))? {
             more = true;
-            rebuilt_any = true;
+            let (ro, sc) = eng.begin_read_pinned()?;
+            let seq = read_commit_seq(&ro, &eng.dbs())?;
+            let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
+            drop(ro);
+            self.hub.notify_full_rebuild_with_maint(seq, sc.epoch, maint_seq, now_ms);
         }
         let schema = self.fresh_schema(&eng)?;
         for def in &schema.indexes {
@@ -1131,34 +1131,40 @@ impl Database {
                     let dr = drain_pending_batch(&eng, def.id, DEFAULT_DRAIN_BATCH)?;
                     if dr.processed > 0 || dr.needs_compaction {
                         more = true;
-                        touched_slots.push(def.slot);
-                        if dr.needs_compaction {
+                        let compacted = if dr.needs_compaction {
                             let _ = elmdb_vec::compact_now(&eng, def.id)?;
-                            compacted_any = true;
+                            true
+                        } else {
+                            false
+                        };
+                        let (ro, sc) = eng.begin_read_pinned()?;
+                        let seq = read_commit_seq(&ro, &eng.dbs())?;
+                        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
+                        drop(ro);
+                        if compacted {
+                            self.hub.notify_schema_change_with_maint(seq, sc.epoch, maint_seq, now_ms);
+                        } else {
+                            self.hub.notify_subdb_write_with_maint(
+                                seq,
+                                sc.epoch,
+                                maint_seq,
+                                1,
+                                def.slot,
+                                &[0x01],
+                                now_ms,
+                            );
                         }
                     }
                 }
                 IndexKind::Rank { .. } if rank::drain_rank_chunk(&eng, def.id, 1024)? > 0 => {
                     more = true;
-                    touched_slots.push(def.slot);
+                    let (ro, sc) = eng.begin_read_pinned()?;
+                    let seq = read_commit_seq(&ro, &eng.dbs())?;
+                    let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
+                    drop(ro);
+                    self.hub.notify_subdb_write_with_maint(seq, sc.epoch, maint_seq, 1, def.slot, &[0x01], now_ms);
                 }
                 _ => {}
-            }
-        }
-        if compacted_any || rebuilt_any || !touched_slots.is_empty() {
-            let (ro, sc) = eng.begin_read_pinned()?;
-            let seq = read_commit_seq(&ro, &eng.dbs())?;
-            let txnid = ro.txnid();
-            drop(ro);
-            let now_ms = now_unix_ms();
-            if compacted_any {
-                self.hub.notify_schema_change_with_txnid(seq, sc.epoch, txnid, now_ms);
-            } else if rebuilt_any {
-                self.hub.notify_full_rebuild_with_txnid(seq, sc.epoch, txnid, now_ms);
-            } else {
-                for slot in touched_slots {
-                    self.hub.notify_subdb_write_with_txnid(seq, sc.epoch, txnid, slot, &[0x01], now_ms);
-                }
             }
         }
         Ok(more)
@@ -1170,49 +1176,86 @@ impl Database {
         let eng = self.enter_op()?;
         self.forbid_inside_txn("flush")?;
         self.require_writable()?;
+        let now_ms = now_unix_ms();
         let mut built_any = false;
         while self.registry.drive_build_chunk(&eng, 2048)? {
             built_any = true;
         }
-        let mut touched_slots = Vec::new();
-        let mut compacted_any = false;
+        if built_any {
+            let (ro, sc) = eng.begin_read_pinned()?;
+            let seq = read_commit_seq(&ro, &eng.dbs())?;
+            let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
+            drop(ro);
+            self.hub.notify_full_rebuild_with_maint(seq, sc.epoch, maint_seq, now_ms);
+        }
         let schema = self.fresh_schema(&eng)?;
         for def in &schema.indexes {
             match &def.kind {
                 IndexKind::Vector { .. } => {
                     let prev_slot = def.slot;
-                    if flush_vec(&eng, def.id)? > 0 {
-                        touched_slots.push(prev_slot);
+                    let mut chunks = 0u64;
+                    let mut needs_compact = false;
+                    loop {
+                        let dr = drain_pending_batch(&eng, def.id, DEFAULT_DRAIN_BATCH)?;
+                        if dr.needs_compaction {
+                            needs_compact = true;
+                        }
+                        if dr.processed == 0 {
+                            break;
+                        }
+                        chunks = chunks.saturating_add(1);
                     }
-                    if let Some(cur) = eng.schema().index_by_id(def.id)
-                        && cur.slot != prev_slot
-                    {
-                        compacted_any = true;
+                    let compacted = if needs_compact {
+                        let _ = elmdb_vec::compact_now(&eng, def.id)?;
+                        true
+                    } else {
+                        false
+                    };
+                    if compacted || chunks > 0 {
+                        let (ro, sc) = eng.begin_read_pinned()?;
+                        let seq = read_commit_seq(&ro, &eng.dbs())?;
+                        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
+                        drop(ro);
+                        if compacted {
+                            self.hub.notify_schema_change_with_maint(seq, sc.epoch, maint_seq, now_ms);
+                        } else {
+                            self.hub.notify_subdb_write_with_maint(
+                                seq,
+                                sc.epoch,
+                                maint_seq,
+                                chunks,
+                                prev_slot,
+                                &[0x01],
+                                now_ms,
+                            );
+                        }
                     }
                 }
-                IndexKind::Rank { .. } if rank::flush_rank(&eng, def.id)? > 0 => {
-                    touched_slots.push(def.slot);
+                IndexKind::Rank { .. } => {
+                    let mut chunks = 0u64;
+                    while rank::drain_rank_chunk(&eng, def.id, rank::DEFAULT_PUSH_BUDGET)? > 0 {
+                        chunks = chunks.saturating_add(1);
+                    }
+                    if chunks > 0 {
+                        let (ro, sc) = eng.begin_read_pinned()?;
+                        let seq = read_commit_seq(&ro, &eng.dbs())?;
+                        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
+                        drop(ro);
+                        self.hub.notify_subdb_write_with_maint(
+                            seq,
+                            sc.epoch,
+                            maint_seq,
+                            chunks,
+                            def.slot,
+                            &[0x01],
+                            now_ms,
+                        );
+                    }
                 }
                 _ => {}
             }
         }
         eng.sync()?;
-        if compacted_any || built_any || !touched_slots.is_empty() {
-            let (ro, sc) = eng.begin_read_pinned()?;
-            let seq = read_commit_seq(&ro, &eng.dbs())?;
-            let txnid = ro.txnid();
-            drop(ro);
-            let now_ms = now_unix_ms();
-            if compacted_any {
-                self.hub.notify_schema_change_with_txnid(seq, sc.epoch, txnid, now_ms);
-            } else if built_any {
-                self.hub.notify_full_rebuild_with_txnid(seq, sc.epoch, txnid, now_ms);
-            } else {
-                for slot in touched_slots {
-                    self.hub.notify_subdb_write_with_txnid(seq, sc.epoch, txnid, slot, &[0x01], now_ms);
-                }
-            }
-        }
         Ok(())
     }
 
@@ -1248,9 +1291,9 @@ impl Database {
         self.registry.rebuild(&eng, idx_id)?;
         let (ro, sc) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
-        let txnid = ro.txnid();
+        let maint_seq = read_maint_seq(&ro, &eng.dbs())?;
         drop(ro);
-        self.hub.notify_full_rebuild_with_txnid(seq, sc.epoch, txnid, now_unix_ms());
+        self.hub.notify_full_rebuild_with_maint(seq, sc.epoch, maint_seq, now_unix_ms());
         Ok(())
     }
 

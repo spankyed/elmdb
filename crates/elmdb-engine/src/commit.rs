@@ -30,6 +30,7 @@ pub const CROSS_PROC_ENTITY_CAP: usize = 64;
 const META_SCHEMA_KEY: &[u8] = b"schema";
 const META_POOL_KEY: &[u8] = b"subdb_pool";
 const META_COMMIT_SEQ_KEY: &[u8] = b"commit_seq";
+const META_MAINT_SEQ_KEY: &[u8] = b"maint_seq";
 const META_SCHEMA_EPOCH_KEY: &[u8] = b"schema_epoch";
 
 // `sequences` sub-DB keys
@@ -164,6 +165,7 @@ pub struct CrossProcCommitSummary {
 #[derive(Debug, Clone)]
 pub struct CommitDeltaSummary {
     pub seq: u64,
+    pub maint_seq: u64,
     pub txnid: u64,
     pub schema_epoch: u64,
     pub touched_types: TypeMask,
@@ -510,6 +512,9 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                 };
                 if txn.get(dbs.meta, META_COMMIT_SEQ_KEY)?.is_none() {
                     txn.put(dbs.meta, META_COMMIT_SEQ_KEY, &0u64.to_le_bytes())?;
+                }
+                if txn.get(dbs.meta, META_MAINT_SEQ_KEY)?.is_none() {
+                    txn.put(dbs.meta, META_MAINT_SEQ_KEY, &0u64.to_le_bytes())?;
                 }
                 txn.commit()?;
                 (dbs, schema, pool)
@@ -877,6 +882,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         self.retry_on_map_full(|| {
             let (mut txn, schema) = self.begin_write_with_fresh_schema()?;
             let out = f(&mut txn, &schema, &self.dbs)?;
+            let _ = bump_maint_seq(&mut txn, &self.dbs)?;
             let receipt = txn.commit()?;
             Ok((out, receipt))
         })
@@ -1605,9 +1611,11 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
     }
 
     fn commit_with_summary(self, want_summary: bool) -> Result<(CommitReceipt, Option<CommitDeltaSummary>)> {
+        let maint_seq = if want_summary { read_maint_seq(&self.txn, &self.engine.dbs)? } else { 0 };
         let receipt = self.txn.commit()?;
         let summary = want_summary.then(|| CommitDeltaSummary {
             seq: self.commit_seq,
+            maint_seq,
             txnid: receipt.txnid,
             schema_epoch: self.schema.epoch,
             touched_types: self.total_deltas.touched_types,
@@ -2860,6 +2868,22 @@ pub fn read_commit_seq<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
         )),
         None => Ok(0),
     }
+}
+
+/// Reads the monotonic maintenance sequence bumped exclusively by `Engine::run_maintenance_write`.
+pub fn read_maint_seq<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
+    match txn.get(dbs.meta, META_MAINT_SEQ_KEY)? {
+        Some(bytes) => Ok(u64::from_le_bytes(
+            bytes.try_into().map_err(|_| ElmdbError::new(ErrorCode::Corrupted, "corrupt maint_seq"))?,
+        )),
+        None => Ok(0),
+    }
+}
+
+fn bump_maint_seq<S: KvStore, V: Vfs>(txn: &mut GatedWriteTxn<'_, S, V>, dbs: &SystemDbs) -> Result<u64> {
+    let next = read_maint_seq(txn, dbs)?.saturating_add(1);
+    txn.put(dbs.meta, META_MAINT_SEQ_KEY, &next.to_le_bytes())?;
+    Ok(next)
 }
 
 pub fn read_schema_epoch<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<u64> {
