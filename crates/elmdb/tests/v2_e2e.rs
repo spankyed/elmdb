@@ -1624,10 +1624,10 @@ fn batch2_map_growth_cross_proc_resize_sidecar_race_opguard_hooks_and_index_disa
 
     // P1-7: Re-entering `&Database` inside `Database::transact(|tx| ...)` returns InvalidArgument (zero deadlock/panic).
     let db_reenter = Arc::clone(&db);
-    db.transact(|_tx| {
+    db.transact(|tx| {
         assert_eq!(db_reenter.get_row("doc-1").unwrap_err().code, ErrorCode::InvalidArgument);
         assert_eq!(db_reenter.close().unwrap_err().code, ErrorCode::InvalidArgument);
-        assert_eq!(db_reenter.pending_commit_seq(), None);
+        assert_eq!(db_reenter.pending_commit_seq(), Some(tx.commit_seq()));
         Ok(())
     })
     .unwrap();
@@ -2615,4 +2615,246 @@ fn batch_b_durability_close_readonly_and_atomic_publish() {
     }
     assert_eq!(elmdb::dump::load(&dump_file, &non_backup_dir).unwrap_err().code, ErrorCode::AlreadyExists);
     assert_eq!(std::fs::read(non_backup_dir.join("keep.txt")).unwrap(), b"precious");
+}
+
+#[test]
+fn batch_c_dump_load_tightened_relations_unified_transact_purge_and_hook_flush() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use elmdb::protocol::{ProtocolCardinality, RelationDefinition, RelationEndpoint};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let db_dir = tmp.path().join("src_db");
+    let db = Database::open(&db_dir, OpenOptions::default()).unwrap();
+
+    // C3: Create edges under relaxed relation constraints, then tighten cardinality/acyclic/weighted/endpoints!
+    let mut relaxed = make_schema();
+    relaxed.relations.insert(
+        "links".into(),
+        RelationDefinition {
+            cardinality: ProtocolCardinality::ManyToMany,
+            acyclic: false,
+            weighted: true,
+            endpoints: vec![],
+            declared_by: None,
+        },
+    );
+    db.set_schema(&relaxed).unwrap();
+    db.execute_batch(&[
+        WireOp::Create {
+            type_name: "note".into(),
+            external_id: Some("a".into()),
+            fields: vec![("title".into(), CanonicalValue::String("A".into()))],
+        },
+        WireOp::Create {
+            type_name: "note".into(),
+            external_id: Some("b".into()),
+            fields: vec![("title".into(), CanonicalValue::String("B".into()))],
+        },
+        WireOp::Create {
+            type_name: "note".into(),
+            external_id: Some("c".into()),
+            fields: vec![("title".into(), CanonicalValue::String("C".into()))],
+        },
+        // Cycle (a -> b -> a), multi-out (a -> c), and weighted edges!
+        WireOp::Link {
+            source: EntityTarget::ExternalId("a".into()),
+            rel_kind: "links".into(),
+            target: EntityTarget::ExternalId("b".into()),
+            weight: Some(2.5f64.to_bits()),
+            info: None,
+        },
+        WireOp::Link {
+            source: EntityTarget::ExternalId("b".into()),
+            rel_kind: "links".into(),
+            target: EntityTarget::ExternalId("a".into()),
+            weight: Some(1.5f64.to_bits()),
+            info: None,
+        },
+        WireOp::Link {
+            source: EntityTarget::ExternalId("a".into()),
+            rel_kind: "links".into(),
+            target: EntityTarget::ExternalId("c".into()),
+            weight: Some(3.0f64.to_bits()),
+            info: None,
+        },
+    ])
+    .unwrap();
+
+    // Tighten relation constraints AFTER edges exist.
+    let mut tightened = relaxed.clone();
+    tightened.types.insert(
+        "other".into(),
+        TypeDefinition {
+            fields: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+            additional_fields: false,
+            short_code: None,
+            change_order: false,
+            declared_by: None,
+        },
+    );
+    tightened.relations.insert(
+        "links".into(),
+        RelationDefinition {
+            cardinality: ProtocolCardinality::OneToOne,
+            acyclic: true,
+            weighted: false,
+            endpoints: vec![RelationEndpoint { source: "other".into(), target: "other".into() }],
+            declared_by: None,
+        },
+    );
+    db.set_schema(&tightened).unwrap();
+
+    // Dump and load MUST succeed cleanly despite tightened relation constraints!
+    let dump_file = tmp.path().join("tightened_rel.json");
+    let dumped = elmdb::dump::dump(&db, &dump_file).unwrap();
+    assert_eq!(dumped.relations, 3);
+    let loaded_dir = tmp.path().join("loaded_db");
+    let loaded = elmdb::dump::load(&dump_file, &loaded_dir).unwrap();
+    assert_eq!(loaded.relations, 3);
+
+    {
+        let ldb = Database::open(&loaded_dir, OpenOptions::default()).unwrap();
+        let out_a = ldb.get_edges("a", Some("links"), elmdb::EdgeDir::Out).unwrap();
+        assert_eq!(out_a.len(), 2);
+        // Tightened constraint is restored on the loaded DB (new mismatched/weighted link is rejected).
+        let err = ldb
+            .execute_batch(&[WireOp::Link {
+                source: EntityTarget::ExternalId("c".into()),
+                rel_kind: "links".into(),
+                target: EntityTarget::ExternalId("b".into()),
+                weight: Some(1.0f64.to_bits()),
+                info: None,
+            }])
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::EndpointMismatch | ErrorCode::ValidationFailed));
+        ldb.close().unwrap();
+    }
+
+    // C4 + C5: Unified `Database::transact`, `Database::purge_archived`, host hooks, no phantom commit_seq,
+    // and `flush_projections()` between Rust hooks and host/JS hooks in the same cascade round!
+    let stats0 = db.stats().unwrap();
+    let noop_val = db.transact(|tx| Ok(tx.get_row("a")?.is_some())).unwrap();
+    assert!(noop_val);
+    let stats1 = db.stats().unwrap();
+    assert_eq!(stats1.commit_seq, stats0.commit_seq, "read-only Database::transact must not bump commit_seq");
+    assert_eq!(stats1.txnid, stats0.txnid, "read-only Database::transact must not bump txnid");
+
+    // Archive `other` (currently 0 rows) and verify 0-row `purge_archived` does NOT bump commit_seq or txnid!
+    db.set_schema(&relaxed).unwrap();
+    let stats_pre_purge0 = db.stats().unwrap();
+    assert_eq!(db.purge_archived("other").unwrap(), 0);
+    let stats_post_purge0 = db.stats().unwrap();
+    assert_eq!(stats_post_purge0.commit_seq, stats_pre_purge0.commit_seq);
+    assert_eq!(stats_post_purge0.txnid, stats_pre_purge0.txnid);
+
+    // Also verify non-empty `purge_archived` destroys 2 rows and invokes registered host `beforeCommit` hooks!
+    db.set_schema(&tightened).unwrap();
+    db.execute_batch(&[
+        WireOp::Create { type_name: "other".into(), external_id: Some("o1".into()), fields: vec![] },
+        WireOp::Create { type_name: "other".into(), external_id: Some("o2".into()), fields: vec![] },
+    ])
+    .unwrap();
+    let other_tid = db.schema().unwrap().type_by_name("other").unwrap().id;
+    let mut other_wants = elmdb::TypeMask::empty();
+    other_wants.insert(other_tid);
+    let purge_host_fired = Arc::new(AtomicUsize::new(0));
+    let purge_host_c = Arc::clone(&purge_host_fired);
+    let purge_hook_id = db
+        .register_host_before_commit(
+            other_wants,
+            Arc::new(move |delta| {
+                purge_host_c.fetch_add(delta.entities.len(), Ordering::SeqCst);
+                Ok(None)
+            }),
+        )
+        .unwrap();
+    db.set_schema(&relaxed).unwrap();
+    assert_eq!(db.purge_archived("other").unwrap(), 2);
+    assert_eq!(purge_host_fired.load(Ordering::SeqCst), 2, "purge_archived must invoke host beforeCommit hooks");
+    db.unregister_before_commit(purge_hook_id);
+
+    // Register BOTH a Rust `beforeCommit` hook AND a host/JS `beforeCommit` hook on `note`.
+    // The Rust hook sets `priority = 777` on the newly created note; in the SAME round, the host hook
+    // queries via the `by_priority` Value index for `priority == 777` and MUST see it immediately (C5)!
+    let note_tid = db.schema().unwrap().type_by_name("note").unwrap().id;
+    let mut wants = elmdb::TypeMask::empty();
+    wants.insert(note_tid);
+    let rust_fired = Arc::new(AtomicUsize::new(0));
+    let rust_fired_c = Arc::clone(&rust_fired);
+    let rust_hook_id = db
+        .register_before_commit(elmdb::BeforeCommitHook {
+            wants: wants.clone(),
+            callback: Arc::new(move |hctx| {
+                let has_trigger = hctx
+                    .entity_deltas()
+                    .iter()
+                    .any(|d| d.after.as_ref().is_some_and(|after| after.header.ext_id == "hook-trigger"));
+                if has_trigger && rust_fired_c.fetch_add(1, Ordering::SeqCst) == 0 {
+                    hctx.exec(&WireOp::Patch {
+                        target: EntityTarget::ExternalId("hook-trigger".into()),
+                        fields: vec![("priority".into(), CanonicalValue::Int(777))],
+                    })?;
+                }
+                Ok(())
+            }),
+        })
+        .unwrap();
+
+    let host_saw_indexed_priority = Arc::new(AtomicUsize::new(0));
+    let host_saw_c = Arc::clone(&host_saw_indexed_priority);
+    let db_arc = Arc::new(db);
+    let db_for_hook = Arc::clone(&db_arc);
+    let host_hook_id = db_arc
+        .register_host_before_commit(
+            wants,
+            Arc::new(move |_delta| {
+                let q = QuerySpec {
+                    source: QuerySource::Type { type_name: "note".into(), include_trashed: false },
+                    steps: vec![QueryStep::Filter {
+                        expr: QueryFilter::Eq { field: "priority".into(), value: serde_json::json!(777) },
+                    }],
+                    terminal: Some(QueryTerminal::Count),
+                    explain: false,
+                };
+                let ans = db_for_hook.execute_query_spec(&q, ExecBudgets::default())?;
+                if let QueryAnswerBody::Count { count } = ans.body
+                    && count >= 1
+                {
+                    host_saw_c.fetch_add(1, Ordering::SeqCst);
+                }
+                Ok(None)
+            }),
+        )
+        .unwrap();
+
+    // Run mutation via `Database::transact` (C4) -> MUST invoke BOTH Rust AND host hooks AND flush
+    // projections between them (C5), and reject re-entrant `db.transact` inside `f`!
+    let db_reenter = Arc::clone(&db_arc);
+    db_arc
+        .transact(|tx| {
+            assert_eq!(db_reenter.transact(|_| Ok(())).unwrap_err().code, ErrorCode::InvalidArgument);
+            tx.exec(&WireOp::Create {
+                type_name: "note".into(),
+                external_id: Some("hook-trigger".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("Hooked".into())),
+                    ("priority".into(), CanonicalValue::Int(1)),
+                ],
+            })?;
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(rust_fired.load(Ordering::SeqCst) >= 1, "Rust beforeCommit hook must fire inside Database::transact");
+    assert!(
+        host_saw_indexed_priority.load(Ordering::SeqCst) >= 1,
+        "host beforeCommit hook must fire inside Database::transact AND observe Rust hook's indexed write (C5)"
+    );
+
+    db_arc.unregister_before_commit(rust_hook_id);
+    db_arc.unregister_before_commit(host_hook_id);
+    db_arc.close().unwrap();
 }

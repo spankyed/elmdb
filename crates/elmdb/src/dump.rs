@@ -19,7 +19,9 @@ use elmdb_wire::{CanonicalValue, ElmdbError, EntityTarget, ErrorCode, Result, Wi
 use serde::{Deserialize, Serialize};
 
 use crate::db::{Database, OpenOptions};
-use crate::protocol::{DumpReport, FieldSpec, IndexDefinition, ProtocolOnDelete, Schema, compiled_to_protocol_schema};
+use crate::protocol::{
+    DumpReport, FieldSpec, IndexDefinition, ProtocolCardinality, ProtocolOnDelete, Schema, compiled_to_protocol_schema,
+};
 
 static NEXT_DUMP_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -348,6 +350,12 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
                 *unique = false;
             }
         }
+    }
+    for rdef in staging_schema.relations.values_mut() {
+        rdef.cardinality = ProtocolCardinality::ManyToMany;
+        rdef.acyclic = false;
+        rdef.weighted = true;
+        rdef.endpoints.clear();
     }
     db.set_schema(&staging_schema)?;
 

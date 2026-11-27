@@ -640,6 +640,13 @@ impl KvStore for SimKvStore {
         self.inner.lock().config.map_size
     }
 
+    fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
+        let mut inner = self.inner.lock();
+        let target = min_size.unwrap_or_else(|| inner.config.map_size.saturating_mul(2));
+        inner.config.map_size = inner.config.map_size.max(target);
+        Ok(inner.config.map_size)
+    }
+
     fn page_size(&self) -> usize {
         self.inner.lock().config.page_size
     }

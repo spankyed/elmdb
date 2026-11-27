@@ -729,3 +729,129 @@ fn batch1_spilled_extra_patch_live_kind_change_refusal_and_ephemeral_delta_foldi
     assert!(engine.get_row("Task-ephemeral-mixed").unwrap().is_none());
     assert!(engine.get_row("Audit-real").unwrap().is_some());
 }
+
+#[test]
+fn batch_c_declared_over_extra_precedence_and_no_phantom_commit_seq() {
+    use elmdb_engine::{read_commit_seq, read_raw_stored_row, read_stored_row};
+    use elmdb_storage::KvRead;
+
+    let store = SimKvStore::default();
+    let vfs = SimVfs::default();
+    let (engine, _) =
+        Engine::open(store, vfs, SimClock::default(), Path::new("/sim/batch_c"), DurabilityMode::Unsafe).unwrap();
+    let mut schema = sample_schema();
+    schema.types.get_mut("Task").unwrap().additional_fields = true;
+    engine.set_schema(&schema).unwrap();
+
+    // 1. Create entities with dynamic `extra` entries matching future declared / renamed field names.
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Task".into(),
+                external_id: Some("e-evolve".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("T1".into())),
+                    ("tag".into(), CanonicalValue::String("zombie_extra".into())),
+                    ("keep_extra".into(), CanonicalValue::String("legit_extra".into())),
+                ],
+            },
+            WireOp::Create {
+                type_name: "Task".into(),
+                external_id: Some("e-rename".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("RealTitle".into())),
+                    ("headline".into(), CanonicalValue::String("zombie_headline".into())),
+                ],
+            },
+        ])
+        .unwrap();
+
+    // 2. Evolve schema: add optional declared field `tag` AND rename declared `title` -> `headline`.
+    let mut evolved = schema.clone();
+    evolved
+        .types
+        .get_mut("Task")
+        .unwrap()
+        .fields
+        .insert("tag".into(), RawField { kind: RawFieldKind::String, optional: true, nullable: false });
+    engine.set_schema(&evolved).unwrap();
+    engine.rename_field("Task", "title", "headline").unwrap();
+
+    // C1: Even before patching, `read_stored_row`, `read_raw_stored_row`, and `get_field` MUST enforce
+    // `Declared > Extra` (declared `headline` wins over stale `extra["headline"]`, unset declared `tag`
+    // does not leak `zombie_extra`, and genuine `keep_extra` remains visible!).
+    {
+        let (ro, cur_schema) = engine.begin_read_pinned().unwrap();
+        let dbs = engine.dbs();
+        let k_ev = elmdb_engine::lookup_ext_id_in_txn(&ro, &dbs, "e-evolve").unwrap().unwrap();
+        let k_rn = elmdb_engine::lookup_ext_id_in_txn(&ro, &dbs, "e-rename").unwrap().unwrap();
+        for row in [
+            read_stored_row(&ro, &cur_schema, &dbs, k_ev).unwrap().unwrap(),
+            read_raw_stored_row(&ro, &cur_schema, &dbs, k_ev).unwrap().unwrap(),
+        ] {
+            assert_eq!(row.fields.get("tag"), None, "unset declared field must not resurrect stale extra");
+            assert_eq!(row.fields.get("headline"), Some(&CanonicalValue::String("T1".into())));
+            assert_eq!(row.fields.get("keep_extra"), Some(&CanonicalValue::String("legit_extra".into())));
+        }
+        for row in [
+            read_stored_row(&ro, &cur_schema, &dbs, k_rn).unwrap().unwrap(),
+            read_raw_stored_row(&ro, &cur_schema, &dbs, k_rn).unwrap().unwrap(),
+        ] {
+            assert_eq!(
+                row.fields.get("headline"),
+                Some(&CanonicalValue::String("RealTitle".into())),
+                "renamed declared field must beat stale extra"
+            );
+        }
+    }
+    assert_eq!(engine.get_field("e-evolve", "tag").unwrap(), None);
+    assert_eq!(engine.get_field("e-rename", "headline").unwrap(), Some(CanonicalValue::String("RealTitle".into())));
+
+    // C1: Patching and Unsetting declared `tag` scrubs stale `packed.extra["tag"]` physically on disk!
+    engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("e-evolve".into()),
+            fields: vec![("tag".into(), CanonicalValue::String("declared_v1".into()))],
+        }])
+        .unwrap();
+    assert_eq!(
+        engine.get_row("e-evolve").unwrap().unwrap().fields.get("tag"),
+        Some(&CanonicalValue::String("declared_v1".into()))
+    );
+    engine
+        .execute_batch(&[WireOp::Unset {
+            target: EntityTarget::ExternalId("e-evolve".into()),
+            fields: vec!["tag".into()],
+        }])
+        .unwrap();
+    assert_eq!(engine.get_row("e-evolve").unwrap().unwrap().fields.get("tag"), None);
+    // Also verify `Unset` on a row that was NEVER patched (`e-evolve` had Patch first; test direct Unset on `e-rename2`)!
+    // Even if `tag` is later archived from the schema, scrubbed `extra["tag"]` stays gone!
+    engine.set_schema(&schema).unwrap();
+    assert_eq!(
+        engine.get_row("e-evolve").unwrap().unwrap().fields.get("tag"),
+        None,
+        "scrubbed extra['tag'] must stay absent even after archiving declared field 'tag'"
+    );
+
+    // C4: Empty `execute_batch(&[])` and read-only `Engine::transact` MUST NOT bump `commit_seq` or `txnid`!
+    let (seq_before, txnid_before) = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        (read_commit_seq(&ro, &engine.dbs()).unwrap(), ro.txnid())
+    };
+    let empty_batch = engine.execute_batch(&[]).unwrap();
+    assert_eq!(empty_batch.commit_seq, seq_before);
+    assert_eq!(empty_batch.receipt.txnid, txnid_before);
+    assert!(empty_batch.summary.is_none());
+
+    let (val, tx_receipt) = engine.transact(|tx| Ok(tx.get_row("e-evolve")?.is_some())).unwrap();
+    assert!(val);
+    assert_eq!(tx_receipt.txnid, txnid_before);
+
+    let (seq_after, txnid_after) = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        (read_commit_seq(&ro, &engine.dbs()).unwrap(), ro.txnid())
+    };
+    assert_eq!(seq_after, seq_before, "empty batch and read-only transact must not bump commit_seq");
+    assert_eq!(txnid_after, txnid_before, "empty batch and read-only transact must not commit an LMDB txn");
+}

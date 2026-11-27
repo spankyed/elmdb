@@ -864,3 +864,206 @@ fn prefix_bmw_matches_exhaustive_oracle_and_prunes_blocks() {
         );
     }
 }
+
+#[test]
+fn batch_c_build_chunk_propagates_map_full_and_io_without_poisoning_build_state() {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    use elmdb_engine::{EdgeDelta, EntityDelta, IndexDef, SystemDbs, max_type_key};
+    use elmdb_projections::{ExternalProjection, IndexMismatch};
+    use elmdb_storage::{DurabilityMode, GatedWriteTxn, StorageError, SubDbHandle};
+    use elmdb_wire::{ElmdbError, ErrorCode, Result};
+
+    // 1. Deterministic `UniqueViolation` during deferred build MUST mark the index `BuildState::Failed`.
+    {
+        let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
+        let mut base = RawSchema::default();
+        let mut fields = BTreeMap::new();
+        fields.insert("code".into(), RawField { kind: RawFieldKind::String, optional: false, nullable: false });
+        base.types.insert(
+            "Item".into(),
+            RawType {
+                fields,
+                indexes: BTreeMap::new(),
+                additional_fields: false,
+                short_code: None,
+                change_order: false,
+                declared_by: None,
+            },
+        );
+        engine.set_schema(&base).unwrap();
+        engine
+            .execute_batch(&[
+                WireOp::Create {
+                    type_name: "Item".into(),
+                    external_id: Some("i1".into()),
+                    fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
+                },
+                WireOp::Create {
+                    type_name: "Item".into(),
+                    external_id: Some("i2".into()),
+                    fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
+                },
+            ])
+            .unwrap();
+
+        let mut with_uniq = base.clone();
+        with_uniq.types.get_mut("Item").unwrap().indexes.insert(
+            "uniq_code".into(),
+            RawIndex { kind: RawIndexKind::Value { fields: vec!["code".into()], unique: true } },
+        );
+        engine.set_schema(&with_uniq).unwrap();
+        assert!(reg.drive_build_chunk(&engine, 16).unwrap());
+        let statuses = reg.index_status(&engine).unwrap();
+        assert!(matches!(statuses[0].state, BuildState::Failed { code: ErrorCode::UniqueViolation, .. }));
+    }
+
+    // 2. Non-deterministic `StorageError::MapFull` (mode=1) MUST propagate to `retry_on_map_full()`,
+    //    auto-growing `map_size` and completing cleanly as `BuildState::Ready` (NEVER `BuildState::Failed`),
+    //    and non-deterministic `ErrorCode::Io` (mode=2) MUST propagate out leaving `BuildState::Building`!
+    struct FlakyExternal {
+        // 0 = ok, 1 = emit MapFull once then flip to 0, 2 = emit Io
+        mode: Arc<AtomicU8>,
+    }
+    impl ExternalProjection<SimKvStore, SimVfs> for FlakyExternal {
+        fn handles(&self, kind: &IndexKind) -> bool {
+            matches!(kind, IndexKind::Vector { .. })
+        }
+        fn apply_entity_delta(
+            &self,
+            _txn: &mut GatedWriteTxn<'_, SimKvStore, SimVfs>,
+            _schema: &elmdb_engine::CompiledSchema,
+            _dbs: &SystemDbs,
+            _def: &IndexDef,
+            _db: SubDbHandle,
+            _delta: &EntityDelta,
+        ) -> Result<()> {
+            match self.mode.load(Ordering::SeqCst) {
+                1 => {
+                    self.mode.store(0, Ordering::SeqCst);
+                    Err(ElmdbError::from(StorageError::MapFull { map_size: 4096 }))
+                }
+                2 => Err(ElmdbError::new(ErrorCode::Io, "transient disk read timeout")),
+                _ => Ok(()),
+            }
+        }
+        fn apply_edge_delta(
+            &self,
+            _txn: &mut GatedWriteTxn<'_, SimKvStore, SimVfs>,
+            _schema: &elmdb_engine::CompiledSchema,
+            _dbs: &SystemDbs,
+            _def: &IndexDef,
+            _db: SubDbHandle,
+            _delta: &EdgeDelta,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn on_index_added(
+            &self,
+            txn: &mut GatedWriteTxn<'_, SimKvStore, SimVfs>,
+            _schema: &elmdb_engine::CompiledSchema,
+            dbs: &SystemDbs,
+            def: &IndexDef,
+            _db: SubDbHandle,
+        ) -> Result<BuildState> {
+            match max_type_key(txn, dbs, def.type_id)? {
+                Some(hw) => Ok(BuildState::Building { built_up_to: EntityKey(0), high_water: hw }),
+                None => Ok(BuildState::Ready),
+            }
+        }
+        fn rebuild_index(
+            &self,
+            _txn: &mut GatedWriteTxn<'_, SimKvStore, SimVfs>,
+            _schema: &elmdb_engine::CompiledSchema,
+            _dbs: &SystemDbs,
+            _def: &IndexDef,
+            _db: SubDbHandle,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn check_index(
+            &self,
+            _txn: &<SimKvStore as elmdb_storage::KvStore>::RoTxn<'_>,
+            _schema: &elmdb_engine::CompiledSchema,
+            _dbs: &SystemDbs,
+            _def: &IndexDef,
+            _db: Option<SubDbHandle>,
+        ) -> Result<Vec<IndexMismatch>> {
+            Ok(Vec::new())
+        }
+    }
+
+    {
+        let mode = Arc::new(AtomicU8::new(2));
+        let store = SimKvStore::default();
+        let vfs = SimVfs::default();
+        let clock = SimClock::new(1000);
+        let reg = Arc::new(
+            ProjectionRegistry::new(BuildPolicy::DeferredWatermark)
+                .with_external(Arc::new(FlakyExternal { mode: Arc::clone(&mode) })),
+        );
+        let (engine, _) = Engine::open_with_projections(
+            store,
+            vfs,
+            clock,
+            "/sim/flaky_io_build",
+            DurabilityMode::Strict,
+            Arc::clone(&reg) as _,
+        )
+        .unwrap();
+
+        let mut base = RawSchema::default();
+        let mut fields = BTreeMap::new();
+        fields.insert("body".into(), RawField { kind: RawFieldKind::String, optional: false, nullable: false });
+        base.types.insert(
+            "Note".into(),
+            RawType {
+                fields,
+                indexes: BTreeMap::new(),
+                additional_fields: false,
+                short_code: None,
+                change_order: false,
+                declared_by: None,
+            },
+        );
+        engine.set_schema(&base).unwrap();
+        engine
+            .execute_batch(&[WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n1".into()),
+                fields: make_fields(&[("body", CanonicalValue::String("hello".into()))]),
+            }])
+            .unwrap();
+
+        let mut with_vec = base.clone();
+        with_vec.types.get_mut("Note").unwrap().indexes.insert(
+            "vec_idx".into(),
+            RawIndex {
+                kind: RawIndexKind::Vector { fields: vec!["body".into()], dims: 4, quantization: "sq8".into() },
+            },
+        );
+        engine.set_schema(&with_vec).unwrap();
+
+        // Transient Io propagates and leaves BuildState::Building (never Failed).
+        let err = reg.drive_build_chunk(&engine, 16).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Io);
+        let statuses = reg.index_status(&engine).unwrap();
+        assert!(
+            matches!(statuses[0].state, BuildState::Building { .. }),
+            "transient Io error must leave index Building, not Failed: {:?}",
+            statuses[0].state
+        );
+
+        // MapFull propagates to `retry_on_map_full()`, auto-grows `map_size`, and reaches `BuildState::Ready`!
+        let map_before = engine.gate().map_size();
+        // Verify `grow_map(Some(1))` never shrinks and `grow_map(None)` doubles cleanly.
+        assert_eq!(engine.gate().grow_map(Some(1)).unwrap(), map_before);
+        let doubled = engine.gate().grow_map(None).unwrap();
+        assert_eq!(doubled, map_before * 2);
+        mode.store(1, Ordering::SeqCst);
+        reg.drain_all_builds(&engine).unwrap();
+        assert!(engine.gate().map_size() > doubled, "MapFull during build chunk must trigger map auto-growth");
+        let statuses_after = reg.index_status(&engine).unwrap();
+        assert_eq!(statuses_after[0].state, BuildState::Ready);
+    }
+}
