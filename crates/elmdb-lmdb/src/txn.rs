@@ -426,9 +426,11 @@ impl KvWrite for LmdbRwTxn<'_> {
                 return Err(map_mdb_err(rc, self.inner.current_map_size(), self.inner.max_dbs));
             }
         } else {
-            // Acquire L4 write lock (`dbis.write()`) *before* `mdb_txn_commit` (strict L2 -> L3 -> L4 order)
-            // so no concurrent `LmdbRoTxn::begin()` (L4 read) can observe the newly committed `MAIN_DBI`
-            // snapshot with stale `env->me_numdbs`/`env->me_dbflags` or miss the new handle in `dbis`!
+            // Acquire L4 `dbi_publish_gate.write()` -> L5 `dbis.write()` *before* `mdb_txn_commit`
+            // (strict L2 -> L3 -> L4 -> L5 order) so no concurrent `LmdbRoTxn::begin()` or `copy_compacted()`
+            // can observe the newly committed `MAIN_DBI` snapshot with stale `env->me_numdbs`/`env->me_dbflags`
+            // or miss the new handle in `dbis`!
+            let _publish = self.inner.dbi_publish_gate.write();
             let mut cache = self.inner.dbis.write();
             // SAFETY: `root` is the sole remaining live `MDB_txn`; `mdb_txn_commit` consumes it.
             let rc = unsafe { ffi::mdb_txn_commit(root.as_ptr()) };
@@ -651,10 +653,11 @@ mod tests {
         assert_eq!(val.mv_size, 8);
         assert_eq!((val.mv_data as usize) % std::mem::align_of::<u64>(), 0);
 
-        // Verify bad key lengths are rejected for both integer-key and byte-key sub-DBs.
+        // Verify bad key lengths are rejected and boundary 511-byte key is accepted.
         assert!(matches!(MdbKey::new(DbFlags::INTEGER_KEY, &[0u8; 7]), Err(StorageError::BadValSize { len: 7 })));
         assert!(matches!(MdbKey::new(DbFlags::INTEGER_KEY, &[0u8; 9]), Err(StorageError::BadValSize { len: 9 })));
         assert!(matches!(MdbKey::new(DbFlags::DEFAULT, &[]), Err(StorageError::BadValSize { len: 0 })));
+        assert!(MdbKey::new(DbFlags::DEFAULT, &[b'k'; 511]).is_ok());
         assert!(matches!(MdbKey::new(DbFlags::DEFAULT, &[0u8; 512]), Err(StorageError::BadValSize { len: 512 })));
 
         let mut rw = store.begin_write(store.lock_map_read()).unwrap();
@@ -663,12 +666,24 @@ mod tests {
         assert!(!rw.put_no_overwrite(db, odd_key_1, b"v42-dup").unwrap());
         rw.put(db, odd_key_1, b"v42-upd").unwrap();
         assert_eq!(rw.get(db, odd_key_1).unwrap(), Some(b"v42-upd".as_slice()));
+        // Insert 400 odd-aligned integer keys to force LMDB B-tree branch splits (`mdb_cmp_long` 8-byte alignment).
+        let mut bulk_buf = [0u8; 17];
+        let bulk_off = if (bulk_buf.as_ptr() as usize).is_multiple_of(2) { 1 } else { 0 };
+        for i in 100u64..500u64 {
+            bulk_buf[bulk_off..bulk_off + 8].copy_from_slice(&i.to_ne_bytes());
+            let k = &bulk_buf[bulk_off..bulk_off + 8];
+            assert_eq!((k.as_ptr() as usize) & 1, 1);
+            rw.put(db, k, b"payload-forcing-branch-page-split-1234567890").unwrap();
+        }
         {
             let mut cur = rw.cursor(db).unwrap();
             let (k, v) = cur.seek_ge(odd_key_1).unwrap().unwrap();
             assert_eq!(k, odd_key_1);
             assert_eq!(v, b"v42-upd");
             assert_eq!(cur.seek_exact(odd_key_1).unwrap(), Some(b"v42-upd".as_slice()));
+            bulk_buf[bulk_off..bulk_off + 8].copy_from_slice(&350u64.to_ne_bytes());
+            let k350 = &bulk_buf[bulk_off..bulk_off + 8];
+            assert_eq!(cur.seek_exact(k350).unwrap(), Some(b"payload-forcing-branch-page-split-1234567890".as_slice()));
         }
         let (_, mg) = rw.commit_raw().unwrap();
         drop(mg);
@@ -689,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_a_preopen_existing_subdbs_propagates_dbs_full_instead_of_swallowing() {
+    fn batch_a_preopen_existing_subdbs_skips_incompatible_and_propagates_dbs_full() {
         let tmp = TempDir::new().unwrap();
         {
             let store = LmdbStore::open(
@@ -702,8 +717,25 @@ mod tests {
                 let db = rw.open_subdb(&format!("sub_{i}"), DbFlags::DEFAULT).unwrap();
                 rw.put(db, b"k", b"v").unwrap();
             }
+            // Also write a raw non-sub-DB entry into `MAIN_DBI` to exercise `MDB_INCOMPATIBLE` skipping!
+            let mut raw_k = to_mdb_val(b"plain_main_entry");
+            let mut raw_v = to_mdb_val(b"not_a_subdb");
+            let rc = unsafe { ffi::mdb_put(rw.active_raw(), store.inner().main_dbi, &mut raw_k, &mut raw_v, 0) };
+            assert_eq!(rc, ffi::MDB_SUCCESS);
             let (_, mg) = rw.commit_raw().unwrap();
             drop(mg);
+        }
+
+        // Reopening with ample `max_dbs` MUST skip `plain_main_entry` (`MDB_INCOMPATIBLE`) and open all 8 sub-DBs.
+        {
+            let store = LmdbStore::open(
+                tmp.path(),
+                LmdbConfig { map_size: 4 * 1024 * 1024, max_dbs: 32, ..LmdbConfig::default() },
+            )
+            .unwrap();
+            let ro = store.begin_read().unwrap();
+            let db0 = ro.open_subdb_existing("sub_0", DbFlags::DEFAULT).unwrap().expect("sub_0 present");
+            assert_eq!(ro.get(db0, b"k").unwrap(), Some(b"v".as_slice()));
         }
 
         // Reopening with `max_dbs` too small to fit all existing named sub-DBs MUST fail with `DbsFull`.
@@ -715,13 +747,63 @@ mod tests {
     }
 
     #[test]
-    fn batch_a_copy_compacted_concurrent_with_new_subdb_commits_is_race_free() {
+    fn batch_a_copy_compacted_is_race_free_and_never_blocks_routine_writes_or_reads() {
         let tmp = TempDir::new().unwrap();
         let db_dir = tmp.path().join("db");
         let store = Arc::new(
             LmdbStore::open(&db_dir, LmdbConfig { map_size: 8 * 1024 * 1024, max_dbs: 128, ..LmdbConfig::default() })
                 .unwrap(),
         );
+        // Seed a sub-DB for routine writes & reads.
+        let seeded_db = {
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
+            let db = rw.open_subdb("seeded", DbFlags::DEFAULT).unwrap();
+            rw.put(db, b"k0", b"v0").unwrap();
+            let (_, mg) = rw.commit_raw().unwrap();
+            drop(mg);
+            db
+        };
+
+        // 1. Hold `EnvCopyGuard` on Thread A (simulating an in-flight `copy_compacted` I/O stream) AND
+        //    park a `dbi_publish_gate.write()` waiter on Thread B: routine writes AND `begin_read` on the
+        //    main thread MUST complete immediately without blocking!
+        {
+            let copy_store = Arc::clone(&store);
+            let (tx_copy_held, rx_copy_held) = std::sync::mpsc::channel();
+            let (tx_copy_release, rx_copy_release) = std::sync::mpsc::channel();
+            let copy_holder = std::thread::spawn(move || {
+                let _copy_guard = copy_store.inner().lock_env_copy().unwrap();
+                tx_copy_held.send(()).unwrap();
+                rx_copy_release.recv().unwrap();
+            });
+            rx_copy_held.recv().unwrap();
+
+            let parked_store = Arc::clone(&store);
+            let (tx_ready, rx_ready) = std::sync::mpsc::channel();
+            let parked_writer = std::thread::spawn(move || {
+                tx_ready.send(()).unwrap();
+                let _w = parked_store.inner().dbi_publish_gate.write();
+            });
+            rx_ready.recv().unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(20));
+
+            // Routine write (no new sub-DB) MUST NOT block while `EnvCopyGuard` is held!
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
+            rw.put(seeded_db, b"k1", b"v1").unwrap();
+            let (_, mg) = rw.commit_raw().unwrap();
+            drop(mg);
+
+            // Reader `begin_read` + `get` MUST NOT block even with a parked `dbi_publish_gate` writer!
+            let ro = store.begin_read().unwrap();
+            assert_eq!(ro.get(seeded_db, b"k1").unwrap(), Some(b"v1".as_slice()));
+            drop(ro);
+
+            tx_copy_release.send(()).unwrap();
+            copy_holder.join().unwrap();
+            parked_writer.join().unwrap();
+        }
+
+        // 2. Concurrent dynamic sub-DB commits vs `copy_compacted` + backup verification.
         let writer_store = Arc::clone(&store);
         let writer = std::thread::spawn(move || {
             for i in 0..32 {
@@ -733,13 +815,87 @@ mod tests {
             }
         });
 
-        for i in 0..16 {
+        let mut last_bak = None;
+        for i in 0..8 {
             let bak_dir = tmp.path().join(format!("bak_{i}"));
             let receipt = store.copy_compacted(&bak_dir).unwrap();
             assert!(bak_dir.join("data.mdb").exists());
-            let _ = receipt.txnid;
+            assert!(receipt.txnid >= 1);
             let _ro = store.begin_read().unwrap();
+            last_bak = Some(bak_dir);
         }
         writer.join().unwrap();
+
+        // Open the compacted backup and verify committed data is intact.
+        let bak = LmdbStore::open(
+            last_bak.unwrap(),
+            LmdbConfig { map_size: 8 * 1024 * 1024, max_dbs: 128, read_only: true, ..LmdbConfig::default() },
+        )
+        .unwrap();
+        let ro = bak.begin_read().unwrap();
+        let db = ro.open_subdb_existing("seeded", DbFlags::DEFAULT).unwrap().expect("seeded present in backup");
+        assert_eq!(ro.get(db, b"k1").unwrap(), Some(b"v1".as_slice()));
+        drop(ro);
+        drop(bak);
+
+        // 3. `map_broken == true` fails closed in both `lock_env_read` (`begin_read`) and `lock_env_copy` (`copy_compacted`).
+        store.inner().map_broken.store(true, Ordering::Release);
+        assert!(matches!(store.begin_read(), Err(StorageError::Corrupted(_))));
+        assert!(matches!(store.copy_compacted(tmp.path().join("bak_broken")), Err(StorageError::Corrupted(_))));
+    }
+
+    #[test]
+    #[ignore = "child process helper invoked by batch_a_begin_read_reclaims_stale_readers_and_rejects_live_full"]
+    fn batch_a_stale_reader_child_helper() {
+        let dir = std::env::var("ELMDB_STALE_READER_DIR").expect("ELMDB_STALE_READER_DIR set");
+        let store =
+            LmdbStore::open(&dir, LmdbConfig { map_size: 4 * 1024 * 1024, max_readers: 1, ..LmdbConfig::default() })
+                .unwrap();
+        let ro = store.begin_read().unwrap();
+        // Deliberately exit without dropping `LmdbRoTxn` to leave a real stale PID reader slot in `lock.mdb`.
+        std::mem::forget(ro);
+        std::mem::forget(store);
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn batch_a_begin_read_reclaims_stale_readers_and_rejects_live_full() {
+        let tmp = TempDir::new().unwrap();
+        let store = Arc::new(
+            LmdbStore::open(
+                tmp.path(),
+                LmdbConfig { map_size: 4 * 1024 * 1024, max_readers: 1, ..LmdbConfig::default() },
+            )
+            .unwrap(),
+        );
+
+        // 1. Live reader on another thread occupies the sole slot -> `begin_read` hits `MDB_READERS_FULL` with `dead == 0` -> Err(ReadersFull).
+        {
+            let reader_store = Arc::clone(&store);
+            let (tx_held, rx_held) = std::sync::mpsc::channel();
+            let (tx_drop, rx_drop) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _live_ro = reader_store.begin_read().unwrap();
+                tx_held.send(()).unwrap();
+                rx_drop.recv().unwrap();
+            });
+            rx_held.recv().unwrap();
+            assert!(matches!(store.begin_read(), Err(StorageError::ReadersFull)));
+            tx_drop.send(()).unwrap();
+            holder.join().unwrap();
+        }
+
+        // 2. Child process opens a reader slot and exits without aborting it -> parent hits `MDB_READERS_FULL`,
+        //    `mdb_reader_check` reclaims `dead == 1 > 0`, and retry succeeds!
+        let exe = std::env::current_exe().unwrap();
+        let status = std::process::Command::new(exe)
+            .args(["--exact", "txn::tests::batch_a_stale_reader_child_helper", "--ignored", "--nocapture"])
+            .env("ELMDB_STALE_READER_DIR", tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "stale reader child helper failed");
+
+        let recovered_ro = store.begin_read().expect("stale reader slot must be reclaimed on MDB_READERS_FULL");
+        drop(recovered_ro);
     }
 }

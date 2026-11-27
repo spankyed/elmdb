@@ -62,8 +62,9 @@ impl<'txn> LmdbCursor<'txn> {
         let mut data_val = ffi::MDB_val { mv_size: 0, mv_data: ptr::null_mut() };
 
         // SAFETY: `self.cursor` is valid for `'txn`, `key_val` and `data_val` are valid pointers.
-        // LMDB does not mutate `key_val.mv_data` for read cursor ops; on return both point into
-        // the transaction's immutable MVCC pages valid for `'txn`.
+        // LMDB does not mutate `*key_val.mv_data` bytes; all ops used here (`FIRST`/`LAST`/`SET_RANGE`/
+        // `SET_KEY`/`NEXT`/`PREV`) reassign `key_val.mv_data` and `data_val.mv_data` on `MDB_SUCCESS`
+        // to point into the transaction's immutable MVCC pages valid for `'txn`.
         let rc = unsafe { ffi::mdb_cursor_get(self.cursor.as_ptr(), &mut key_val, &mut data_val, op) };
         match rc {
             ffi::MDB_SUCCESS => {
