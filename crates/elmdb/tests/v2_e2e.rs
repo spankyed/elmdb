@@ -2812,20 +2812,24 @@ fn batch_c_dump_load_tightened_relations_unified_transact_purge_and_hook_flush()
     let host_hook_id = db_arc
         .register_host_before_commit(
             wants,
-            Arc::new(move |_delta| {
-                let q = QuerySpec {
-                    source: QuerySource::Type { type_name: "note".into(), include_trashed: false },
-                    steps: vec![QueryStep::Filter {
-                        expr: QueryFilter::Eq { field: "priority".into(), value: serde_json::json!(777) },
-                    }],
-                    terminal: Some(QueryTerminal::Count),
-                    explain: false,
-                };
-                let ans = db_for_hook.execute_query_spec(&q, ExecBudgets::default())?;
-                if let QueryAnswerBody::Count { count } = ans.body
-                    && count >= 1
-                {
-                    host_saw_c.fetch_add(1, Ordering::SeqCst);
+            Arc::new(move |delta| {
+                // Only check on Round 0 (the initial `create` round) so we genuinely verify
+                // `flush_projections()` ran between Rust hooks and host hooks in the SAME round!
+                if delta.entities.iter().any(|e| e.op == "create" && e.id == "hook-trigger") {
+                    let q = QuerySpec {
+                        source: QuerySource::Type { type_name: "note".into(), include_trashed: false },
+                        steps: vec![QueryStep::Filter {
+                            expr: QueryFilter::Eq { field: "priority".into(), value: serde_json::json!(777) },
+                        }],
+                        terminal: Some(QueryTerminal::Count),
+                        explain: false,
+                    };
+                    let ans = db_for_hook.execute_query_spec(&q, ExecBudgets::default())?;
+                    if let QueryAnswerBody::Count { count } = ans.body
+                        && count >= 1
+                    {
+                        host_saw_c.fetch_add(1, Ordering::SeqCst);
+                    }
                 }
                 Ok(None)
             }),
