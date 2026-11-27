@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! The `elmdb` command: inspect, check, rebuild, back up, dump, load, and purge archived types.
 //! Each opens the database itself; `inspect`, `check`, `backup` and `dump` open it read-only.
 

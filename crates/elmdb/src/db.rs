@@ -1181,8 +1181,9 @@ impl Database {
             match &def.kind {
                 IndexKind::Vector { .. } => {
                     let prev_slot = def.slot;
-                    flush_vec(&eng, def.id)?;
-                    touched_slots.push(prev_slot);
+                    if flush_vec(&eng, def.id)? > 0 {
+                        touched_slots.push(prev_slot);
+                    }
                     if let Some(cur) = eng.schema().index_by_id(def.id)
                         && cur.slot != prev_slot
                     {

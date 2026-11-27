@@ -142,10 +142,13 @@ impl CsrGraph {
             weighted,
             &GraphBuildOpts { max_heap_bytes, cancel: None, include_trashed: true },
             &mut |_| {},
+            &mut |_| {},
         )
     }
 
-    /// Tracked CSR subgraph builder invoking `on_adj_read(u)` for every node whose adjacency list is scanned.
+    /// Tracked CSR subgraph builder invoking `on_adj_read(u)` for every node whose adjacency list is scanned
+    /// and `on_entity_read(u)` when checking live/trashed visibility (`!opts.include_trashed`).
+    #[allow(clippy::too_many_arguments)]
     pub fn build_tracked<R: KvRead>(
         txn: &R,
         dbs: &SystemDbs,
@@ -154,10 +157,21 @@ impl CsrGraph {
         weighted: bool,
         opts: &GraphBuildOpts<'_>,
         on_adj_read: &mut dyn FnMut(EntityKey),
+        on_entity_read: &mut dyn FnMut(EntityKey),
     ) -> Result<Self> {
         check_cancel(opts.cancel)?;
         nodes.sort_unstable();
         nodes.dedup();
+        if !opts.include_trashed {
+            let mut live = Vec::with_capacity(nodes.len());
+            for k in nodes {
+                check_cancel(opts.cancel)?;
+                if is_entity_live(txn, dbs, k, false, on_entity_read)? {
+                    live.push(k);
+                }
+            }
+            nodes = live;
+        }
         let n = nodes.len();
         let mut approx_bytes = n.saturating_mul(32);
         if approx_bytes > opts.max_heap_bytes {

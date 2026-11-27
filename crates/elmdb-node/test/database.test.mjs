@@ -248,7 +248,8 @@ test('transact nested savepoints, RYOW, counters, runBeforeCommit: false, and Pr
   assert.equal(db.get('n-async'), null);
   assert.equal(db.getCounter('NOTE'), 2);
 
-  // P0 #4: Returning an object with a throwing `.then` getter MUST roll back and rethrow the getter error!
+  // P0 #4 + P1-1: Returning an object with a throwing `.then` getter OR throwing JS primitives
+  // (outer or nested savepoint) MUST roll back cleanly and rethrow the EXACT JS value verbatim!
   assert.throws(
     () => db.transact(() => {
       db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'GetterThrow' }, 'n-getter'); }));
@@ -262,6 +263,37 @@ test('transact nested savepoints, RYOW, counters, runBeforeCommit: false, and Pr
   );
   assert.equal(db.get('n-getter'), null, 'writes must roll back when .then getter throws');
 
+  for (const primitive of ['raw-string-error', 42, false, null, undefined]) {
+    let caught = Symbol('not-caught');
+    try {
+      db.transact(() => {
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'PrimRB' }, 'n-prim-rb'); }));
+        throw primitive;
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert.strictEqual(caught, primitive, `outer transact must rethrow primitive ${String(primitive)} verbatim`);
+    assert.equal(db.get('n-prim-rb'), null);
+  }
+
+  // Hostile `.then` getter throwing a primitive string also rethrows verbatim & rolls back
+  let hostileCaught = null;
+  try {
+    db.transact(() => {
+      db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'HostilePrim' }, 'n-hostile-prim'); }));
+      return {
+        get then() {
+          throw 'hostile-then-string';
+        },
+      };
+    });
+  } catch (err) {
+    hostileCaught = err;
+  }
+  assert.strictEqual(hostileCaught, 'hostile-then-string');
+  assert.equal(db.get('n-hostile-prim'), null);
+
   // { runBeforeCommit: false } skips hooks cleanly
   db.transact(() => {
     db.setCounter('IMPORT', 99);
@@ -270,6 +302,24 @@ test('transact nested savepoints, RYOW, counters, runBeforeCommit: false, and Pr
   assert.equal(hookRuns, 1);
   assert.equal(db.getCounter('IMPORT'), 99);
   assert.equal(db.unregisterBeforeCommit(hid), true);
+
+  // Nested savepoint throwing a primitive rolls back inner only and preserves outer write
+  db.transact(() => {
+    db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'OuterSurvives' }, 'n-outer-prim'); }));
+    let nestedCaught = null;
+    try {
+      db.transact(() => {
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'InnerRB' }, 'n-inner-prim'); }));
+        throw 'nested-primitive-abort';
+      });
+    } catch (err) {
+      nestedCaught = err;
+    }
+    assert.strictEqual(nestedCaught, 'nested-primitive-abort');
+    assert.equal(db.get('n-inner-prim'), null);
+  });
+  assert.equal(db.get('n-outer-prim')?.fields.title, 'OuterSurvives');
+  assert.equal(db.get('n-inner-prim'), null);
 
   // P1 #6: Calling db.close() inside db.transact() rejects with INVALID_ARGUMENT without wiping hooks!
   let hookStillAlive = false;

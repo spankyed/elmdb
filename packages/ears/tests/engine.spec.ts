@@ -512,5 +512,30 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     const nestedUnit = events.slice(beforeNested).find((e) => e.op.kind === 'unit');
     expect(nestedUnit?.res.outcome).toBe('ok');
     expect(nestedUnit?.res.sequence).toBeUndefined();
+
+    // P1-1: Throwing raw JS primitives in engine.transact() rethrows verbatim (never wrapped as INVALID_ARGUMENT)
+    for (const prim of ['raw-string-error', 42, null, undefined]) {
+      let caught: unknown = Symbol('unthrown');
+      try {
+        engine.transact(() => {
+          engine.create('Task', { title: 'Should rollback', done: false }, 't-prim-rb');
+          // eslint-disable-next-line @typescript-eslint/only-throw-error
+          throw prim;
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBe(prim);
+      expect(engine.get('t-prim-rb')).toBeNull();
+    }
+
+    // P2-2: Empty engine.batch(() => {}) inside transact() must NOT report a phantom sequence to observer
+    const beforeEmptyBatch = events.length;
+    engine.transact(() => {
+      engine.batch(() => {});
+    });
+    const emptyUnit = events.slice(beforeEmptyBatch).find((e) => e.op.kind === 'unit');
+    expect(emptyUnit?.res.outcome).toBe('ok');
+    expect(emptyUnit?.res.sequence).toBeUndefined();
   });
 });

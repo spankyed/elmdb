@@ -662,6 +662,34 @@ fn source_includes_trashed(node: &LogicalNode) -> bool {
     }
 }
 
+fn build_tracked_csr<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
+    nodes: Vec<EntityKey>,
+    rel_kinds: &[RelKindId],
+    weighted: bool,
+    opts: &GraphBuildOpts<'_>,
+) -> Result<CsrGraph> {
+    let mut adj_reads = Vec::new();
+    let mut ent_reads = Vec::new();
+    let g = CsrGraph::build_tracked(
+        ctx.txn,
+        &ctx.dbs,
+        nodes,
+        rel_kinds,
+        weighted,
+        opts,
+        &mut |u| adj_reads.push(u),
+        &mut |u| ent_reads.push(u),
+    )?;
+    for u in ent_reads {
+        ctx.recorder.record_point_entity(u, &FieldMask::empty());
+    }
+    for u in adj_reads {
+        ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
+    }
+    Ok(g)
+}
+
 fn eval_graph_analyze<R: KvRead>(
     ctx: &mut ExecCtx<'_, R>,
     input: &LogicalNode,
@@ -678,44 +706,34 @@ fn eval_graph_analyze<R: KvRead>(
 
     match spec {
         GraphAnalyzeSpec::WeakComponents { rel_kinds } => {
-            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, &opts, &mut |u| {
-                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
-            })?;
+            let g = build_tracked_csr(ctx, nodes, rel_kinds, false, &opts)?;
             ctx.check_cancel()?;
             let comps = weak_components(&g);
             ctx.explain.rows_returned = comps.len() as u64;
             Ok(QueryResult::GraphGroups(comps))
         }
         GraphAnalyzeSpec::Scc { rel_kinds } => {
-            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, &opts, &mut |u| {
-                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
-            })?;
+            let g = build_tracked_csr(ctx, nodes, rel_kinds, false, &opts)?;
             ctx.check_cancel()?;
             let comps = scc(&g);
             ctx.explain.rows_returned = comps.len() as u64;
             Ok(QueryResult::GraphGroups(comps))
         }
         GraphAnalyzeSpec::TopoSort { rel_kinds } => {
-            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, false, &opts, &mut |u| {
-                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
-            })?;
+            let g = build_tracked_csr(ctx, nodes, rel_kinds, false, &opts)?;
             ctx.check_cancel()?;
             let res = topo_sort(&g);
             ctx.explain.rows_returned = res.order.len() as u64;
             Ok(QueryResult::GraphTopo(res))
         }
         GraphAnalyzeSpec::Ppr { rel_kinds, weighted, seeds, damping, iterations, tolerance } => {
-            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, *weighted, &opts, &mut |u| {
-                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
-            })?;
+            let g = build_tracked_csr(ctx, nodes, rel_kinds, *weighted, &opts)?;
             let res = ppr_cancellable(&g, seeds, *damping, *iterations, *tolerance, ctx.budgets.cancel)?;
             ctx.explain.rows_returned = res.scores.len() as u64;
             Ok(QueryResult::GraphPpr(res))
         }
         GraphAnalyzeSpec::Leiden { rel_kinds, weighted, resolution, seed, iterations } => {
-            let g = CsrGraph::build_tracked(ctx.txn, &ctx.dbs, nodes, rel_kinds, *weighted, &opts, &mut |u| {
-                ctx.recorder.record_edge_adj(u, rel_kinds, EdgeDir::Out);
-            })?;
+            let g = build_tracked_csr(ctx, nodes, rel_kinds, *weighted, &opts)?;
             ctx.check_cancel()?;
             let groups = leiden_communities(&g, *resolution, *seed, *iterations)?;
             ctx.explain.rows_returned = groups.len() as u64;
