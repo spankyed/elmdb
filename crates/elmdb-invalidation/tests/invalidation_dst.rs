@@ -1012,11 +1012,11 @@ fn review_regression_subdb_same_seq_seq_gap_resurrection_abort_and_imperative_se
     // Watch was requeued dirty (not wedged running!), so `tick(100)` picks it up cleanly!
     assert!(hub.tick(100).due_ids.contains(&w_imp));
 
-    // P0-4: Unregistering / stopping before `rerun_query_watch` finishes MUST NOT resurrect watch into `InvalidationIndex`!
+    // P0-4 & E3: Unregistering / stopping before `rerun_query_watch` fails fast with Closed without resurrecting!
     hub.unregister_watch(w_imp);
-    let (_out, deliver) =
-        hub.rerun_query_watch(w_imp, &engine, &qe, &note_plan, ExecBudgets::default(), 110, 1, |_| None).unwrap();
-    assert!(!deliver);
+    let err_unreg =
+        hub.rerun_query_watch(w_imp, &engine, &qe, &note_plan, ExecBudgets::default(), 110, 1, |_| None).unwrap_err();
+    assert_eq!(err_unreg.code, ErrorCode::Closed);
     assert_eq!(hub.stats().active_watches, 0);
     assert_eq!(hub.stats().tier2_live_ranges, 0);
 
@@ -1400,4 +1400,383 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         .unwrap();
     let dirty_sc = hub_sc.notify_schema_change_with_maint(s4, e_now + 1, m4, 10);
     assert_eq!(dirty_sc, vec![w_sc]);
+}
+
+#[test]
+fn batch_e_scheduler_abort_backoff_and_monotonic_snapshot_fence() {
+    use std::sync::Barrier;
+    use std::sync::atomic::AtomicUsize;
+
+    // 1. E1: Sans-I/O WatchScheduler exponential failure backoff, idempotency, monotonic clock clamping,
+    //    reset on finish_run, and non-starvation of healthy watches.
+    let mut sched = WatchScheduler::new(8);
+    let failing = WatchId(1);
+    let healthy = WatchId(2);
+    sched.register(
+        failing,
+        WatchPolicy { mode: WatchMode::Declarative, min_gap_ms: 0, adaptive_multiplier: 0 },
+        1000,
+        0,
+        true,
+        None,
+    );
+    sched.register(
+        healthy,
+        WatchPolicy { mode: WatchMode::Declarative, min_gap_ms: 16, adaptive_multiplier: 0 },
+        1000,
+        0,
+        true,
+        None,
+    );
+
+    sched.mark_dirty(&[failing], 1000);
+    assert_eq!(sched.next_due(1000, 0).watch_id, Some(failing));
+    assert!(sched.abort_run(failing, true, 1000));
+    // 1st failure -> 50ms backoff (not immediately due at 1000ms!).
+    assert_eq!(sched.next_due(1000, 0).watch_id, None);
+    assert_eq!(sched.next_wake_delay_ms(1000), Some(elmdb_invalidation::DEFAULT_FAILURE_BACKOFF_BASE_MS));
+    // Calling abort_run a second time while already !running is idempotent (must not double backoff to 100ms).
+    assert!(sched.abort_run(failing, true, 1000));
+    assert_eq!(sched.next_wake_delay_ms(1000), Some(50));
+
+    // Healthy watch is NEVER starved while failing watch is backed off!
+    sched.mark_dirty(&[healthy], 1016);
+    assert_eq!(sched.next_due(1016, 0).watch_id, Some(healthy));
+    assert!(sched.finish_run(healthy, 1016, 1, None));
+
+    // 2nd failure at 1050 -> 100ms; 3rd at 1150 -> 200ms; exponential cap at 30_000ms.
+    assert_eq!(sched.next_due(1050, 0).watch_id, Some(failing));
+    assert!(sched.abort_run(failing, true, 1050));
+    assert_eq!(sched.next_wake_delay_ms(1050), Some(100));
+
+    assert_eq!(sched.next_due(1150, 0).watch_id, Some(failing));
+    assert!(sched.abort_run(failing, true, 1150));
+    assert_eq!(sched.next_wake_delay_ms(1150), Some(200));
+
+    let mut t = 1350u64;
+    for _ in 0..20 {
+        assert_eq!(sched.next_due(t, 0).watch_id, Some(failing));
+        assert!(sched.abort_run(failing, true, t));
+        let delay = sched.next_wake_delay_ms(t).unwrap();
+        assert!(delay <= elmdb_invalidation::DEFAULT_FAILURE_BACKOFF_MAX_MS);
+        t += delay;
+    }
+    assert_eq!(sched.next_due(t, 0).watch_id, Some(failing));
+    assert!(sched.abort_run(failing, true, t));
+    assert_eq!(sched.next_wake_delay_ms(t), Some(elmdb_invalidation::DEFAULT_FAILURE_BACKOFF_MAX_MS));
+
+    // Watch with min_gap_ms > 50ms keeps adaptive cooldown on 1st failure (never shortened to 50ms).
+    let slow_gap = WatchId(3);
+    sched.register(
+        slow_gap,
+        WatchPolicy { mode: WatchMode::Declarative, min_gap_ms: 200, adaptive_multiplier: 0 },
+        t,
+        0,
+        true,
+        None,
+    );
+    sched.mark_dirty(&[slow_gap], t);
+    assert!(sched.begin_run(slow_gap));
+    assert!(sched.abort_run(slow_gap, true, t));
+    assert_eq!(sched.next_wake_delay_ms(t), Some(200));
+    // abort_run with requeue_dirty = false leaves watch clean (not dirty).
+    assert_eq!(sched.next_due(t + 200, 0).watch_id, Some(slow_gap));
+    assert!(sched.abort_run(slow_gap, false, t + 200));
+    assert!(!sched.tick(t + 1000).due_ids.contains(&slow_gap));
+    sched.unregister(slow_gap);
+
+    // Backward host clock step during abort_run must clamp `last_run_ms` monotonically (`t` vs `t - 500`).
+    let prev_last_run = t;
+    t += elmdb_invalidation::DEFAULT_FAILURE_BACKOFF_MAX_MS;
+    assert_eq!(sched.next_due(t, 0).watch_id, Some(failing));
+    assert!(sched.abort_run(failing, true, prev_last_run - 500));
+    assert_eq!(
+        sched.next_wake_delay_ms(prev_last_run - 500),
+        Some(elmdb_invalidation::DEFAULT_FAILURE_BACKOFF_MAX_MS + 500)
+    );
+
+    // Successful finish_run resets consecutive_failures back to 0 (normal min_gap_ms = 0).
+    assert_eq!(sched.next_due(t, 0).watch_id, Some(failing));
+    assert!(sched.finish_run(failing, t, 0, None));
+    sched.mark_dirty(&[failing], t);
+    assert_eq!(sched.next_wake_delay_ms(t), Some(0));
+
+    // 2. E3: Unit tests for monotonic `(seq, maint_seq, epoch)` snapshot fence, overlapping runs,
+    //    and `dirty_since_ms` fairness preservation in WatchScheduler.
+    assert!(sched.enter_rerun(WatchId(999)).is_none());
+    assert!(!sched.can_accept_rerun(WatchId(999), 1, (1, 0, 0)));
+    sched.seed_snapshot(failing, (5, 2, 1));
+    let r1 = sched.enter_rerun(failing).unwrap();
+    let r2 = sched.enter_rerun(failing).unwrap();
+    assert!(r2 > r1);
+    assert!(sched.can_accept_rerun(failing, r2, (5, 2, 1))); // equal snapshot, latest run accepted
+    assert!(sched.can_accept_rerun(failing, r2, (6, 2, 1))); // advanced seq accepted
+    assert!(!sched.can_accept_rerun(failing, r2, (4, 2, 1))); // stale seq rejected
+    assert!(!sched.can_accept_rerun(failing, r2, (5, 1, 1))); // stale maint_seq rejected
+    assert!(!sched.can_accept_rerun(failing, r2, (5, 2, 0))); // stale schema_epoch rejected
+    // r2 finishes first at (6, 2, 1): r1 is still in flight so `running` MUST stay true!
+    assert!(sched.finish_rerun(failing, r2, (6, 2, 1), false, t, 1, None));
+    assert!(!sched.watches_settled(), "running must remain true while overlapping r1 is in flight");
+    // Older r1 at EQUAL snapshot (6, 2, 1) is rejected because r1 < accepted_run_id (r2),
+    // while r1 at a STRICTLY NEWER snapshot (7, 2, 1) and r2/r2+1 at equal snapshot are accepted!
+    assert!(!sched.can_accept_rerun(failing, r1, (6, 2, 1)));
+    assert!(!sched.can_accept_rerun(failing, r1, (5, 2, 1)));
+    assert!(sched.can_accept_rerun(failing, r1, (7, 2, 1)));
+    assert!(sched.can_accept_rerun(failing, r2, (6, 2, 1)));
+    assert!(sched.can_accept_rerun(failing, r2 + 1, (6, 2, 1)));
+    // With 2 active runs, abandoning one keeps running=true until the last is abandoned.
+    let _r_extra = sched.enter_rerun(failing).unwrap();
+    sched.abandon_rerun(failing);
+    assert!(!sched.watches_settled());
+    sched.abandon_rerun(failing);
+    assert!(sched.watches_settled(), "abandoning last in-flight rerun clears running");
+
+    // Overlapping abort_rerun preserves running while sibling is active, respects requeue_dirty=false,
+    // and applies backoff when last aborts.
+    let r3 = sched.enter_rerun(failing).unwrap();
+    let _r4 = sched.enter_rerun(failing).unwrap();
+    assert!(sched.abort_rerun(failing, false, t));
+    assert!(!sched.watches_settled());
+    assert!(sched.abort_rerun(failing, false, t));
+    assert!(sched.watches_settled(), "abort_rerun(requeue_dirty=false) leaves watch clean");
+    let _r4b = sched.enter_rerun(failing).unwrap();
+    let _r4c = sched.enter_rerun(failing).unwrap();
+    // Aborting one overlapping rerun with requeue_dirty=true must set dirty=true even while sibling is active.
+    assert!(sched.abort_rerun(failing, true, t));
+    assert!(!sched.watches_settled());
+    sched.abandon_rerun(failing);
+    assert!(!sched.watches_settled(), "dirty set by first abort_rerun must survive sibling abandon_rerun");
+    // Now abort both runs to verify backoff applies once the last active rerun aborts.
+    let _r4d = sched.enter_rerun(failing).unwrap();
+    let _r4e = sched.enter_rerun(failing).unwrap();
+    assert!(sched.abort_rerun(failing, true, t));
+    assert!(!sched.watches_settled());
+    assert!(sched.abort_rerun(failing, true, t));
+    assert_eq!(sched.next_wake_delay_ms(t), Some(elmdb_invalidation::DEFAULT_FAILURE_BACKOFF_BASE_MS * 2));
+
+    // Verify finish_rerun with stale=true sets dirty when clean AND preserves earlier dirty_since_ms when already dirty.
+    let r5 = sched.enter_rerun(failing).unwrap();
+    assert!(r5 > r3);
+    assert!(sched.finish_rerun(failing, r5, (7, 2, 1), true, t + 50, 1, None));
+    assert!(!sched.watches_settled());
+    let r6 = sched.enter_rerun(failing).unwrap();
+    sched.mark_dirty(&[failing], t + 60);
+    sched.mark_dirty(&[healthy], t + 70);
+    assert!(sched.finish_rerun(failing, r6, (8, 2, 1), true, t + 90, 1, None));
+    assert_eq!(
+        sched.tick(t + 200).due_ids,
+        vec![failing, healthy],
+        "finish_rerun(stale=true) must preserve earlier dirty_since_ms=t+60 ahead of healthy at t+70"
+    );
+    sched.stop_watches();
+    assert!(sched.enter_rerun(failing).is_none());
+    assert!(!sched.can_accept_rerun(failing, 99, (8, 3, 2)));
+
+    // 3. E3: LiveQueryHub fail-fast pre-check & concurrent stale-snapshot fencing!
+    let (engine, _reg, ids) = open_sim();
+    let engine = Arc::new(engine);
+    let qe = Arc::new(QueryEngine::default());
+    let hub = Arc::new(LiveQueryHub::from_engine(&engine, 8).unwrap());
+    let count_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+        terminal: TerminalSpec::Count,
+    });
+
+    engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n1".into()),
+            fields: vec![("title".into(), CanonicalValue::String("one".into()))],
+        }])
+        .unwrap();
+
+    let (wid, init_count) = hub
+        .register_query_watch_in_snapshot(
+            &engine,
+            &qe,
+            ExecBudgets::default(),
+            WatchPolicy::default(),
+            10,
+            1,
+            |_ro, _schema, exec, _unres| {
+                let out = exec(&count_plan)?;
+                let QueryResult::Count(c) = out.result else { panic!("expected Count") };
+                Ok((c, Some(hash_result_128(&c.to_le_bytes()))))
+            },
+        )
+        .unwrap();
+    assert_eq!(init_count, 1);
+
+    // Fail-fast on unregistered watch BEFORE invoking compile_and_materialize callback!
+    let calls = AtomicUsize::new(0);
+    let err_missing = hub
+        .rerun_query_watch_in_snapshot(
+            WatchId(999_999),
+            &engine,
+            &qe,
+            ExecBudgets::default(),
+            20,
+            1,
+            |_ro, _schema, _exec, _unres| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok((0u64, None))
+            },
+        )
+        .unwrap_err();
+    assert_eq!(err_missing.code, elmdb_wire::ErrorCode::Closed);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // Concurrent stale rerun vs newer rerun on the same watch_id:
+    // Slow thread captures snapshot at seq S1 (count = 1), pauses at barrier while main thread
+    // commits a 2nd Note (seq S2, count = 2) and completes a newer rerun. When slow thread finishes,
+    // monotonic fence MUST reject stale S1 (should_deliver == false) without overwriting S2's ReadSet!
+    let started = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let t_hub = Arc::clone(&hub);
+    let t_eng = Arc::clone(&engine);
+    let t_qe = Arc::clone(&qe);
+    let t_plan = count_plan.clone();
+    let t_started = Arc::clone(&started);
+    let t_release = Arc::clone(&release);
+    let slow = std::thread::spawn(move || {
+        t_hub
+            .rerun_query_watch_in_snapshot(
+                wid,
+                &t_eng,
+                &t_qe,
+                ExecBudgets::default(),
+                30,
+                1,
+                |_ro, _schema, exec, _unres| {
+                    let out = exec(&t_plan)?;
+                    let QueryResult::Count(c) = out.result else { panic!("expected Count") };
+                    t_started.wait();
+                    t_release.wait();
+                    Ok((c, Some(hash_result_128(&c.to_le_bytes()))))
+                },
+            )
+            .unwrap()
+    });
+
+    started.wait();
+    let sum2 = engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n2".into()),
+            fields: vec![("title".into(), CanonicalValue::String("two".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    hub.notify_commit(&engine.schema(), &sum2, 40);
+
+    let (fast_count, fast_deliver) = hub
+        .rerun_query_watch_in_snapshot(
+            wid,
+            &engine,
+            &qe,
+            ExecBudgets::default(),
+            50,
+            1,
+            |_ro, _schema, exec, _unres| {
+                let out = exec(&count_plan)?;
+                let QueryResult::Count(c) = out.result else { panic!("expected Count") };
+                Ok((c, Some(hash_result_128(&c.to_le_bytes()))))
+            },
+        )
+        .unwrap();
+    assert_eq!(fast_count, 2);
+    assert!(fast_deliver);
+
+    // Release slow stale thread (count = 1 at S1) -> MUST NOT deliver or overwrite S2's hash/ReadSet!
+    release.wait();
+    let (slow_count, slow_deliver) = slow.join().unwrap();
+    assert_eq!(slow_count, 1);
+    assert!(!slow_deliver, "stale concurrent snapshot S1 must be fenced off after S2 landed");
+    assert!(hub.watches_settled());
+
+    // Rerunning at S2 again still sees S2's hash (proving slow S1 did not clobber last_result_hash!).
+    let (check_count, check_deliver) = hub
+        .rerun_query_watch_in_snapshot(
+            wid,
+            &engine,
+            &qe,
+            ExecBudgets::default(),
+            100,
+            1,
+            |_ro, _schema, exec, _unres| {
+                let out = exec(&count_plan)?;
+                let QueryResult::Count(c) = out.result else { panic!("expected Count") };
+                Ok((c, Some(hash_result_128(&c.to_le_bytes()))))
+            },
+        )
+        .unwrap();
+    assert_eq!(check_count, 2);
+    assert!(!check_deliver);
+
+    // Unregister racing DURING an in-flight snapshot returns Ok((_, false)) and never resurrects!
+    let u_started = Arc::new(Barrier::new(2));
+    let u_release = Arc::new(Barrier::new(2));
+    let u_hub = Arc::clone(&hub);
+    let u_eng = Arc::clone(&engine);
+    let u_qe = Arc::clone(&qe);
+    let u_plan = count_plan.clone();
+    let u_s = Arc::clone(&u_started);
+    let u_r = Arc::clone(&u_release);
+    let racing = std::thread::spawn(move || {
+        u_hub
+            .rerun_query_watch_in_snapshot(
+                wid,
+                &u_eng,
+                &u_qe,
+                ExecBudgets::default(),
+                120,
+                1,
+                |_ro, _schema, exec, _unres| {
+                    let out = exec(&u_plan)?;
+                    let QueryResult::Count(c) = out.result else { panic!("expected Count") };
+                    u_s.wait();
+                    u_r.wait();
+                    Ok((c, Some(hash_result_128(&c.to_le_bytes()))))
+                },
+            )
+            .unwrap()
+    });
+    u_started.wait();
+    assert!(hub.unregister_watch(wid));
+    u_release.wait();
+    let (_, race_deliver) = racing.join().unwrap();
+    assert!(!race_deliver);
+    // Also exercise `rerun_query_watch` (non-snapshot path) for changed delivery + Closed after unregister.
+    let (wid_plain, _) = hub
+        .register_query_watch(&engine, &qe, &count_plan, ExecBudgets::default(), WatchPolicy::default(), 130, 1, |o| {
+            let QueryResult::Count(c) = o.result else { return None };
+            Some(hash_result_128(&c.to_le_bytes()))
+        })
+        .unwrap();
+    let sum3 = engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n3".into()),
+            fields: vec![("title".into(), CanonicalValue::String("three".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    hub.notify_commit(&engine.schema(), &sum3, 140);
+    let (out_plain, del_plain) = hub
+        .rerun_query_watch(wid_plain, &engine, &qe, &count_plan, ExecBudgets::default(), 150, 1, |o| {
+            let QueryResult::Count(c) = o.result else { return None };
+            Some(hash_result_128(&c.to_le_bytes()))
+        })
+        .unwrap();
+    assert_eq!(out_plain.result, QueryResult::Count(3));
+    assert!(del_plain);
+    assert!(hub.unregister_watch(wid_plain));
+    assert_eq!(
+        hub.rerun_query_watch(wid_plain, &engine, &qe, &count_plan, ExecBudgets::default(), 160, 1, |_| None)
+            .unwrap_err()
+            .code,
+        elmdb_wire::ErrorCode::Closed
+    );
 }

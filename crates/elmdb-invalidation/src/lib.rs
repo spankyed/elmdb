@@ -19,8 +19,8 @@ use elmdb_wire::Result;
 pub use index::{COMMIT_RING_CAP, InvalidationIndex, InvalidationStats};
 pub use read_set::{CoalescedRange, EdgeAdjWatch, PointWatch, ReadSet, WatchId};
 pub use scheduler::{
-    DEFAULT_ADAPTIVE_MULTIPLIER, DEFAULT_MIN_GAP_MS, DEFAULT_TURN_SLICE_MS, NextDue, TickResult, WatchMode,
-    WatchPolicy, WatchScheduler, hash_result_128,
+    DEFAULT_ADAPTIVE_MULTIPLIER, DEFAULT_FAILURE_BACKOFF_BASE_MS, DEFAULT_FAILURE_BACKOFF_MAX_MS, DEFAULT_MIN_GAP_MS,
+    DEFAULT_TURN_SLICE_MS, NextDue, TickResult, WatchMode, WatchPolicy, WatchScheduler, hash_result_128,
 };
 
 struct HubState {
@@ -110,6 +110,7 @@ impl LiveQueryHub {
         }
         // P0-6: Mark `already_ran = true` even when `hash == None` (e.g. Imperative watches)!
         guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
+        guard.scheduler.seed_snapshot(watch_id, (read_seq, read_maint_seq, read_epoch));
         let stale = guard.index.register_after_read_with_maint(
             watch_id,
             read_seq,
@@ -139,17 +140,20 @@ impl LiveQueryHub {
         cost_ms: u64,
         result_hash: impl FnOnce(&QueryOutput) -> Option<[u8; 16]>,
     ) -> Result<(QueryOutput, bool)> {
-        {
-            // Ensure `dirty -> running` transition before taking the lock-free snapshot (no-op if `next_due` already started it).
+        let run_id = {
+            // Fail fast on stopped/unregistered watches before taking a lock-free snapshot, and
+            // track overlapping concurrent reruns so earlier runs cannot clear `running` under newer ones.
             let mut guard = self.state.lock().expect("hub lock poisoned");
-            guard.scheduler.begin_run(watch_id);
-        }
+            guard.scheduler.enter_rerun(watch_id).ok_or_else(|| {
+                elmdb_wire::ElmdbError::new(elmdb_wire::ErrorCode::Closed, "watch is stopped or unregistered")
+            })?
+        };
         let snap = match run_tracked_snapshot(engine, query_engine, plan, budgets) {
             Ok(s) => s,
             Err(e) => {
                 // P0-5: Never leave `running = true` wedged on query error / cancellation!
                 let mut guard = self.state.lock().expect("hub lock poisoned");
-                guard.scheduler.abort_run(watch_id, true, now_ms);
+                guard.scheduler.abort_rerun(watch_id, true, now_ms);
                 return Err(e);
             }
         };
@@ -158,8 +162,10 @@ impl LiveQueryHub {
         let current_schema = engine.schema();
 
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        // P0-4: Never resurrect a watch that was unregistered or stopped while our snapshot ran!
-        if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
+        let snapshot = (read_seq, read_maint_seq, read_epoch);
+        // P0-4 & E3: Never resurrect an unregistered/stopped watch or overwrite a newer snapshot's ReadSet!
+        if !guard.scheduler.can_accept_rerun(watch_id, run_id, snapshot) {
+            guard.scheduler.abandon_rerun(watch_id);
             return Ok((output, false));
         }
         let stale = guard.index.register_after_read_with_maint(
@@ -170,10 +176,7 @@ impl LiveQueryHub {
             &read_set,
             &current_schema,
         );
-        if stale {
-            guard.scheduler.mark_dirty(&[watch_id], now_ms);
-        }
-        let should_deliver = guard.scheduler.finish_run(watch_id, now_ms, cost_ms, hash);
+        let should_deliver = guard.scheduler.finish_rerun(watch_id, run_id, snapshot, stale, now_ms, cost_ms, hash);
         Ok((output, should_deliver))
     }
 
@@ -219,6 +222,7 @@ impl LiveQueryHub {
             return Err(elmdb_wire::ElmdbError::new(elmdb_wire::ErrorCode::Closed, "watch scheduler is stopped"));
         }
         guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
+        guard.scheduler.seed_snapshot(watch_id, (read_seq, read_maint_seq, read_epoch));
         let stale = guard.index.register_after_read_with_maint(
             watch_id,
             read_seq,
@@ -251,10 +255,12 @@ impl LiveQueryHub {
             &mut bool,
         ) -> Result<(A, Option<[u8; 16]>)>,
     ) -> Result<(A, bool)> {
-        {
+        let run_id = {
             let mut guard = self.state.lock().expect("hub lock poisoned");
-            guard.scheduler.begin_run(watch_id);
-        }
+            guard.scheduler.enter_rerun(watch_id).ok_or_else(|| {
+                elmdb_wire::ElmdbError::new(elmdb_wire::ErrorCode::Closed, "watch is stopped or unregistered")
+            })?
+        };
         struct RerunSnap<A> {
             read_seq: u64,
             read_maint_seq: u64,
@@ -284,14 +290,16 @@ impl LiveQueryHub {
             Ok(v) => v,
             Err(e) => {
                 let mut guard = self.state.lock().expect("hub lock poisoned");
-                guard.scheduler.abort_run(watch_id, true, now_ms);
+                guard.scheduler.abort_rerun(watch_id, true, now_ms);
                 return Err(e);
             }
         };
         let current_schema = engine.schema();
 
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
+        let snapshot = (read_seq, read_maint_seq, read_epoch);
+        if !guard.scheduler.can_accept_rerun(watch_id, run_id, snapshot) {
+            guard.scheduler.abandon_rerun(watch_id);
             return Ok((answer, false));
         }
         let stale = guard.index.register_after_read_with_maint(
@@ -302,10 +310,7 @@ impl LiveQueryHub {
             &read_set,
             &current_schema,
         );
-        if stale {
-            guard.scheduler.mark_dirty(&[watch_id], now_ms);
-        }
-        let should_deliver = guard.scheduler.finish_run(watch_id, now_ms, cost_ms, hash);
+        let should_deliver = guard.scheduler.finish_rerun(watch_id, run_id, snapshot, stale, now_ms, cost_ms, hash);
         Ok((answer, should_deliver))
     }
 
