@@ -1541,6 +1541,14 @@ fn batch_e_scheduler_abort_backoff_and_monotonic_snapshot_fence() {
     assert!(sched.watches_settled(), "abort_rerun(requeue_dirty=false) leaves watch clean");
     let _r4b = sched.enter_rerun(failing).unwrap();
     let _r4c = sched.enter_rerun(failing).unwrap();
+    // Aborting one overlapping rerun with requeue_dirty=true must set dirty=true even while sibling is active.
+    assert!(sched.abort_rerun(failing, true, t));
+    assert!(!sched.watches_settled());
+    sched.abandon_rerun(failing);
+    assert!(!sched.watches_settled(), "dirty set by first abort_rerun must survive sibling abandon_rerun");
+    // Now abort both runs to verify backoff applies once the last active rerun aborts.
+    let _r4d = sched.enter_rerun(failing).unwrap();
+    let _r4e = sched.enter_rerun(failing).unwrap();
     assert!(sched.abort_rerun(failing, true, t));
     assert!(!sched.watches_settled());
     assert!(sched.abort_rerun(failing, true, t));
@@ -1739,21 +1747,31 @@ fn batch_e_scheduler_abort_backoff_and_monotonic_snapshot_fence() {
     u_release.wait();
     let (_, race_deliver) = racing.join().unwrap();
     assert!(!race_deliver);
-    // Also exercise `rerun_query_watch` (non-snapshot path) for normal rerun + Closed after unregister.
+    // Also exercise `rerun_query_watch` (non-snapshot path) for changed delivery + Closed after unregister.
     let (wid_plain, _) = hub
         .register_query_watch(&engine, &qe, &count_plan, ExecBudgets::default(), WatchPolicy::default(), 130, 1, |o| {
             let QueryResult::Count(c) = o.result else { return None };
             Some(hash_result_128(&c.to_le_bytes()))
         })
         .unwrap();
+    let sum3 = engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n3".into()),
+            fields: vec![("title".into(), CanonicalValue::String("three".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    hub.notify_commit(&engine.schema(), &sum3, 140);
     let (out_plain, del_plain) = hub
         .rerun_query_watch(wid_plain, &engine, &qe, &count_plan, ExecBudgets::default(), 150, 1, |o| {
             let QueryResult::Count(c) = o.result else { return None };
             Some(hash_result_128(&c.to_le_bytes()))
         })
         .unwrap();
-    assert_eq!(out_plain.result, QueryResult::Count(2));
-    assert!(!del_plain);
+    assert_eq!(out_plain.result, QueryResult::Count(3));
+    assert!(del_plain);
     assert!(hub.unregister_watch(wid_plain));
     assert_eq!(
         hub.rerun_query_watch(wid_plain, &engine, &qe, &count_plan, ExecBudgets::default(), 160, 1, |_| None)

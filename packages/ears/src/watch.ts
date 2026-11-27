@@ -457,16 +457,22 @@ export class WatchPump implements WatchController {
     this.#armTimer(delayMs);
   }
 
-  #failStopHandle(error: EarsError, alreadyReportedId?: number): void {
+  #failStopHandle(error: EarsError, firstEntry?: WatchEntry): void {
     this.#stopped = true;
     this.#clearTimer();
     const remaining = [...this.#entries.values()];
     this.#entries.clear();
+    if (firstEntry !== undefined) {
+      firstEntry.active = false;
+    }
     for (const entry of remaining) {
       entry.active = false;
     }
+    if (firstEntry !== undefined) {
+      this.#reportError(firstEntry, error, true);
+    }
     for (const entry of remaining) {
-      if (entry.id !== alreadyReportedId) {
+      if (firstEntry === undefined || entry.id !== firstEntry.id) {
         this.#reportError(entry, error, true);
       }
     }
@@ -588,10 +594,7 @@ export class WatchPump implements WatchController {
           failedThisTurn.add(entry.id);
           const policy = WATCH_ERROR_POLICY[earsErr.code];
           if (policy === 'fatal_handle') {
-            entry.active = false;
-            this.#entries.delete(entry.id);
-            this.#reportError(entry, earsErr, true);
-            this.#failStopHandle(earsErr, entry.id);
+            this.#failStopHandle(earsErr, entry);
             break;
           }
           if (policy === 'permanent_watch') {
