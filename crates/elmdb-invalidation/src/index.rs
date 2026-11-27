@@ -905,9 +905,7 @@ impl InvalidationIndex {
             return Ok(self.all_watch_ids());
         };
 
-        if tip_seq > self.latest_seq
-            && !summaries.iter().map(|cp| cp.seq).eq(self.latest_seq.saturating_add(1)..=tip_seq)
-        {
+        if !summaries.iter().map(|cp| cp.seq).eq(self.latest_seq.saturating_add(1)..=tip_seq) {
             // P0-2: Non-contiguous cross-process commit_log window -> fail strictly safe!
             self.record_full_invalidation(tip_seq, tip_maint, tip_epoch);
             return Ok(self.all_watch_ids());

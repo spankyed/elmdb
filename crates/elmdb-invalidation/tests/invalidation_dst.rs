@@ -1311,18 +1311,86 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         touched_rel_kinds: vec![],
     };
     assert_eq!(idx_clk.apply_cross_proc_summary(&schema_now, &cp_note), vec![WatchId(200)]);
+    // Boundary checks on `check_ring_staleness` strict `>` comparisons (CrossProc, Local, SubDbWrite):
+    // (a) CrossProc: seq 12 touched Note, seq 13 touched Author -> reader at seq 12 is NOT stale;
+    //     after seq 14 touches Note, reader at seq 12 IS stale!
+    let cp_author2 = elmdb_engine::CrossProcCommitSummary {
+        seq: 13,
+        schema_epoch: e_now,
+        touched_types: vec![ids.author_type],
+        touched_entities: Some(vec![]),
+        touched_rel_kinds: vec![],
+    };
+    assert!(idx_clk.apply_cross_proc_summary(&schema_now, &cp_author2).is_empty());
+    assert!(
+        !idx_clk.register_after_read_with_maint(WatchId(200), 12, 6, e_now, &rs4, &schema_now),
+        "reader at seq 12 after Note@12 and Author@13 must NOT be stale"
+    );
+    let cp_note2 = elmdb_engine::CrossProcCommitSummary {
+        seq: 14,
+        schema_epoch: e_now,
+        touched_types: vec![ids.note_type],
+        touched_entities: Some(vec![]),
+        touched_rel_kinds: vec![],
+    };
+    assert_eq!(idx_clk.apply_cross_proc_summary(&schema_now, &cp_note2), vec![WatchId(200)]);
+    assert!(
+        idx_clk.register_after_read_with_maint(WatchId(200), 12, 6, e_now, &rs4, &schema_now),
+        "reader at seq 12 with Note@14 in ring MUST be stale"
+    );
+    // (b) Local: commit S+1 touches Note, commit S+2 touches Author -> reader at S+1 is NOT stale!
+    let mut idx_loc = InvalidationIndex::new_with_maint_seq(s4, e4, m4);
+    let loc_note = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("n1".into()),
+            fields: vec![("title".into(), CanonicalValue::String("N1-loc".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    let loc_auth = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("a1".into()),
+            fields: vec![("name".into(), CanonicalValue::String("A1-loc".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    idx_loc.notify_commit(&engine.schema(), &loc_note);
+    idx_loc.notify_commit(&engine.schema(), &loc_auth);
+    assert!(
+        !idx_loc.register_after_read_with_maint(WatchId(202), loc_note.seq, loc_note.maint_seq, e4, &rs4, &schema_now),
+        "reader at loc_note.seq with only unrelated Author commit after it must NOT be stale"
+    );
+    // (c) SubDbWrite: maint m+1 touches Vector slot, maint m+2 touches unrelated slot -> Vector reader at m+1 is NOT stale!
+    let vec_plan2 = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            spec: ScoreSpec::VectorNear { index_id: ids.idx_vec, vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 5 },
+        }),
+        terminal: TerminalSpec::Hits { fields: None, highlights: false },
+    });
+    let (vs, vm, ve, _vo, vrs) = run_tracked_snapshot(&engine, &qe, &vec_plan2, ExecBudgets::default()).unwrap();
+    let mut idx_sub = InvalidationIndex::new_with_maint_seq(vs, ve, vm);
+    idx_sub.notify_subdb_write_at_maint(vs, ve, vm + 1, ids.idx_vec_slot, &[0x01]);
+    idx_sub.notify_subdb_write_at_maint(vs, ve, vm + 2, ids.idx_vec_slot.wrapping_add(1), &[0x01]);
+    assert!(
+        !idx_sub.register_after_read_with_maint(WatchId(203), vs, vm + 1, ve, &vrs, &schema_now),
+        "Vector reader at vm+1 with only unrelated slot write at vm+2 must NOT be stale"
+    );
 
     // 2. `notify_full_rebuild_at_maint` stale-receipt guard & fresh-receipt invalidation.
-    // Stale (maint_seq <= 6, seq <= 12, epoch <= e_now) is ignored:
-    assert!(idx_clk.notify_full_rebuild_at_maint(12, e_now, 6).is_empty());
-    // Fresh maint_seq > 6 invalidates:
-    assert_eq!(idx_clk.notify_full_rebuild_at_maint(12, e_now, 7), vec![WatchId(200)]);
-    // Same maint_seq == 7 with advanced seq > 12 invalidates:
-    assert_eq!(idx_clk.notify_full_rebuild_at_maint(13, e_now, 7), vec![WatchId(200)]);
-    // Same maint_seq == 7 & seq == 13 with advanced epoch > e_now invalidates:
-    assert_eq!(idx_clk.notify_full_rebuild_at_maint(13, e_now + 1, 7), vec![WatchId(200)]);
+    // Stale (maint_seq <= 6, seq <= 14, epoch <= e_now) is ignored:
+    assert!(idx_clk.notify_full_rebuild_at_maint(14, e_now, 6).is_empty());
+    // Fresh maint_seq > 6 (jumping to 10 != latest_maint_seq + 1) invalidates and records exact maint_seq 10:
+    assert_eq!(idx_clk.notify_full_rebuild_at_maint(14, e_now, 10), vec![WatchId(200)]);
+    assert_eq!(idx_clk.latest_maint_seq(), 10);
+    // Same maint_seq == 10 with advanced seq > 14 invalidates:
+    assert_eq!(idx_clk.notify_full_rebuild_at_maint(15, e_now, 10), vec![WatchId(200)]);
+    // Same maint_seq == 10 & seq == 15 with advanced epoch > e_now invalidates:
+    assert_eq!(idx_clk.notify_full_rebuild_at_maint(15, e_now + 1, 10), vec![WatchId(200)]);
     // `notify_schema_change` invalidates active watches and advances epoch:
-    assert_eq!(idx_clk.notify_schema_change(13, e_now + 2), vec![WatchId(200)]);
+    assert_eq!(idx_clk.notify_schema_change(15, e_now + 2), vec![WatchId(200)]);
     assert_eq!(idx_clk.latest_schema_epoch(), e_now + 2);
 
     // 3. `LiveQueryHub::notify_schema_change_with_maint` returns invalidated WatchIds.
