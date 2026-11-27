@@ -642,12 +642,16 @@ fn materialize_hits<R: KvRead>(
     Ok(out)
 }
 
+/// Returns whether the upstream query source explicitly opted into soft-trashed entities.
+/// `LiteralKeys` (`query.ids([...])`) defaults to `false` for graph/link/traversal visibility so
+/// `hops`, `shortestPath`, `hasLink`, `degrees`, `jaccard`, and `adamicAdar` never leak or
+/// traverse through soft-trashed entities unless the caller opted in via `include_trashed: true`.
 fn source_includes_trashed(node: &LogicalNode) -> bool {
     match node {
         LogicalNode::Source(SourceSpec::Type { include_trashed, .. })
         | LogicalNode::Source(SourceSpec::Types { include_trashed, .. })
         | LogicalNode::Source(SourceSpec::AllEntities { include_trashed }) => *include_trashed,
-        LogicalNode::Source(SourceSpec::LiteralKeys(_)) => true,
+        LogicalNode::Source(SourceSpec::LiteralKeys(_)) => false,
         LogicalNode::Filter { input, .. }
         | LogicalNode::Score { input, .. }
         | LogicalNode::Traverse { input, .. }
@@ -980,7 +984,7 @@ fn eval_terminal<R: KvRead>(
             }
         }
         TerminalSpec::Degrees { rel_kinds, dir } => {
-            let include_trashed = node_includes_trashed(input);
+            let include_trashed = source_includes_trashed(input);
             let mut stream = eval_stream(ctx, input, None)?;
             let mut batch = KeyBatch::default();
             let mut out = Vec::new();
@@ -1251,7 +1255,7 @@ fn eval_filter<R: KvRead>(
     }
 
     // Fallback: pull from input stream and apply predicate.
-    let include_trashed = node_includes_trashed(input);
+    let include_trashed = source_includes_trashed(input);
     let mut input_stream = eval_stream(ctx, input, None)?;
     ctx.explain.residual_filters += 1;
     let cap = limit_hint.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
@@ -1546,22 +1550,6 @@ fn try_pushdown_conjunct<R: KvRead>(
             Ok(Some((linked, false, "HasLinkDriveFromTarget".into())))
         }
         _ => Ok(None),
-    }
-}
-
-fn node_includes_trashed(node: &LogicalNode) -> bool {
-    match node {
-        LogicalNode::Source(SourceSpec::Type { include_trashed, .. })
-        | LogicalNode::Source(SourceSpec::Types { include_trashed, .. })
-        | LogicalNode::Source(SourceSpec::AllEntities { include_trashed }) => *include_trashed,
-        LogicalNode::Source(SourceSpec::LiteralKeys(_)) => false,
-        LogicalNode::Filter { input, .. }
-        | LogicalNode::Score { input, .. }
-        | LogicalNode::Traverse { input, .. }
-        | LogicalNode::GraphAnalyze { input, .. }
-        | LogicalNode::Distinct { input }
-        | LogicalNode::OrderSlice { input, .. }
-        | LogicalNode::Terminal { input, .. } => node_includes_trashed(input),
     }
 }
 
@@ -2108,7 +2096,7 @@ fn eval_score_signal<R: KvRead>(
 }
 
 fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec: &TraverseSpec) -> Result<VecStreamOp> {
-    let include_trashed = node_includes_trashed(input);
+    let include_trashed = source_includes_trashed(input);
     let stream = eval_stream(ctx, input, None)?;
     let seeds: Vec<EntityKey> =
         collect_all_pairs(ctx, stream, BATCH_SIZE as u16)?.into_iter().map(|(k, _)| k).collect();
@@ -2121,19 +2109,31 @@ fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec:
             let mut results = Vec::new();
             for s in seeds {
                 ctx.check_cancel()?;
-                if !visited.contains_key(&s) {
-                    if visited.len() >= ctx.budgets.max_traversal_visited {
+                if visited.contains_key(&s) || hidden.contains(&s) {
+                    continue;
+                }
+                if !include_trashed && !is_neighbor_visible(ctx, s, false)? {
+                    if visited.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
                         return Err(ElmdbError::new(
                             ErrorCode::ResourceLimit,
                             "traversal exceeded max_traversal_visited budget",
                         ));
                     }
-                    visited.insert(s, 0);
-                    ctx.charge_heap(32)?;
-                    queue.push_back((s, 0));
-                    if *min_hops == 0 {
-                        results.push((s, 0.0));
-                    }
+                    ctx.charge_heap(16)?;
+                    hidden.insert(s);
+                    continue;
+                }
+                if visited.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
+                    return Err(ElmdbError::new(
+                        ErrorCode::ResourceLimit,
+                        "traversal exceeded max_traversal_visited budget",
+                    ));
+                }
+                visited.insert(s, 0);
+                ctx.charge_heap(32)?;
+                queue.push_back((s, 0));
+                if *min_hops == 0 {
+                    results.push((s, 0.0));
                 }
             }
             while let Some((u, depth)) = queue.pop_front() {
@@ -2159,15 +2159,16 @@ fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec:
                     if visited.contains_key(&v) || hidden.contains(&v) {
                         continue;
                     }
-                    if !is_neighbor_visible(ctx, v, include_trashed)? {
-                        hidden.insert(v);
-                        continue;
-                    }
-                    if visited.len() >= ctx.budgets.max_traversal_visited {
+                    if visited.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
                         return Err(ElmdbError::new(
                             ErrorCode::ResourceLimit,
                             "traversal exceeded max_traversal_visited budget",
                         ));
+                    }
+                    if !is_neighbor_visible(ctx, v, include_trashed)? {
+                        ctx.charge_heap(16)?;
+                        hidden.insert(v);
+                        continue;
                     }
                     let nd = depth + 1;
                     visited.insert(v, nd);
@@ -2191,20 +2192,32 @@ fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec:
             let mut queue: VecDeque<(EntityKey, u32)> = VecDeque::new();
             for s in seeds {
                 ctx.check_cancel()?;
-                if s == *target {
-                    return Ok(VecStreamOp::new(vec![(s, 0.0)]));
+                if parent.contains_key(&s) || hidden.contains(&s) {
+                    continue;
                 }
-                if !parent.contains_key(&s) {
-                    if parent.len() >= ctx.budgets.max_traversal_visited {
+                if !include_trashed && !is_neighbor_visible(ctx, s, false)? {
+                    if parent.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
                         return Err(ElmdbError::new(
                             ErrorCode::ResourceLimit,
                             "shortest-path exceeded max_traversal_visited budget",
                         ));
                     }
-                    parent.insert(s, None);
-                    ctx.charge_heap(32)?;
-                    queue.push_back((s, 0));
+                    ctx.charge_heap(16)?;
+                    hidden.insert(s);
+                    continue;
                 }
+                if s == *target {
+                    return Ok(VecStreamOp::new(vec![(s, 0.0)]));
+                }
+                if parent.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
+                    return Err(ElmdbError::new(
+                        ErrorCode::ResourceLimit,
+                        "shortest-path exceeded max_traversal_visited budget",
+                    ));
+                }
+                parent.insert(s, None);
+                ctx.charge_heap(32)?;
+                queue.push_back((s, 0));
             }
             let mut found = false;
             while let Some((u, depth)) = queue.pop_front() {
@@ -2230,15 +2243,16 @@ fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec:
                     if parent.contains_key(&v) || hidden.contains(&v) {
                         continue;
                     }
-                    if !is_neighbor_visible(ctx, v, include_trashed)? {
-                        hidden.insert(v);
-                        continue;
-                    }
-                    if parent.len() >= ctx.budgets.max_traversal_visited {
+                    if parent.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
                         return Err(ElmdbError::new(
                             ErrorCode::ResourceLimit,
                             "shortest-path exceeded max_traversal_visited budget",
                         ));
+                    }
+                    if !is_neighbor_visible(ctx, v, include_trashed)? {
+                        ctx.charge_heap(16)?;
+                        hidden.insert(v);
+                        continue;
                     }
                     parent.insert(v, Some(u));
                     ctx.charge_heap(32)?;

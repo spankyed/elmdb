@@ -1205,4 +1205,25 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         d_sub.contains(&WatchId(1)),
         "notify_subdb_write observing an unseen normal commit seq MUST fail-safe invalidate all watches"
     );
+
+    // Review P1-1 regression: `notify_full_rebuild(seq, epoch)` (txnid == 0) at same `seq == latest_seq`
+    // MUST mark a concurrent reader at `seq` as stale (not hit early fast-path return false)!
+    let (s3, _t3, e3, _o3, rs3) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
+    let mut idx_rb = InvalidationIndex::new(s3, e3);
+    idx_rb.notify_full_rebuild(s3, e3);
+    assert!(
+        idx_rb.register_after_read(WatchId(42), s3, e3, &rs3, &engine.schema()),
+        "same-seq txnid-less notify_full_rebuild MUST mark concurrent reader stale"
+    );
+
+    // Review P0-1 regression: `notify_subdb_write_at_txnid` observing `txnid > prev_txnid + 1`
+    // (indicating an unseen cross-process maintenance write on another slot) MUST invalidate all watches!
+    let (s4, t4, e4, _o4, rs4) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
+    let mut idx_mg = InvalidationIndex::new_with_txnid(s4, e4, t4);
+    assert!(!idx_mg.register_after_read_with_txnid(WatchId(77), s4, t4, e4, &rs4, &engine.schema()));
+    let d_mg = idx_mg.notify_subdb_write_at_txnid(s4, e4, t4 + 2, ids.idx_vec_slot, &[0x01]);
+    assert!(
+        d_mg.contains(&WatchId(77)),
+        "notify_subdb_write_at_txnid with txnid gap (> prev_txnid + 1) MUST fail-safe invalidate all watches"
+    );
 }

@@ -544,7 +544,8 @@ impl InvalidationIndex {
         // Maintenance writes (`SubDbWrite` / `FullInvalidation` rebuilds) do not increment `commit_seq`.
         // Compare strictly by LMDB `txnid > read_at_txnid` whenever available so post-maintenance reruns settle cleanly!
         let has_maint_txnid = self.latest_maint_txnid.is_some_and(|t| read_at_txnid == 0 || t > read_at_txnid);
-        let has_maint_seq_fallback = self.latest_subdb_write_seq.is_some_and(|s| s >= read_at_seq);
+        let has_maint_seq_fallback = self.latest_subdb_write_seq.is_some_and(|s| s >= read_at_seq)
+            || self.ring_dropped_subdb_up_to.is_some_and(|s| s >= read_at_seq);
         if read_at_seq >= self.latest_seq && !has_maint_txnid && !has_maint_seq_fallback {
             return false;
         }
@@ -678,6 +679,7 @@ impl InvalidationIndex {
     pub fn notify_commit(&mut self, schema: &CompiledSchema, summary: &CommitDeltaSummary) -> Vec<WatchId> {
         let prev_seq = self.latest_seq;
         let prev_epoch = self.latest_schema_epoch;
+        let prev_txnid = self.last_seen_txnid;
         self.observe_txnid(summary.txnid);
 
         if summary.seq <= prev_seq {
@@ -685,8 +687,20 @@ impl InvalidationIndex {
         }
 
         let schema_changed = summary.schema_epoch != prev_epoch;
+        let seq_delta = summary.seq.saturating_sub(prev_seq);
         let seq_gap = summary.seq > prev_seq.saturating_add(1);
+        // Each normal commit increments both `commit_seq` and LMDB `txnid` by 1.
+        // If `summary.txnid > prev_txnid + seq_delta`, an unseen cross-process maintenance write
+        // occurred before this local commit — fail strictly safe instead of swallowing its txnid!
+        let maint_gap = summary.txnid > 0 && prev_txnid.is_some_and(|pt| summary.txnid > pt.saturating_add(seq_delta));
 
+        if maint_gap {
+            self.ring_dropped_up_to = self.ring_dropped_up_to.max(summary.seq);
+            self.latest_maint_txnid =
+                Some(self.latest_maint_txnid.map_or(summary.txnid, |prev| prev.max(summary.txnid)));
+            self.push_ring(summary.seq, summary.txnid, summary.schema_epoch, CommitRingPayload::FullInvalidation);
+            return self.all_watch_ids();
+        }
         if seq_gap {
             let missing_up_to = summary.seq.saturating_sub(1);
             self.ring_dropped_up_to = self.ring_dropped_up_to.max(missing_up_to);
@@ -892,21 +906,28 @@ impl InvalidationIndex {
     ) -> Vec<WatchId> {
         let prev_seq = self.latest_seq;
         let prev_epoch = self.latest_schema_epoch;
+        let prev_txnid = self.last_seen_txnid;
         let schema_changed = schema_epoch != prev_epoch;
         // A SubDbWrite carries no normal commit summary, so ANY `seq > prev_seq` means at least
         // one normal commit was not yet processed by `InvalidationIndex` — fail strictly safe!
+        // Likewise, if `txnid > prev_txnid + 1`, at least one unseen maintenance write (e.g., from
+        // another process on a different slot) occurred before this write — fail strictly safe!
         let seq_gap = seq > prev_seq;
+        let maint_gap = txnid > 0 && prev_txnid.is_some_and(|pt| txnid > pt.saturating_add(1));
 
         if txnid > 0 {
             self.observe_txnid(txnid);
         }
-        if seq_gap {
+        if seq_gap || maint_gap {
             self.ring_dropped_up_to = self.ring_dropped_up_to.max(seq);
+            if txnid > 0 {
+                self.latest_maint_txnid = Some(self.latest_maint_txnid.map_or(txnid, |prev| prev.max(txnid)));
+            }
             self.push_ring(seq, txnid, schema_epoch, CommitRingPayload::FullInvalidation);
         }
         self.push_ring(seq, txnid, schema_epoch, CommitRingPayload::SubDbWrite { slot, key: key.to_vec() });
 
-        if schema_changed || seq_gap {
+        if schema_changed || seq_gap || maint_gap {
             return self.all_watch_ids();
         }
         let mut out = Vec::new();

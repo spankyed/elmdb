@@ -1731,6 +1731,7 @@ fn batch2_map_growth_cross_proc_resize_sidecar_race_opguard_hooks_and_index_disa
 #[ignore = "child process helper invoked by batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_and_order_schema"]
 fn child_batch3_worker() {
     let dir = std::path::PathBuf::from(std::env::var("ELMDB_TEST_B3_DIR").expect("ELMDB_TEST_B3_DIR"));
+    let mode = std::env::var("ELMDB_TEST_B3_MODE").unwrap_or_else(|_| "combined".into());
     let db = Database::open(
         &dir,
         OpenOptions {
@@ -1740,14 +1741,19 @@ fn child_batch3_worker() {
         },
     )
     .unwrap();
-    // P0-11: Combine a normal data commit (bumps commit_seq += 1, txnid += 1) AND a maintenance
-    // write (`set_embeddings`, bumps txnid += 1 without bumping commit_seq) in one polling window!
-    db.execute_batch(&[WireOp::Patch {
-        target: EntityTarget::ExternalId("a1".into()),
-        fields: vec![("name".into(), CanonicalValue::String("Updated By Child".into()))],
-    }])
-    .unwrap();
-    db.set_embeddings("emb", "n1", &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    if mode == "maint_only" {
+        // P0-1 review regression: maintenance-only write in child, followed by unrelated local commit in parent!
+        db.set_embeddings("emb", "n2", &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    } else {
+        // P0-11: Combine a normal data commit (bumps commit_seq += 1, txnid += 1) AND a maintenance
+        // write (`set_embeddings`, bumps txnid += 1 without bumping commit_seq) in one polling window!
+        db.execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("a1".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Updated By Child".into()))],
+        }])
+        .unwrap();
+        db.set_embeddings("emb", "n1", &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    }
     db.close().unwrap();
 }
 
@@ -2007,6 +2013,32 @@ fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_a
     let QueryAnswerBody::Ids { ids } = ans_after_child.body else { panic!("expected Ids") };
     assert!(ids.contains(&"n1".to_string()), "reran vector watch must see child's embedding for n1");
     assert!(db.watches_settled(), "watch MUST settle cleanly after cross-process maintenance rerun");
+
+    // Review P0-1 regression: child performs maintenance-only `set_embeddings("emb", "n2", [1,0,0,0])`,
+    // then parent performs an UNRELATED local write (`Patch Author("a1")`) BEFORE `catch_up_cross_process()`.
+    // `notify_commit` MUST detect the txnid maintenance gap and dirty `w_vec` instead of swallowing it!
+    let status2 = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_batch3_worker", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_B3_DIR", &db_dir)
+        .env("ELMDB_TEST_B3_MODE", "maint_only")
+        .status()
+        .unwrap();
+    assert!(status2.success(), "child_batch3_worker(maint_only) failed: {status2}");
+
+    db.execute_batch(&[WireOp::Patch {
+        target: EntityTarget::ExternalId("a1".into()),
+        fields: vec![("name".into(), CanonicalValue::String("Local Unrelated After Child Maint".into()))],
+    }])
+    .unwrap();
+    now += 1000;
+    let due_after_local = db.tick_watches(now).due_ids;
+    assert!(
+        due_after_local.contains(&w_vec),
+        "unrelated local commit after cross-process maintenance write MUST detect txnid gap and dirty Note vector watch!"
+    );
+    assert!(db.begin_watch_run(w_vec));
+    let _ = db.rerun_query_watch(w_vec, &vec_spec, now + 10, 1).unwrap();
+    assert!(db.watches_settled(), "watch MUST settle cleanly after txnid-gap rerun");
     db.unregister_watch(w_vec);
 
     // -------------------------------------------------------------------------
@@ -2251,8 +2283,42 @@ fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_a
     };
     assert_eq!(deg_all, vec![("A".to_string(), 1)]);
 
+    // Review P1-2 regression: `LiteralKeys` (`ids(["B"])`) where seed `B` is trashed must neither emit
+    // `B` nor traverse out of `B` to `C` in `hops` or `shortestPath`!
+    let trashed_seed_hops = QuerySpec {
+        source: QuerySource::Ids { ids: vec!["B".into()] },
+        steps: vec![QueryStep::Hops { rel_kinds: vec!["link".into()], dir: "out".into(), min_hops: 0, max_hops: 2 }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let QueryAnswerBody::Ids { ids: ts_hops } =
+        db.execute_query_spec(&trashed_seed_hops, ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(ts_hops.is_empty(), "hops from trashed LiteralKeys seed must be empty, got {ts_hops:?}");
+
+    let trashed_seed_sp = QuerySpec {
+        source: QuerySource::Ids { ids: vec!["B".into()] },
+        steps: vec![QueryStep::ShortestPath {
+            rel_kinds: vec!["link".into()],
+            dir: "out".into(),
+            target_id: "C".into(),
+            max_hops: 2,
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let QueryAnswerBody::Ids { ids: ts_sp } =
+        db.execute_query_spec(&trashed_seed_sp, ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(ts_sp.is_empty(), "shortestPath from trashed LiteralKeys seed must be empty, got {ts_sp:?}");
+
     // -------------------------------------------------------------------------
-    // 7. P1-11: Dropping a Vector index purges `dbs.embeddings` cleanly (no ghost vectors on re-add!)
+    // 7. P1-11: Dropping and re-adding a Vector index produces clean empty recall
+    //    (physical `dbs.embeddings` purge is directly asserted in `vector_and_rank_dst.rs`!)
     // -------------------------------------------------------------------------
     let mut dropped_vec_schema = schema.clone();
     dropped_vec_schema.types.get_mut("Note").unwrap().indexes.remove("emb");
