@@ -28,16 +28,16 @@ impl<'env> LmdbRoTxn<'env> {
         let inner = Arc::clone(store.inner());
         let env_guard = inner.lock_env_read()?;
         let mut raw: *mut ffi::MDB_txn = ptr::null_mut();
-        // SAFETY: `inner.env` is open and protected by `EnvReadGuard` (L2 `map_gate` + L4 `dbis.read()`),
-        // preventing `mdb_txn_renew0` from racing `LmdbRwTxn::commit_raw()` or `ensure_subdbs_open()`.
+        // SAFETY: `inner.env` is open and protected by `EnvReadGuard` (L2 `map_gate` + L4
+        // `dbi_publish_gate.read_txn()`), preventing `mdb_txn_renew0` from racing `LmdbRwTxn::commit_raw()`
+        // or `ensure_subdbs_open()`.
         let mut rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
         if rc == ffi::MDB_READERS_FULL {
             let mut dead: libc::c_int = 0;
-            // SAFETY: Reclaim stale reader slots from crashed processes and retry once if any were freed.
-            if unsafe { ffi::mdb_reader_check(inner.env.as_ptr(), &mut dead) } == ffi::MDB_SUCCESS && dead > 0 {
-                // SAFETY: `inner.env` is open and `env_guard` is still held; retrying `MDB_RDONLY` txn.
-                rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
-            }
+            // SAFETY: Reclaim stale reader slots from crashed processes and retry once.
+            let _ = unsafe { ffi::mdb_reader_check(inner.env.as_ptr(), &mut dead) };
+            // SAFETY: `inner.env` is open and `env_guard` is still held; retrying `MDB_RDONLY` txn.
+            rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
         }
         let map_guard = env_guard.into_map_guard();
         if rc != ffi::MDB_SUCCESS {
@@ -844,6 +844,7 @@ mod tests {
         assert!(matches!(store.copy_compacted(tmp.path().join("bak_broken")), Err(StorageError::Corrupted(_))));
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "child process helper invoked by batch_a_begin_read_reclaims_stale_readers_and_rejects_live_full"]
     fn batch_a_stale_reader_child_helper() {
@@ -869,7 +870,7 @@ mod tests {
             .unwrap(),
         );
 
-        // 1. Live reader on another thread occupies the sole slot -> `begin_read` hits `MDB_READERS_FULL` with `dead == 0` -> Err(ReadersFull).
+        // 1. Live reader on another thread occupies the sole slot -> `begin_read` hits `MDB_READERS_FULL` -> Err(ReadersFull).
         {
             let reader_store = Arc::clone(&store);
             let (tx_held, rx_held) = std::sync::mpsc::channel();
@@ -886,16 +887,22 @@ mod tests {
         }
 
         // 2. Child process opens a reader slot and exits without aborting it -> parent hits `MDB_READERS_FULL`,
-        //    `mdb_reader_check` reclaims `dead == 1 > 0`, and retry succeeds!
-        let exe = std::env::current_exe().unwrap();
-        let status = std::process::Command::new(exe)
-            .args(["--exact", "txn::tests::batch_a_stale_reader_child_helper", "--ignored", "--nocapture"])
-            .env("ELMDB_STALE_READER_DIR", tmp.path())
-            .status()
-            .unwrap();
-        assert!(status.success(), "stale reader child helper failed");
+        //    `mdb_reader_check` reclaims the stale slot, and retry succeeds.
+        //    Gated on Unix: upstream LMDB's Windows `mdb_reader_pid` opens the exited PID with
+        //    `PROCESS_QUERY_LIMITED_INFORMATION` (without `SYNCHRONIZE`), so `WaitForSingleObject(h, 0)`
+        //    returns `WAIT_FAILED` ("alive") while Windows kernel/runner teardown still holds any handle.
+        #[cfg(unix)]
+        {
+            let exe = std::env::current_exe().unwrap();
+            let status = std::process::Command::new(exe)
+                .args(["--exact", "txn::tests::batch_a_stale_reader_child_helper", "--ignored", "--nocapture"])
+                .env("ELMDB_STALE_READER_DIR", tmp.path())
+                .status()
+                .unwrap();
+            assert!(status.success(), "stale reader child helper failed");
 
-        let recovered_ro = store.begin_read().expect("stale reader slot must be reclaimed on MDB_READERS_FULL");
-        drop(recovered_ro);
+            let recovered_ro = store.begin_read().expect("stale reader slot must be reclaimed on MDB_READERS_FULL");
+            drop(recovered_ro);
+        }
     }
 }

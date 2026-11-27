@@ -518,8 +518,8 @@ impl LmdbStore {
         {
             let _copy_guard = self.inner.lock_env_copy()?;
             // SAFETY: `self.inner.env` is an open `MDB_env` protected by L2 `map_gate.read()` + L4
-            // `dbi_publish_gate.read()`, preventing concurrent `mdb_dbis_update` from racing `mdb_env_copy2`'s
-            // internal `mdb_txn_renew0` without blocking routine writes or `lookup_flags` reads.
+            // `dbi_publish_gate.read_copy()`, preventing concurrent `mdb_dbis_update` from racing `mdb_env_copy2`'s
+            // internal `mdb_txn_renew0` without blocking routine writes, `begin_read`, or `lookup_flags` reads.
             let mut rc = unsafe { ffi::mdb_env_copy2(self.inner.env.as_ptr(), c_path.as_ptr(), ffi::MDB_CP_COMPACT) };
             if rc == ffi::MDB_READERS_FULL {
                 let mut dead: libc::c_int = 0;

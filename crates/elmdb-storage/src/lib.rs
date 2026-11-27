@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 //! Core storage abstractions, durability choke point, bounded DBI slot pool,
-//! and strict 4-domain lock hierarchy for elmdb v2.
+//! and strict 5-domain lock hierarchy for elmdb v2.
 //!
 //! This crate has zero LMDB dependency so production code and deterministic
 //! simulation (`elmdb-sim`) compile against the exact same traits.

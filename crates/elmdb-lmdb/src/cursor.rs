@@ -54,6 +54,9 @@ impl<'txn> LmdbCursor<'txn> {
         key_in: Option<&[u8]>,
         not_found_state: CursorState,
     ) -> Result<Option<KvEntry<'txn>>, StorageError> {
+        // mutant-skip: replace LmdbCursor<'txn>::get_op -> Result<Option<KvEntry<'txn>>, StorageError> with Ok\(Some\(Default::default\(\)\)\)
+        // Returning `Ok(Some((&[], &[])))` forever turns every `while let Some(..) = cur.next()?` scan
+        // into an unbounded allocation loop that OOM-kills parallel nextest workers before per-test timeout.
         let key_storage = key_in.map(|bytes| MdbKey::new(self.flags, bytes)).transpose()?;
         let mut key_val = match &key_storage {
             Some(key) => key.as_mdb_val(),
