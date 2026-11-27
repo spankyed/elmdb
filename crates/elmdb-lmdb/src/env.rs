@@ -779,19 +779,16 @@ impl KvStore for LmdbStore {
             self.inner.map_size.store(cur, Ordering::Release);
             return Ok(cur);
         }
-        // SAFETY: L2 `map_gate.write()` guarantees zero active transactions or `me_metas` readers in this process.
+        // SAFETY: L2 `map_gate.write()` guarantees zero active transactions (`env->me_txn == NULL`) or `me_metas` readers.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), aligned) };
         if rc != ffi::MDB_SUCCESS {
-            // `mdb_env_set_mapsize` returns `EINVAL` before unmapping (`mdb.c:4718`). Any other failure
-            // happens after `munmap`/`UnmapViewOfFile` and leaves `env->me_map` unmapped (`me_metas` dangling),
-            // which LMDB's public C API cannot remap -> fail closed permanently!
-            if rc != libc::EINVAL {
-                self.inner.map_broken.store(true, Ordering::SeqCst);
-                return Err(StorageError::Corrupted(format!(
-                    "mdb_env_set_mapsize({aligned}) failed after unmap (rc={rc}); environment is unusable"
-                )));
-            }
-            return Err(map_mdb_err(rc, aligned, self.inner.max_dbs));
+            // Under `map_gate.write()`, `env->me_txn` is guaranteed NULL, so any failure (including
+            // `mmap` returning `EINVAL` for an oversized mapping) occurs after unmapping `env->me_map`
+            // and leaves `me_metas` dangling -> fail closed unconditionally!
+            self.inner.map_broken.store(true, Ordering::SeqCst);
+            return Err(StorageError::Corrupted(format!(
+                "mdb_env_set_mapsize({aligned}) failed (rc={rc}); environment is unusable"
+            )));
         }
         // Re-read `me_mapsize` in case LMDB clamped `aligned` upward to `minsize`.
         let mut after_info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
@@ -808,20 +805,17 @@ impl KvStore for LmdbStore {
     }
 
     fn adopt_resized_map(&self) -> Result<usize, StorageError> {
-        // Acquire L2 exclusive write lock so ZERO read/write txns or `me_metas` readers are active.
+        // Acquire L2 exclusive write lock so ZERO read/write txns (`env->me_txn == NULL`) or `me_metas` readers are active.
         let _gate = self.inner.map_gate.write();
         self.inner.check_map_ok()?;
         let cur = self.inner.current_map_size();
         // SAFETY: `size = 0` tells LMDB to adopt the external cross-process map size cleanly.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), 0) };
         if rc != ffi::MDB_SUCCESS {
-            if rc != libc::EINVAL {
-                self.inner.map_broken.store(true, Ordering::SeqCst);
-                return Err(StorageError::Corrupted(format!(
-                    "mdb_env_set_mapsize(0) failed after unmap (rc={rc}); environment is unusable"
-                )));
-            }
-            return Err(map_mdb_err(rc, cur, self.inner.max_dbs));
+            self.inner.map_broken.store(true, Ordering::SeqCst);
+            return Err(StorageError::Corrupted(format!(
+                "mdb_env_set_mapsize(0) failed (rc={rc}); environment is unusable"
+            )));
         }
         let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
         // SAFETY: `self.inner.env` is open.
