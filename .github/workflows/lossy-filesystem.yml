@@ -14,7 +14,7 @@ on:
   pull_request:
     paths:
       - .github/workflows/lossy-filesystem.yml
-      - crates/elmdb/src/engine/tests/power_loss.rs
+      - crates/elmdb/tests/power_loss.rs
 
 permissions:
   contents: read
@@ -27,7 +27,7 @@ jobs:
     env:
       # LazyFS at a commit read before it was pinned (2026-11-12)
       LAZYFS_COMMIT: 3edad01aa936b81fed9bd64e47e725fc5ef6c977
-      TEST: engine::tests::power_loss::a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync
+      TEST: a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show active-toolchain
@@ -45,7 +45,7 @@ jobs:
           (cd "$RUNNER_TEMP/lazyfs/lazyfs" && ./build.sh)
 
       - name: The tests, built before the filesystem is mounted
-        run: cargo test -p elmdb --lib --no-run
+        run: cargo test -p elmdb --test power_loss --no-run
 
       - name: LazyFS mounted, and the scripts that drop what wasn't synced, tear a write, and mount it again
         run: |
@@ -105,7 +105,7 @@ jobs:
           ELMDB_LOSSY_LOSE: ${{ runner.temp }}/lose.sh
         run: |
           mkdir -p "$ELMDB_LOSSY_DIR"
-          cargo test -p elmdb --lib -- --ignored --exact "$TEST" --nocapture --test-threads=1
+          cargo test -p elmdb --test power_loss -- --ignored --exact "$TEST" --nocapture --test-threads=1
 
       - name: Without the pin it doesn't, so the test above can fail
         env:
@@ -116,7 +116,7 @@ jobs:
           mkdir -p "$ELMDB_LOSSY_DIR"
           # Only the failure of the database's check counts: what it held against what its last sync held. Another
           # failure, a writer that never synced or a script that broke, says nothing of the test
-          if cargo test -p elmdb --lib -- --ignored --exact "$TEST" --nocapture --test-threads=1 > unpinned.log 2>&1; then
+          if cargo test -p elmdb --test power_loss -- --ignored --exact "$TEST" --nocapture --test-threads=1 > unpinned.log 2>&1; then
             cat unpinned.log
             echo "::error::the test passed with the writer's pin turned off: it can't tell a torn database from a whole one"
             exit 1
@@ -132,10 +132,10 @@ jobs:
           ELMDB_TORN_DIR: ${{ runner.temp }}/lazyfs.mnt/torn
           ELMDB_TORN_ARM: ${{ runner.temp }}/arm.sh
           ELMDB_TORN_HEAL: ${{ runner.temp }}/heal.sh
-          TORN: engine::tests::power_loss::a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync
+          TORN: a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync
         run: |
           mkdir -p "$ELMDB_TORN_DIR"
-          cargo test -p elmdb --lib -- --ignored --exact "$TORN" --nocapture --test-threads=1
+          cargo test -p elmdb --test power_loss -- --ignored --exact "$TORN" --nocapture --test-threads=1
 
       - name: LazyFS's log
         if: always()

@@ -148,6 +148,42 @@ engine.batch((b) => {
 });
 const found = engine.query.of('Note').search('text', 'database', { topK: 10 }).ids();
 assert.deepEqual([...found].sort(), ['note-a', 'note-c']);
+// Prefix BM25F search + UTF-16 highlights + projected fields
+const prefixHits = engine.query
+  .of('Note')
+  .search('text', 'datab', { prefix: true, topK: 10 })
+  .hits({ fields: ['title'], highlights: true });
+assert.equal(prefixHits.length, 2);
+assert.ok(prefixHits.every((h) => h.highlights && (h.highlights.title?.length ?? 0) > 0));
+// Transact with nested savepoint rollback, RYOW, persistent counters, and beforeCommit hook
+let hookCount = 0;
+const unsubHook = engine.beforeCommit(['Note'], () => {
+  hookCount++;
+});
+const watchCounts = [];
+const watchHandle = engine.query.of('Note').watch((rows) => watchCounts.push(rows.length), { fields: ['title'], minGapMs: 0 });
+assert.deepEqual(watchCounts, [3]);
+engine.transact(() => {
+  assert.equal(engine.nextCounter('NOTE'), 1);
+  engine.create('Note', { title: 'Transactional note' }, 'note-d');
+  assert.equal(engine.get('note-d')?.fields.title, 'Transactional note');
+  try {
+    engine.transact(() => {
+      engine.create('Note', { title: 'Rolled back note' }, 'note-rb');
+      assert.equal(engine.nextCounter('NOTE'), 2);
+      throw new Error('rollback inner');
+    });
+  } catch {
+    // Inner savepoint rolled back while outer write survives.
+  }
+  assert.equal(engine.get('note-rb'), null);
+  assert.equal(engine.getCounter('NOTE'), 1);
+});
+assert.equal(hookCount, 1);
+engine.watches.flushSync(Date.now() + 100);
+assert.equal(watchCounts[watchCounts.length - 1], 4);
+watchHandle.stop();
+unsubHook();
 const incoming = engine.query.ids(['note-a']).hops({ relKinds: ['refs'], dir: 'in', maxHops: 1 }).all();
 assert.deepEqual(incoming.map((r) => r.fields.title).sort(), ['Backups', 'Database migrations']);
 engine.admin.close();

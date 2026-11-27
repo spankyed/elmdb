@@ -53,9 +53,19 @@ except ImportError:
 
 # Exit codes cargo-mutants answers for a run that tested what it was given: nothing missed, a mutant missed, a timeout
 TESTED = {0, 2, 3}
-# The engine's suite without the model harness, which caught none of the baseline's survivors
-# (`docs/evidence/mutation-baseline.md`) and is most of its time
-SUITE_ARGS = {"elmdb": ["--", "--", "--skip", "model::machine::the_engine"]}
+# Optional per-crate extra nextest arguments when no explicit --test-filter is provided
+SUITE_ARGS = {}
+# Internal v2 layered crates whose mutants are tested against BOTH their own crate suite AND downstream `elmdb` E2E tests
+LAYERED_ENGINE_CRATES = frozenset({
+    "elmdb-storage",
+    "elmdb-lmdb",
+    "elmdb-wire",
+    "elmdb-engine",
+    "elmdb-projections",
+    "elmdb-vec",
+    "elmdb-query",
+    "elmdb-invalidation",
+})
 # Each job's copy builds the workspace from cold in the system's temporary directory: below the floor `cargo xtask
 # pre-push` holds a run to (`xtask/src/build_dir.rs`, FLOOR) the disk would fill part way through, and the copies with
 # it, and whatever else the machine runs. Nothing is run when nothing is in scope, so nothing is asked of the disk then.
@@ -676,10 +686,13 @@ def validate_test_filter_scope(crate_files, test_filter):
 def build_mutants_command(jobs, out_dir, selection, chosen, crate_name, with_features, test_filter=None):
     """Assemble the `cargo mutants` argv for one crate."""
     suite_args = ["--", "-E", test_filter] if test_filter is not None else SUITE_ARGS.get(crate_name, [])
+    test_packages = ["--test-package", crate_name]
+    if crate_name in LAYERED_ENGINE_CRATES:
+        test_packages.extend(["--test-package", "elmdb"])
     return [
         "cargo", "mutants", "-j", jobs, "-o", str(out_dir),
         *selection, *chosen,
-        "--test-package", crate_name, *with_features, *suite_args,
+        *test_packages, *with_features, *suite_args,
     ]
 
 

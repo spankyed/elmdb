@@ -1,10 +1,10 @@
 # Targeted Miri and Linux AddressSanitizer / UndefinedBehaviorSanitizer runs: weekly, and on a dispatch.
 #
-# Miri checks the pure-Rust modules (key and value codecs, exact summation, interval tracking, label matching,
-# graph algorithms, and watch CallbackScope TLS pointer cleanup on unwind) without crossing the LMDB C FFI.
+# Miri checks the pure-Rust v2 modules (`elmdb-wire`, `elmdb-storage`, `elmdb-projections`, `elmdb-vec`,
+# and sans-I/O `elmdb-invalidation` scheduler) without crossing LMDB or zstd C FFI.
 #
 # ASan + UBSan instruments both Rust (`-Zsanitizer=address`) and the bundled C libraries (`lmdb-master-sys`,
-# `zstd-sys`) across real LMDB transactions, including `WriteTxn::into_static`, compression, and boundary fuzzing.
+# `zstd-sys`) across real LMDB transactions, map growth, durability sidecars, compression, and full v2 E2E suites.
 name: sanitizers
 
 on:
@@ -24,7 +24,7 @@ env:
 
 jobs:
   miri:
-    name: Miri (pure-Rust unit tests)
+    name: Miri (pure-Rust v2 unit tests)
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -36,42 +36,24 @@ jobs:
           key: miri
       - name: prepare miri sysroot
         run: cargo +nightly miri setup
-      - name: run pure-Rust unit tests under Miri
+      - name: run pure-Rust v2 unit tests under Miri
         run: |
           set -euo pipefail
           run_miri() {
+            local pkg="$1"
+            shift
             local log
             log=$(mktemp)
-            cargo +nightly miri test -p elmdb --lib -- "$@" --color never 2>&1 | tee "$log"
+            cargo +nightly miri test -p "$pkg" "$@" -- --color never 2>&1 | tee "$log"
             # Guard against empty filters silently passing
             grep -Eq 'test result: ok\. [1-9][0-9]* passed;' "$log"
             rm -f "$log"
           }
-          run_miri format::key::tests \
-            --skip byte_order_is_tuple_order \
-            --skip decodes_what_it_encodes \
-            --skip a_key_splits_into_its_parts_encodings_and_a_cut_part_into_none \
-            --skip a_prefix_range_holds_exactly_the_keys_that_extend_the_prefix
-          run_miri format::value::tests
-          run_miri engine::sum::tests
-          run_miri engine::tracking::tests \
-            --skip finds_exactly_the_owners_a_scan_of_every_read_set_finds
-          run_miri engine::text::labels::tests
-          run_miri engine::algorithms::tests \
-            --skip rank_agrees_with_the_dense_reference \
-            --skip weighted_rank_agrees_with_the_dense_reference \
-            --skip unit_weights_rank_as_no_weights_to_the_bit \
-            --skip components_agree_with_breadth_first_search \
-            --skip strong_components_agree_with_mutual_reachability \
-            --skip reversing_every_edge_leaves_the_strong_components \
-            --skip each_strong_component_lies_in_one_weak_one_and_together_they_form_no_cycle \
-            --skip relabelling_the_nodes_permutes_the_scores \
-            --skip communities_cover_every_node_once_each_connected_and_no_worse_than_alone \
-            --skip the_topological_order_agrees_with_its_definition \
-            --skip groups_from_labels_agree_with_grouping_by_hand \
-            --skip a_long_chain_or_cycle_walks_without_overflowing_the_stack \
-            --skip a_long_chain_orders_without_overflowing_the_stack
-          run_miri engine::watch::tests::callback_scope
+          run_miri elmdb-wire --lib
+          run_miri elmdb-storage --lib
+          run_miri elmdb-projections --lib
+          run_miri elmdb-vec --lib
+          run_miri elmdb-invalidation --test invalidation_dst sans_io_scheduler_adaptive_gap_turn_slicing_dedup_and_lifecycle
 
   asan-ubsan:
     name: ASan + UBSan (Linux x64)
@@ -95,19 +77,11 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: asan-ubsan
-      - name: run FFI, store, compression and boundary tests under ASan + UBSan
+      - name: run FFI, LMDB, durability, compression, and E2E suites under ASan + UBSan
         run: |
           set -euo pipefail
-          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p elmdb \
-            --test store_soundness \
-            --test boundary_fuzz \
-            --test engine_correctness
-          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu -p elmdb --lib -- \
-            store:: \
-            engine::tests::compression \
-            engine::tests::commits \
-            engine::tests::tracked \
-            engine::tests::graph \
-            engine::tests::trigram \
-            engine::watch:: \
-            --skip measure_idle_reader_
+          cargo +nightly test -Zbuild-std --target x86_64-unknown-linux-gnu \
+            -p elmdb-storage \
+            -p elmdb-lmdb \
+            -p elmdb-engine \
+            -p elmdb

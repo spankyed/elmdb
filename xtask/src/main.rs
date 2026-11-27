@@ -105,41 +105,66 @@ fn main() -> ExitCode {
     }
 }
 
-/// The engine's files that lock, wait or keep per-thread state outside `crate::sync`, each with why: what isn't
-/// listed here goes through it, so the models can run it on their own threads. A model of one of these is how it
-/// leaves the list
+/// v2 engine crates scanned by `check-sync` to keep direct locking outside `elmdb-storage::locks` explicit and audited.
+const SYNC_CHECKED_CRATES: &[&str] =
+    &["elmdb", "elmdb-engine", "elmdb-invalidation", "elmdb-query", "elmdb-projections", "elmdb-vec"];
+
+/// The engine's files (prefixed `<crate>/src/<rel>`) that lock, wait or keep per-thread state outside
+/// `elmdb-storage::locks`, each with why. A listed file that no longer locks is flagged as stale.
 const UNMODELLED: &[(&str, &str)] = &[
-    ("db.rs", "handle lifecycle RwLock dropping LmdbStore deterministically on close/atexit"),
-    ("diagnostics.rs", "optional tracing span collector installed by host program, outside engine concurrency"),
+    (
+        "elmdb/src/db.rs",
+        "handle lifecycle RwLock/Condvar dropping LmdbStore deterministically on close/atexit + ACTIVE_TXNS TLS",
+    ),
+    (
+        "elmdb/src/diagnostics.rs",
+        "optional tracing span collector installed by host program, outside engine concurrency",
+    ),
+    (
+        "elmdb-invalidation/src/lib.rs",
+        "LiveQueryHub Mutex protecting in-memory InvalidationIndex and sans-I/O WatchScheduler",
+    ),
 ];
 
-/// Fails on an engine file that locks outside `crate::sync` and isn't in `UNMODELLED`, on a listed file that no
-/// longer does, or on a Shuttle/Loom-modelled file whose production code reaches `std::sync::atomic` (other than
-/// `Ordering`), `std::sync::OnceLock`/`Once`, or `std::thread::spawn` directly
+/// Fails on a v2 engine file that locks outside `elmdb-storage::locks` and isn't in `UNMODELLED`, on a listed file
+/// that no longer does, or on a modelled file whose production code reaches unmodelled concurrency primitives directly.
 fn check_sync(root: &Path) -> Result<(), String> {
-    let source = root.join("crates/elmdb/src");
-    let found = unmodelled_files(&source)?;
+    let mut found = std::collections::BTreeSet::new();
+    let mut modelled = Vec::new();
+    for crate_name in SYNC_CHECKED_CRATES {
+        let source = root.join("crates").join(crate_name).join("src");
+        if !source.is_dir() {
+            continue;
+        }
+        for rel in unmodelled_files(&source)? {
+            found.insert(format!("{crate_name}/src/{rel}"));
+        }
+        for (rel, violations) in unmodelled_in_modelled_files(&source)? {
+            modelled.push((format!("{crate_name}/src/{rel}"), violations));
+        }
+    }
     let listed: std::collections::BTreeSet<String> = UNMODELLED.iter().map(|(file, _)| (*file).to_owned()).collect();
     let unlisted: Vec<_> = found.difference(&listed).collect();
     let stale: Vec<_> = listed.difference(&found).collect();
-    let modelled = unmodelled_in_modelled_files(&source)?;
     if unlisted.is_empty() && stale.is_empty() && modelled.is_empty() {
         return Ok(());
     }
     let mut message = String::new();
     if !unlisted.is_empty() {
         message += &format!(
-            "these lock, wait or keep per-thread state outside crate::sync, which the concurrency models can't run: \
-             {unlisted:?}; use crate::sync's primitives, or list the file in xtask's UNMODELLED with why\n"
+            "these lock, wait or keep per-thread state outside elmdb-storage::locks: \
+             {unlisted:?}; use elmdb-storage::locks primitives, or list the file in xtask's UNMODELLED with why\n"
         );
     }
     if !stale.is_empty() {
-        message += &format!("UNMODELLED lists files that no longer lock outside crate::sync: {stale:?}; remove them\n");
+        message += &format!(
+            "UNMODELLED lists files that no longer lock outside elmdb-storage::locks: {stale:?}; remove them\n"
+        );
     }
     if !modelled.is_empty() {
         message += &format!(
-            "these Shuttle/Loom-modelled files use unmodelled concurrency primitives directly: {modelled:?}; route \
-             them through crate::sync so the concurrency models explore every interleaving\n"
+            "these modelled files use unmodelled concurrency primitives directly: {modelled:?}; route \
+             them through the lock hierarchy\n"
         );
     }
     Err(message.trim_end().to_owned())

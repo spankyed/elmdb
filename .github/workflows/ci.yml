@@ -117,6 +117,10 @@ jobs:
       - run: cargo xtask check-leiden-serial
       - run: cargo xtask check-sync
       - run: cargo xtask check-commits
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - run: cargo xtask check-mutant-exclusions
       - run: python3 -B scripts/test-mutants-in-diff.py
       - name: binding
         run: |

@@ -178,7 +178,12 @@ class CommandAndArgsTests(unittest.TestCase):
         default_cmd = mid.build_mutants_command(
             "2", Path("out/elmdb"), ["--in-diff", "branch.diff"], [], "elmdb", ["--features", "diagnostics"]
         )
-        self.assertEqual(default_cmd[-4:], ["--", "--", "--skip", "model::machine::the_engine"])
+        self.assertEqual(default_cmd[-4:], ["--test-package", "elmdb", "--features", "diagnostics"])
+
+        layered_cmd = mid.build_mutants_command(
+            "2", Path("out/elmdb-query"), ["--in-diff", "branch.diff"], [], "elmdb-query", []
+        )
+        self.assertEqual(layered_cmd[-4:], ["--test-package", "elmdb-query", "--test-package", "elmdb"])
 
         filtered_cmd = mid.build_mutants_command(
             "2", Path("out/elmdb"), ["--in-diff", "branch.diff"], ["--re", "ranks\\.rs:42:"],
