@@ -941,10 +941,12 @@ fn search_layer_beam<R: KvRead>(
     Ok(out)
 }
 
-/// Layer-0 HNSW beam search with **inline tombstone & predicate filtering**:
+/// Layer-0 HNSW beam search with **inline tombstone, predicate, and entity-dedup filtering**:
 /// - Traverses tombstoned and predicate-unmatched nodes transparently as graph bridges (bounded by
 ///   `max_visits`) so tombstones or selective predicates (`|allowed| > 2048`) never starve `ef`!
-/// - Counts ONLY live, candidate-matching nodes toward `results.len() < ef` and `worst` termination!
+/// - Counts ONLY live, candidate-matching nodes (and, when `best_chunk_per_entity` is true, distinct
+///   `EntityKey`s!) toward `ef` and `worst` termination so a single multi-chunk document can never
+///   monopolize the HNSW beam!
 fn search_layer_beam_filtered<R: KvRead>(
     txn: &R,
     db: SubDbHandle,
@@ -952,6 +954,7 @@ fn search_layer_beam_filtered<R: KvRead>(
     entry_id: u32,
     ef: usize,
     allowed: Option<&FxHashSet<EntityKey>>,
+    best_chunk_per_entity: bool,
 ) -> Result<Vec<(EntityKey, u32, f32)>> {
     let dims = q.vec.len();
     let ef = ef.max(1);
@@ -966,6 +969,26 @@ fn search_layer_beam_filtered<R: KvRead>(
     let mut candidates: BinaryHeap<MinDistNode> = BinaryHeap::new();
     let mut results: BinaryHeap<DistNode> = BinaryHeap::new();
     let mut accepted: FxHashMap<u32, (EntityKey, u32, f32)> = FxHashMap::default();
+    // When `best_chunk_per_entity` is true, tracks `(node_id, chunk_id, best_dist)` per distinct live EntityKey.
+    let mut best_by_entity: FxHashMap<EntityKey, (u32, u32, f32)> = FxHashMap::default();
+
+    let prune_stale_top = |results: &mut BinaryHeap<DistNode>,
+                           accepted: &FxHashMap<u32, (EntityKey, u32, f32)>,
+                           best_by_entity: &FxHashMap<EntityKey, (u32, u32, f32)>| {
+        if !best_chunk_per_entity {
+            return;
+        }
+        while let Some(top) = results.peek() {
+            let is_current = accepted
+                .get(&top.id)
+                .and_then(|&(ek, _, _)| best_by_entity.get(&ek))
+                .is_some_and(|&(best_id, _, _)| best_id == top.id);
+            if is_current {
+                break;
+            }
+            results.pop();
+        }
+    };
 
     let is_live_match = |node: &PackedHnswNode| -> Result<bool> {
         if allowed.is_some_and(|set| !set.contains(&node.entity)) {
@@ -983,11 +1006,16 @@ fn search_layer_beam_filtered<R: KvRead>(
     if is_live_match(&ep_node)? {
         results.push(ep);
         accepted.insert(entry_id, (ep_node.entity, ep_node.chunk, ep_dist));
+        if best_chunk_per_entity {
+            best_by_entity.insert(ep_node.entity, (entry_id, ep_node.chunk, ep_dist));
+        }
     }
 
     while let Some(MinDistNode(curr)) = candidates.pop() {
+        prune_stale_top(&mut results, &accepted, &best_by_entity);
+        let result_count = if best_chunk_per_entity { best_by_entity.len() } else { results.len() };
         let worst = results.peek().map_or(f32::INFINITY, |r| r.dist);
-        if results.len() >= ef && curr.dist > worst {
+        if result_count >= ef && curr.dist > worst {
             break;
         }
         if visited.len() >= max_visits {
@@ -1003,17 +1031,42 @@ fn search_layer_beam_filtered<R: KvRead>(
             }
             let n = load_node(txn, db, nid, dims)?;
             let d = cosine_distance_query_vs_quant(q.vec, q.norm, &n.vec);
+            prune_stale_top(&mut results, &accepted, &best_by_entity);
+            let cur_count = if best_chunk_per_entity { best_by_entity.len() } else { results.len() };
             let worst_now = results.peek().map_or(f32::INFINITY, |r| r.dist);
-            if results.len() < ef || d < worst_now {
+            if cur_count < ef || d < worst_now {
                 let dn = DistNode { dist: d, id: nid };
                 candidates.push(MinDistNode(dn));
                 if is_live_match(&n)? {
-                    results.push(dn);
-                    accepted.insert(nid, (n.entity, n.chunk, d));
-                    if results.len() > ef
-                        && let Some(evicted) = results.pop()
-                    {
-                        accepted.remove(&evicted.id);
+                    if best_chunk_per_entity {
+                        if let Some(&(prev_nid, prev_chunk, prev_dist)) = best_by_entity.get(&n.entity) {
+                            if d < prev_dist || (d.to_bits() == prev_dist.to_bits() && n.chunk < prev_chunk) {
+                                accepted.remove(&prev_nid);
+                                accepted.insert(nid, (n.entity, n.chunk, d));
+                                best_by_entity.insert(n.entity, (nid, n.chunk, d));
+                                results.push(dn);
+                            }
+                        } else {
+                            accepted.insert(nid, (n.entity, n.chunk, d));
+                            best_by_entity.insert(n.entity, (nid, n.chunk, d));
+                            results.push(dn);
+                            if best_by_entity.len() > ef {
+                                prune_stale_top(&mut results, &accepted, &best_by_entity);
+                                if let Some(evicted) = results.pop()
+                                    && let Some((ev_ek, _, _)) = accepted.remove(&evicted.id)
+                                {
+                                    best_by_entity.remove(&ev_ek);
+                                }
+                            }
+                        }
+                    } else {
+                        results.push(dn);
+                        accepted.insert(nid, (n.entity, n.chunk, d));
+                        if results.len() > ef
+                            && let Some(evicted) = results.pop()
+                        {
+                            accepted.remove(&evicted.id);
+                        }
                     }
                 }
             }
@@ -1023,8 +1076,11 @@ fn search_layer_beam_filtered<R: KvRead>(
         }
     }
 
-    let mut out: Vec<(EntityKey, u32, f32)> =
-        results.into_vec().into_iter().filter_map(|dn| accepted.get(&dn.id).copied()).collect();
+    let mut out: Vec<(EntityKey, u32, f32)> = if best_chunk_per_entity {
+        best_by_entity.into_iter().map(|(ek, (_, chunk, dist))| (ek, chunk, dist)).collect()
+    } else {
+        results.into_vec().into_iter().filter_map(|dn| accepted.get(&dn.id).copied()).collect()
+    };
     out.sort_by(|a, b| a.2.total_cmp(&b.2).then_with(|| a.0.cmp(&b.0)).then_with(|| a.1.cmp(&b.1)));
     Ok(out)
 }
@@ -1435,7 +1491,7 @@ pub fn search_near<R: KvRead>(
             curr_id = nid;
             curr_dist = nd;
         }
-        let beam = search_layer_beam_filtered(txn, db, q, curr_id, rerank_k, candidates)?;
+        let beam = search_layer_beam_filtered(txn, db, q, curr_id, rerank_k, candidates, best_chunk_per_entity)?;
         for (entity, chunk, dist) in beam {
             pool.entry((entity, chunk))
                 .and_modify(|d| {

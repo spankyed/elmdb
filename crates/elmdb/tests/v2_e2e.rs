@@ -1726,3 +1726,610 @@ fn batch2_map_growth_cross_proc_resize_sidecar_race_opguard_hooks_and_index_disa
         reopened.close().unwrap();
     }
 }
+
+#[test]
+#[ignore = "child process helper invoked by batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_and_order_schema"]
+fn child_batch3_worker() {
+    let dir = std::path::PathBuf::from(std::env::var("ELMDB_TEST_B3_DIR").expect("ELMDB_TEST_B3_DIR"));
+    let mode = std::env::var("ELMDB_TEST_B3_MODE").unwrap_or_else(|_| "combined".into());
+    let db = Database::open(
+        &dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    if mode == "maint_only" {
+        // P0-1 review regression: maintenance-only write in child, followed by unrelated local commit in parent!
+        db.set_embeddings("emb", "n2", &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    } else {
+        // P0-11: Combine a normal data commit (bumps commit_seq += 1, txnid += 1) AND a maintenance
+        // write (`set_embeddings`, bumps txnid += 1 without bumping commit_seq) in one polling window!
+        db.execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("a1".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Updated By Child".into()))],
+        }])
+        .unwrap();
+        db.set_embeddings("emb", "n1", &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    }
+    db.close().unwrap();
+}
+
+#[test]
+fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_and_order_schema() {
+    let tmp = tempdir().unwrap();
+    let db_dir = tmp.path().join("batch3_db");
+    let db = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Strict,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    // P2-7: Order index on non-String field (Any / Integer) MUST be rejected with InvalidSchema!
+    let mut bad_any_types = BTreeMap::new();
+    let mut bad_any_fields = BTreeMap::new();
+    bad_any_fields.insert("payload".into(), FieldDefinition { kind: FieldSpec::Any, optional: true, nullable: true });
+    let mut bad_any_indexes = BTreeMap::new();
+    bad_any_indexes
+        .insert("ord_payload".into(), IndexDefinition::Order { field: "payload".into(), locale: "en-US".into() });
+    bad_any_types.insert(
+        "Bad".into(),
+        TypeDefinition { fields: bad_any_fields, indexes: bad_any_indexes, ..Default::default() },
+    );
+    let bad_order_any = Schema { dollar_schema: None, types: bad_any_types, relations: BTreeMap::new() };
+    assert_eq!(db.set_schema(&bad_order_any).unwrap_err().code, ErrorCode::InvalidSchema);
+
+    let mut bad_int_types = BTreeMap::new();
+    let mut bad_int_fields = BTreeMap::new();
+    bad_int_fields.insert("score".into(), FieldDefinition { kind: FieldSpec::Integer, optional: true, nullable: true });
+    let mut bad_int_indexes = BTreeMap::new();
+    bad_int_indexes
+        .insert("ord_score".into(), IndexDefinition::Order { field: "score".into(), locale: "en-US".into() });
+    bad_int_types.insert(
+        "Bad".into(),
+        TypeDefinition { fields: bad_int_fields, indexes: bad_int_indexes, ..Default::default() },
+    );
+    let bad_order_int = Schema { dollar_schema: None, types: bad_int_types, relations: BTreeMap::new() };
+    assert_eq!(db.set_schema(&bad_order_int).unwrap_err().code, ErrorCode::InvalidSchema);
+
+    // Build rich schema covering Author, Note (Text + Trigram + Vector + Ref), and Node (graph links).
+    let mut types = BTreeMap::new();
+    let mut author_fields = BTreeMap::new();
+    author_fields.insert("name".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    types.insert("Author".into(), TypeDefinition { fields: author_fields, ..Default::default() });
+
+    let mut note_fields = BTreeMap::new();
+    note_fields.insert("body".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    note_fields.insert(
+        "author".into(),
+        FieldDefinition {
+            kind: FieldSpec::Ref { to: vec!["Author".into()], on_delete: elmdb::protocol::ProtocolOnDelete::SetNull },
+            optional: true,
+            nullable: true,
+        },
+    );
+    let mut note_indexes = BTreeMap::new();
+    note_indexes.insert("txt".into(), IndexDefinition::Text { fields: vec![("body".into(), 1)] });
+    note_indexes.insert("tri".into(), IndexDefinition::Trigram { fields: vec!["body".into()] });
+    note_indexes.insert(
+        "emb".into(),
+        IndexDefinition::Vector { fields: vec!["body".into()], dims: 4, quantization: "sq8".into() },
+    );
+    types.insert("Note".into(), TypeDefinition { fields: note_fields, indexes: note_indexes, ..Default::default() });
+
+    let mut node_fields = BTreeMap::new();
+    node_fields.insert("label".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    types.insert("Node".into(), TypeDefinition { fields: node_fields, ..Default::default() });
+
+    let mut relations = BTreeMap::new();
+    relations.insert(
+        "link".into(),
+        RelationDefinition {
+            endpoints: vec![RelationEndpoint { source: "Node".into(), target: "Node".into() }],
+            ..Default::default()
+        },
+    );
+    let schema = Schema { dollar_schema: None, types, relations };
+    db.set_schema(&schema).unwrap();
+
+    db.execute_batch(&[
+        WireOp::Create {
+            type_name: "Author".into(),
+            external_id: Some("a1".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Alice".into()))],
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n1".into()),
+            fields: vec![("body".into(), CanonicalValue::String("the quick brown fox jumps".into()))],
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n2".into()),
+            fields: vec![("body".into(), CanonicalValue::String("quick unrelated brown ... fox".into()))],
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n_greek_mid".into()),
+            fields: vec![("body".into(), CanonicalValue::String("ΑΟΣΑ".into()))],
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n_greek_end".into()),
+            fields: vec![("body".into(), CanonicalValue::String("ΑΟΣ".into()))],
+        },
+        WireOp::Create {
+            type_name: "Node".into(),
+            external_id: Some("A".into()),
+            fields: vec![("label".into(), CanonicalValue::String("A".into()))],
+        },
+        WireOp::Create {
+            type_name: "Node".into(),
+            external_id: Some("B".into()),
+            fields: vec![("label".into(), CanonicalValue::String("B".into()))],
+        },
+        WireOp::Create {
+            type_name: "Node".into(),
+            external_id: Some("C".into()),
+            fields: vec![("label".into(), CanonicalValue::String("C".into()))],
+        },
+        WireOp::Link {
+            rel_kind: "link".into(),
+            source: EntityTarget::ExternalId("A".into()),
+            target: EntityTarget::ExternalId("B".into()),
+            weight: None,
+            info: None,
+        },
+        WireOp::Link {
+            rel_kind: "link".into(),
+            source: EntityTarget::ExternalId("B".into()),
+            target: EntityTarget::ExternalId("C".into()),
+            weight: None,
+            info: None,
+        },
+    ])
+    .unwrap();
+
+    // -------------------------------------------------------------------------
+    // 1. P1-8: Trigram Regex + Contains on Greek contextual final sigma (`ΑΟΣ` vs `ΑΟΣΑ`)
+    // -------------------------------------------------------------------------
+    for expr in [
+        QueryFilter::Regex { field: "body".into(), pattern: "ΑΟΣ".into() },
+        QueryFilter::Regex { field: "body".into(), pattern: "(?i)ΑΟΣ".into() },
+        QueryFilter::Contains { field: "body".into(), needle: "ΑΟΣ".into() },
+    ] {
+        let q = QuerySpec {
+            source: QuerySource::Type { type_name: "Note".into(), include_trashed: false },
+            steps: vec![QueryStep::Filter { expr }],
+            terminal: Some(QueryTerminal::Ids),
+            explain: true,
+        };
+        let ans = db.execute_query_spec(&q, ExecBudgets::default()).unwrap();
+        let QueryAnswerBody::Ids { mut ids } = ans.body else { panic!("expected Ids") };
+        ids.sort();
+        assert_eq!(ids, vec!["n_greek_end", "n_greek_mid"], "Greek trigram query must match both ΑΟΣ and ΑΟΣΑ");
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. P1-9: Phrase-only BM25F search (`query: ""` + `phrase: [...]`) returns matching docs
+    // -------------------------------------------------------------------------
+    for empty_q in ["", "   "] {
+        let q = QuerySpec {
+            source: QuerySource::Type { type_name: "Note".into(), include_trashed: false },
+            steps: vec![QueryStep::Score {
+                spec: QueryScore::Bm25f {
+                    index: "txt".into(),
+                    query: empty_q.into(),
+                    require_all: false,
+                    prefix: false,
+                    phrase: Some(vec!["quick".into(), "brown".into()]),
+                    top_k: Some(10),
+                },
+            }],
+            terminal: Some(QueryTerminal::Ids),
+            explain: false,
+        };
+        let QueryAnswerBody::Ids { ids } = db.execute_query_spec(&q, ExecBudgets::default()).unwrap().body else {
+            panic!("expected Ids");
+        };
+        assert_eq!(ids, vec!["n1"], "phrase-only BM25F search must return exact phrase match");
+    }
+
+    // -------------------------------------------------------------------------
+    // 3. P0-10: Maintenance writes (`setEmbeddings`, `driveBackgroundWork`, `flush`, `rebuild`)
+    //    invalidate affected watches ONCE and settle cleanly (`watches_settled() == true`)!
+    // -------------------------------------------------------------------------
+    let vec_spec = QuerySpec {
+        source: QuerySource::Type { type_name: "Note".into(), include_trashed: false },
+        steps: vec![QueryStep::Score {
+            spec: QueryScore::VectorNear { index: "emb".into(), vector: vec![1.0, 0.0, 0.0, 0.0], top_k: 5 },
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let fast_policy = WatchPolicy { min_gap_ms: 0, adaptive_multiplier: 0, ..Default::default() };
+    let (w_vec, init_vec) = db.register_query_watch(&vec_spec, fast_policy, 1000).unwrap();
+    let QueryAnswerBody::Ids { ids } = init_vec.body else { panic!("expected Ids") };
+    assert!(ids.is_empty());
+    assert!(db.watches_settled());
+
+    let mut now = 2000u64;
+    // (a) set_embeddings
+    db.set_embeddings("emb", "n2", &[vec![0.0, 1.0, 0.0, 0.0]]).unwrap();
+    assert!(!db.watches_settled());
+    assert!(db.begin_watch_run(w_vec));
+    let _ = db.rerun_query_watch(w_vec, &vec_spec, now, 1).unwrap();
+    assert!(db.watches_settled(), "watch MUST settle after single rerun following setEmbeddings (no livelock!)");
+    assert!(db.tick_watches(now + 100).due_ids.is_empty());
+
+    // (b) drive_background_work
+    now += 1000;
+    let _ = db.drive_background_work(64).unwrap();
+    if !db.watches_settled() {
+        assert!(db.begin_watch_run(w_vec));
+        let _ = db.rerun_query_watch(w_vec, &vec_spec, now, 1).unwrap();
+    }
+    assert!(db.watches_settled(), "watch MUST settle after driveBackgroundWork");
+
+    // (c) flush
+    now += 1000;
+    db.flush().unwrap();
+    if !db.watches_settled() {
+        assert!(db.begin_watch_run(w_vec));
+        let _ = db.rerun_query_watch(w_vec, &vec_spec, now, 1).unwrap();
+    }
+    assert!(db.watches_settled(), "watch MUST settle after flush");
+
+    // (d) rebuild
+    now += 1000;
+    db.rebuild(None).unwrap();
+    assert!(!db.watches_settled());
+    assert!(db.begin_watch_run(w_vec));
+    let _ = db.rerun_query_watch(w_vec, &vec_spec, now, 1).unwrap();
+    assert!(db.watches_settled(), "watch MUST settle after single rerun following rebuild (no livelock!)");
+
+    // -------------------------------------------------------------------------
+    // 4. P0-11: Cross-process normal commit + maintenance write in same poll window!
+    // -------------------------------------------------------------------------
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_batch3_worker", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_B3_DIR", &db_dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "child_batch3_worker failed: {status}");
+
+    now += 1000;
+    let dirtied = db.catch_up_cross_process(now).unwrap();
+    assert!(dirtied.contains(&w_vec), "cross-process normal commit + setEmbeddings MUST dirty Note vector watch!");
+    assert!(db.begin_watch_run(w_vec));
+    let (ans_after_child, delivered) = db.rerun_query_watch(w_vec, &vec_spec, now + 10, 1).unwrap();
+    assert!(delivered);
+    let QueryAnswerBody::Ids { ids } = ans_after_child.body else { panic!("expected Ids") };
+    assert!(ids.contains(&"n1".to_string()), "reran vector watch must see child's embedding for n1");
+    assert!(db.watches_settled(), "watch MUST settle cleanly after cross-process maintenance rerun");
+
+    // Review P0-1 regression: child performs maintenance-only `set_embeddings("emb", "n2", [1,0,0,0])`,
+    // then parent performs an UNRELATED local write (`Patch Author("a1")`) BEFORE `catch_up_cross_process()`.
+    // `notify_commit` MUST detect the txnid maintenance gap and dirty `w_vec` instead of swallowing it!
+    let status2 = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_batch3_worker", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_B3_DIR", &db_dir)
+        .env("ELMDB_TEST_B3_MODE", "maint_only")
+        .status()
+        .unwrap();
+    assert!(status2.success(), "child_batch3_worker(maint_only) failed: {status2}");
+
+    db.execute_batch(&[WireOp::Patch {
+        target: EntityTarget::ExternalId("a1".into()),
+        fields: vec![("name".into(), CanonicalValue::String("Local Unrelated After Child Maint".into()))],
+    }])
+    .unwrap();
+    now += 1000;
+    let due_after_local = db.tick_watches(now).due_ids;
+    assert!(
+        due_after_local.contains(&w_vec),
+        "unrelated local commit after cross-process maintenance write MUST detect txnid gap and dirty Note vector watch!"
+    );
+    assert!(db.begin_watch_run(w_vec));
+    let _ = db.rerun_query_watch(w_vec, &vec_spec, now + 10, 1).unwrap();
+    assert!(db.watches_settled(), "watch MUST settle cleanly after txnid-gap rerun");
+    db.unregister_watch(w_vec);
+
+    // -------------------------------------------------------------------------
+    // 5. P0-12: Watches referencing not-yet-created external IDs (`ids`, `where(ref)`, `hasLink(target)`)
+    // -------------------------------------------------------------------------
+    let spec_future_ids = QuerySpec {
+        source: QuerySource::Ids { ids: vec!["future_author".into()] },
+        steps: vec![],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let spec_future_ref = QuerySpec {
+        source: QuerySource::Type { type_name: "Note".into(), include_trashed: false },
+        steps: vec![QueryStep::Filter {
+            expr: QueryFilter::Eq { field: "author".into(), value: serde_json::json!("future_author") },
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let spec_future_link = QuerySpec {
+        source: QuerySource::Type { type_name: "Node".into(), include_trashed: false },
+        steps: vec![QueryStep::Filter {
+            expr: QueryFilter::HasLink {
+                rel_kinds: vec!["link".into()],
+                dir: "out".into(),
+                target_id: Some("future_node".into()),
+            },
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+
+    now += 1000;
+    let (w_f_ids, _) = db.register_query_watch(&spec_future_ids, fast_policy, now).unwrap();
+    let (w_f_ref, _) = db.register_query_watch(&spec_future_ref, fast_policy, now).unwrap();
+    let (w_f_link, _) = db.register_query_watch(&spec_future_link, fast_policy, now).unwrap();
+    assert!(db.watches_settled());
+
+    db.execute_batch(&[
+        WireOp::Create {
+            type_name: "Author".into(),
+            external_id: Some("future_author".into()),
+            fields: vec![("name".into(), CanonicalValue::String("Future".into()))],
+        },
+        WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("n_future_ref".into()),
+            fields: vec![
+                ("body".into(), CanonicalValue::String("note for future author".into())),
+                ("author".into(), CanonicalValue::String("future_author".into())),
+            ],
+        },
+        WireOp::Create {
+            type_name: "Node".into(),
+            external_id: Some("future_node".into()),
+            fields: vec![("label".into(), CanonicalValue::String("FutureNode".into()))],
+        },
+        WireOp::Link {
+            rel_kind: "link".into(),
+            source: EntityTarget::ExternalId("C".into()),
+            target: EntityTarget::ExternalId("future_node".into()),
+            weight: None,
+            info: None,
+        },
+    ])
+    .unwrap();
+
+    now += 1000;
+    let due = db.tick_watches(now).due_ids;
+    assert!(due.contains(&w_f_ids), "ids(['future_author']) watch must fire on creation");
+    assert!(due.contains(&w_f_ref), "where(author == 'future_author') watch must fire on creation");
+    assert!(due.contains(&w_f_link), "hasLink(target: 'future_node') watch must fire on creation");
+
+    assert!(db.begin_watch_run(w_f_ids));
+    let (ans_f_ids, _) = db.rerun_query_watch(w_f_ids, &spec_future_ids, now, 1).unwrap();
+    let QueryAnswerBody::Ids { ids: got_ids } = ans_f_ids.body else { panic!("expected Ids") };
+    assert_eq!(got_ids, vec!["future_author"]);
+
+    assert!(db.begin_watch_run(w_f_ref));
+    let (ans_f_ref, _) = db.rerun_query_watch(w_f_ref, &spec_future_ref, now, 1).unwrap();
+    let QueryAnswerBody::Ids { ids: got_ref } = ans_f_ref.body else { panic!("expected Ids") };
+    assert_eq!(got_ref, vec!["n_future_ref"]);
+
+    assert!(db.begin_watch_run(w_f_link));
+    let (ans_f_link, _) = db.rerun_query_watch(w_f_link, &spec_future_link, now, 1).unwrap();
+    let QueryAnswerBody::Ids { ids: got_link } = ans_f_link.body else { panic!("expected Ids") };
+    assert_eq!(got_link, vec!["C"]);
+
+    db.unregister_watch(w_f_ids);
+    db.unregister_watch(w_f_ref);
+    db.unregister_watch(w_f_link);
+
+    // -------------------------------------------------------------------------
+    // 6. P0-14: Soft-trashed entities excluded from `hops`, `shortestPath`, `hasLink`, `degrees`
+    //    when `includeTrashed: false` AND live watches fire when neighbor `B` is trashed!
+    // -------------------------------------------------------------------------
+    let make_hops = |inc_trashed: bool| QuerySpec {
+        source: QuerySource::Type { type_name: "Node".into(), include_trashed: inc_trashed },
+        steps: vec![
+            QueryStep::Filter { expr: QueryFilter::Eq { field: "label".into(), value: serde_json::json!("A") } },
+            QueryStep::Hops { rel_kinds: vec!["link".into()], dir: "out".into(), min_hops: 1, max_hops: 2 },
+        ],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let make_sp = |inc_trashed: bool, target: &str| QuerySpec {
+        source: QuerySource::Type { type_name: "Node".into(), include_trashed: inc_trashed },
+        steps: vec![
+            QueryStep::Filter { expr: QueryFilter::Eq { field: "label".into(), value: serde_json::json!("A") } },
+            QueryStep::ShortestPath {
+                rel_kinds: vec!["link".into()],
+                dir: "out".into(),
+                target_id: target.into(),
+                max_hops: 3,
+            },
+        ],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let make_has_link_pushdown = |inc_trashed: bool| QuerySpec {
+        source: QuerySource::Type { type_name: "Node".into(), include_trashed: inc_trashed },
+        steps: vec![QueryStep::Filter {
+            expr: QueryFilter::HasLink {
+                rel_kinds: vec!["link".into()],
+                dir: "out".into(),
+                target_id: Some("B".into()),
+            },
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let make_has_link_any = |inc_trashed: bool| QuerySpec {
+        source: QuerySource::Type { type_name: "Node".into(), include_trashed: inc_trashed },
+        steps: vec![
+            QueryStep::Filter { expr: QueryFilter::Eq { field: "label".into(), value: serde_json::json!("A") } },
+            QueryStep::Filter {
+                expr: QueryFilter::HasLink { rel_kinds: vec!["link".into()], dir: "out".into(), target_id: None },
+            },
+        ],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let make_degrees = |inc_trashed: bool| QuerySpec {
+        source: QuerySource::Type { type_name: "Node".into(), include_trashed: inc_trashed },
+        steps: vec![QueryStep::Filter {
+            expr: QueryFilter::Eq { field: "label".into(), value: serde_json::json!("A") },
+        }],
+        terminal: Some(QueryTerminal::Degrees { rel_kinds: vec!["link".into()], dir: "out".into() }),
+        explain: false,
+    };
+
+    now += 1000;
+    let (w_hops, _) = db.register_query_watch(&make_hops(false), fast_policy, now).unwrap();
+    let (w_sp, _) = db.register_query_watch(&make_sp(false, "C"), fast_policy, now).unwrap();
+    let (w_hl, _) = db.register_query_watch(&make_has_link_pushdown(false), fast_policy, now).unwrap();
+    let (w_deg, _) = db.register_query_watch(&make_degrees(false), fast_policy, now).unwrap();
+
+    // Trash intermediate node B (`A -> B -> C`)!
+    db.execute_batch(&[WireOp::Trash { target: EntityTarget::ExternalId("B".into()) }]).unwrap();
+
+    now += 1000;
+    let due_graph = db.tick_watches(now).due_ids;
+    assert!(due_graph.contains(&w_hops), "trashing neighbor B must invalidate hops watch");
+    assert!(due_graph.contains(&w_sp), "trashing neighbor B must invalidate shortestPath watch");
+    assert!(due_graph.contains(&w_hl), "trashing target B must invalidate hasLink watch");
+    assert!(due_graph.contains(&w_deg), "trashing neighbor B must invalidate degrees watch");
+    db.unregister_watch(w_hops);
+    db.unregister_watch(w_sp);
+    db.unregister_watch(w_hl);
+    db.unregister_watch(w_deg);
+
+    // With includeTrashed: false -> B is excluded AND not traversed through to C!
+    let QueryAnswerBody::Ids { ids: h_live } =
+        db.execute_query_spec(&make_hops(false), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(h_live.is_empty(), "hops(includeTrashed=false) must exclude trashed B and not traverse to C: {h_live:?}");
+
+    let QueryAnswerBody::Ids { ids: sp_c_live } =
+        db.execute_query_spec(&make_sp(false, "C"), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(sp_c_live.is_empty(), "shortestPath(A->C) must not traverse through trashed B");
+
+    let QueryAnswerBody::Ids { ids: sp_b_live } =
+        db.execute_query_spec(&make_sp(false, "B"), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(sp_b_live.is_empty(), "shortestPath(A->B) must exclude trashed target B");
+
+    let QueryAnswerBody::Ids { ids: hl_push_live } =
+        db.execute_query_spec(&make_has_link_pushdown(false), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(hl_push_live.is_empty(), "hasLink(target: B) pushdown must exclude trashed B");
+
+    let QueryAnswerBody::Ids { ids: hl_any_live } =
+        db.execute_query_spec(&make_has_link_any(false), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(hl_any_live.is_empty(), "hasLink(dir: out) must ignore edges to trashed B");
+
+    let QueryAnswerBody::Degrees { degrees: deg_live } =
+        db.execute_query_spec(&make_degrees(false), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Degrees");
+    };
+    assert_eq!(deg_live, vec![("A".to_string(), 0)], "degrees(A) must not count trashed neighbor B");
+
+    // With includeTrashed: true -> B IS visible and traversed to C!
+    let QueryAnswerBody::Ids { ids: mut h_all } =
+        db.execute_query_spec(&make_hops(true), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    h_all.sort();
+    assert_eq!(h_all, vec!["B", "C"]);
+
+    let QueryAnswerBody::Ids { ids: sp_all } =
+        db.execute_query_spec(&make_sp(true, "C"), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert_eq!(sp_all, vec!["A", "B", "C"]);
+
+    let QueryAnswerBody::Ids { ids: hl_all } =
+        db.execute_query_spec(&make_has_link_pushdown(true), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert_eq!(hl_all, vec!["A"]);
+
+    let QueryAnswerBody::Degrees { degrees: deg_all } =
+        db.execute_query_spec(&make_degrees(true), ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Degrees");
+    };
+    assert_eq!(deg_all, vec![("A".to_string(), 1)]);
+
+    // Review P1-2 regression: `LiteralKeys` (`ids(["B"])`) where seed `B` is trashed must neither emit
+    // `B` nor traverse out of `B` to `C` in `hops` or `shortestPath`!
+    let trashed_seed_hops = QuerySpec {
+        source: QuerySource::Ids { ids: vec!["B".into()] },
+        steps: vec![QueryStep::Hops { rel_kinds: vec!["link".into()], dir: "out".into(), min_hops: 0, max_hops: 2 }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let QueryAnswerBody::Ids { ids: ts_hops } =
+        db.execute_query_spec(&trashed_seed_hops, ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(ts_hops.is_empty(), "hops from trashed LiteralKeys seed must be empty, got {ts_hops:?}");
+
+    let trashed_seed_sp = QuerySpec {
+        source: QuerySource::Ids { ids: vec!["B".into()] },
+        steps: vec![QueryStep::ShortestPath {
+            rel_kinds: vec!["link".into()],
+            dir: "out".into(),
+            target_id: "C".into(),
+            max_hops: 2,
+        }],
+        terminal: Some(QueryTerminal::Ids),
+        explain: false,
+    };
+    let QueryAnswerBody::Ids { ids: ts_sp } =
+        db.execute_query_spec(&trashed_seed_sp, ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(ts_sp.is_empty(), "shortestPath from trashed LiteralKeys seed must be empty, got {ts_sp:?}");
+
+    // -------------------------------------------------------------------------
+    // 7. P1-11: Dropping and re-adding a Vector index produces clean empty recall
+    //    (physical `dbs.embeddings` purge is directly asserted in `vector_and_rank_dst.rs`!)
+    // -------------------------------------------------------------------------
+    let mut dropped_vec_schema = schema.clone();
+    dropped_vec_schema.types.get_mut("Note").unwrap().indexes.remove("emb");
+    db.set_schema(&dropped_vec_schema).unwrap();
+    db.set_schema(&schema).unwrap();
+    let QueryAnswerBody::Ids { ids: after_readd } =
+        db.execute_query_spec(&vec_spec, ExecBudgets::default()).unwrap().body
+    else {
+        panic!("expected Ids");
+    };
+    assert!(after_readd.is_empty(), "dropped vector index must have purged primary embeddings: {after_readd:?}");
+
+    db.close().unwrap();
+}

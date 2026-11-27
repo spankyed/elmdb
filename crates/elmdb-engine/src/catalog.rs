@@ -583,7 +583,16 @@ impl CompiledSchema {
                             continue;
                         }
                         match tdef.field_by_name(field) {
-                            Some(fd) => IndexKind::Order { field: fd.id, locale: locale.clone() },
+                            Some(fd) if matches!(fd.kind, FieldKind::String) => {
+                                IndexKind::Order { field: fd.id, locale: locale.clone() }
+                            }
+                            Some(fd) => {
+                                errors.push(format!(
+                                    "{path}: order index field '{field}' must have kind String (got {:?})",
+                                    fd.kind
+                                ));
+                                continue;
+                            }
                             None => {
                                 errors.push(format!("{path}: unknown field '{field}'"));
                                 continue;

@@ -95,19 +95,30 @@ impl LiveQueryHub {
         cost_ms: u64,
         result_hash: impl FnOnce(&QueryOutput) -> Option<[u8; 16]>,
     ) -> Result<(WatchId, QueryOutput)> {
+        if self.state.lock().expect("hub lock poisoned").scheduler.is_stopped() {
+            return Err(elmdb_wire::ElmdbError::new(elmdb_wire::ErrorCode::Closed, "watch scheduler is stopped"));
+        }
         let watch_id = self.alloc_watch_id();
-        let (read_seq, read_epoch, output, read_set) = run_tracked_snapshot(engine, query_engine, plan, budgets)?;
+        let (read_seq, read_txnid, read_epoch, output, read_set) =
+            run_tracked_snapshot(engine, query_engine, plan, budgets)?;
         let hash = result_hash(&output);
         let current_schema = engine.schema();
 
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        // P0-4: Never leak into `InvalidationIndex` if `stop_watches()` raced with our lock-free snapshot!
+        // P0-4 / P0-13: Fail closed if `stop_watches()` raced with our lock-free snapshot!
         if guard.scheduler.is_stopped() {
-            return Ok((watch_id, output));
+            return Err(elmdb_wire::ElmdbError::new(elmdb_wire::ErrorCode::Closed, "watch scheduler is stopped"));
         }
         // P0-6: Mark `already_ran = true` even when `hash == None` (e.g. Imperative watches)!
         guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
-        let stale = guard.index.register_after_read(watch_id, read_seq, read_epoch, &read_set, &current_schema);
+        let stale = guard.index.register_after_read_with_txnid(
+            watch_id,
+            read_seq,
+            read_txnid,
+            read_epoch,
+            &read_set,
+            &current_schema,
+        );
         if stale {
             guard.scheduler.mark_dirty(&[watch_id], now_ms);
         }
@@ -143,7 +154,7 @@ impl LiveQueryHub {
                 return Err(e);
             }
         };
-        let (read_seq, read_epoch, output, read_set) = snap;
+        let (read_seq, read_txnid, read_epoch, output, read_set) = snap;
         let hash = result_hash(&output);
         let current_schema = engine.schema();
 
@@ -152,7 +163,14 @@ impl LiveQueryHub {
         if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
             return Ok((output, false));
         }
-        let stale = guard.index.register_after_read(watch_id, read_seq, read_epoch, &read_set, &current_schema);
+        let stale = guard.index.register_after_read_with_txnid(
+            watch_id,
+            read_seq,
+            read_txnid,
+            read_epoch,
+            &read_set,
+            &current_schema,
+        );
         if stale {
             guard.scheduler.mark_dirty(&[watch_id], now_ms);
         }
@@ -175,25 +193,42 @@ impl LiveQueryHub {
             &S::RoTxn<'_>,
             &CompiledSchema,
             &mut dyn FnMut(&LogicalPlan) -> Result<QueryOutput>,
+            &mut bool,
         ) -> Result<(A, Option<[u8; 16]>)>,
     ) -> Result<(WatchId, A)> {
+        use elmdb_storage::KvRead;
+        if self.state.lock().expect("hub lock poisoned").scheduler.is_stopped() {
+            return Err(elmdb_wire::ElmdbError::new(elmdb_wire::ErrorCode::Closed, "watch scheduler is stopped"));
+        }
         let watch_id = self.alloc_watch_id();
         let (ro, schema) = engine.begin_read_pinned()?;
         let read_seq = read_commit_seq(&ro, &engine.dbs())?;
+        let read_txnid = ro.txnid();
         let read_epoch = schema.epoch;
         let mut read_set = ReadSet::new();
+        let mut unresolved_ext_id = false;
         let mut exec =
             |plan: &LogicalPlan| query_engine.execute_in_txn(engine, &ro, &schema, plan, budgets, &mut read_set);
-        let (answer, hash) = compile_and_materialize(&ro, &schema, &mut exec)?;
+        let (answer, hash) = compile_and_materialize(&ro, &schema, &mut exec, &mut unresolved_ext_id)?;
+        if unresolved_ext_id {
+            elmdb_query::QueryReadRecorder::record_all_entities(&mut read_set);
+        }
         drop(ro);
         let current_schema = engine.schema();
 
         let mut guard = self.state.lock().expect("hub lock poisoned");
         if guard.scheduler.is_stopped() {
-            return Ok((watch_id, answer));
+            return Err(elmdb_wire::ElmdbError::new(elmdb_wire::ErrorCode::Closed, "watch scheduler is stopped"));
         }
         guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
-        let stale = guard.index.register_after_read(watch_id, read_seq, read_epoch, &read_set, &current_schema);
+        let stale = guard.index.register_after_read_with_txnid(
+            watch_id,
+            read_seq,
+            read_txnid,
+            read_epoch,
+            &read_set,
+            &current_schema,
+        );
         if stale {
             guard.scheduler.mark_dirty(&[watch_id], now_ms);
         }
@@ -215,14 +250,17 @@ impl LiveQueryHub {
             &S::RoTxn<'_>,
             &CompiledSchema,
             &mut dyn FnMut(&LogicalPlan) -> Result<QueryOutput>,
+            &mut bool,
         ) -> Result<(A, Option<[u8; 16]>)>,
     ) -> Result<(A, bool)> {
+        use elmdb_storage::KvRead;
         {
             let mut guard = self.state.lock().expect("hub lock poisoned");
             guard.scheduler.begin_run(watch_id);
         }
         struct RerunSnap<A> {
             read_seq: u64,
+            read_txnid: u64,
             read_epoch: u64,
             answer: A,
             hash: Option<[u8; 16]>,
@@ -231,16 +269,21 @@ impl LiveQueryHub {
         let run_result = (|| -> Result<RerunSnap<A>> {
             let (ro, schema) = engine.begin_read_pinned()?;
             let read_seq = read_commit_seq(&ro, &engine.dbs())?;
+            let read_txnid = ro.txnid();
             let read_epoch = schema.epoch;
             let mut read_set = ReadSet::new();
+            let mut unresolved_ext_id = false;
             let mut exec =
                 |plan: &LogicalPlan| query_engine.execute_in_txn(engine, &ro, &schema, plan, budgets, &mut read_set);
-            let (answer, hash) = compile_and_materialize(&ro, &schema, &mut exec)?;
+            let (answer, hash) = compile_and_materialize(&ro, &schema, &mut exec, &mut unresolved_ext_id)?;
+            if unresolved_ext_id {
+                elmdb_query::QueryReadRecorder::record_all_entities(&mut read_set);
+            }
             drop(ro);
-            Ok(RerunSnap { read_seq, read_epoch, answer, hash, read_set })
+            Ok(RerunSnap { read_seq, read_txnid, read_epoch, answer, hash, read_set })
         })();
 
-        let RerunSnap { read_seq, read_epoch, answer, hash, read_set } = match run_result {
+        let RerunSnap { read_seq, read_txnid, read_epoch, answer, hash, read_set } = match run_result {
             Ok(v) => v,
             Err(e) => {
                 let mut guard = self.state.lock().expect("hub lock poisoned");
@@ -254,7 +297,14 @@ impl LiveQueryHub {
         if guard.scheduler.is_stopped() || !guard.scheduler.contains(watch_id) {
             return Ok((answer, false));
         }
-        let stale = guard.index.register_after_read(watch_id, read_seq, read_epoch, &read_set, &current_schema);
+        let stale = guard.index.register_after_read_with_txnid(
+            watch_id,
+            read_seq,
+            read_txnid,
+            read_epoch,
+            &read_set,
+            &current_schema,
+        );
         if stale {
             guard.scheduler.mark_dirty(&[watch_id], now_ms);
         }
@@ -293,8 +343,7 @@ impl LiveQueryHub {
         now_ms: u64,
     ) -> Vec<WatchId> {
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        guard.index.observe_txnid(txnid);
-        let dirty = guard.index.notify_subdb_write(seq, schema_epoch, slot, key);
+        let dirty = guard.index.notify_subdb_write_at_txnid(seq, schema_epoch, txnid, slot, key);
         guard.scheduler.mark_dirty(&dirty, now_ms);
         dirty
     }
@@ -314,16 +363,14 @@ impl LiveQueryHub {
         now_ms: u64,
     ) -> Vec<WatchId> {
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        guard.index.observe_txnid(txnid);
-        let dirty = guard.index.notify_schema_change(seq, new_schema_epoch);
+        let dirty = guard.index.notify_schema_change_at_txnid(seq, new_schema_epoch, txnid);
         guard.scheduler.mark_dirty(&dirty, now_ms);
         dirty
     }
 
     pub fn notify_full_rebuild_with_txnid(&self, seq: u64, schema_epoch: u64, txnid: u64, now_ms: u64) -> Vec<WatchId> {
         let mut guard = self.state.lock().expect("hub lock poisoned");
-        guard.index.observe_txnid(txnid);
-        let dirty = guard.index.notify_full_rebuild(seq, schema_epoch);
+        let dirty = guard.index.notify_full_rebuild_at_txnid(seq, schema_epoch, txnid);
         guard.scheduler.mark_dirty(&dirty, now_ms);
         dirty
     }
@@ -379,18 +426,20 @@ impl LiveQueryHub {
 }
 
 /// Helper executing `plan` lock-free inside a single MVCC `RoTxn` and returning
-/// `(snapshot_commit_seq, snapshot_schema_epoch, QueryOutput, ReadSet)`.
+/// `(snapshot_commit_seq, snapshot_txnid, snapshot_schema_epoch, QueryOutput, ReadSet)`.
 pub fn run_tracked_snapshot<S: KvStore, V: Vfs, C: Clock>(
     engine: &Engine<S, V, C>,
     query_engine: &QueryEngine,
     plan: &LogicalPlan,
     budgets: ExecBudgets<'_>,
-) -> Result<(u64, u64, QueryOutput, ReadSet)> {
+) -> Result<(u64, u64, u64, QueryOutput, ReadSet)> {
+    use elmdb_storage::KvRead;
     let (ro, schema) = engine.begin_read_pinned()?;
     let read_seq = read_commit_seq(&ro, &engine.dbs())?;
+    let read_txnid = ro.txnid();
     let read_epoch = schema.epoch;
     let mut read_set = ReadSet::new();
     let output = query_engine.execute_in_txn(engine, &ro, &schema, plan, budgets, &mut read_set)?;
     drop(ro);
-    Ok((read_seq, read_epoch, output, read_set))
+    Ok((read_seq, read_txnid, read_epoch, output, read_set))
 }

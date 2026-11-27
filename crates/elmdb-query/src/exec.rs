@@ -642,12 +642,16 @@ fn materialize_hits<R: KvRead>(
     Ok(out)
 }
 
+/// Returns whether the upstream query source explicitly opted into soft-trashed entities.
+/// `LiteralKeys` (`query.ids([...])`) defaults to `false` for graph/link/traversal visibility so
+/// `hops`, `shortestPath`, `hasLink`, `degrees`, `jaccard`, and `adamicAdar` never leak or
+/// traverse through soft-trashed entities unless the caller opted in via `include_trashed: true`.
 fn source_includes_trashed(node: &LogicalNode) -> bool {
     match node {
         LogicalNode::Source(SourceSpec::Type { include_trashed, .. })
         | LogicalNode::Source(SourceSpec::Types { include_trashed, .. })
         | LogicalNode::Source(SourceSpec::AllEntities { include_trashed }) => *include_trashed,
-        LogicalNode::Source(SourceSpec::LiteralKeys(_)) => true,
+        LogicalNode::Source(SourceSpec::LiteralKeys(_)) => false,
         LogicalNode::Filter { input, .. }
         | LogicalNode::Score { input, .. }
         | LogicalNode::Traverse { input, .. }
@@ -980,6 +984,7 @@ fn eval_terminal<R: KvRead>(
             }
         }
         TerminalSpec::Degrees { rel_kinds, dir } => {
+            let include_trashed = source_includes_trashed(input);
             let mut stream = eval_stream(ctx, input, None)?;
             let mut batch = KeyBatch::default();
             let mut out = Vec::new();
@@ -989,10 +994,18 @@ fn eval_terminal<R: KvRead>(
                     ctx.recorder.record_edge_adj(ek, rel_kinds, *dir);
                     let mut deg = 0u64;
                     if matches!(dir, EdgeDir::Out | EdgeDir::Both) {
-                        deg += scan_adj_out_raw(ctx.txn, &ctx.dbs, ek, rel_kinds)?.len() as u64;
+                        for (dst, _, _) in scan_adj_out_raw(ctx.txn, &ctx.dbs, ek, rel_kinds)? {
+                            if is_neighbor_visible(ctx, dst, include_trashed)? {
+                                deg += 1;
+                            }
+                        }
                     }
                     if matches!(dir, EdgeDir::In | EdgeDir::Both) {
-                        deg += scan_adj_in_raw(ctx.txn, &ctx.dbs, ek, rel_kinds)?.len() as u64;
+                        for (src, _, _) in scan_adj_in_raw(ctx.txn, &ctx.dbs, ek, rel_kinds)? {
+                            if is_neighbor_visible(ctx, src, include_trashed)? {
+                                deg += 1;
+                            }
+                        }
                     }
                     ctx.charge_heap(16)?;
                     out.push((ek, deg));
@@ -1229,7 +1242,7 @@ fn eval_filter<R: KvRead>(
             let mut out = Vec::new();
             for ek in candidates {
                 ctx.check_cancel()?;
-                if eval_predicate(ctx, ek, &res_expr)? {
+                if eval_predicate(ctx, ek, &res_expr, false)? {
                     ctx.charge_heap(16)?;
                     out.push((ek, 0.0));
                     if out.len() >= cap {
@@ -1242,6 +1255,7 @@ fn eval_filter<R: KvRead>(
     }
 
     // Fallback: pull from input stream and apply predicate.
+    let include_trashed = source_includes_trashed(input);
     let mut input_stream = eval_stream(ctx, input, None)?;
     ctx.explain.residual_filters += 1;
     let cap = limit_hint.unwrap_or(u64::MAX).min(usize::MAX as u64) as usize;
@@ -1250,7 +1264,7 @@ fn eval_filter<R: KvRead>(
     while input_stream.next_batch(ctx, BATCH_SIZE as u16, &mut batch)? {
         for i in 0..batch.len as usize {
             let ek = batch.keys[i];
-            if eval_predicate(ctx, ek, expr)? {
+            if eval_predicate(ctx, ek, expr, include_trashed)? {
                 ctx.charge_heap(16)?;
                 out.push((ek, batch.scores[i]));
                 if out.len() >= cap {
@@ -1498,7 +1512,10 @@ fn try_pushdown_conjunct<R: KvRead>(
             Ok(Some((keys, true, format!("TrigramRegex({})", idx.name))))
         }
         FilterExpr::HasLink { rel_kinds, dir, target: Some(target_key) } => {
-            // Drive-from-smaller-side for `HasLink { target: X }`: look up reverse adjacency of `target_key`!
+            // Drive-from-smaller-side for `HasLink { target: X }`: verify target is live & record dependency!
+            if !is_neighbor_visible(ctx, *target_key, false)? {
+                return Ok(Some((Vec::new(), false, "HasLinkDriveFromTarget".into())));
+            }
             let rev_dir = match dir {
                 EdgeDir::Out => EdgeDir::In,
                 EdgeDir::In => EdgeDir::Out,
@@ -1536,7 +1553,20 @@ fn try_pushdown_conjunct<R: KvRead>(
     }
 }
 
-fn eval_predicate<R: KvRead>(ctx: &mut ExecCtx<'_, R>, key: EntityKey, expr: &FilterExpr) -> Result<bool> {
+fn is_neighbor_visible<R: KvRead>(ctx: &mut ExecCtx<'_, R>, key: EntityKey, include_trashed: bool) -> Result<bool> {
+    ctx.recorder.record_point_entity(key, &FieldMask::empty());
+    let Some(row) = ctx.load_row(key)? else {
+        return Ok(false);
+    };
+    Ok(include_trashed || !row.header.is_trashed())
+}
+
+fn eval_predicate<R: KvRead>(
+    ctx: &mut ExecCtx<'_, R>,
+    key: EntityKey,
+    expr: &FilterExpr,
+    include_trashed: bool,
+) -> Result<bool> {
     match expr {
         FilterExpr::Eq(field, target) => {
             let mut m = FieldMask::empty();
@@ -1548,7 +1578,9 @@ fn eval_predicate<R: KvRead>(ctx: &mut ExecCtx<'_, R>, key: EntityKey, expr: &Fi
                 None => Ok(matches!(target, CanonicalValue::Null)),
             }
         }
-        FilterExpr::Ne(field, target) => Ok(!eval_predicate(ctx, key, &FilterExpr::Eq(*field, target.clone()))?),
+        FilterExpr::Ne(field, target) => {
+            Ok(!eval_predicate(ctx, key, &FilterExpr::Eq(*field, target.clone()), include_trashed)?)
+        }
         FilterExpr::In(field, targets) => {
             let mut m = FieldMask::empty();
             m.insert(*field);
@@ -1596,12 +1628,12 @@ fn eval_predicate<R: KvRead>(ctx: &mut ExecCtx<'_, R>, key: EntityKey, expr: &Fi
             m.insert(*field);
             ctx.recorder.record_point_entity(key, &m);
             let Some(row) = ctx.load_row(key)? else { return Ok(false) };
-            let low_needle = needle.to_lowercase();
+            let low_needle = trigram::fold_case(needle);
             match row.fields.get(field) {
-                Some(CanonicalValue::String(s)) => Ok(s.to_lowercase().contains(&low_needle)),
+                Some(CanonicalValue::String(s)) => Ok(trigram::fold_case(s).contains(&low_needle)),
                 Some(CanonicalValue::Array(items)) => Ok(items
                     .iter()
-                    .any(|it| matches!(it, CanonicalValue::String(s) if s.to_lowercase().contains(&low_needle)))),
+                    .any(|it| matches!(it, CanonicalValue::String(s) if trigram::fold_case(s).contains(&low_needle)))),
                 _ => Ok(false),
             }
         }
@@ -1628,26 +1660,35 @@ fn eval_predicate<R: KvRead>(ctx: &mut ExecCtx<'_, R>, key: EntityKey, expr: &Fi
             let Some(row) = ctx.load_row(key)? else { return Ok(false) };
             Ok(matches!(row.fields.get(field), None | Some(CanonicalValue::Null)))
         }
-        FilterExpr::IsPresent(field) => Ok(!eval_predicate(ctx, key, &FilterExpr::IsNull(*field))?),
+        FilterExpr::IsPresent(field) => Ok(!eval_predicate(ctx, key, &FilterExpr::IsNull(*field), include_trashed)?),
         FilterExpr::HasLink { rel_kinds, dir, target } => {
+            if let Some(t) = target
+                && !is_neighbor_visible(ctx, *t, include_trashed)?
+            {
+                return Ok(false);
+            }
             ctx.recorder.record_edge_adj(key, rel_kinds, *dir);
             if matches!(dir, EdgeDir::Out | EdgeDir::Both) {
                 let edges = scan_adj_out_raw(ctx.txn, &ctx.dbs, key, rel_kinds)?;
-                if edges.iter().any(|(dst, _, _)| target.is_none_or(|t| t == *dst)) {
-                    return Ok(true);
+                for (dst, _, _) in edges {
+                    if target.is_none_or(|t| t == dst) && is_neighbor_visible(ctx, dst, include_trashed)? {
+                        return Ok(true);
+                    }
                 }
             }
             if matches!(dir, EdgeDir::In | EdgeDir::Both) {
                 let edges = scan_adj_in_raw(ctx.txn, &ctx.dbs, key, rel_kinds)?;
-                if edges.iter().any(|(src, _, _)| target.is_none_or(|t| t == *src)) {
-                    return Ok(true);
+                for (src, _, _) in edges {
+                    if target.is_none_or(|t| t == src) && is_neighbor_visible(ctx, src, include_trashed)? {
+                        return Ok(true);
+                    }
                 }
             }
             Ok(false)
         }
         FilterExpr::And(parts) => {
             for p in parts {
-                if !eval_predicate(ctx, key, p)? {
+                if !eval_predicate(ctx, key, p, include_trashed)? {
                     return Ok(false);
                 }
             }
@@ -1655,13 +1696,13 @@ fn eval_predicate<R: KvRead>(ctx: &mut ExecCtx<'_, R>, key: EntityKey, expr: &Fi
         }
         FilterExpr::Or(parts) => {
             for p in parts {
-                if eval_predicate(ctx, key, p)? {
+                if eval_predicate(ctx, key, p, include_trashed)? {
                     return Ok(true);
                 }
             }
             Ok(false)
         }
-        FilterExpr::Not(inner) => Ok(!eval_predicate(ctx, key, inner)?),
+        FilterExpr::Not(inner) => Ok(!eval_predicate(ctx, key, inner, include_trashed)?),
     }
 }
 
@@ -1743,6 +1784,19 @@ fn eval_score_signal<R: KvRead>(
                 phrase.as_ref().map(|terms| text::analyze_phrase(terms, None));
 
             if let Some(phrase_terms) = normalized_phrase {
+                let query_is_empty = text::analyze_text(query, None).is_empty();
+                if query_is_empty && phrase_terms.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let phrase_query_owned: Option<String> = if query_is_empty {
+                    Some(phrase_terms.iter().map(|(t, _)| t.as_str()).collect::<Vec<_>>().join(" "))
+                } else {
+                    None
+                };
+                let effective_query = phrase_query_owned.as_deref().unwrap_or(query);
+                let effective_require_all = if query_is_empty { true } else { *require_all };
+                let effective_prefix = if query_is_empty { false } else { *prefix };
+
                 // Exponential widening ensures zero phrase false negatives even when > 128 higher-scoring
                 // non-phrase distractors exist, while staying fast for normal queries!
                 let mut fetch_k = k.saturating_mul(4).clamp(128, 1_048_576);
@@ -1751,11 +1805,11 @@ fn eval_score_signal<R: KvRead>(
                     let (hits, _) = text::search_bmw_with_prefix(
                         ctx.txn,
                         db,
-                        query,
+                        effective_query,
                         None,
                         fetch_k,
-                        *require_all,
-                        *prefix,
+                        effective_require_all,
+                        effective_prefix,
                         candidates,
                     )?;
                     let exhausted = hits.len() < fetch_k;
@@ -2042,6 +2096,7 @@ fn eval_score_signal<R: KvRead>(
 }
 
 fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec: &TraverseSpec) -> Result<VecStreamOp> {
+    let include_trashed = source_includes_trashed(input);
     let stream = eval_stream(ctx, input, None)?;
     let seeds: Vec<EntityKey> =
         collect_all_pairs(ctx, stream, BATCH_SIZE as u16)?.into_iter().map(|(k, _)| k).collect();
@@ -2049,23 +2104,36 @@ fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec:
     match spec {
         TraverseSpec::Hops { rel_kinds, dir, min_hops, max_hops } => {
             let mut visited: FxHashMap<EntityKey, u32> = FxHashMap::default();
+            let mut hidden: FxHashSet<EntityKey> = FxHashSet::default();
             let mut queue: VecDeque<(EntityKey, u32)> = VecDeque::new();
             let mut results = Vec::new();
             for s in seeds {
                 ctx.check_cancel()?;
-                if !visited.contains_key(&s) {
-                    if visited.len() >= ctx.budgets.max_traversal_visited {
+                if visited.contains_key(&s) || hidden.contains(&s) {
+                    continue;
+                }
+                if !include_trashed && !is_neighbor_visible(ctx, s, false)? {
+                    if visited.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
                         return Err(ElmdbError::new(
                             ErrorCode::ResourceLimit,
                             "traversal exceeded max_traversal_visited budget",
                         ));
                     }
-                    visited.insert(s, 0);
-                    ctx.charge_heap(32)?;
-                    queue.push_back((s, 0));
-                    if *min_hops == 0 {
-                        results.push((s, 0.0));
-                    }
+                    ctx.charge_heap(16)?;
+                    hidden.insert(s);
+                    continue;
+                }
+                if visited.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
+                    return Err(ElmdbError::new(
+                        ErrorCode::ResourceLimit,
+                        "traversal exceeded max_traversal_visited budget",
+                    ));
+                }
+                visited.insert(s, 0);
+                ctx.charge_heap(32)?;
+                queue.push_back((s, 0));
+                if *min_hops == 0 {
+                    results.push((s, 0.0));
                 }
             }
             while let Some((u, depth)) = queue.pop_front() {
@@ -2088,46 +2156,68 @@ fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec:
                 nexts.sort_unstable();
                 nexts.dedup();
                 for v in nexts {
-                    if !visited.contains_key(&v) {
-                        if visited.len() >= ctx.budgets.max_traversal_visited {
-                            return Err(ElmdbError::new(
-                                ErrorCode::ResourceLimit,
-                                "traversal exceeded max_traversal_visited budget",
-                            ));
-                        }
-                        let nd = depth + 1;
-                        visited.insert(v, nd);
-                        ctx.charge_heap(32)?;
-                        if nd >= *min_hops {
-                            results.push((v, nd as f64));
-                        }
-                        if nd < *max_hops {
-                            queue.push_back((v, nd));
-                        }
+                    if visited.contains_key(&v) || hidden.contains(&v) {
+                        continue;
+                    }
+                    if visited.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ResourceLimit,
+                            "traversal exceeded max_traversal_visited budget",
+                        ));
+                    }
+                    if !is_neighbor_visible(ctx, v, include_trashed)? {
+                        ctx.charge_heap(16)?;
+                        hidden.insert(v);
+                        continue;
+                    }
+                    let nd = depth + 1;
+                    visited.insert(v, nd);
+                    ctx.charge_heap(32)?;
+                    if nd >= *min_hops {
+                        results.push((v, nd as f64));
+                    }
+                    if nd < *max_hops {
+                        queue.push_back((v, nd));
                     }
                 }
             }
             Ok(VecStreamOp::new(results))
         }
         TraverseSpec::ShortestPath { rel_kinds, dir, target, max_hops } => {
+            if !is_neighbor_visible(ctx, *target, include_trashed)? {
+                return Ok(VecStreamOp::new(Vec::new()));
+            }
             let mut parent: FxHashMap<EntityKey, Option<EntityKey>> = FxHashMap::default();
+            let mut hidden: FxHashSet<EntityKey> = FxHashSet::default();
             let mut queue: VecDeque<(EntityKey, u32)> = VecDeque::new();
             for s in seeds {
                 ctx.check_cancel()?;
-                if s == *target {
-                    return Ok(VecStreamOp::new(vec![(s, 0.0)]));
+                if parent.contains_key(&s) || hidden.contains(&s) {
+                    continue;
                 }
-                if !parent.contains_key(&s) {
-                    if parent.len() >= ctx.budgets.max_traversal_visited {
+                if !include_trashed && !is_neighbor_visible(ctx, s, false)? {
+                    if parent.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
                         return Err(ElmdbError::new(
                             ErrorCode::ResourceLimit,
                             "shortest-path exceeded max_traversal_visited budget",
                         ));
                     }
-                    parent.insert(s, None);
-                    ctx.charge_heap(32)?;
-                    queue.push_back((s, 0));
+                    ctx.charge_heap(16)?;
+                    hidden.insert(s);
+                    continue;
                 }
+                if s == *target {
+                    return Ok(VecStreamOp::new(vec![(s, 0.0)]));
+                }
+                if parent.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
+                    return Err(ElmdbError::new(
+                        ErrorCode::ResourceLimit,
+                        "shortest-path exceeded max_traversal_visited budget",
+                    ));
+                }
+                parent.insert(s, None);
+                ctx.charge_heap(32)?;
+                queue.push_back((s, 0));
             }
             let mut found = false;
             while let Some((u, depth)) = queue.pop_front() {
@@ -2150,21 +2240,27 @@ fn eval_traverse<R: KvRead>(ctx: &mut ExecCtx<'_, R>, input: &LogicalNode, spec:
                 nexts.sort_unstable();
                 nexts.dedup();
                 for v in nexts {
-                    if !parent.contains_key(&v) {
-                        if parent.len() >= ctx.budgets.max_traversal_visited {
-                            return Err(ElmdbError::new(
-                                ErrorCode::ResourceLimit,
-                                "shortest-path exceeded max_traversal_visited budget",
-                            ));
-                        }
-                        parent.insert(v, Some(u));
-                        ctx.charge_heap(32)?;
-                        if v == *target {
-                            found = true;
-                            break;
-                        }
-                        queue.push_back((v, depth + 1));
+                    if parent.contains_key(&v) || hidden.contains(&v) {
+                        continue;
                     }
+                    if parent.len().saturating_add(hidden.len()) >= ctx.budgets.max_traversal_visited {
+                        return Err(ElmdbError::new(
+                            ErrorCode::ResourceLimit,
+                            "shortest-path exceeded max_traversal_visited budget",
+                        ));
+                    }
+                    if !is_neighbor_visible(ctx, v, include_trashed)? {
+                        ctx.charge_heap(16)?;
+                        hidden.insert(v);
+                        continue;
+                    }
+                    parent.insert(v, Some(u));
+                    ctx.charge_heap(32)?;
+                    if v == *target {
+                        found = true;
+                        break;
+                    }
+                    queue.push_back((v, depth + 1));
                 }
                 if found {
                     break;

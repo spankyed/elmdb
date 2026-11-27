@@ -703,3 +703,57 @@ fn review_regression_lmdb_cross_handle_sees_newly_allocated_compaction_slot() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].key, k1);
 }
+
+#[test]
+fn batch3_multichunk_hnsw_beam_dedup_prevents_entity_starvation() {
+    // P1-10: Entity A has 80 chunks clustered closest to query; Entities B..E have 1 chunk slightly further.
+    // With `top_k = 5` (`ef = 64`) and `best_chunk_per_entity = true`, all 5 distinct entities MUST be returned!
+    let (engine, _reg) = open_sim(BuildPolicy::EagerInSchemaChange);
+    engine.set_schema(&vec_and_rank_schema("sq8", 4)).unwrap();
+    let idx_id = engine.schema().indexes.iter().find(|i| i.name == "emb").unwrap().id;
+
+    let mut ops = Vec::new();
+    for name in ["A", "B", "C", "D", "E"] {
+        ops.push(WireOp::Create { type_name: "Doc".into(), external_id: Some(name.into()), fields: vec![] });
+    }
+    engine.execute_batch(&ops).unwrap();
+
+    let ka = engine.get_row("A").unwrap().unwrap().key;
+    let kb = engine.get_row("B").unwrap().unwrap().key;
+    let kc = engine.get_row("C").unwrap().unwrap().key;
+    let kd = engine.get_row("D").unwrap().unwrap().key;
+    let ke = engine.get_row("E").unwrap().unwrap().key;
+
+    // 80 chunks on Entity A all very close to `[1, 0, 0, 0]` (> ef = 64!)
+    let mut a_chunks = Vec::with_capacity(80);
+    for i in 0..80u32 {
+        let eps = 0.001 * (i as f32);
+        a_chunks.push(vec![1.0, eps, 0.0, 0.0]);
+    }
+    set_entity_embeddings(&engine, idx_id, ka, &a_chunks).unwrap();
+    set_entity_embeddings(&engine, idx_id, kb, &[vec![0.92, 0.39, 0.0, 0.0]]).unwrap();
+    set_entity_embeddings(&engine, idx_id, kc, &[vec![0.90, 0.43, 0.0, 0.0]]).unwrap();
+    set_entity_embeddings(&engine, idx_id, kd, &[vec![0.88, 0.47, 0.0, 0.0]]).unwrap();
+    set_entity_embeddings(&engine, idx_id, ke, &[vec![0.86, 0.51, 0.0, 0.0]]).unwrap();
+
+    // Drain ALL chunks into HNSW (zero remaining pending) so query exercises `search_layer_beam_filtered`!
+    flush(&engine, idx_id).unwrap();
+
+    let (ro, schema) = engine.begin_read_pinned().unwrap();
+    let def = schema.index_by_id(idx_id).unwrap();
+    let db = engine.gate().open_subdb_ro(&ro, &def.subdb_slot().name(), DbFlags::DEFAULT).unwrap().unwrap();
+    let hits = search_near(
+        &ro,
+        &engine.dbs(),
+        def,
+        db,
+        &[1.0, 0.0, 0.0, 0.0],
+        SearchNearOpts { top_k: 5, candidates: None, best_chunk_per_entity: true },
+    )
+    .unwrap();
+    let hit_keys: FxHashSet<_> = hits.iter().map(|h| h.key).collect();
+    assert_eq!(hits.len(), 5, "expected all 5 distinct entities without multi-chunk beam starvation, got {hits:?}");
+    for expected in [ka, kb, kc, kd, ke] {
+        assert!(hit_keys.contains(&expected), "missing entity {expected:?} in HNSW hits {hits:?}");
+    }
+}

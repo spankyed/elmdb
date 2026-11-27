@@ -424,11 +424,11 @@ impl Database {
         self.require_writable()?;
         self.forbid_inside_txn("setSchema")?;
         let (compiled, diff) = eng.set_schema(raw)?;
-        let (ro, _) = eng.begin_read_pinned()?;
+        let (ro, ro_schema) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
         let txnid = ro.txnid();
         drop(ro);
-        self.hub.notify_schema_change_with_txnid(seq, compiled.epoch, txnid, now_unix_ms());
+        self.hub.notify_schema_change_with_txnid(seq, ro_schema.epoch, txnid, now_unix_ms());
         self.query_engine.clear_cache();
         Ok(SchemaChange::from_diff(&compiled, &diff))
     }
@@ -438,11 +438,11 @@ impl Database {
         self.require_writable()?;
         self.forbid_inside_txn("renameType")?;
         let compiled = eng.rename_type(old_type, new_type, rewrite_ids)?;
-        let (ro, _) = eng.begin_read_pinned()?;
+        let (ro, ro_schema) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
         let txnid = ro.txnid();
         drop(ro);
-        self.hub.notify_schema_change_with_txnid(seq, compiled.epoch, txnid, now_unix_ms());
+        self.hub.notify_schema_change_with_txnid(seq, ro_schema.epoch, txnid, now_unix_ms());
         self.query_engine.clear_cache();
         Ok(compiled.epoch)
     }
@@ -452,11 +452,11 @@ impl Database {
         self.require_writable()?;
         self.forbid_inside_txn("renameField")?;
         let compiled = eng.rename_field(type_name, old_field, new_field)?;
-        let (ro, _) = eng.begin_read_pinned()?;
+        let (ro, ro_schema) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
         let txnid = ro.txnid();
         drop(ro);
-        self.hub.notify_schema_change_with_txnid(seq, compiled.epoch, txnid, now_unix_ms());
+        self.hub.notify_schema_change_with_txnid(seq, ro_schema.epoch, txnid, now_unix_ms());
         self.query_engine.clear_cache();
         Ok(compiled.epoch)
     }
@@ -466,11 +466,11 @@ impl Database {
         self.require_writable()?;
         self.forbid_inside_txn("renameRelation")?;
         let compiled = eng.rename_relation(old_rel, new_rel)?;
-        let (ro, _) = eng.begin_read_pinned()?;
+        let (ro, ro_schema) = eng.begin_read_pinned()?;
         let seq = read_commit_seq(&ro, &eng.dbs())?;
         let txnid = ro.txnid();
         drop(ro);
-        self.hub.notify_schema_change_with_txnid(seq, compiled.epoch, txnid, now_unix_ms());
+        self.hub.notify_schema_change_with_txnid(seq, ro_schema.epoch, txnid, now_unix_ms());
         self.query_engine.clear_cache();
         Ok(compiled.epoch)
     }
@@ -606,11 +606,12 @@ impl Database {
             .with(|m| m.borrow_mut().remove(&self.id))
             .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
         let ctx = slot.ctx.ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on commit"))?;
+        let committed_schema = Arc::clone(ctx.schema());
         let committed = ctx.finish_and_commit(true)?;
         let out_meta = match committed {
             Some((seq, receipt, sum)) => {
                 if let Some(ref s) = sum {
-                    self.hub.notify_commit(&eng.schema(), s, now_unix_ms());
+                    self.hub.notify_commit(&committed_schema, s, now_unix_ms());
                 }
                 Some((seq, receipt))
             }
@@ -1005,8 +1006,14 @@ impl Database {
             policy,
             now_ms,
             1,
-            |ro, schema, exec| {
-                let plan = compile_query_spec(schema, spec, |ext_id| lookup_ext_id_in_txn(ro, &dbs, ext_id))?;
+            |ro, schema, exec, unresolved_ext_id| {
+                let plan = compile_query_spec(schema, spec, |ext_id| {
+                    let found = lookup_ext_id_in_txn(ro, &dbs, ext_id)?;
+                    if found.is_none() {
+                        *unresolved_ext_id = true;
+                    }
+                    Ok(found)
+                })?;
                 let out = exec(&plan)?;
                 let explain = spec.explain.then_some(&out.explain);
                 let ans =
@@ -1036,8 +1043,14 @@ impl Database {
             ExecBudgets::default(),
             now_ms,
             cost_ms,
-            |ro, schema, exec| {
-                let plan = compile_query_spec(schema, spec, |ext_id| lookup_ext_id_in_txn(ro, &dbs, ext_id))?;
+            |ro, schema, exec, unresolved_ext_id| {
+                let plan = compile_query_spec(schema, spec, |ext_id| {
+                    let found = lookup_ext_id_in_txn(ro, &dbs, ext_id)?;
+                    if found.is_none() {
+                        *unresolved_ext_id = true;
+                    }
+                    Ok(found)
+                })?;
                 let out = exec(&plan)?;
                 let explain = spec.explain.then_some(&out.explain);
                 let ans =
