@@ -829,12 +829,7 @@ impl Database {
                     .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing for transact"))
             })?;
             let mut restore = RestoreCtxGuard { db_id: self.id, ctx: Some(taken_ctx) };
-            let res = {
-                let ctx = restore.ctx.as_mut().expect("taken_ctx");
-                let out = f(ctx)?;
-                ctx.flush_projections()?;
-                Ok(out)
-            };
+            let res = f(restore.ctx.as_mut().expect("taken_ctx"));
             drop(restore);
             res
         })

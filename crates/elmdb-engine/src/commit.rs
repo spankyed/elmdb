@@ -1349,7 +1349,10 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         &self.txn
     }
 
+    /// Returns a mutable reference to the underlying `GatedWriteTxn` and marks the transaction dirty
+    /// so raw sub-DB writes are never silently aborted by `finish_and_commit`.
     pub fn txn_mut(&mut self) -> &mut GatedWriteTxn<'a, S, V> {
+        self.dirty = true;
         &mut self.txn
     }
 
@@ -3262,9 +3265,13 @@ pub fn scan_edges_by_kind<R: KvRead>(txn: &R, dbs: &SystemDbs, kind: RelKindId) 
     Ok(out)
 }
 
-/// Merges packed declared fields and dynamic `extra` fields with canonical `Declared > Extra`
-/// precedence: active declared fields exclusively own their names so stale `extra` entries from
-/// prior schema states can never clobber or resurrect them.
+/// Merges packed declared fields and dynamic `extra` fields with canonical 3-tier precedence:
+/// **Active Declared > Extra > Archived Declared**.
+///
+/// - Active declared fields exclusively own their names so stale `extra` entries from prior
+///   schema states can never clobber or resurrect them.
+/// - Live `extra` entries written after a declared field was archived override the stale archived
+///   value, matching `read_single_field` / `get_field`.
 fn merge_row_fields<F>(
     tdef: &crate::TypeDef,
     packed_fields: BTreeMap<FieldId, CanonicalValue>,
@@ -3275,15 +3282,23 @@ where
     F: FnMut(CanonicalValue) -> Result<CanonicalValue>,
 {
     let mut fields = BTreeMap::new();
+    let mut active_declared = Vec::new();
+    for (fid, val) in packed_fields {
+        if let Some(fdef) = tdef.field_by_id(fid) {
+            if fdef.archived {
+                fields.insert(fdef.name.clone(), transform_declared(val)?);
+            } else {
+                active_declared.push((fdef.name.clone(), val));
+            }
+        }
+    }
     for (k, v) in packed_extra {
         if tdef.field_by_name(&k).is_none() {
             fields.insert(k, v);
         }
     }
-    for (fid, val) in packed_fields {
-        if let Some(fdef) = tdef.field_by_id(fid) {
-            fields.insert(fdef.name.clone(), transform_declared(val)?);
-        }
+    for (name, val) in active_declared {
+        fields.insert(name, transform_declared(val)?);
     }
     Ok(fields)
 }

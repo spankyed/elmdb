@@ -2793,10 +2793,12 @@ fn batch_c_dump_load_tightened_relations_unified_transact_purge_and_hook_flush()
                     .iter()
                     .any(|d| d.after.as_ref().is_some_and(|after| after.header.ext_id == "hook-trigger"));
                 if has_trigger && rust_fired_c.fetch_add(1, Ordering::SeqCst) == 0 {
-                    hctx.exec(&WireOp::Patch {
+                    // Use `exec_batch` (which does NOT flush projections internally) so this test genuinely
+                    // proves `run_combined_hook_cascade` flushes projections between Rust hooks and host hooks!
+                    hctx.exec_batch(&[WireOp::Patch {
                         target: EntityTarget::ExternalId("hook-trigger".into()),
                         fields: vec![("priority".into(), CanonicalValue::Int(777))],
-                    })?;
+                    }])?;
                 }
                 Ok(())
             }),

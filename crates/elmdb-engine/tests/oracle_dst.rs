@@ -748,11 +748,19 @@ fn batch_c_declared_over_extra_precedence_and_no_phantom_commit_seq() {
         .execute_batch(&[
             WireOp::Create {
                 type_name: "Task".into(),
-                external_id: Some("e-evolve".into()),
+                external_id: Some("e-patch-only".into()),
                 fields: vec![
                     ("title".into(), CanonicalValue::String("T1".into())),
-                    ("tag".into(), CanonicalValue::String("zombie_extra".into())),
+                    ("tag".into(), CanonicalValue::String("zombie_patch".into())),
                     ("keep_extra".into(), CanonicalValue::String("legit_extra".into())),
+                ],
+            },
+            WireOp::Create {
+                type_name: "Task".into(),
+                external_id: Some("e-unset-only".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("T2".into())),
+                    ("tag".into(), CanonicalValue::String("zombie_unset".into())),
                 ],
             },
             WireOp::Create {
@@ -778,12 +786,11 @@ fn batch_c_declared_over_extra_precedence_and_no_phantom_commit_seq() {
     engine.rename_field("Task", "title", "headline").unwrap();
 
     // C1: Even before patching, `read_stored_row`, `read_raw_stored_row`, and `get_field` MUST enforce
-    // `Declared > Extra` (declared `headline` wins over stale `extra["headline"]`, unset declared `tag`
-    // does not leak `zombie_extra`, and genuine `keep_extra` remains visible!).
+    // `Active Declared > Extra > Archived Declared`.
     {
         let (ro, cur_schema) = engine.begin_read_pinned().unwrap();
         let dbs = engine.dbs();
-        let k_ev = elmdb_engine::lookup_ext_id_in_txn(&ro, &dbs, "e-evolve").unwrap().unwrap();
+        let k_ev = elmdb_engine::lookup_ext_id_in_txn(&ro, &dbs, "e-patch-only").unwrap().unwrap();
         let k_rn = elmdb_engine::lookup_ext_id_in_txn(&ro, &dbs, "e-rename").unwrap().unwrap();
         for row in [
             read_stored_row(&ro, &cur_schema, &dbs, k_ev).unwrap().unwrap(),
@@ -804,35 +811,64 @@ fn batch_c_declared_over_extra_precedence_and_no_phantom_commit_seq() {
             );
         }
     }
-    assert_eq!(engine.get_field("e-evolve", "tag").unwrap(), None);
+    assert_eq!(engine.get_field("e-patch-only", "tag").unwrap(), None);
     assert_eq!(engine.get_field("e-rename", "headline").unwrap(), Some(CanonicalValue::String("RealTitle".into())));
 
-    // C1: Patching and Unsetting declared `tag` scrubs stale `packed.extra["tag"]` physically on disk!
+    // C1: Isolated `Patch` scrubbing on `e-patch-only` (NEVER unset) AND isolated `Unset` scrubbing on
+    // `e-unset-only` (NEVER patched) must BOTH physically remove stale `extra["tag"]`!
     engine
-        .execute_batch(&[WireOp::Patch {
-            target: EntityTarget::ExternalId("e-evolve".into()),
-            fields: vec![("tag".into(), CanonicalValue::String("declared_v1".into()))],
-        }])
+        .execute_batch(&[
+            WireOp::Patch {
+                target: EntityTarget::ExternalId("e-patch-only".into()),
+                fields: vec![("tag".into(), CanonicalValue::String("declared_v1".into()))],
+            },
+            WireOp::Unset { target: EntityTarget::ExternalId("e-unset-only".into()), fields: vec!["tag".into()] },
+        ])
         .unwrap();
     assert_eq!(
-        engine.get_row("e-evolve").unwrap().unwrap().fields.get("tag"),
+        engine.get_row("e-patch-only").unwrap().unwrap().fields.get("tag"),
         Some(&CanonicalValue::String("declared_v1".into()))
     );
-    engine
-        .execute_batch(&[WireOp::Unset {
-            target: EntityTarget::ExternalId("e-evolve".into()),
-            fields: vec!["tag".into()],
-        }])
-        .unwrap();
-    assert_eq!(engine.get_row("e-evolve").unwrap().unwrap().fields.get("tag"), None);
-    // Also verify `Unset` on a row that was NEVER patched (`e-evolve` had Patch first; test direct Unset on `e-rename2`)!
-    // Even if `tag` is later archived from the schema, scrubbed `extra["tag"]` stays gone!
+    assert_eq!(engine.get_row("e-unset-only").unwrap().unwrap().fields.get("tag"), None);
+
+    // Archive `tag` (removing it from active schema):
+    // - `e-unset-only` has neither declared `tag` nor `extra["tag"]` -> `None` (proves `Unset` scrubbed `extra`!)
+    // - `e-patch-only` retains archived declared `tag = "declared_v1"` (proves `Patch` scrubbed `zombie_patch`!)
+    // - Patching `e-patch-only` with live `extra["tag"] = "extra_v2"` MUST beat archived declared `"declared_v1"`
+    //   across `get_field`, `read_stored_row`, and `read_raw_stored_row` (`Active Declared > Extra > Archived Declared`)!
     engine.set_schema(&schema).unwrap();
     assert_eq!(
-        engine.get_row("e-evolve").unwrap().unwrap().fields.get("tag"),
+        engine.get_row("e-unset-only").unwrap().unwrap().fields.get("tag"),
         None,
-        "scrubbed extra['tag'] must stay absent even after archiving declared field 'tag'"
+        "Unset must scrub extra['tag'] independently of Patch"
     );
+    assert_eq!(
+        engine.get_row("e-patch-only").unwrap().unwrap().fields.get("tag"),
+        Some(&CanonicalValue::String("declared_v1".into())),
+        "Patch must scrub zombie_patch so archived declared value is not clobbered"
+    );
+    engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("e-patch-only".into()),
+            fields: vec![("tag".into(), CanonicalValue::String("extra_v2".into()))],
+        }])
+        .unwrap();
+    assert_eq!(engine.get_field("e-patch-only", "tag").unwrap(), Some(CanonicalValue::String("extra_v2".into())));
+    {
+        let (ro, cur_schema) = engine.begin_read_pinned().unwrap();
+        let dbs = engine.dbs();
+        let k_p = elmdb_engine::lookup_ext_id_in_txn(&ro, &dbs, "e-patch-only").unwrap().unwrap();
+        for row in [
+            read_stored_row(&ro, &cur_schema, &dbs, k_p).unwrap().unwrap(),
+            read_raw_stored_row(&ro, &cur_schema, &dbs, k_p).unwrap().unwrap(),
+        ] {
+            assert_eq!(
+                row.fields.get("tag"),
+                Some(&CanonicalValue::String("extra_v2".into())),
+                "live extra patched after archiving must beat stale archived declared field"
+            );
+        }
+    }
 
     // C4: Empty `execute_batch(&[])` and read-only `Engine::transact` MUST NOT bump `commit_seq` or `txnid`!
     let (seq_before, txnid_before) = {
@@ -844,7 +880,7 @@ fn batch_c_declared_over_extra_precedence_and_no_phantom_commit_seq() {
     assert_eq!(empty_batch.receipt.txnid, txnid_before);
     assert!(empty_batch.summary.is_none());
 
-    let (val, tx_receipt) = engine.transact(|tx| Ok(tx.get_row("e-evolve")?.is_some())).unwrap();
+    let (val, tx_receipt) = engine.transact(|tx| Ok(tx.get_row("e-patch-only")?.is_some())).unwrap();
     assert!(val);
     assert_eq!(tx_receipt.txnid, txnid_before);
 
@@ -854,4 +890,16 @@ fn batch_c_declared_over_extra_precedence_and_no_phantom_commit_seq() {
     };
     assert_eq!(seq_after, seq_before, "empty batch and read-only transact must not bump commit_seq");
     assert_eq!(txnid_after, txnid_before, "empty batch and read-only transact must not commit an LMDB txn");
+
+    // P2-4: Raw write via `tx.txn_mut()` marks the transaction dirty automatically so it commits cleanly.
+    let (_, raw_receipt) = engine
+        .transact(|tx| {
+            let dbs = tx.dbs();
+            tx.txn_mut().put(dbs.sequences, b"raw_test_marker", b"ok")?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(raw_receipt.txnid > txnid_after);
+    let (ro, _) = engine.begin_read_pinned().unwrap();
+    assert_eq!(ro.get(engine.dbs().sequences, b"raw_test_marker").unwrap(), Some(b"ok".as_slice()));
 }

@@ -392,12 +392,13 @@ fn dst_zero_byte_sidecar_recovers_as_unsynced_and_grouped_sync_failure_poisons()
     let unrec = DurabilityGate::new_unrecovered(store.clone(), vfs.clone(), dir, DurabilityMode::Strict);
     assert!(matches!(unrec.acknowledge_restore(), Err(StorageError::InvalidState(_))));
 
-    // Verify SimKvStore::grow_map never shrinks and doubles cleanly on `None`.
+    // Verify SimKvStore::grow_map never shrinks, respects explicit larger target, and doubles cleanly on `None`.
     {
         use elmdb_storage::KvStore;
         let orig_map = store.map_size();
         assert_eq!(store.grow_map(Some(1)).unwrap(), orig_map);
-        assert_eq!(store.grow_map(None).unwrap(), orig_map * 2);
+        assert_eq!(store.grow_map(Some(orig_map + 4096)).unwrap(), orig_map + 4096);
+        assert_eq!(store.grow_map(None).unwrap(), (orig_map + 4096) * 2);
     }
 
     // P2-3: Post-commit I/O failure in Grouped `sync()` permanently poisons the gate!
