@@ -7,8 +7,8 @@
 use std::sync::Arc;
 
 use elmdb_engine::{
-    CompiledSchema, EdgeDelta, Engine, EntityDelta, EntityKey, IndexDef, IndexId, IndexKind, PackedRow, ProjectionSink,
-    SchemaDiff, SystemDbs, max_type_key, read_packed_row, scan_type_keys, scan_type_keys_in_range,
+    CompiledSchema, EdgeDelta, Engine, EntityDelta, EntityKey, IndexDef, IndexId, IndexKind, MaintReceipt, PackedRow,
+    ProjectionSink, SchemaDiff, SystemDbs, max_type_key, read_packed_row, scan_type_keys, scan_type_keys_in_range,
 };
 use elmdb_storage::{Clock, DbFlags, GatedWriteTxn, KvCursor, KvRead, KvStore, SubDbHandle, Vfs};
 use elmdb_wire::{ElmdbError, ErrorCode, Result};
@@ -154,6 +154,16 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
     /// Advances watermark-bounded builds by up to `chunk_size` entities across the first `Building` index.
     /// Returns `true` if work was performed (caller can loop until `false` to finish all builds).
     pub fn drive_build_chunk<C: Clock>(&self, engine: &Engine<S, V, C>, chunk_size: usize) -> Result<bool> {
+        Ok(self.drive_build_chunk_with_receipt(engine, chunk_size)?.is_some())
+    }
+
+    /// Like `drive_build_chunk`, returning `Some(maint_receipt)` when a chunk committed and `None`
+    /// without bumping `maint_seq` if no `Building` index remains (including under concurrent races!).
+    pub fn drive_build_chunk_with_receipt<C: Clock>(
+        &self,
+        engine: &Engine<S, V, C>,
+        chunk_size: usize,
+    ) -> Result<Option<MaintReceipt>> {
         // Fast lock-free RO pre-check so idle calls never acquire the write lock or fsync!
         {
             let (ro, schema) = engine.begin_read_pinned()?;
@@ -166,11 +176,11 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                 }
             }
             if !has_building {
-                return Ok(false);
+                return Ok(None);
             }
         }
         let chunk = chunk_size.max(1);
-        let (did_work, _) = engine.run_maintenance_write(|txn, schema, dbs| {
+        let committed = engine.run_maintenance_write_opt(|txn, schema, dbs| {
             for def in &schema.indexes {
                 let Some(state) = read_build_state(txn, dbs, def.id)? else {
                     continue;
@@ -180,7 +190,7 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                 };
                 if built_up_to >= high_water {
                     write_build_state(txn, dbs, def.id, &BuildState::Ready)?;
-                    return Ok(true);
+                    return Ok(Some(()));
                 }
 
                 let db = txn.open_subdb(&def.subdb_slot().name(), DbFlags::DEFAULT)?;
@@ -188,7 +198,7 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                 let batch_keys = scan_type_keys_in_range(txn, dbs, def.type_id, after, Some(high_water), chunk)?;
                 if batch_keys.is_empty() {
                     write_build_state(txn, dbs, def.id, &BuildState::Ready)?;
-                    return Ok(true);
+                    return Ok(Some(()));
                 }
 
                 let last_key = *batch_keys.last().expect("non-empty");
@@ -236,11 +246,11 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                         )?;
                     }
                 }
-                return Ok(true);
+                return Ok(Some(()));
             }
-            Ok(false)
+            Ok(None)
         })?;
-        Ok(did_work)
+        Ok(committed.map(|((), mr)| mr))
     }
 
     /// Drives all watermark-bounded background builds to completion (chunked by `DEFAULT_BUILD_CHUNK`).
@@ -255,7 +265,16 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
     /// Rebuilds one index (or all indexes when `target == None`) from scratch from primary storage
     /// using O(1) `truncate` on the pooled `SubDbSlot` (zero DBI leak!).
     pub fn rebuild<C: Clock>(&self, engine: &Engine<S, V, C>, target: Option<IndexId>) -> Result<usize> {
-        let (rebuilt, _) = engine.run_maintenance_write(|txn, schema, dbs| {
+        Ok(self.rebuild_with_receipt(engine, target)?.0)
+    }
+
+    /// Like `rebuild`, also returning the atomic `MaintReceipt` captured inside the rebuild write txn.
+    pub fn rebuild_with_receipt<C: Clock>(
+        &self,
+        engine: &Engine<S, V, C>,
+        target: Option<IndexId>,
+    ) -> Result<(usize, MaintReceipt)> {
+        engine.run_maintenance_write(|txn, schema, dbs| {
             let mut count = 0usize;
             for def in &schema.indexes {
                 if let Some(tid) = target
@@ -291,8 +310,7 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                 return Err(ElmdbError::new(ErrorCode::UnknownIndex, format!("unknown index id {}", tid.0)));
             }
             Ok(count)
-        })?;
-        Ok(rebuilt)
+        })
     }
 
     /// Differential verifier proving `derived == rebuild(primary)` byte-for-byte for every Ready index!

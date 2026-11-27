@@ -60,6 +60,7 @@ const KNOWN_ERROR_CODES: Readonly<Record<ErrorCode, true>> = Object.freeze({
   DATABASE_LOCKED: true,
   ALREADY_EXISTS: true,
   PANICKED: true,
+  ALREADY_LOADED: true,
 });
 
 const NAPI_INVALID_ARG_CODES: Readonly<Record<string, true>> = Object.freeze({

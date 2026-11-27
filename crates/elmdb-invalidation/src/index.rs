@@ -245,15 +245,12 @@ enum CommitRingPayload {
         slot: u16,
         key: Vec<u8>,
     },
-    /// Schema epoch change or fail-safe full invalidation barrier.
-    FullInvalidation,
 }
 
 #[derive(Debug, Clone)]
 struct CommitRingEntry {
     seq: u64,
-    txnid: u64,
-    schema_epoch: u64,
+    maint_seq: u64,
     payload: CommitRingPayload,
 }
 
@@ -266,11 +263,13 @@ pub struct InvalidationStats {
     pub tier2_slab_bytes: usize,
     pub latest_seq: u64,
     pub latest_schema_epoch: u64,
+    pub latest_maint_seq: u64,
     pub ring_len: usize,
 }
 
 /// Two-tier live-query invalidation index with lock-free MVCC `CommitRing` catch-up
-/// and cross-process `commit_log` selective invalidation.
+/// and cross-process `commit_log` selective invalidation driven by three exact orthogonal
+/// logical clocks: `(commit_seq, schema_epoch, maint_seq)`.
 #[derive(Debug, Default)]
 pub struct InvalidationIndex {
     // Dense owner allocation (`owner_idx` <-> `WatchId`) for fast bitset short-circuiting.
@@ -291,19 +290,12 @@ pub struct InvalidationIndex {
     // Tier 2 flat segmented-arena range slabs per `SubDbSlot`.
     slot_arenas: FxHashMap<u16, SlotRangeArena>,
 
-    // Lock-free MVCC CommitRing (last `COMMIT_RING_CAP` commits).
+    // Lock-free MVCC CommitRing (last `COMMIT_RING_CAP` entries) over three orthogonal logical clocks.
     latest_seq: u64,
     latest_schema_epoch: u64,
-    last_seen_txnid: Option<u64>,
-    ring_dropped_up_to: u64,
-    /// Tracks maintenance writes (`set_entity_embeddings`, `drain_rank_chunk`, `rebuild`, etc.) that
-    /// do not increment `commit_seq`. Compared strictly by `txnid > read_at_txnid` when `txnid > 0`
-    /// so watches rerun once and settle cleanly (zero livelock).
-    latest_maint_txnid: Option<u64>,
-    ring_dropped_maint_txnid: Option<u64>,
-    /// Seq-based fallback used only when direct unit tests omit a real LMDB `txnid` (`txnid == 0`).
-    latest_subdb_write_seq: Option<u64>,
-    ring_dropped_subdb_up_to: Option<u64>,
+    latest_maint_seq: u64,
+    ring_dropped_seq_up_to: u64,
+    ring_dropped_maint_up_to: u64,
     ring: VecDeque<CommitRingEntry>,
 
     // Reusable scratch bitset for zero-alloc `stab` deduplication.
@@ -312,26 +304,18 @@ pub struct InvalidationIndex {
 
 impl InvalidationIndex {
     pub fn new(initial_seq: u64, initial_schema_epoch: u64) -> Self {
+        Self::new_with_maint_seq(initial_seq, initial_schema_epoch, 0)
+    }
+
+    pub fn new_with_maint_seq(initial_seq: u64, initial_schema_epoch: u64, initial_maint_seq: u64) -> Self {
         Self {
             latest_seq: initial_seq,
             latest_schema_epoch: initial_schema_epoch,
-            ring_dropped_up_to: initial_seq,
+            latest_maint_seq: initial_maint_seq,
+            ring_dropped_seq_up_to: initial_seq,
+            ring_dropped_maint_up_to: initial_maint_seq,
             ..Default::default()
         }
-    }
-
-    pub fn new_with_txnid(initial_seq: u64, initial_schema_epoch: u64, initial_txnid: u64) -> Self {
-        Self {
-            latest_seq: initial_seq,
-            latest_schema_epoch: initial_schema_epoch,
-            last_seen_txnid: Some(initial_txnid),
-            ring_dropped_up_to: initial_seq,
-            ..Default::default()
-        }
-    }
-
-    pub fn observe_txnid(&mut self, txnid: u64) {
-        self.last_seen_txnid = Some(self.last_seen_txnid.map_or(txnid, |prev| prev.max(txnid)));
     }
 
     pub fn stats(&self) -> InvalidationStats {
@@ -345,6 +329,7 @@ impl InvalidationIndex {
             tier2_slab_bytes,
             latest_seq: self.latest_seq,
             latest_schema_epoch: self.latest_schema_epoch,
+            latest_maint_seq: self.latest_maint_seq,
             ring_len: self.ring.len(),
         }
     }
@@ -355,6 +340,10 @@ impl InvalidationIndex {
 
     pub fn latest_schema_epoch(&self) -> u64 {
         self.latest_schema_epoch
+    }
+
+    pub fn latest_maint_seq(&self) -> u64 {
+        self.latest_maint_seq
     }
 
     /// Removes `watch_id` from all Tier 1 and Tier 2 tables and recycles its dense `owner_idx`.
@@ -448,19 +437,19 @@ impl InvalidationIndex {
         read_set: &ReadSet,
         current_schema: &CompiledSchema,
     ) -> bool {
-        self.register_after_read_with_txnid(watch_id, read_at_seq, 0, read_schema_epoch, read_set, current_schema)
+        self.register_after_read_with_maint(watch_id, read_at_seq, 0, read_schema_epoch, read_set, current_schema)
     }
 
     /// Registers (or atomically replaces) `watch_id`'s `ReadSet` collected during an MVCC snapshot read
-    /// at `(read_at_seq, read_at_txnid, read_schema_epoch)` and immediately checks `CommitRing`.
+    /// at `(read_at_seq, read_at_maint_seq, read_schema_epoch)` and immediately checks `CommitRing`.
     ///
-    /// Comparing maintenance writes strictly against `read_at_txnid` (`maint_txnid > read_at_txnid`)
-    /// prevents post-maintenance watch livelock while still catching every concurrent maintenance write!
-    pub fn register_after_read_with_txnid(
+    /// Comparing maintenance writes strictly against `read_at_maint_seq` (`rec.maint_seq > read_at_maint_seq`)
+    /// prevents post-maintenance watch livelock while catching every concurrent maintenance write!
+    pub fn register_after_read_with_maint(
         &mut self,
         watch_id: WatchId,
         read_at_seq: u64,
-        read_at_txnid: u64,
+        read_at_maint_seq: u64,
         read_schema_epoch: u64,
         read_set: &ReadSet,
         current_schema: &CompiledSchema,
@@ -522,9 +511,10 @@ impl InvalidationIndex {
             ranges,
         };
 
-        // Check whether any commits or maintenance writes happened AFTER `(read_at_seq, read_at_txnid)`
+        // Check whether any commits or maintenance writes happened AFTER `(read_at_seq, read_at_maint_seq)`
         // (or schema epoch changed).
-        let stale = self.check_ring_staleness(&entry, read_at_seq, read_at_txnid, read_schema_epoch, current_schema);
+        let stale =
+            self.check_ring_staleness(&entry, read_at_seq, read_at_maint_seq, read_schema_epoch, current_schema);
         self.watches.insert(watch_id, entry);
         stale
     }
@@ -533,182 +523,108 @@ impl InvalidationIndex {
         &self,
         entry: &WatchEntry,
         read_at_seq: u64,
-        read_at_txnid: u64,
+        read_at_maint_seq: u64,
         read_schema_epoch: u64,
         schema: &CompiledSchema,
     ) -> bool {
-        // P1-2: Verify schema epoch matches BOTH `latest_schema_epoch` AND the `schema` used to evaluate deltas!
         if read_schema_epoch != self.latest_schema_epoch || read_schema_epoch != schema.epoch {
             return true;
         }
-        // Maintenance writes (`SubDbWrite` / `FullInvalidation` rebuilds) do not increment `commit_seq`.
-        // Compare strictly by LMDB `txnid > read_at_txnid` whenever available so post-maintenance reruns settle cleanly!
-        let has_maint_txnid = self.latest_maint_txnid.is_some_and(|t| read_at_txnid == 0 || t > read_at_txnid);
-        let has_maint_seq_fallback = self.latest_subdb_write_seq.is_some_and(|s| s >= read_at_seq)
-            || self.ring_dropped_subdb_up_to.is_some_and(|s| s >= read_at_seq);
-        if read_at_seq >= self.latest_seq && !has_maint_txnid && !has_maint_seq_fallback {
+        if read_at_seq >= self.latest_seq && read_at_maint_seq >= self.latest_maint_seq {
             return false;
         }
-        // Fail strictly safe if `CommitRing` evicted commits or maintenance writes overlapping the reader's snapshot!
-        if read_at_seq < self.ring_dropped_up_to {
+        // Fail strictly safe if `CommitRing` evicted or barrier-cleared commits/maintenance overlapping the reader!
+        if read_at_seq < self.ring_dropped_seq_up_to || read_at_maint_seq < self.ring_dropped_maint_up_to {
             return true;
         }
-        if self.ring_dropped_maint_txnid.is_some_and(|t| read_at_txnid == 0 || t > read_at_txnid) {
-            return true;
-        }
-        if self.ring_dropped_subdb_up_to.is_some_and(|s| s >= read_at_seq) {
-            return true;
-        }
-        let mut expected_seq = read_at_seq.saturating_add(1);
+        // Invariant: every entry in `self.ring` belongs to `self.latest_schema_epoch` and contiguously covers
+        // `(ring_dropped_seq_up_to + 1 ..= latest_seq)` and `(ring_dropped_maint_up_to + 1 ..= latest_maint_seq)`.
         for rec in &self.ring {
             match &rec.payload {
                 CommitRingPayload::SubDbWrite { slot, key } => {
-                    // Compare strictly by `txnid > read_at_txnid` when both carry real txnids;
-                    // fall back to `rec.seq >= read_at_seq` only for txnid-less direct unit tests.
-                    if rec.txnid > 0 && read_at_txnid > 0 {
-                        if rec.txnid <= read_at_txnid {
-                            continue;
-                        }
-                    } else if rec.seq < read_at_seq {
-                        continue;
-                    }
-                    if rec.schema_epoch != read_schema_epoch {
-                        return true;
-                    }
-                    if entry_matches_subdb_key(entry, *slot, key) {
-                        return true;
-                    }
-                }
-                CommitRingPayload::FullInvalidation => {
-                    let newer_by_txnid = rec.txnid > 0 && (read_at_txnid == 0 || rec.txnid > read_at_txnid);
-                    if rec.seq > read_at_seq || newer_by_txnid {
+                    if rec.maint_seq > read_at_maint_seq && entry_matches_subdb_key(entry, *slot, key) {
                         return true;
                     }
                 }
                 CommitRingPayload::Local(summary) => {
-                    if rec.seq <= read_at_seq {
-                        continue;
-                    }
-                    if rec.schema_epoch != read_schema_epoch {
-                        return true;
-                    }
-                    if rec.seq > expected_seq {
-                        return true;
-                    }
-                    if rec.seq == expected_seq {
-                        expected_seq = expected_seq.saturating_add(1);
-                    }
-                    if entry_matches_local_commit(entry, schema, summary) {
+                    if rec.seq > read_at_seq && entry_matches_local_commit(entry, schema, summary) {
                         return true;
                     }
                 }
                 CommitRingPayload::CrossProc(cp) => {
-                    if rec.seq <= read_at_seq {
-                        continue;
-                    }
-                    if rec.schema_epoch != read_schema_epoch {
-                        return true;
-                    }
-                    if rec.seq > expected_seq {
-                        return true;
-                    }
-                    if rec.seq == expected_seq {
-                        expected_seq = expected_seq.saturating_add(1);
-                    }
-                    if entry_matches_cross_proc(entry, schema, cp) {
+                    if rec.seq > read_at_seq && entry_matches_cross_proc(entry, schema, cp) {
                         return true;
                     }
                 }
             }
         }
-        // Fail safe if ring did not cover all commits up to `latest_seq`.
-        read_at_seq < self.latest_seq && expected_seq <= self.latest_seq
+        false
     }
 
-    fn push_ring(&mut self, seq: u64, txnid: u64, schema_epoch: u64, payload: CommitRingPayload) {
-        if matches!(payload, CommitRingPayload::SubDbWrite { .. }) {
-            if txnid > 0 {
-                self.latest_maint_txnid = Some(self.latest_maint_txnid.map_or(txnid, |prev| prev.max(txnid)));
-            } else {
-                self.latest_subdb_write_seq = Some(self.latest_subdb_write_seq.map_or(seq, |prev| prev.max(seq)));
-            }
-        }
-        if seq > self.latest_seq {
-            self.latest_seq = seq;
-        }
-        if schema_epoch > self.latest_schema_epoch {
-            self.latest_schema_epoch = schema_epoch;
-        }
+    /// Records a fail-safe full-invalidation barrier at `(seq, maint_seq, schema_epoch)` and clears the ring so
+    /// `(ring_dropped_seq_up_to == latest_seq, ring_dropped_maint_up_to == latest_maint_seq)` holds exactly.
+    fn record_full_invalidation(&mut self, seq: u64, maint_seq: u64, schema_epoch: u64) {
+        self.latest_seq = self.latest_seq.max(seq);
+        self.latest_maint_seq = self.latest_maint_seq.max(maint_seq);
+        self.latest_schema_epoch = self.latest_schema_epoch.max(schema_epoch);
+        self.ring_dropped_seq_up_to = self.latest_seq;
+        self.ring_dropped_maint_up_to = self.latest_maint_seq;
+        self.ring.clear();
+    }
+
+    fn push_ring(&mut self, seq: u64, maint_seq: u64, payload: CommitRingPayload) {
+        self.latest_seq = self.latest_seq.max(seq);
+        self.latest_maint_seq = self.latest_maint_seq.max(maint_seq);
         if self.ring.len() >= COMMIT_RING_CAP
             && let Some(evicted) = self.ring.pop_front()
         {
             match evicted.payload {
                 CommitRingPayload::SubDbWrite { .. } => {
-                    if evicted.txnid > 0 {
-                        self.ring_dropped_maint_txnid =
-                            Some(self.ring_dropped_maint_txnid.map_or(evicted.txnid, |prev| prev.max(evicted.txnid)));
-                    } else {
-                        self.ring_dropped_subdb_up_to =
-                            Some(self.ring_dropped_subdb_up_to.map_or(evicted.seq, |prev| prev.max(evicted.seq)));
-                    }
-                }
-                CommitRingPayload::FullInvalidation => {
-                    self.ring_dropped_up_to = self.ring_dropped_up_to.max(evicted.seq);
-                    if evicted.txnid > 0 {
-                        self.ring_dropped_maint_txnid =
-                            Some(self.ring_dropped_maint_txnid.map_or(evicted.txnid, |prev| prev.max(evicted.txnid)));
-                    }
+                    self.ring_dropped_maint_up_to = self.ring_dropped_maint_up_to.max(evicted.maint_seq);
                 }
                 CommitRingPayload::Local(_) | CommitRingPayload::CrossProc(_) => {
-                    self.ring_dropped_up_to = self.ring_dropped_up_to.max(evicted.seq);
+                    self.ring_dropped_seq_up_to = self.ring_dropped_seq_up_to.max(evicted.seq);
                 }
             }
         }
-        self.ring.push_back(CommitRingEntry { seq, txnid, schema_epoch, payload });
+        self.ring.push_back(CommitRingEntry { seq, maint_seq, payload });
     }
 
     /// Processes an in-process committed `CommitDeltaSummary`, appends it to `CommitRing`,
     /// and returns the deduplicated list of invalidated `WatchId`s!
     ///
     /// Fail-safe guarantee:
-    /// - If `summary.seq > prev_latest_seq + 1` (e.g. an intervening cross-process commit or
-    ///   out-of-order concurrent commit) or `schema_epoch` changed, invalidates ALL watches!
-    /// - If `summary.seq <= prev_latest_seq` (late out-of-order delivery after a higher seq already
-    ///   triggered gap invalidation or cross-process catch-up), preserves `CommitRing` monotonicity
-    ///   without corrupting ring ordering or regressing `latest_schema_epoch`.
+    /// - If `summary.maint_seq > prev_maint` (an unseen cross-process maintenance write occurred),
+    ///   `summary.seq > prev_seq + 1` (a commit gap), or `schema_epoch` changed, invalidates ALL watches!
+    /// - Standalone non-query writes (like `next_counter`/`set_counter`) bump neither `commit_seq` nor
+    ///   `maint_seq`, so they never trigger spurious false-positive invalidations!
     pub fn notify_commit(&mut self, schema: &CompiledSchema, summary: &CommitDeltaSummary) -> Vec<WatchId> {
         let prev_seq = self.latest_seq;
+        let prev_maint = self.latest_maint_seq;
         let prev_epoch = self.latest_schema_epoch;
-        let prev_txnid = self.last_seen_txnid;
-        self.observe_txnid(summary.txnid);
+        let maint_gap = summary.maint_seq > prev_maint;
 
+        if maint_gap {
+            self.record_full_invalidation(summary.seq, summary.maint_seq, summary.schema_epoch);
+            return self.all_watch_ids();
+        }
         if summary.seq <= prev_seq {
             return Vec::new();
         }
 
         let schema_changed = summary.schema_epoch != prev_epoch;
-        let seq_delta = summary.seq.saturating_sub(prev_seq);
-        let seq_gap = summary.seq > prev_seq.saturating_add(1);
-        // Each normal commit increments both `commit_seq` and LMDB `txnid` by 1.
-        // If `summary.txnid > prev_txnid + seq_delta`, an unseen cross-process maintenance write
-        // occurred before this local commit — fail strictly safe instead of swallowing its txnid!
-        let maint_gap = summary.txnid > 0 && prev_txnid.is_some_and(|pt| summary.txnid > pt.saturating_add(seq_delta));
-
-        if maint_gap {
-            self.ring_dropped_up_to = self.ring_dropped_up_to.max(summary.seq);
-            self.latest_maint_txnid =
-                Some(self.latest_maint_txnid.map_or(summary.txnid, |prev| prev.max(summary.txnid)));
-            self.push_ring(summary.seq, summary.txnid, summary.schema_epoch, CommitRingPayload::FullInvalidation);
+        if schema_changed {
+            self.record_full_invalidation(summary.seq, summary.maint_seq, summary.schema_epoch);
             return self.all_watch_ids();
         }
+        let seq_gap = summary.seq > prev_seq.saturating_add(1);
         if seq_gap {
             let missing_up_to = summary.seq.saturating_sub(1);
-            self.ring_dropped_up_to = self.ring_dropped_up_to.max(missing_up_to);
-            self.push_ring(missing_up_to, summary.txnid, summary.schema_epoch, CommitRingPayload::FullInvalidation);
+            self.record_full_invalidation(missing_up_to, prev_maint, summary.schema_epoch);
         }
-        self.push_ring(summary.seq, summary.txnid, summary.schema_epoch, CommitRingPayload::Local(summary.clone()));
+        self.push_ring(summary.seq, summary.maint_seq, CommitRingPayload::Local(summary.clone()));
 
-        if schema_changed || seq_gap {
+        if seq_gap {
             return self.all_watch_ids();
         }
         if self.watches.is_empty() {
@@ -893,43 +809,37 @@ impl InvalidationIndex {
 
     /// Notifies a direct sub-DB write outside `execute_batch` (e.g., `set_entity_embeddings` or background vector/rank drain).
     pub fn notify_subdb_write(&mut self, seq: u64, schema_epoch: u64, slot: u16, key: &[u8]) -> Vec<WatchId> {
-        self.notify_subdb_write_at_txnid(seq, schema_epoch, 0, slot, key)
+        self.notify_subdb_write_at_maint(seq, schema_epoch, 0, slot, key)
     }
 
-    pub fn notify_subdb_write_at_txnid(
+    pub fn notify_subdb_write_at_maint(
         &mut self,
         seq: u64,
         schema_epoch: u64,
-        txnid: u64,
+        maint_seq: u64,
         slot: u16,
         key: &[u8],
     ) -> Vec<WatchId> {
         let prev_seq = self.latest_seq;
+        let prev_maint = self.latest_maint_seq;
         let prev_epoch = self.latest_schema_epoch;
-        let prev_txnid = self.last_seen_txnid;
+
+        // Ignore stale delayed receipts already superseded by a newer catch-up, schema change, or barrier.
+        if maint_seq > 0 && maint_seq <= prev_maint && seq <= prev_seq && schema_epoch <= prev_epoch {
+            return Vec::new();
+        }
+
         let schema_changed = schema_epoch != prev_epoch;
-        // A SubDbWrite carries no normal commit summary, so ANY `seq > prev_seq` means at least
-        // one normal commit was not yet processed by `InvalidationIndex` — fail strictly safe!
-        // Likewise, if `txnid > prev_txnid + 1`, at least one unseen maintenance write (e.g., from
-        // another process on a different slot) occurred before this write — fail strictly safe!
         let seq_gap = seq > prev_seq;
-        let maint_gap = txnid > 0 && prev_txnid.is_some_and(|pt| txnid > pt.saturating_add(1));
+        let effective_maint = if maint_seq > 0 { maint_seq } else { prev_maint.saturating_add(1) };
+        let maint_gap = effective_maint > prev_maint.saturating_add(1);
 
-        if txnid > 0 {
-            self.observe_txnid(txnid);
-        }
-        if seq_gap || maint_gap {
-            self.ring_dropped_up_to = self.ring_dropped_up_to.max(seq);
-            if txnid > 0 {
-                self.latest_maint_txnid = Some(self.latest_maint_txnid.map_or(txnid, |prev| prev.max(txnid)));
-            }
-            self.push_ring(seq, txnid, schema_epoch, CommitRingPayload::FullInvalidation);
-        }
-        self.push_ring(seq, txnid, schema_epoch, CommitRingPayload::SubDbWrite { slot, key: key.to_vec() });
-
-        if schema_changed || seq_gap || maint_gap {
+        if seq_gap || maint_gap || schema_changed {
+            self.record_full_invalidation(seq, effective_maint, schema_epoch);
             return self.all_watch_ids();
         }
+        self.push_ring(seq, effective_maint, CommitRingPayload::SubDbWrite { slot, key: key.to_vec() });
+
         let mut out = Vec::new();
         if let Some(arena) = self.slot_arenas.get(&slot) {
             self.scratch_touched.reset(self.next_owner_idx as usize);
@@ -940,71 +850,48 @@ impl InvalidationIndex {
 
     /// Notifies a schema change (`set_schema`), invalidating all active watches cleanly.
     pub fn notify_schema_change(&mut self, seq: u64, new_schema_epoch: u64) -> Vec<WatchId> {
-        self.notify_schema_change_at_txnid(seq, new_schema_epoch, 0)
+        self.notify_schema_change_at_maint(seq, new_schema_epoch, self.latest_maint_seq)
     }
 
-    pub fn notify_schema_change_at_txnid(&mut self, seq: u64, new_schema_epoch: u64, txnid: u64) -> Vec<WatchId> {
-        if txnid > 0 {
-            self.observe_txnid(txnid);
-            if seq <= self.latest_seq {
-                self.latest_maint_txnid = Some(self.latest_maint_txnid.map_or(txnid, |prev| prev.max(txnid)));
-            }
-        }
-        if seq > self.latest_seq.saturating_add(1) {
-            self.ring_dropped_up_to = self.ring_dropped_up_to.max(seq.saturating_sub(1));
-        }
-        self.push_ring(seq, txnid, new_schema_epoch, CommitRingPayload::FullInvalidation);
+    pub fn notify_schema_change_at_maint(&mut self, seq: u64, new_schema_epoch: u64, maint_seq: u64) -> Vec<WatchId> {
+        self.record_full_invalidation(seq, maint_seq, new_schema_epoch);
         self.all_watch_ids()
     }
 
-    /// Notifies a full maintenance rebuild that may not bump `commit_seq` or `schema_epoch`,
-    /// recording a txnid-tagged barrier so concurrent readers older than `txnid` rerun once and settle cleanly.
+    /// Notifies a full maintenance rebuild, recording a `maint_seq`-tagged barrier so concurrent
+    /// readers older than `maint_seq` rerun once and settle cleanly.
     pub fn notify_full_rebuild(&mut self, seq: u64, schema_epoch: u64) -> Vec<WatchId> {
-        self.notify_full_rebuild_at_txnid(seq, schema_epoch, 0)
+        self.notify_full_rebuild_at_maint(seq, schema_epoch, 0)
     }
 
-    pub fn notify_full_rebuild_at_txnid(&mut self, seq: u64, schema_epoch: u64, txnid: u64) -> Vec<WatchId> {
-        if txnid > 0 {
-            self.observe_txnid(txnid);
-            self.latest_maint_txnid = Some(self.latest_maint_txnid.map_or(txnid, |prev| prev.max(txnid)));
-        } else {
-            self.ring_dropped_subdb_up_to = Some(self.ring_dropped_subdb_up_to.map_or(seq, |prev| prev.max(seq)));
+    pub fn notify_full_rebuild_at_maint(&mut self, seq: u64, schema_epoch: u64, maint_seq: u64) -> Vec<WatchId> {
+        if maint_seq > 0
+            && maint_seq <= self.latest_maint_seq
+            && seq <= self.latest_seq
+            && schema_epoch <= self.latest_schema_epoch
+        {
+            return Vec::new();
         }
-        self.push_ring(seq, txnid, schema_epoch, CommitRingPayload::FullInvalidation);
+        let effective_maint = if maint_seq > 0 { maint_seq } else { self.latest_maint_seq.saturating_add(1) };
+        self.record_full_invalidation(seq, effective_maint, schema_epoch);
         self.all_watch_ids()
     }
 
     /// Selective cross-process catch-up via persisted `commit_log` (last 4,096 commits),
     /// executed atomically inside **ONE single pinned MVCC `RoTxn`** (zero TOCTOU race!)
-    /// AND comparing `ro.txnid()` against `commit_seq` delta so cross-process maintenance writes
-    /// (`set_entity_embeddings`, `drain_rank_chunk`, `build_chunk`, `rebuild`) are ALWAYS detected
-    /// even when interleaved with normal data commits between polls!
+    /// using the exact orthogonal `(commit_seq, schema_epoch, maint_seq)` clocks.
     pub fn catch_up_cross_process<S: KvStore, V: Vfs, C: Clock>(
         &mut self,
         engine: &Engine<S, V, C>,
     ) -> Result<Vec<WatchId>> {
-        use elmdb_storage::KvRead;
         let (ro, schema) = engine.begin_read_pinned()?;
-        let cur_txnid = ro.txnid();
+        let tip_maint = elmdb_engine::read_maint_seq(&ro, &engine.dbs())?;
         let (tip_seq, summaries_opt) = elmdb_engine::read_commit_summaries_in_txn(&ro, &engine.dbs(), self.latest_seq)?;
         let tip_epoch = schema.epoch;
         drop(ro);
 
-        let prev_seq = self.latest_seq;
-        let prev_txnid = self.last_seen_txnid;
-        self.observe_txnid(cur_txnid);
-
-        // Each normal data/schema commit bumps `commit_seq` by 1 and LMDB `txnid` by 1.
-        // Any maintenance write bumps `txnid` without bumping `commit_seq`, so
-        // `cur_txnid > prev_txnid + (tip_seq - prev_seq)` detects maintenance writes BOTH alone
-        // AND when combined with normal commits in the same polling interval!
-        let seq_delta = tip_seq.saturating_sub(prev_seq);
-        let maint_happened = prev_txnid.is_some_and(|pt| cur_txnid > pt.saturating_add(seq_delta));
-
-        if maint_happened {
-            self.ring_dropped_up_to = self.ring_dropped_up_to.max(tip_seq);
-            self.latest_maint_txnid = Some(self.latest_maint_txnid.map_or(cur_txnid, |prev| prev.max(cur_txnid)));
-            self.push_ring(tip_seq, cur_txnid, tip_epoch, CommitRingPayload::FullInvalidation);
+        if tip_maint > self.latest_maint_seq {
+            self.record_full_invalidation(tip_seq, tip_maint, tip_epoch);
             return Ok(self.all_watch_ids());
         }
 
@@ -1014,64 +901,48 @@ impl InvalidationIndex {
 
         let Some(summaries) = summaries_opt else {
             // > 4,096 commits elapsed cross-process: fail strictly safe!
-            self.ring_dropped_up_to = tip_seq;
-            self.push_ring(tip_seq, cur_txnid, tip_epoch, CommitRingPayload::FullInvalidation);
+            self.record_full_invalidation(tip_seq, tip_maint, tip_epoch);
             return Ok(self.all_watch_ids());
         };
 
-        if tip_seq > self.latest_seq {
-            // P0-2: Verify contiguous sequence coverage `self.latest_seq + 1 ..= tip_seq`!
-            let mut expected = self.latest_seq.saturating_add(1);
-            let mut contiguous = !summaries.is_empty();
-            for cp in &summaries {
-                if cp.seq != expected {
-                    contiguous = false;
-                    break;
-                }
-                expected = expected.saturating_add(1);
-            }
-            if !contiguous || expected != tip_seq.saturating_add(1) {
-                self.ring_dropped_up_to = tip_seq;
-                self.push_ring(tip_seq, cur_txnid, tip_epoch, CommitRingPayload::FullInvalidation);
-                return Ok(self.all_watch_ids());
-            }
+        if !summaries.iter().map(|cp| cp.seq).eq(self.latest_seq.saturating_add(1)..=tip_seq) {
+            // P0-2: Non-contiguous cross-process commit_log window -> fail strictly safe!
+            self.record_full_invalidation(tip_seq, tip_maint, tip_epoch);
+            return Ok(self.all_watch_ids());
         }
 
         if summaries.is_empty() {
-            if tip_epoch != self.latest_schema_epoch {
-                return Ok(self.notify_schema_change_at_txnid(tip_seq, tip_epoch, cur_txnid));
-            }
-            return Ok(Vec::new());
+            return Ok(self.notify_schema_change_at_maint(tip_seq, tip_epoch, tip_maint));
         }
 
         let mut all_dirty: FxHashSet<WatchId> = FxHashSet::default();
         for cp in summaries {
-            let dirty = self.apply_cross_proc_summary_at_txnid(&schema, &cp, cur_txnid);
+            let dirty = self.apply_cross_proc_summary_at_maint(&schema, &cp, tip_maint);
             all_dirty.extend(dirty);
         }
         // If `tip_epoch` advanced (e.g. schema change didn't emit a data commit summary), fail safe!
         if tip_epoch != self.latest_schema_epoch {
-            all_dirty.extend(self.notify_schema_change_at_txnid(tip_seq, tip_epoch, cur_txnid));
+            all_dirty.extend(self.notify_schema_change_at_maint(tip_seq, tip_epoch, tip_maint));
         }
         Ok(all_dirty.into_iter().collect())
     }
 
     /// Applies one `CrossProcCommitSummary` selectively (public for deterministic unit testing).
     pub fn apply_cross_proc_summary(&mut self, schema: &CompiledSchema, cp: &CrossProcCommitSummary) -> Vec<WatchId> {
-        self.apply_cross_proc_summary_at_txnid(schema, cp, 0)
+        self.apply_cross_proc_summary_at_maint(schema, cp, self.latest_maint_seq)
     }
 
-    fn apply_cross_proc_summary_at_txnid(
+    fn apply_cross_proc_summary_at_maint(
         &mut self,
         schema: &CompiledSchema,
         cp: &CrossProcCommitSummary,
-        txnid: u64,
+        maint_seq: u64,
     ) -> Vec<WatchId> {
-        let schema_changed = cp.schema_epoch != self.latest_schema_epoch;
-        self.push_ring(cp.seq, txnid, cp.schema_epoch, CommitRingPayload::CrossProc(cp.clone()));
-        if schema_changed {
+        if cp.schema_epoch != self.latest_schema_epoch {
+            self.record_full_invalidation(cp.seq, maint_seq, cp.schema_epoch);
             return self.all_watch_ids();
         }
+        self.push_ring(cp.seq, maint_seq, CommitRingPayload::CrossProc(cp.clone()));
         if self.watches.is_empty() {
             return Vec::new();
         }

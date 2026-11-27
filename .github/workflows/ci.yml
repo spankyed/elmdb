@@ -101,6 +101,7 @@ jobs:
       - run: cargo fetch --locked
       - run: cargo xtask check-generated
       - run: cargo xtask check-versions
+      - run: cargo xtask check-workspace-deps
       - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
         with:
           tool: cargo-about@0.9.3

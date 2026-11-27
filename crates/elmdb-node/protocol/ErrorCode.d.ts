@@ -42,5 +42,6 @@ export type ErrorCode =
   | 'DATABASE_LOCKED'
   | 'ALREADY_EXISTS'
   | 'PANICKED'
+  | 'ALREADY_LOADED'
 ;
 

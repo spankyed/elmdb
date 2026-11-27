@@ -13,6 +13,7 @@ import {
   type EarsOperationResult,
   type Schema,
 } from '../src/index.ts';
+import { hasKnownErrorCode, toEarsError } from '../src/errors.ts';
 import {
   DATABASE_FORMAT,
   createTemporaryDatabases,
@@ -537,5 +538,11 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     const emptyUnit = events.slice(beforeEmptyBatch).find((e) => e.op.kind === 'unit');
     expect(emptyUnit?.res.outcome).toBe('ok');
     expect(emptyUnit?.res.sequence).toBeUndefined();
+
+    // ALREADY_LOADED is part of the unified ErrorCode / EarsErrorCode taxonomy
+    expect(hasKnownErrorCode({ code: 'ALREADY_LOADED' })).toBe(true);
+    const alreadyLoaded = toEarsError({ code: 'ALREADY_LOADED', message: 'another binary claimed process' });
+    expect(alreadyLoaded.code).toBe('ALREADY_LOADED');
+    expect(alreadyLoaded.message).toContain('another binary');
   });
 });
