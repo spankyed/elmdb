@@ -184,18 +184,15 @@ pub(crate) fn atomic_publish_dir_replace(
     backup_marker: &str,
     nonce: u64,
 ) -> Result<()> {
-    match fs::symlink_metadata(target_dir) {
-        Err(e) if e.kind() == ErrorKind::NotFound => return atomic_publish_dir_new(staging, target_dir),
-        Err(e) => {
-            return Err(ElmdbError::new(ErrorCode::Io, format!("cannot inspect backup target: {e}")));
-        }
-        Ok(meta) if meta.file_type().is_symlink() => {
+    if let Ok(meta) = fs::symlink_metadata(target_dir) {
+        if meta.file_type().is_symlink() {
             return Err(ElmdbError::new(
                 ErrorCode::InvalidArgument,
                 format!("refusing to replace symlink backup target '{}'", target_dir.display()),
             ));
         }
-        Ok(_) => {}
+    } else {
+        return atomic_publish_dir_new(staging, target_dir);
     }
 
     // Drop `ReadDir` immediately before renaming/removing so Windows never hits `ERROR_ACCESS_DENIED`
