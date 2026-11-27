@@ -1454,7 +1454,7 @@ fn batch_e_scheduler_abort_backoff_and_monotonic_snapshot_fence() {
     assert_eq!(sched.next_wake_delay_ms(1150), Some(200));
 
     let mut t = 1350u64;
-    for _ in 0..12 {
+    for _ in 0..20 {
         assert_eq!(sched.next_due(t, 0).watch_id, Some(failing));
         assert!(sched.abort_run(failing, true, t));
         let delay = sched.next_wake_delay_ms(t).unwrap();
@@ -1464,6 +1464,26 @@ fn batch_e_scheduler_abort_backoff_and_monotonic_snapshot_fence() {
     assert_eq!(sched.next_due(t, 0).watch_id, Some(failing));
     assert!(sched.abort_run(failing, true, t));
     assert_eq!(sched.next_wake_delay_ms(t), Some(elmdb_invalidation::DEFAULT_FAILURE_BACKOFF_MAX_MS));
+
+    // Watch with min_gap_ms > 50ms keeps adaptive cooldown on 1st failure (never shortened to 50ms).
+    let slow_gap = WatchId(3);
+    sched.register(
+        slow_gap,
+        WatchPolicy { mode: WatchMode::Declarative, min_gap_ms: 200, adaptive_multiplier: 0 },
+        t,
+        0,
+        true,
+        None,
+    );
+    sched.mark_dirty(&[slow_gap], t);
+    assert!(sched.begin_run(slow_gap));
+    assert!(sched.abort_run(slow_gap, true, t));
+    assert_eq!(sched.next_wake_delay_ms(t), Some(200));
+    // abort_run with requeue_dirty = false leaves watch clean (not dirty).
+    assert_eq!(sched.next_due(t + 200, 0).watch_id, Some(slow_gap));
+    assert!(sched.abort_run(slow_gap, false, t + 200));
+    assert!(!sched.tick(t + 1000).due_ids.contains(&slow_gap));
+    sched.unregister(slow_gap);
 
     // Backward host clock step during abort_run must clamp `last_run_ms` monotonically (`t` vs `t - 500`).
     let prev_last_run = t;
@@ -1481,17 +1501,68 @@ fn batch_e_scheduler_abort_backoff_and_monotonic_snapshot_fence() {
     sched.mark_dirty(&[failing], t);
     assert_eq!(sched.next_wake_delay_ms(t), Some(0));
 
-    // 2. E3: Unit tests for monotonic `(seq, maint_seq, epoch)` snapshot fence in WatchScheduler.
-    assert!(!sched.accept_snapshot(WatchId(999), (1, 0, 0)));
-    assert!(sched.accept_snapshot(failing, (5, 2, 1)));
-    assert!(sched.accept_snapshot(failing, (5, 2, 1))); // equal is accepted
-    assert!(sched.accept_snapshot(failing, (6, 2, 1))); // advanced seq accepted
-    assert!(!sched.accept_snapshot(failing, (5, 2, 1))); // stale seq rejected
-    assert!(!sched.accept_snapshot(failing, (6, 1, 1))); // stale maint_seq rejected
-    assert!(!sched.accept_snapshot(failing, (6, 2, 0))); // stale schema_epoch rejected
-    assert!(sched.accept_snapshot(failing, (6, 3, 2)));
+    // 2. E3: Unit tests for monotonic `(seq, maint_seq, epoch)` snapshot fence, overlapping runs,
+    //    and `dirty_since_ms` fairness preservation in WatchScheduler.
+    assert!(sched.enter_rerun(WatchId(999)).is_none());
+    assert!(!sched.can_accept_rerun(WatchId(999), 1, (1, 0, 0)));
+    sched.seed_snapshot(failing, (5, 2, 1));
+    let r1 = sched.enter_rerun(failing).unwrap();
+    let r2 = sched.enter_rerun(failing).unwrap();
+    assert!(r2 > r1);
+    assert!(sched.can_accept_rerun(failing, r2, (5, 2, 1))); // equal snapshot, latest run accepted
+    assert!(sched.can_accept_rerun(failing, r2, (6, 2, 1))); // advanced seq accepted
+    assert!(!sched.can_accept_rerun(failing, r2, (4, 2, 1))); // stale seq rejected
+    assert!(!sched.can_accept_rerun(failing, r2, (5, 1, 1))); // stale maint_seq rejected
+    assert!(!sched.can_accept_rerun(failing, r2, (5, 2, 0))); // stale schema_epoch rejected
+    // r2 finishes first at (6, 2, 1): r1 is still in flight so `running` MUST stay true!
+    assert!(sched.finish_rerun(failing, r2, (6, 2, 1), false, t, 1, None));
+    assert!(!sched.watches_settled(), "running must remain true while overlapping r1 is in flight");
+    // Older r1 at EQUAL snapshot (6, 2, 1) is rejected because r1 < accepted_run_id (r2),
+    // while r1 at a STRICTLY NEWER snapshot (7, 2, 1) and r2/r2+1 at equal snapshot are accepted!
+    assert!(!sched.can_accept_rerun(failing, r1, (6, 2, 1)));
+    assert!(!sched.can_accept_rerun(failing, r1, (5, 2, 1)));
+    assert!(sched.can_accept_rerun(failing, r1, (7, 2, 1)));
+    assert!(sched.can_accept_rerun(failing, r2, (6, 2, 1)));
+    assert!(sched.can_accept_rerun(failing, r2 + 1, (6, 2, 1)));
+    // With 2 active runs, abandoning one keeps running=true until the last is abandoned.
+    let _r_extra = sched.enter_rerun(failing).unwrap();
+    sched.abandon_rerun(failing);
+    assert!(!sched.watches_settled());
+    sched.abandon_rerun(failing);
+    assert!(sched.watches_settled(), "abandoning last in-flight rerun clears running");
+
+    // Overlapping abort_rerun preserves running while sibling is active, respects requeue_dirty=false,
+    // and applies backoff when last aborts.
+    let r3 = sched.enter_rerun(failing).unwrap();
+    let _r4 = sched.enter_rerun(failing).unwrap();
+    assert!(sched.abort_rerun(failing, false, t));
+    assert!(!sched.watches_settled());
+    assert!(sched.abort_rerun(failing, false, t));
+    assert!(sched.watches_settled(), "abort_rerun(requeue_dirty=false) leaves watch clean");
+    let _r4b = sched.enter_rerun(failing).unwrap();
+    let _r4c = sched.enter_rerun(failing).unwrap();
+    assert!(sched.abort_rerun(failing, true, t));
+    assert!(!sched.watches_settled());
+    assert!(sched.abort_rerun(failing, true, t));
+    assert_eq!(sched.next_wake_delay_ms(t), Some(elmdb_invalidation::DEFAULT_FAILURE_BACKOFF_BASE_MS * 2));
+
+    // Verify finish_rerun with stale=true sets dirty when clean AND preserves earlier dirty_since_ms when already dirty.
+    let r5 = sched.enter_rerun(failing).unwrap();
+    assert!(r5 > r3);
+    assert!(sched.finish_rerun(failing, r5, (7, 2, 1), true, t + 50, 1, None));
+    assert!(!sched.watches_settled());
+    let r6 = sched.enter_rerun(failing).unwrap();
+    sched.mark_dirty(&[failing], t + 60);
+    sched.mark_dirty(&[healthy], t + 70);
+    assert!(sched.finish_rerun(failing, r6, (8, 2, 1), true, t + 90, 1, None));
+    assert_eq!(
+        sched.tick(t + 200).due_ids,
+        vec![failing, healthy],
+        "finish_rerun(stale=true) must preserve earlier dirty_since_ms=t+60 ahead of healthy at t+70"
+    );
     sched.stop_watches();
-    assert!(!sched.accept_snapshot(failing, (7, 3, 2)));
+    assert!(sched.enter_rerun(failing).is_none());
+    assert!(!sched.can_accept_rerun(failing, 99, (8, 3, 2)));
 
     // 3. E3: LiveQueryHub fail-fast pre-check & concurrent stale-snapshot fencing!
     let (engine, _reg, ids) = open_sim();
@@ -1668,5 +1739,26 @@ fn batch_e_scheduler_abort_backoff_and_monotonic_snapshot_fence() {
     u_release.wait();
     let (_, race_deliver) = racing.join().unwrap();
     assert!(!race_deliver);
-    assert_eq!(hub.stats().active_watches, 0);
+    // Also exercise `rerun_query_watch` (non-snapshot path) for normal rerun + Closed after unregister.
+    let (wid_plain, _) = hub
+        .register_query_watch(&engine, &qe, &count_plan, ExecBudgets::default(), WatchPolicy::default(), 130, 1, |o| {
+            let QueryResult::Count(c) = o.result else { return None };
+            Some(hash_result_128(&c.to_le_bytes()))
+        })
+        .unwrap();
+    let (out_plain, del_plain) = hub
+        .rerun_query_watch(wid_plain, &engine, &qe, &count_plan, ExecBudgets::default(), 150, 1, |o| {
+            let QueryResult::Count(c) = o.result else { return None };
+            Some(hash_result_128(&c.to_le_bytes()))
+        })
+        .unwrap();
+    assert_eq!(out_plain.result, QueryResult::Count(2));
+    assert!(!del_plain);
+    assert!(hub.unregister_watch(wid_plain));
+    assert_eq!(
+        hub.rerun_query_watch(wid_plain, &engine, &qe, &count_plan, ExecBudgets::default(), 160, 1, |_| None)
+            .unwrap_err()
+            .code,
+        elmdb_wire::ErrorCode::Closed
+    );
 }

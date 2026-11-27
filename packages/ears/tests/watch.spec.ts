@@ -494,45 +494,63 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     steady.stop();
   });
 
-  it('unregisters and settles permanently poisoned PANICKED and POISONED watch handles without leaking timers (E2)', () => {
-    for (const permanentCode of ['PANICKED', 'POISONED'] as const) {
+  it('fail-stops and settles all watches on handle-fatal PANICKED/POISONED/DURABILITY_FAILED and pump-level errors (E2)', () => {
+    // 1. Realistic latched native handle: once a panic/poison/durability fault occurs inside rerunWatch,
+    //    EVERY subsequent native method (watchesSettled, tickWatches, unregisterWatch, etc.) throws too!
+    for (const fatalCode of ['PANICKED', 'POISONED', 'DURABILITY_FAILED'] as const) {
       const clock = createFakeClock(20_000);
       const handle = temps.open({ schema: watchSchema });
       const realDb = handle.database;
-      let injectFault = false;
+      let triggerOnRerun = false;
+      let handleLatched = false;
       const wrappedDb = new Proxy(realDb, {
         get(target, prop, receiver) {
           if (prop === 'rerunWatch') {
             return (watchId: number, spec: unknown, now: number, costMs: number) => {
-              if (injectFault) {
-                throw new EarsError(permanentCode, `simulated ${permanentCode} fault`);
+              if (triggerOnRerun) {
+                handleLatched = true;
+                throw new EarsError(fatalCode, `simulated ${fatalCode} fault`);
               }
               return target.rerunWatch(watchId, spec as Parameters<typeof target.rerunWatch>[1], now, costMs);
             };
           }
           const value = Reflect.get(target, prop, receiver);
-          return typeof value === 'function' ? value.bind(target) : value;
+          if (typeof value !== 'function') return value;
+          return (...args: unknown[]) => {
+            if (handleLatched) {
+              throw new EarsError(fatalCode, `latched ${fatalCode} handle`);
+            }
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
         },
       });
 
       const engine = createEarsEngine({ database: wrappedDb, clock });
-      const errors: EarsError[] = [];
-      const w = engine.query.of('Task').watchCount(() => {}, {
+      const w1Errors: EarsError[] = [];
+      const w2Errors: EarsError[] = [];
+      const w1 = engine.query.of('Task').watchCount(() => {}, {
         minGapMs: 0,
-        onError: (err) => errors.push(err),
+        onError: (err) => w1Errors.push(err),
+      });
+      const w2 = engine.query.of('Other').watchCount(() => {}, {
+        minGapMs: 0,
+        onError: (err) => w2Errors.push(err),
       });
 
       let settledCalls = 0;
-      injectFault = true;
+      triggerOnRerun = true;
       engine.create('Task', { title: 'trigger', done: false }, 'p-1');
       engine.watches.onSettled(() => {
         settledCalls++;
       });
 
       clock.advance(10);
-      expect(errors).toHaveLength(1);
-      expect(errors[0]!.code).toBe(permanentCode);
-      expect(w.active).toBe(false);
+      expect(w1Errors).toHaveLength(1);
+      expect(w1Errors[0]!.code).toBe(fatalCode);
+      expect(w2Errors).toHaveLength(1);
+      expect(w2Errors[0]!.code).toBe(fatalCode);
+      expect(w1.active).toBe(false);
+      expect(w2.active).toBe(false);
       expect(engine.watches.activeCount).toBe(0);
       expect(engine.watches.settled()).toBe(true);
       expect(settledCalls).toBe(1);
@@ -540,7 +558,50 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
 
       // Advancing well past any backoff window must never re-invoke onError!
       clock.advance(60_000);
-      expect(errors).toHaveLength(1);
+      expect(w1Errors).toHaveLength(1);
+      expect(w2Errors).toHaveLength(1);
+    }
+
+    // 2. Handle-fatal PANICKED or CLOSED thrown directly from nextDueWatch (pump-level read)
+    //    must also fail-stop, notify every active watch's onError, clear timers, and fire onSettled!
+    for (const pumpCode of ['PANICKED', 'CLOSED'] as const) {
+      const clock = createFakeClock(30_000);
+      const handle = temps.open({ schema: watchSchema });
+      const realDb = handle.database;
+      let latchNextDue = false;
+      const wrappedDb = new Proxy(realDb, {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (typeof value !== 'function') return value;
+          return (...args: unknown[]) => {
+            if (latchNextDue && (prop === 'nextDueWatch' || prop === 'watchesSettled' || prop === 'tickWatches')) {
+              throw new EarsError(pumpCode, `pump-level ${pumpCode}`);
+            }
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        },
+      });
+
+      const engine = createEarsEngine({ database: wrappedDb, clock });
+      const errs: EarsError[] = [];
+      const w = engine.query.of('Task').watchCount(() => {}, {
+        minGapMs: 0,
+        onError: (err) => errs.push(err),
+      });
+      engine.create('Task', { title: 't', done: false }, 'pd-1');
+      let settled = 0;
+      engine.watches.onSettled(() => {
+        settled++;
+      });
+      latchNextDue = true;
+      clock.advance(10);
+      expect(errs).toHaveLength(1);
+      expect(errs[0]!.code).toBe(pumpCode);
+      expect(w.active).toBe(false);
+      expect(engine.watches.activeCount).toBe(0);
+      expect(engine.watches.settled()).toBe(true);
+      expect(settled).toBe(1);
+      expect(clock.pendingTimers).toBe(0);
     }
   });
 });

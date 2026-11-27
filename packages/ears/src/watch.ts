@@ -85,51 +85,56 @@ export function createSystemClock(): EarsClock & AfterClock {
 
 /**
  * Compile-time exhaustive retry policy for every canonical `EarsErrorCode`.
- * `'permanent'` errors unregister the watch immediately so broken/poisoned handles never spin or leak timers;
- * `'transient'` errors apply bounded exponential backoff.
+ * - `'fatal_handle'`: the database handle itself is permanently unusable (`PANICKED`, `POISONED`, `CORRUPTED`,
+ *   `DURABILITY_FAILED`); fail-stop the entire watch pump, deactivate all watches, notify all error handlers,
+ *   and settle cleanly without calling dead native methods.
+ * - `'permanent_watch'`: this watch's query can no longer succeed on the current schema/handle; unregister it.
+ * - `'transient'`: apply bounded exponential backoff so failing watches never livelock at 0ms.
  */
-const WATCH_ERROR_POLICY: Readonly<Record<EarsErrorCode, 'permanent' | 'transient'>> = Object.freeze({
-  INVALID_ARGUMENT: 'permanent',
-  INVALID_WIRE_FRAME: 'permanent',
-  INVALID_SCHEMA: 'permanent',
+type WatchErrorPolicy = 'transient' | 'permanent_watch' | 'fatal_handle';
+
+const WATCH_ERROR_POLICY: Readonly<Record<EarsErrorCode, WatchErrorPolicy>> = Object.freeze({
+  INVALID_ARGUMENT: 'permanent_watch',
+  INVALID_WIRE_FRAME: 'permanent_watch',
+  INVALID_SCHEMA: 'permanent_watch',
   SCHEMA_CHANGED: 'transient',
-  UNKNOWN_TYPE: 'permanent',
-  TYPE_ARCHIVED: 'permanent',
-  UNKNOWN_FIELD: 'permanent',
-  UNKNOWN_RELATION: 'permanent',
-  UNKNOWN_INDEX: 'permanent',
+  UNKNOWN_TYPE: 'permanent_watch',
+  TYPE_ARCHIVED: 'permanent_watch',
+  UNKNOWN_FIELD: 'permanent_watch',
+  UNKNOWN_RELATION: 'permanent_watch',
+  UNKNOWN_INDEX: 'permanent_watch',
   ENTITY_NOT_FOUND: 'transient',
   ENTITY_ALREADY_EXISTS: 'transient',
   ENTITY_TRASHED: 'transient',
   ENTITY_NOT_TRASHED: 'transient',
   RELATION_NOT_FOUND: 'transient',
   RELATION_ALREADY_EXISTS: 'transient',
-  VALIDATION_FAILED: 'permanent',
+  VALIDATION_FAILED: 'permanent_watch',
   UNIQUE_VIOLATION: 'transient',
   CARDINALITY_VIOLATION: 'transient',
   CYCLE_DETECTED: 'transient',
   REFERENCED: 'transient',
-  ENDPOINT_MISMATCH: 'permanent',
+  ENDPOINT_MISMATCH: 'permanent_watch',
   HOOK_ABORTED: 'transient',
   HOOK_CYCLE_LIMIT: 'transient',
-  ASYNC_CALLBACK_FORBIDDEN: 'permanent',
+  ASYNC_CALLBACK_FORBIDDEN: 'permanent_watch',
   INDEX_BUILD_FAILED: 'transient',
   INDEX_NOT_READY: 'transient',
   RESOURCE_LIMIT: 'transient',
   CANCELLED: 'transient',
   STORAGE_FULL: 'transient',
-  CORRUPTED: 'permanent',
-  DURABILITY_FAILED: 'transient',
-  POISONED: 'permanent',
+  CORRUPTED: 'fatal_handle',
+  DURABILITY_FAILED: 'fatal_handle',
+  POISONED: 'fatal_handle',
   IO: 'transient',
   INTERNAL: 'transient',
-  CLOSED: 'permanent',
-  READ_ONLY: 'permanent',
-  NO_DATABASE: 'permanent',
+  CLOSED: 'permanent_watch',
+  READ_ONLY: 'permanent_watch',
+  NO_DATABASE: 'permanent_watch',
   DATABASE_LOCKED: 'transient',
-  ALREADY_EXISTS: 'permanent',
-  PANICKED: 'permanent',
-  ALREADY_LOADED: 'permanent',
+  ALREADY_EXISTS: 'permanent_watch',
+  PANICKED: 'fatal_handle',
+  ALREADY_LOADED: 'permanent_watch',
 });
 
 const INITIAL_TRANSIENT_BACKOFF_MS = 50;
@@ -452,6 +457,28 @@ export class WatchPump implements WatchController {
     this.#armTimer(delayMs);
   }
 
+  #failStopHandle(error: EarsError, alreadyReportedId?: number): void {
+    this.#stopped = true;
+    this.#clearTimer();
+    const remaining = [...this.#entries.values()];
+    this.#entries.clear();
+    for (const entry of remaining) {
+      entry.active = false;
+    }
+    for (const entry of remaining) {
+      if (entry.id !== alreadyReportedId) {
+        this.#reportError(entry, error, true);
+      }
+    }
+  }
+
+  #handlePumpReadError(err: unknown): void {
+    const earsErr = toEarsError(err);
+    if (WATCH_ERROR_POLICY[earsErr.code] === 'fatal_handle' || earsErr.code === 'CLOSED') {
+      this.#failStopHandle(earsErr);
+    }
+  }
+
   #drain(startNowMs: number, scheduleTail: boolean): number {
     if (this.#pumping || this.#stopped) return 0;
     this.#pumping = true;
@@ -479,7 +506,8 @@ export class WatchPump implements WatchController {
           let tick;
           try {
             tick = this.#db.tickWatches(nowMs);
-          } catch {
+          } catch (tickErr) {
+            this.#handlePumpReadError(tickErr);
             break;
           }
           let dbFailed = false;
@@ -495,7 +523,8 @@ export class WatchPump implements WatchController {
               let began: boolean;
               try {
                 began = this.#db.beginWatchRun(candidate);
-              } catch {
+              } catch (beginErr) {
+                this.#handlePumpReadError(beginErr);
                 dbFailed = true;
                 break;
               }
@@ -523,7 +552,8 @@ export class WatchPump implements WatchController {
           let due;
           try {
             due = this.#db.nextDueWatch(nowMs, elapsedTurnMs);
-          } catch {
+          } catch (dueErr) {
+            this.#handlePumpReadError(dueErr);
             break;
           }
           if (due.watchId === undefined) {
@@ -545,6 +575,10 @@ export class WatchPump implements WatchController {
 
         const runStart = this.#clock.now();
         const finishRerun = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
+        if (!entry.active) {
+          finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+          continue;
+        }
         let rerun;
         try {
           rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
@@ -552,8 +586,16 @@ export class WatchPump implements WatchController {
           const earsErr = toEarsError(rerunErr);
           finishRerun?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
           failedThisTurn.add(entry.id);
-          if (WATCH_ERROR_POLICY[earsErr.code] === 'permanent') {
-            // Permanent schema/compile/closed/poisoned/panicked error: stop the broken watch so it cannot livelock or starve others.
+          const policy = WATCH_ERROR_POLICY[earsErr.code];
+          if (policy === 'fatal_handle') {
+            entry.active = false;
+            this.#entries.delete(entry.id);
+            this.#reportError(entry, earsErr, true);
+            this.#failStopHandle(earsErr, entry.id);
+            break;
+          }
+          if (policy === 'permanent_watch') {
+            // Permanent schema/compile/closed error: stop this broken watch so it cannot livelock or starve others.
             this.#unregister(entry.id);
           } else {
             // Ensure Rust WatchScheduler clears `running = false` and requeues `dirty = true` even if

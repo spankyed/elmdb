@@ -63,6 +63,9 @@ struct WatchSlot {
     policy: WatchPolicy,
     dirty: bool,
     running: bool,
+    active_reruns: u32,
+    next_run_id: u64,
+    accepted_run_id: u64,
     dirty_since_ms: Option<u64>,
     last_run_ms: Option<u64>,
     last_cost_ms: u64,
@@ -86,6 +89,30 @@ impl WatchSlot {
         match self.last_run_ms {
             None => 0,
             Some(last) => last.saturating_add(self.gap_ms()),
+        }
+    }
+
+    fn record_completion(&mut self, now_ms: u64, cost_ms: u64, new_result_hash: Option<[u8; 16]>) -> bool {
+        self.consecutive_failures = 0;
+        // Clamp `last_run_ms` monotonically so a backward host clock step cannot shorten cooldowns.
+        self.last_run_ms = Some(self.last_run_ms.map_or(now_ms, |prev| prev.max(now_ms)));
+        self.last_cost_ms = cost_ms;
+        match self.policy.mode {
+            WatchMode::Declarative => {
+                if let Some(h) = new_result_hash {
+                    let changed = self.last_result_hash != Some(h);
+                    self.last_result_hash = Some(h);
+                    changed
+                } else {
+                    true
+                }
+            }
+            WatchMode::Imperative => {
+                if let Some(h) = new_result_hash {
+                    self.last_result_hash = Some(h);
+                }
+                true
+            }
         }
     }
 }
@@ -170,6 +197,9 @@ impl WatchScheduler {
                 policy,
                 dirty: !already_ran,
                 running: false,
+                active_reruns: 0,
+                next_run_id: 0,
+                accepted_run_id: 0,
                 dirty_since_ms: if already_ran { None } else { Some(now_ms) },
                 last_run_ms: if already_ran { Some(now_ms) } else { None },
                 last_cost_ms: initial_cost_ms,
@@ -180,22 +210,100 @@ impl WatchScheduler {
         );
     }
 
-    /// Seeds or advances the monotonic `(commit_seq, maint_seq, schema_epoch)` snapshot fence for `id`.
-    /// Returns `false` if `id` is stopped/unregistered or if `snapshot` is strictly older in any clock
-    /// component than the latest snapshot already accepted for `id`.
-    pub fn accept_snapshot(&mut self, id: WatchId, snapshot: (u64, u64, u64)) -> bool {
+    /// Seeds the initial `(commit_seq, maint_seq, schema_epoch)` snapshot fence on watch registration.
+    pub fn seed_snapshot(&mut self, id: WatchId, snapshot: (u64, u64, u64)) {
+        if let Some(slot) = self.watches.get_mut(&id) {
+            slot.last_snapshot = Some(snapshot);
+        }
+    }
+
+    /// Enters a lock-free rerun for `id`, returning a monotonic `run_id` token or `None` if stopped/unregistered.
+    /// Tracks overlapping concurrent reruns via `active_reruns` so an earlier run finishing cannot clear
+    /// `running = false` out from under a newer in-flight run.
+    pub fn enter_rerun(&mut self, id: WatchId) -> Option<u64> {
+        let slot = self.watches.get_mut(&id)?;
+        slot.running = true;
+        slot.dirty = false;
+        slot.dirty_since_ms = None;
+        slot.active_reruns = slot.active_reruns.saturating_add(1);
+        slot.next_run_id = slot.next_run_id.saturating_add(1);
+        Some(slot.next_run_id)
+    }
+
+    /// Checks whether a completed rerun `(run_id, snapshot)` is still current against `id`'s monotonic
+    /// `(commit_seq, maint_seq, schema_epoch)` fence and run order without mutating slot state.
+    pub fn can_accept_rerun(&self, id: WatchId, run_id: u64, snapshot: (u64, u64, u64)) -> bool {
+        let Some(slot) = self.watches.get(&id) else {
+            return false;
+        };
+        if let Some((prev_seq, prev_maint, prev_epoch)) = slot.last_snapshot {
+            if snapshot.0 < prev_seq || snapshot.1 < prev_maint || snapshot.2 < prev_epoch {
+                return false;
+            }
+            if snapshot == (prev_seq, prev_maint, prev_epoch) && run_id < slot.accepted_run_id {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Releases an in-flight rerun token that was rejected by `can_accept_rerun` without touching
+    /// the newer run's `ReadSet`, `dirty` state, `last_result_hash`, or failure backoff.
+    pub fn abandon_rerun(&mut self, id: WatchId) {
+        if let Some(slot) = self.watches.get_mut(&id) {
+            slot.active_reruns = slot.active_reruns.saturating_sub(1);
+            slot.running = slot.active_reruns != 0;
+        }
+    }
+
+    /// Aborts a rerun started via `enter_rerun`, preserving `running = true` if another concurrent
+    /// rerun is still in flight; otherwise delegates to `abort_run` backoff and requeue semantics.
+    pub fn abort_rerun(&mut self, id: WatchId, requeue_dirty: bool, now_ms: u64) -> bool {
         let Some(slot) = self.watches.get_mut(&id) else {
             return false;
         };
-        if let Some((prev_seq, prev_maint, prev_epoch)) = slot.last_snapshot
-            && (snapshot.0 < prev_seq || snapshot.1 < prev_maint || snapshot.2 < prev_epoch)
-        {
-            return false;
+        slot.active_reruns = slot.active_reruns.saturating_sub(1);
+        if slot.active_reruns != 0 {
+            if requeue_dirty && !slot.dirty {
+                slot.dirty = true;
+                slot.dirty_since_ms = Some(now_ms);
+            }
+            return true;
         }
+        self.abort_run(id, requeue_dirty, now_ms)
+    }
+
+    /// Completes an accepted rerun started via `enter_rerun`: advances the monotonic snapshot fence,
+    /// preserves original `dirty_since_ms` when `stale == true` (or clears `dirty` when `!stale`),
+    /// updates `running`, resets failure backoff, and returns `should_deliver`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_rerun(
+        &mut self,
+        id: WatchId,
+        run_id: u64,
+        snapshot: (u64, u64, u64),
+        stale: bool,
+        now_ms: u64,
+        cost_ms: u64,
+        new_result_hash: Option<[u8; 16]>,
+    ) -> bool {
+        let Some(slot) = self.watches.get_mut(&id) else {
+            return false;
+        };
         slot.last_snapshot = Some(snapshot);
-        slot.dirty = false;
-        slot.dirty_since_ms = None;
-        true
+        slot.accepted_run_id = slot.accepted_run_id.max(run_id);
+        slot.active_reruns = slot.active_reruns.saturating_sub(1);
+        slot.running = slot.active_reruns != 0;
+        if stale {
+            if !slot.dirty {
+                slot.dirty = true;
+                slot.dirty_since_ms = Some(now_ms);
+            }
+        } else {
+            slot.dirty = false;
+            slot.dirty_since_ms = None;
+        }
+        slot.record_completion(now_ms, cost_ms, new_result_hash)
     }
 
     /// Removes a watch from scheduling.
@@ -372,27 +480,7 @@ impl WatchScheduler {
             return false;
         };
         slot.running = false;
-        slot.consecutive_failures = 0;
-        // Clamp `last_run_ms` monotonically so a backward host clock step cannot shorten cooldowns.
-        slot.last_run_ms = Some(slot.last_run_ms.map_or(now_ms, |prev| prev.max(now_ms)));
-        slot.last_cost_ms = cost_ms;
-        match slot.policy.mode {
-            WatchMode::Declarative => {
-                if let Some(h) = new_result_hash {
-                    let changed = slot.last_result_hash != Some(h);
-                    slot.last_result_hash = Some(h);
-                    changed
-                } else {
-                    true
-                }
-            }
-            WatchMode::Imperative => {
-                if let Some(h) = new_result_hash {
-                    slot.last_result_hash = Some(h);
-                }
-                true
-            }
-        }
+        slot.record_completion(now_ms, cost_ms, new_result_hash)
     }
 
     /// Computes the next wake delay in milliseconds at `now_ms` (used by host to arm its single timer).
