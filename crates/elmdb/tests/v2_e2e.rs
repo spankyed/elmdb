@@ -2331,5 +2331,24 @@ fn batch3_watch_settlement_xproc_maint_future_ids_trashed_graph_trigram_phrase_a
     };
     assert!(after_readd.is_empty(), "dropped vector index must have purged primary embeddings: {after_readd:?}");
 
+    // 8. P2-3: `db.flush()` dirties a Vector watch ONLY when pending vector work actually flushed,
+    //    and leaves settled watches untouched when idle!
+    db.set_embeddings("emb", "n1", &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
+    let (idle_wid, _) = db
+        .register_query_watch(
+            &vec_spec,
+            WatchPolicy { min_gap_ms: 0, adaptive_multiplier: 0, ..Default::default() },
+            5000,
+        )
+        .unwrap();
+    assert!(db.watches_settled());
+    db.flush().unwrap();
+    assert!(!db.watches_settled(), "flush() that drains pending vector work must dirty Vector watch");
+    let _ = db.rerun_query_watch(idle_wid, &vec_spec, 5100, 1).unwrap();
+    assert!(db.watches_settled());
+    db.flush().unwrap();
+    assert!(db.watches_settled(), "idle flush() with no vector work must not dirty settled watches");
+    db.unregister_watch(idle_wid);
+
     db.close().unwrap();
 }

@@ -238,24 +238,8 @@ pub struct TransactOptions {
     pub run_before_commit: Option<bool>,
 }
 
-fn clear_pending_exception(raw_env: napi::sys::napi_env) {
+fn take_pending_exception(raw_env: napi::sys::napi_env) -> Option<napi::sys::napi_value> {
     let mut is_pending = false;
-    // SAFETY: `raw_env` is the active N-API environment on the current JS thread.
-    if unsafe { napi::sys::napi_is_exception_pending(raw_env, &mut is_pending) } == napi::sys::Status::napi_ok
-        && is_pending
-    {
-        let mut ignored = std::ptr::null_mut();
-        let _ = unsafe { napi::sys::napi_get_and_clear_last_exception(raw_env, &mut ignored) };
-    }
-}
-
-/// Clears any pending N-API exception raised by a JS `beforeCommit` hook, extracts its `.message`
-/// (or `String(err)` fallback), and returns `ElmdbError(HookAborted, message)` with a clean N-API env.
-fn extract_and_clear_hook_error(env: &Env, err: napi::Error) -> ElmdbError {
-    let raw_env = env.raw();
-    let mut is_pending = false;
-    let mut extracted: Option<String> = None;
-
     // SAFETY: `raw_env` is the active N-API environment on the current JS thread.
     if unsafe { napi::sys::napi_is_exception_pending(raw_env, &mut is_pending) } == napi::sys::Status::napi_ok
         && is_pending
@@ -263,33 +247,52 @@ fn extract_and_clear_hook_error(env: &Env, err: napi::Error) -> ElmdbError {
         let mut raw_exc = std::ptr::null_mut();
         if unsafe { napi::sys::napi_get_and_clear_last_exception(raw_env, &mut raw_exc) } == napi::sys::Status::napi_ok
             && !raw_exc.is_null()
-            && let Ok(exc) = unsafe { Unknown::from_napi_value(raw_env, raw_exc) }
         {
-            if let Ok(vtype) = exc.get_type()
-                && matches!(vtype, ValueType::Object | ValueType::Function)
-                && let Ok(obj) = exc.coerce_to_object()
-                && let Ok(msg_val) = obj.get_named_property_unchecked::<Unknown<'_>>("message")
-                && matches!(msg_val.get_type(), Ok(ValueType::String))
-                && let Ok(js_str) = msg_val.coerce_to_string()
+            return Some(raw_exc);
+        }
+    }
+    None
+}
+
+fn clear_pending_exception(raw_env: napi::sys::napi_env) {
+    let _ = take_pending_exception(raw_env);
+}
+
+fn extract_hook_error_value(
+    raw_env: napi::sys::napi_env,
+    raw_exc: Option<napi::sys::napi_value>,
+    err: napi::Error,
+) -> ElmdbError {
+    let mut extracted: Option<String> = None;
+
+    // SAFETY: `raw_env` is the active N-API environment on the current JS thread and `raw_exc` came from it.
+    if let Some(raw_exc) = raw_exc
+        && let Ok(exc) = unsafe { Unknown::from_napi_value(raw_env, raw_exc) }
+    {
+        if let Ok(vtype) = exc.get_type()
+            && matches!(vtype, ValueType::Object | ValueType::Function)
+            && let Ok(obj) = exc.coerce_to_object()
+            && let Ok(msg_val) = obj.get_named_property_unchecked::<Unknown<'_>>("message")
+            && matches!(msg_val.get_type(), Ok(ValueType::String))
+            && let Ok(js_str) = msg_val.coerce_to_string()
+            && let Ok(utf8) = js_str.into_utf8()
+            && let Ok(s) = utf8.as_str()
+            && !s.is_empty()
+        {
+            extracted = Some(s.to_owned());
+        }
+        // If reading `.message` threw a hostile getter error, clear it before falling back.
+        clear_pending_exception(raw_env);
+
+        if extracted.is_none() {
+            if let Ok(js_str) = exc.coerce_to_string()
                 && let Ok(utf8) = js_str.into_utf8()
                 && let Ok(s) = utf8.as_str()
                 && !s.is_empty()
             {
                 extracted = Some(s.to_owned());
             }
-            // If reading `.message` threw a hostile getter error, clear it before falling back.
             clear_pending_exception(raw_env);
-
-            if extracted.is_none() {
-                if let Ok(js_str) = exc.coerce_to_string()
-                    && let Ok(utf8) = js_str.into_utf8()
-                    && let Ok(s) = utf8.as_str()
-                    && !s.is_empty()
-                {
-                    extracted = Some(s.to_owned());
-                }
-                clear_pending_exception(raw_env);
-            }
         }
     }
 
@@ -297,6 +300,14 @@ fn extract_and_clear_hook_error(env: &Env, err: napi::Error) -> ElmdbError {
         .or_else(|| (!err.reason.is_empty()).then_some(err.reason))
         .unwrap_or_else(|| "beforeCommit hook aborted".to_owned());
     ElmdbError::new(ErrorCode::HookAborted, message)
+}
+
+/// Clears any pending N-API exception raised by a JS `beforeCommit` hook, extracts its `.message`
+/// (or `String(err)` fallback), and returns `ElmdbError(HookAborted, message)` with a clean N-API env.
+fn extract_and_clear_hook_error(env: &Env, err: napi::Error) -> ElmdbError {
+    let raw_env = env.raw();
+    let raw_exc = take_pending_exception(raw_env);
+    extract_hook_error_value(raw_env, raw_exc, err)
 }
 
 /// Calls a synchronous JS `beforeCommit` callback via raw `napi_call_function` so any thrown JS value
@@ -328,42 +339,68 @@ fn call_js_hook_sync<'env>(
 enum ThenableCheck {
     Value(Unknown<'static>),
     AsyncForbidden,
-    JsThrown(napi::Error),
+    JsThrown(Option<napi::sys::napi_value>, napi::Error),
 }
 
-fn check_not_thenable(val: Unknown<'static>) -> ThenableCheck {
-    match val.is_promise() {
-        Ok(true) => return ThenableCheck::AsyncForbidden,
-        Ok(false) => {}
-        Err(e) => return ThenableCheck::JsThrown(e),
-    }
-    let vtype = match val.get_type() {
-        Ok(t) => t,
-        Err(e) => return ThenableCheck::JsThrown(e),
+/// Checks whether `raw_val` is a Promise or thenable using raw N-API calls so any exception thrown
+/// by a hostile `.then` getter (including primitives) is captured and cleared cleanly without
+/// leaving a pending exception active on `raw_env`.
+fn check_not_thenable_raw(raw_env: napi::sys::napi_env, raw_val: napi::sys::napi_value) -> ThenableCheck {
+    let fail = |status: napi::sys::napi_status| -> ThenableCheck {
+        let raw_exc = take_pending_exception(raw_env);
+        ThenableCheck::JsThrown(raw_exc, napi::Error::from_status(napi::Status::from(status)))
     };
-    if matches!(vtype, ValueType::Object | ValueType::Function) {
-        let obj = match val.coerce_to_object() {
-            Ok(o) => o,
-            Err(e) => return ThenableCheck::JsThrown(e),
-        };
-        let has_then = match obj.has_named_property("then") {
-            Ok(b) => b,
-            Err(e) => return ThenableCheck::JsThrown(e),
-        };
+
+    let mut is_promise = false;
+    // SAFETY: `raw_env` and `raw_val` are valid handles on the current JS thread.
+    let st = unsafe { napi::sys::napi_is_promise(raw_env, raw_val, &mut is_promise) };
+    if st != napi::sys::Status::napi_ok {
+        return fail(st);
+    }
+    if is_promise {
+        return ThenableCheck::AsyncForbidden;
+    }
+
+    let mut vtype = napi::sys::ValueType::napi_undefined;
+    // SAFETY: `raw_env` and `raw_val` are valid handles on the current JS thread.
+    let st = unsafe { napi::sys::napi_typeof(raw_env, raw_val, &mut vtype) };
+    if st != napi::sys::Status::napi_ok {
+        return fail(st);
+    }
+    if vtype == napi::sys::ValueType::napi_object || vtype == napi::sys::ValueType::napi_function {
+        let mut has_then = false;
+        // SAFETY: `c"then"` is NUL-terminated; `raw_val` is an object/function.
+        let st = unsafe { napi::sys::napi_has_named_property(raw_env, raw_val, c"then".as_ptr(), &mut has_then) };
+        if st != napi::sys::Status::napi_ok {
+            return fail(st);
+        }
         if has_then {
-            let then_val: Unknown<'_> = match obj.get_named_property_unchecked("then") {
-                Ok(v) => v,
-                Err(e) => return ThenableCheck::JsThrown(e),
-            };
-            match then_val.get_type() {
-                Ok(ValueType::Function) => return ThenableCheck::AsyncForbidden,
-                Ok(_) => {}
-                Err(e) => return ThenableCheck::JsThrown(e),
+            let mut then_val = std::ptr::null_mut();
+            // SAFETY: `c"then"` is NUL-terminated; `raw_val` is an object/function.
+            let st = unsafe { napi::sys::napi_get_named_property(raw_env, raw_val, c"then".as_ptr(), &mut then_val) };
+            if st != napi::sys::Status::napi_ok {
+                return fail(st);
+            }
+            let mut then_type = napi::sys::ValueType::napi_undefined;
+            let st = unsafe { napi::sys::napi_typeof(raw_env, then_val, &mut then_type) };
+            if st != napi::sys::Status::napi_ok {
+                return fail(st);
+            }
+            if then_type == napi::sys::ValueType::napi_function {
+                return ThenableCheck::AsyncForbidden;
             }
         }
-        return ThenableCheck::Value(obj.to_unknown());
     }
-    ThenableCheck::Value(val)
+
+    // SAFETY: `raw_val` is a valid JS value on `raw_env`.
+    match unsafe { Unknown::from_napi_value(raw_env, raw_val) } {
+        Ok(val) => ThenableCheck::Value(val),
+        Err(e) => ThenableCheck::JsThrown(take_pending_exception(raw_env), e),
+    }
+}
+
+fn check_not_thenable(env: &Env, val: Unknown<'static>) -> ThenableCheck {
+    check_not_thenable_raw(env.raw(), val.raw())
 }
 
 fn counter_to_js_safe(val: u64) -> Result<f64, Code> {
@@ -630,28 +667,50 @@ impl Database {
         self.health.guarded_raw(&env, "Database.transact", || {
             let opts =
                 EngineTransactOptions { run_before_commit: options.and_then(|o| o.run_before_commit).unwrap_or(true) };
+            let raw_env = env.raw();
+            let raw_fn = callback.raw();
+            let mut thrown_raw_exc: Option<napi::sys::napi_value> = None;
             let mut thrown_js: Option<napi::Error> = None;
-            let outcome = self.inner.transact_scoped(opts, || match callback.call(()) {
-                Ok(ret) => match check_not_thenable(ret) {
+
+            let outcome = self.inner.transact_scoped(opts, || {
+                let mut recv = std::ptr::null_mut();
+                let mut ret = std::ptr::null_mut();
+                // SAFETY: `raw_env` and `raw_fn` are valid N-API handles on this JS thread.
+                let recv_st = unsafe { napi::sys::napi_get_undefined(raw_env, &mut recv) };
+                if recv_st != napi::sys::Status::napi_ok {
+                    thrown_raw_exc = take_pending_exception(raw_env);
+                    thrown_js = Some(napi::Error::from_status(napi::Status::from(recv_st)));
+                    return Err(ElmdbError::new(ErrorCode::Cancelled, "JS transaction receiver lookup failed"));
+                }
+                let call_st =
+                    unsafe { napi::sys::napi_call_function(raw_env, recv, raw_fn, 0, std::ptr::null(), &mut ret) };
+                if call_st != napi::sys::Status::napi_ok {
+                    thrown_raw_exc = take_pending_exception(raw_env);
+                    thrown_js = Some(napi::Error::from_status(napi::Status::from(call_st)));
+                    return Err(ElmdbError::new(ErrorCode::Cancelled, "JS transaction callback threw"));
+                }
+                match check_not_thenable_raw(raw_env, ret) {
                     ThenableCheck::Value(v) => Ok(v),
                     ThenableCheck::AsyncForbidden => Err(ElmdbError::new(
                         ErrorCode::AsyncCallbackForbidden,
                         "synchronous callback must not return a Promise or thenable",
                     )),
-                    ThenableCheck::JsThrown(js_err) => {
+                    ThenableCheck::JsThrown(raw_exc, js_err) => {
+                        thrown_raw_exc = raw_exc;
                         thrown_js = Some(js_err);
                         Err(ElmdbError::new(ErrorCode::Cancelled, "JS getter threw while inspecting return value"))
                     }
-                },
-                Err(js_err) => {
-                    thrown_js = Some(js_err);
-                    Err(ElmdbError::new(ErrorCode::Cancelled, "JS transaction callback threw"))
                 }
             });
+
             match outcome {
                 Ok(val) => Ok(val),
                 Err(elmdb_err) => {
-                    if let Some(js_err) = thrown_js {
+                    if let Some(raw_exc) = thrown_raw_exc {
+                        // SAFETY: Rethrow the exact captured JS value (Error or primitive) verbatim.
+                        let _ = unsafe { napi::sys::napi_throw(raw_env, raw_exc) };
+                        Err(napi::Error::from_status(napi::Status::PendingException))
+                    } else if let Some(js_err) = thrown_js {
                         Err(js_err)
                     } else {
                         Err(napi::Error::from(JsError::from(to_js(elmdb_err)).into_unknown(env)))
@@ -737,6 +796,9 @@ impl Database {
         &self,
         env: Env,
         type_names: Option<Vec<String>>,
+        #[napi(
+            ts_arg_type = "(delta: { commitSeq: number; entities: Array<{ id: string; typeName: string; op: 'create' | 'update' | 'trash' | 'restore' | 'destroy' }>; edges: Array<{ relKind: string; op: 'link' | 'unlink' | 'update'; sourceId: string; targetId: string }> }) => unknown"
+        )]
         callback: Function<serde_json::Value, Unknown<'static>>,
     ) -> Result<f64, Code> {
         self.health.guarded("Database.registerBeforeCommit", || {
@@ -823,7 +885,7 @@ impl Database {
                                 None => Ok(None),
                                 Some(func) => {
                                     let ret = call_js_hook_sync(&js_env, func, payload)?;
-                                    let ret = match check_not_thenable(ret) {
+                                    let ret = match check_not_thenable(&js_env, ret) {
                                         ThenableCheck::Value(v) => v,
                                         ThenableCheck::AsyncForbidden => {
                                             return Err(ElmdbError::new(
@@ -831,8 +893,8 @@ impl Database {
                                                 "beforeCommit hooks must be synchronous (Promises and async callbacks are forbidden)",
                                             ));
                                         }
-                                        ThenableCheck::JsThrown(e) => {
-                                            return Err(extract_and_clear_hook_error(&js_env, e));
+                                        ThenableCheck::JsThrown(raw_exc, e) => {
+                                            return Err(extract_hook_error_value(js_env.raw(), raw_exc, e));
                                         }
                                     };
                                     let vtype = ret

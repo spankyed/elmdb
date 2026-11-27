@@ -155,7 +155,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       });
       throw earsErr;
     }
-    if (isInWriteTxn()) {
+    if (ops > 0 && isInWriteTxn()) {
       outerTxnMutated = true;
     }
     finish?.({

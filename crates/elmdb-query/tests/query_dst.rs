@@ -1804,3 +1804,140 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
     assert!(!es.add(f64::MAX));
     assert_eq!(es.total(), f64::MAX);
 }
+
+#[test]
+fn graph_analyze_filters_soft_trashed_literal_keys_and_records_read_set() {
+    let (engine, _reg, ids) = open_sim(BuildPolicy::EagerInSchemaChange);
+    let qe = QueryEngine::default();
+
+    // A -> B -> C with B soft-trashed (and C -> A so SCC would be 1 cycle if B leaked).
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("A".into()),
+                fields: vec![("title".into(), CanonicalValue::String("A".into()))],
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("B".into()),
+                fields: vec![("title".into(), CanonicalValue::String("B".into()))],
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("C".into()),
+                fields: vec![("title".into(), CanonicalValue::String("C".into()))],
+            },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("A".into()),
+                target: EntityTarget::ExternalId("B".into()),
+                weight: Some(1.0f64.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("B".into()),
+                target: EntityTarget::ExternalId("C".into()),
+                weight: Some(1.0f64.to_bits()),
+                info: None,
+            },
+            WireOp::Link {
+                rel_kind: "CITES".into(),
+                source: EntityTarget::ExternalId("C".into()),
+                target: EntityTarget::ExternalId("A".into()),
+                weight: Some(1.0f64.to_bits()),
+                info: None,
+            },
+            WireOp::Trash { target: EntityTarget::ExternalId("B".into()) },
+        ])
+        .unwrap();
+
+    let ka = engine.get_row("A").unwrap().unwrap().key;
+    let kb = engine.get_row("B").unwrap().unwrap().key;
+    let kc = engine.get_row("C").unwrap().unwrap().key;
+    let lit = || LogicalNode::Source(SourceSpec::LiteralKeys(vec![ka, kb, kc]));
+
+    // 1. WeakComponents over LiteralKeys([A, B, C]) excludes trashed B (leaving {A}, {C} disconnected once C->A is removed)
+    engine
+        .execute_batch(&[WireOp::Unlink {
+            rel_kind: Some("CITES".into()),
+            source: EntityTarget::ExternalId("C".into()),
+            target: Some(EntityTarget::ExternalId("A".into())),
+        }])
+        .unwrap();
+
+    let wc_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(lit()),
+        spec: GraphAnalyzeSpec::WeakComponents { rel_kinds: vec![ids.cites] },
+    });
+    let mut rec = FullAuditRecorder::default();
+    let wc_out = qe.execute_tracked(&engine, &wc_plan, ExecBudgets::default(), &mut rec).unwrap();
+    let QueryResult::GraphGroups(wc) = wc_out.result else { panic!("expected GraphGroups") };
+    assert_eq!(wc, vec![vec![ka], vec![kc]], "trashed bridge B must not connect A and C");
+    assert!(
+        rec.point_masks.iter().any(|(k, _)| *k == kb),
+        "ReadSet must track trashed node B for restore invalidation"
+    );
+
+    // 2. SCC, TopoSort, PPR, Leiden over LiteralKeys([A, B, C]) must all exclude trashed B.
+    let scc_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(lit()),
+        spec: GraphAnalyzeSpec::Scc { rel_kinds: vec![ids.cites] },
+    });
+    let QueryResult::GraphGroups(sccs) = qe.execute(&engine, &scc_plan, ExecBudgets::default()).unwrap().result else {
+        panic!("expected GraphGroups");
+    };
+    assert!(!sccs.iter().flatten().any(|&k| k == kb));
+
+    let topo_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(lit()),
+        spec: GraphAnalyzeSpec::TopoSort { rel_kinds: vec![ids.cites] },
+    });
+    let QueryResult::GraphTopo(topo) = qe.execute(&engine, &topo_plan, ExecBudgets::default()).unwrap().result else {
+        panic!("expected GraphTopo");
+    };
+    assert_eq!(topo.order, vec![ka, kc]);
+
+    let ppr_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(lit()),
+        spec: GraphAnalyzeSpec::Ppr {
+            rel_kinds: vec![ids.cites],
+            weighted: false,
+            seeds: vec![(ka, 1.0), (kb, 1.0)],
+            damping: 0.85,
+            iterations: 20,
+            tolerance: 1e-8,
+        },
+    });
+    let QueryResult::GraphPpr(ppr) = qe.execute(&engine, &ppr_plan, ExecBudgets::default()).unwrap().result else {
+        panic!("expected GraphPpr");
+    };
+    assert!(!ppr.scores.iter().any(|&(k, _)| k == kb));
+
+    let leiden_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(lit()),
+        spec: GraphAnalyzeSpec::Leiden {
+            rel_kinds: vec![ids.cites],
+            weighted: false,
+            resolution: 1.0,
+            seed: 42,
+            iterations: 5,
+        },
+    });
+    let QueryResult::GraphGroups(comms) = qe.execute(&engine, &leiden_plan, ExecBudgets::default()).unwrap().result
+    else {
+        panic!("expected GraphGroups");
+    };
+    assert!(!comms.iter().flatten().any(|&k| k == kb));
+
+    // 3. Contrast: SourceSpec::Type { include_trashed: true } DOES include B and bridges A -> B -> C!
+    let wc_incl = LogicalPlan::new(LogicalNode::GraphAnalyze {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: true })),
+        spec: GraphAnalyzeSpec::WeakComponents { rel_kinds: vec![ids.cites] },
+    });
+    let QueryResult::GraphGroups(wc_all) = qe.execute(&engine, &wc_incl, ExecBudgets::default()).unwrap().result else {
+        panic!("expected GraphGroups");
+    };
+    assert_eq!(wc_all, vec![vec![ka, kb, kc]]);
+}

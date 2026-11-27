@@ -1,7 +1,7 @@
 # Fails, which mails whoever maintains this, when a crate in the lockfile has a RustSec advisory deny.toml doesn't
-# ignore, or the workspace's root package-lock.json (the build tooling and `@elmdb/ears`'s runtime dependency on
-# `msgpackr`) has an npm advisory of high severity or above. The binding package (`elmdb`) itself has no third-party
-# runtime dependencies, only its platform binary optional dependencies. An advisory appears with no change here, so this
+# ignore, or the workspace's root package-lock.json (the build and test tooling) has an npm advisory of high severity
+# or above. Both `elmdb` and `@elmdb/ears` have zero third-party runtime dependencies (`elmdb` only names its platform
+# binary optional dependencies). An advisory appears with no change here, so this
 # reads both each day on main and runs `npm audit` on pull requests that change `package-lock.json`; ci.yml reads the
 # RustSec ones for a pull request that changes the Rust lockfile or deny.toml.
 name: advisories

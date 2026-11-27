@@ -79,7 +79,7 @@ export declare class Database {
    * - Returning a `Uint8Array`/`Buffer` containing an `elmdb-wire` batch applies those derived writes
    *   in the same savepoint cascade (up to `MAX_HOOK_ROUNDS`).
    */
-  registerBeforeCommit(typeNames: Array<string> | undefined | null, callback: (arg: any) => unknown): number
+  registerBeforeCommit(typeNames: Array<string> | undefined | null, callback: (delta: { commitSeq: number; entities: Array<{ id: string; typeName: string; op: 'create' | 'update' | 'trash' | 'restore' | 'destroy' }>; edges: Array<{ relKind: string; op: 'link' | 'unlink' | 'update'; sourceId: string; targetId: string }> }) => unknown): number
   unregisterBeforeCommit(hookId: number): boolean
   /** Reads one entity row by external ID with all `EntityRef`s resolved in a single pinned MVCC snapshot. */
   get(extId: string): Row | null
