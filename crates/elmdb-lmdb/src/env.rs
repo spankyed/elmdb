@@ -343,11 +343,9 @@ impl LmdbEnvInner {
         Ok(())
     }
 
-    /// Opens a fresh `MDB_RDONLY` durable-pin transaction while the caller holds L2 `MapGate`
-    /// (read or write), serializing against DBI publication via L4 `dbi_publish_gate.read_txn()`.
-    pub(crate) fn open_durable_pin_txn(&self) -> Result<DurablePinTxn, StorageError> {
-        self.check_map_ok()?;
-        let _publish = self.dbi_publish_gate.read_txn();
+    /// Begins a raw `MDB_RDONLY` transaction while the caller holds L2 `MapGate` and L4
+    /// `dbi_publish_gate.read_txn()`, reclaiming stale reader slots once on `MDB_READERS_FULL`.
+    pub(crate) fn begin_raw_ro_txn_locked(&self) -> Result<NonNull<ffi::MDB_txn>, StorageError> {
         let mut raw: *mut ffi::MDB_txn = ptr::null_mut();
         // SAFETY: `self.env` is open and protected by L2 `MapGate` + L4 `dbi_publish_gate.read_txn()`.
         let mut rc = unsafe { ffi::mdb_txn_begin(self.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
@@ -355,13 +353,21 @@ impl LmdbEnvInner {
             let mut dead: libc::c_int = 0;
             // SAFETY: Reclaim stale reader slots from crashed processes and retry once.
             let _ = unsafe { ffi::mdb_reader_check(self.env.as_ptr(), &mut dead) };
+            // SAFETY: `self.env` is open and L2+L4 are still held; retrying `MDB_RDONLY` txn.
             rc = unsafe { ffi::mdb_txn_begin(self.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
         }
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.current_map_size(), self.max_dbs));
         }
-        let txn = NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null durable pin MDB_txn".into()))?;
-        Ok(DurablePinTxn(txn))
+        NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null read MDB_txn".into()))
+    }
+
+    /// Opens a fresh `MDB_RDONLY` durable-pin transaction while the caller holds L2 `MapGate`
+    /// (read or write), serializing against DBI publication via L4 `dbi_publish_gate.read_txn()`.
+    pub(crate) fn open_durable_pin_txn(&self) -> Result<DurablePinTxn, StorageError> {
+        self.check_map_ok()?;
+        let _publish = self.dbi_publish_gate.read_txn();
+        Ok(DurablePinTxn(self.begin_raw_ro_txn_locked()?))
     }
 
     /// Opens a new durable pin at the current tip *before* aborting the previous pin (zero unpinned window).
@@ -388,6 +394,33 @@ impl LmdbEnvInner {
         drop(old);
     }
 
+    /// Clears any active durable pin and adopts an external cross-process map resize via
+    /// `mdb_env_set_mapsize(env, 0)`. Caller MUST hold exclusive L2 `MapGate::write()`.
+    pub(crate) fn adopt_map_size_raw_under_write(&self) -> Result<usize, StorageError> {
+        self.check_map_ok()?;
+        let cur = self.current_map_size();
+        self.clear_durable_pin_before_remap();
+        // SAFETY: `size = 0` adopts the external cross-process map size cleanly;
+        // exclusive L2 `MapGate::write()` and `durable_pin.is_none()` guarantee zero live transactions.
+        let rc = unsafe { ffi::mdb_env_set_mapsize(self.env.as_ptr(), 0) };
+        if rc != ffi::MDB_SUCCESS {
+            self.map_broken.store(true, Ordering::SeqCst);
+            return Err(StorageError::Corrupted(format!(
+                "mdb_env_set_mapsize(0) failed (rc={rc}); environment is unusable"
+            )));
+        }
+        let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
+        // SAFETY: `self.env` is open and remapped.
+        let rc = unsafe { ffi::mdb_env_info(self.env.as_ptr(), info.as_mut_ptr()) };
+        if rc != ffi::MDB_SUCCESS {
+            return Err(map_mdb_err(rc, cur, self.max_dbs));
+        }
+        // SAFETY: `mdb_env_info` succeeded.
+        let actual = unsafe { info.assume_init() }.me_mapsize;
+        self.map_size.store(actual, Ordering::Release);
+        Ok(actual)
+    }
+
     /// Acquires a durable pin under exclusive L2 `MapGate::write()`, retrying `mdb_env_set_mapsize(0)`
     /// inline if a concurrent cross-process writer resized the map again right after our remap.
     pub(crate) fn acquire_pin_retrying_resize_under_write(&self) -> Result<(), StorageError> {
@@ -395,22 +428,7 @@ impl LmdbEnvInner {
             match self.refresh_durable_pin_under_map_lock() {
                 Ok(()) => return Ok(()),
                 Err(StorageError::MapResized) => {
-                    self.clear_durable_pin_before_remap();
-                    // SAFETY: Caller holds exclusive L2 `MapGate::write()` and `durable_pin` is cleared.
-                    let rc = unsafe { ffi::mdb_env_set_mapsize(self.env.as_ptr(), 0) };
-                    if rc != ffi::MDB_SUCCESS {
-                        self.map_broken.store(true, Ordering::SeqCst);
-                        return Err(StorageError::Corrupted(format!(
-                            "mdb_env_set_mapsize(0) during pin retry failed (rc={rc}); environment is unusable"
-                        )));
-                    }
-                    let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
-                    // SAFETY: `self.env` is open and remapped.
-                    if unsafe { ffi::mdb_env_info(self.env.as_ptr(), info.as_mut_ptr()) } == ffi::MDB_SUCCESS {
-                        // SAFETY: `mdb_env_info` succeeded.
-                        let actual = unsafe { info.assume_init() }.me_mapsize;
-                        self.map_size.store(actual, Ordering::Release);
-                    }
+                    let _ = self.adopt_map_size_raw_under_write()?;
                 }
                 Err(err) => return Err(err),
             }
@@ -1013,32 +1031,11 @@ impl KvStore for LmdbStore {
         pin_after: bool,
     ) -> Result<usize, StorageError> {
         self.inner.assert_map_write_guard(map_guard)?;
-        self.inner.check_map_ok()?;
-        let cur = self.inner.current_map_size();
-        // Release any Grouped durable pin strictly BEFORE `mdb_env_set_mapsize(0)` unmaps `me_map`.
-        self.inner.clear_durable_pin_before_remap();
-        // SAFETY: `size = 0` tells LMDB to adopt the external cross-process map size cleanly;
-        // exclusive L2 `map_guard` and `durable_pin.is_none()` guarantee zero live transactions.
-        let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), 0) };
-        if rc != ffi::MDB_SUCCESS {
-            self.inner.map_broken.store(true, Ordering::SeqCst);
-            return Err(StorageError::Corrupted(format!(
-                "mdb_env_set_mapsize(0) failed (rc={rc}); environment is unusable"
-            )));
-        }
-        let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
-        // SAFETY: `self.inner.env` is open.
-        let rc = unsafe { ffi::mdb_env_info(self.inner.env.as_ptr(), info.as_mut_ptr()) };
-        if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, cur, self.inner.max_dbs));
-        }
-        // SAFETY: `mdb_env_info` succeeded.
-        let actual = unsafe { info.assume_init() }.me_mapsize;
-        self.inner.map_size.store(actual, Ordering::Release);
+        let actual = self.inner.adopt_map_size_raw_under_write()?;
         if pin_after {
             self.inner.acquire_pin_retrying_resize_under_write()?;
         }
-        Ok(actual)
+        Ok(self.inner.current_map_size().max(actual))
     }
 
     fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {

@@ -423,6 +423,22 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
     // Part A: Demonstrate the exact freelist page-reuse failure mode when NO reader/pin holds `D`.
     {
         let store = SimKvStore::new(SimKvConfig::default());
+        // Before first sync (`durable.txnid == 0`), multiple commits + power loss must NOT mark txnid 0 corrupted.
+        let db = {
+            let mut rw = store.begin_write(()).unwrap();
+            let db = rw.open_subdb("data", DbFlags::DEFAULT).unwrap();
+            rw.put(db, b"k", b"pre0").unwrap();
+            let _ = rw.commit_raw().unwrap();
+            db
+        };
+        for i in 1..=4 {
+            let mut rw = store.begin_write(()).unwrap();
+            rw.put(db, b"k", format!("pre{i}").as_bytes()).unwrap();
+            let _ = rw.commit_raw().unwrap();
+        }
+        store.crash_power_loss();
+        assert_eq!(store.begin_read().unwrap().txnid(), 0);
+
         let mut rw = store.begin_write(()).unwrap();
         let db = rw.open_subdb("data", DbFlags::DEFAULT).unwrap();
         rw.put(db, b"k", b"durable_v1").unwrap();
@@ -430,18 +446,29 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         store.sync(&()).unwrap();
         assert_eq!(store.durable_txnid(), r1.txnid);
 
-        // Holding an active `SimRoTxn` at D protects D across D+1..D+3.
-        let ro_guard = store.begin_read().unwrap();
+        // Clean (no-op) commits after sync must NOT trigger freelist reuse corruption!
+        for _ in 0..4 {
+            let rw = store.begin_write(()).unwrap();
+            let _ = rw.commit_raw().unwrap();
+        }
+        // Holding TWO simultaneous `SimRoTxn`s at D: dropping ONE leaves the second still protecting D!
+        let ro_guard1 = store.begin_read().unwrap();
+        let ro_guard2 = store.begin_read().unwrap();
+        drop(ro_guard1);
         for i in 2..=4 {
             let mut rw = store.begin_write(()).unwrap();
             rw.put(db, b"k", format!("v{i}").as_bytes()).unwrap();
             let _ = rw.commit_raw().unwrap();
         }
-        drop(ro_guard);
-        // Once the reader drops, the next unsynced commit recycles D's pages.
+        drop(ro_guard2);
+        // Holding a reader at `D+3` (`r > durable.txnid`) does NOT protect D!
+        let newer_reader = store.begin_read().unwrap();
+        assert!(newer_reader.txnid() > r1.txnid);
+        // Once all `<= D` readers drop, the next unsynced commit recycles D's pages even while `newer_reader` is live.
         let mut rw = store.begin_write(()).unwrap();
         rw.put(db, b"k", b"recycled_d_pages").unwrap();
         let _ = rw.commit_raw().unwrap();
+        drop(newer_reader);
 
         store.crash_power_loss();
         // Meta page STILL matches D, while reading the tree fails with `Corrupted`!
@@ -451,6 +478,8 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         assert!(matches!(ro.cursor(db), Err(StorageError::Corrupted(_))));
         assert!(matches!(ro.entries(db), Err(StorageError::Corrupted(_))));
         assert!(matches!(ro.open_subdb_existing("data", DbFlags::DEFAULT), Err(StorageError::Corrupted(_))));
+        // Verify `adopt_resized_map_locked` returns real `map_size` (kills Ok(0)/Ok(1) mutants).
+        assert_eq!(store.adopt_resized_map_locked(&(), false).unwrap(), store.map_size());
     }
 
     // Part B: `DurabilityGate` in `Grouped` mode pins D on `sync()` so D+1..D+10 NEVER corrupt D on power loss.
@@ -598,5 +627,76 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         assert!(matches!(grow_err, StorageError::DurabilityFailed(_)), "expected DurabilityFailed, got {grow_err:?}");
         assert!(re_e.is_poisoned(), "failed post-remap re-pin MUST poison Grouped DurabilityGate");
         assert!(matches!(re_e.begin_read(), Err(StorageError::Poisoned(_))));
+    }
+
+    // Part F: Exhaustive `DurabilityGate` mode / read_only / unrecovered / `MapResized` / peer-commit remap coverage!
+    {
+        // 1. Strict mode `sync()` and `grow_map()` NEVER acquire a Grouped durable pin, and non-Corrupted
+        //    `grow_map` / `adopt_resized_map` failures in Strict mode do NOT poison the gate!
+        let vfs_s = SimVfs::new(BootId([0x81; 16]));
+        let store_s = SimKvStore::new(SimKvConfig::default());
+        let dir_s = PathBuf::from("/sim-strict-no-pin");
+        let (strict_gate, _) =
+            DurabilityGate::open(store_s.clone(), vfs_s.clone(), &dir_s, DurabilityMode::Strict).unwrap();
+        {
+            let mut tx = strict_gate.begin_write().unwrap();
+            let d = tx.open_subdb("t", DbFlags::DEFAULT).unwrap();
+            tx.put(d, b"a", b"b").unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(store_s.pinned_txnid(), None, "Strict commit must not acquire Grouped pin");
+        strict_gate.sync().unwrap();
+        assert_eq!(store_s.pinned_txnid(), None, "Strict sync must not acquire Grouped pin");
+        strict_gate.grow_map(Some(128 * 1024 * 1024)).unwrap();
+        assert_eq!(store_s.pinned_txnid(), None, "Strict grow_map must not acquire Grouped pin");
+        store_s.inject_remap_failures(1);
+        assert!(matches!(strict_gate.grow_map(None), Err(StorageError::ReadersFull)));
+        assert!(!strict_gate.is_poisoned(), "Strict non-Corrupted grow_map error must NOT poison gate");
+        // `begin_read` hitting `MapResized` in Strict mode adopts cleanly without pinning, and non-Corrupted adopt error does not poison.
+        store_s.inject_read_map_resized(1);
+        let _ro = strict_gate.begin_read().unwrap();
+        assert_eq!(store_s.pinned_txnid(), None);
+        store_s.inject_read_map_resized(1);
+        store_s.inject_remap_failures(1);
+        assert!(matches!(strict_gate.begin_read(), Err(StorageError::ReadersFull)));
+        assert!(!strict_gate.is_poisoned(), "Strict non-Corrupted adopt error must NOT poison gate");
+
+        // 2. Unrecovered Grouped gate `grow_map()` does NOT pin or seal; read-only Grouped open & adopt do NOT pin or seal!
+        let unrec_g = DurabilityGate::new_unrecovered(store_s.clone(), vfs_s.clone(), &dir_s, DurabilityMode::Grouped);
+        unrec_g.grow_map(None).unwrap();
+        assert_eq!(store_s.pinned_txnid(), None, "unrecovered Grouped grow_map must not acquire pin");
+
+        let (ro_g, rep_ro) =
+            DurabilityGate::open_with_options(store_s.clone(), vfs_s.clone(), &dir_s, DurabilityMode::Grouped, true)
+                .unwrap();
+        assert_eq!(rep_ro.status, RecoveryStatus::Clean);
+        assert_eq!(store_s.pinned_txnid(), None, "read-only Grouped recover must not acquire pin");
+        store_s.inject_read_map_resized(1);
+        let _ro2 = ro_g.begin_read().unwrap();
+        assert_eq!(store_s.pinned_txnid(), None, "read-only Grouped adopt must not acquire pin");
+        drop(ro_g);
+
+        // 3. Writable Grouped gate: `sync()` hitting `MapResized` on `refresh_durable_pin` routes through
+        //    `adopt_and_pin_grouped`, AND a peer commit landing during `adopt_resized_map` is sealed by
+        //    `verify_and_seal_after_remap_locked` before returning!
+        let (grp, _) = DurabilityGate::open(store_s.clone(), vfs_s.clone(), &dir_s, DurabilityMode::Grouped).unwrap();
+        assert!(store_s.pinned_txnid().is_some());
+        let pre_txnid = grp.last_txnid().unwrap();
+        store_s.inject_pin_map_resized(1);
+        store_s.inject_peer_commit_on_adopt(1);
+        grp.sync().unwrap();
+        assert_eq!(
+            store_s.durable_txnid(),
+            pre_txnid + 1,
+            "verify_and_seal_after_remap_locked must seal cross-process commit made during adopt"
+        );
+        assert_eq!(store_s.pinned_txnid(), Some(pre_txnid + 1));
+
+        // 4. Writable Grouped gate: `adopt_resized_map_internal` failing to re-pin poisons fail-closed!
+        store_s.inject_read_map_resized(1);
+        store_s.inject_pin_failures(1);
+        let adopt_err = grp.begin_read().err().expect("failed Grouped adopt re-pin must error");
+        assert!(matches!(adopt_err, StorageError::DurabilityFailed(_)), "got {adopt_err:?}");
+        assert!(grp.is_poisoned(), "failed Grouped adopt re-pin MUST poison gate");
     }
 }

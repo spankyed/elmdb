@@ -315,8 +315,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         let map_write = self.store.lock_map_write();
         let mut guard = self.writer.lock();
         self.check_poisoned()?;
-        let pin_after =
-            self.mode == DurabilityMode::Grouped && guard.recovered && !self.unacked_reboot.load(Ordering::Acquire);
+        let pin_after = self.mode == DurabilityMode::Grouped && guard.recovered;
         if pin_after {
             let _ = self.persist_durable_locked(&mut guard, MapWitness::Write(&map_write), None, false)?;
         }

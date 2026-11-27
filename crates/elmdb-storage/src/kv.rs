@@ -149,12 +149,6 @@ pub trait KvStore: Send + Sync {
     ) -> Result<usize, StorageError> {
         Ok(self.map_size())
     }
-    /// Adopts an external cross-process map resize (`mdb_env_set_mapsize(env, 0)`) under L2 `MapGate::write()`.
-    /// Caller MUST NOT hold any active transaction (`L2` or `L3`).
-    fn adopt_resized_map(&self) -> Result<usize, StorageError> {
-        let map_guard = self.lock_map_write();
-        self.adopt_resized_map_locked(&map_guard, false)
-    }
     /// Adopts an external cross-process map resize while the caller ALREADY holds exclusive L2
     /// `MapWriteGuard`, releasing any active durable pin before `mdb_env_set_mapsize(0)` and
     /// acquiring a fresh pin before returning whenever `pin_after == true`.
@@ -184,9 +178,7 @@ pub trait KvStore: Send + Sync {
     }
     /// Returns the debug lock-hierarchy scope ID for this store instance so higher layers
     /// (`DurabilityGate`, `Engine`) bind their L1–L5 locks to the same per-database scope.
-    fn lock_scope_id(&self) -> LockScopeId {
-        LockScopeId::DEFAULT
-    }
+    fn lock_scope_id(&self) -> LockScopeId;
     fn last_txnid(&self) -> Result<u64, StorageError>;
     fn roots_sha256(&self) -> Result<[u8; 32], StorageError>;
     /// Atomically reads `(txnid, roots_sha256)` from a single active meta-page snapshot (no TOCTOU).

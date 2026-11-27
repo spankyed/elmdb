@@ -2030,6 +2030,23 @@ mod tests {
                 crate::fs_publish::atomic_publish_dir_new(&stage_io, &dir.path().join(".")).unwrap_err().code,
                 ErrorCode::InvalidArgument
             );
+            assert_eq!(
+                crate::fs_publish::atomic_publish_dir_new(&stage_io, Path::new("")).unwrap_err().code,
+                ErrorCode::InvalidArgument
+            );
+            assert_eq!(
+                crate::fs_publish::atomic_publish_dir_new(&stage_io, Path::new(".")).unwrap_err().code,
+                ErrorCode::InvalidArgument
+            );
+            // Non-NotFound error (`ENOTDIR` traversing through a regular file) maps to `ErrorCode::Io`!
+            assert_eq!(
+                crate::fs_publish::atomic_publish_dir_new(&stage_io, &reg_file.join("child")).unwrap_err().code,
+                ErrorCode::Io
+            );
+            assert_eq!(
+                crate::fs_publish::ensure_not_self_or_descendant(&src, &reg_file.join("child")).unwrap_err().code,
+                ErrorCode::Io
+            );
             assert!(
                 fs::symlink_metadata(&link_target).unwrap().file_type().is_symlink(),
                 "symlink target must remain intact after failed atomic_publish_dir_new"

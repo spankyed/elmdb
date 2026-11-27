@@ -27,23 +27,8 @@ impl<'env> LmdbRoTxn<'env> {
     pub(crate) fn begin(store: &'env LmdbStore) -> Result<Self, StorageError> {
         let inner = Arc::clone(store.inner());
         let env_guard = inner.lock_env_read()?;
-        let mut raw: *mut ffi::MDB_txn = ptr::null_mut();
-        // SAFETY: `inner.env` is open and protected by `EnvReadGuard` (L2 `map_gate` + L4
-        // `dbi_publish_gate.read_txn()`), preventing `mdb_txn_renew0` from racing `LmdbRwTxn::commit_raw()`
-        // or `ensure_subdbs_open()`.
-        let mut rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
-        if rc == ffi::MDB_READERS_FULL {
-            let mut dead: libc::c_int = 0;
-            // SAFETY: Reclaim stale reader slots from crashed processes and retry once.
-            let _ = unsafe { ffi::mdb_reader_check(inner.env.as_ptr(), &mut dead) };
-            // SAFETY: `inner.env` is open and `env_guard` is still held; retrying `MDB_RDONLY` txn.
-            rc = unsafe { ffi::mdb_txn_begin(inner.env.as_ptr(), ptr::null_mut(), ffi::MDB_RDONLY, &mut raw) };
-        }
+        let txn = inner.begin_raw_ro_txn_locked()?;
         let map_guard = env_guard.into_map_guard();
-        if rc != ffi::MDB_SUCCESS {
-            return Err(map_mdb_err(rc, inner.current_map_size(), inner.max_dbs));
-        }
-        let txn = NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null read MDB_txn".into()))?;
         Ok(Self { txn, _map_guard: map_guard, inner, _env: PhantomData })
     }
 }
@@ -999,11 +984,28 @@ mod tests {
         let r4 = tx.commit().unwrap();
         assert_eq!(r4.txnid, 4);
 
+        // Direct `commit_raw` check for `open_subdb` when sub-DB ALREADY exists on disk (`MAIN_DBI`)
+        // vs brand-new sub-DB (bypassing `inner.dbis` cache to exercise `existed == true` vs `false`!).
+        {
+            store.inner().dbis.write().by_name.remove("items");
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
+            let _ = rw.open_subdb("items", DbFlags::DEFAULT).unwrap();
+            let (rec_existing, mg) = rw.commit_raw().unwrap();
+            drop(mg);
+            assert_eq!(rec_existing.txnid, 4, "reopening existing sub-DB must not bump commit_raw txnid");
+
+            let mut rw2 = store.begin_write(store.lock_map_read()).unwrap();
+            let _ = rw2.open_subdb("brand_new_subdb", DbFlags::DEFAULT).unwrap();
+            let (rec_new, mg2) = rw2.commit_raw().unwrap();
+            drop(mg2);
+            assert_eq!(rec_new.txnid, 5, "creating a brand-new sub-DB MUST bump commit_raw txnid");
+        }
+
         // Re-populate and drop so `data.mdb` has a valid `main_root`.
         let mut tx = gate.begin_write().unwrap();
         tx.put(db, b"k2", b"v2").unwrap();
-        let r5 = tx.commit().unwrap();
-        assert_eq!(r5.txnid, 5);
+        let r6 = tx.commit().unwrap();
+        assert_eq!(r6.txnid, 6);
         drop(gate);
         drop(store);
 
@@ -1117,6 +1119,48 @@ mod tests {
             drop(ro);
             assert!(gate.map_size() >= 2 * 1024 * 1024);
             assert!(store.has_durable_pin(), "durable pin must remain active after adopt_resized_map()");
+        }
+
+        // Verify `DurablePinTxn::drop` releases reader slots cleanly (with `max_readers = 2`, 6 consecutive
+        // `sync()` calls would hit `MDB_READERS_FULL` on the 3rd call if `Drop` leaked slots!), plus direct
+        // `refresh_durable_pin`, `refresh_durable_pin_under_write`, `assert_map_write_guard`, and `sync_under_write`.
+        let tmp_small = TempDir::new().unwrap();
+        let small = LmdbStore::open(
+            tmp_small.path(),
+            LmdbConfig { map_size: 256 * 1024, max_dbs: 32, max_readers: 2, no_sync: true, ..LmdbConfig::default() },
+        )
+        .unwrap();
+        // Direct `refresh_durable_pin` & `refresh_durable_pin_under_write` acquire the pin.
+        {
+            let rg = small.lock_map_read();
+            small.refresh_durable_pin(&rg).unwrap();
+            assert!(small.has_durable_pin());
+            drop(rg);
+            small.inner().clear_durable_pin_before_remap();
+            assert!(!small.has_durable_pin());
+            let wg = small.lock_map_write();
+            small.refresh_durable_pin_under_write(&wg).unwrap();
+            assert!(small.has_durable_pin());
+            drop(wg);
+        }
+        // Foreign `MapWriteGuard` from `store` is rejected by `small`'s `assert_map_write_guard`.
+        {
+            let foreign_wg = store.lock_map_write();
+            assert!(matches!(small.sync_under_write(&foreign_wg), Err(StorageError::InvalidState(_))));
+            assert!(matches!(small.refresh_durable_pin_under_write(&foreign_wg), Err(StorageError::InvalidState(_))));
+            assert!(matches!(small.grow_map_locked(&foreign_wg, None, false), Err(StorageError::InvalidState(_))));
+        }
+        // 6 consecutive `sync()` refreshes on `max_readers = 2` prove `DurablePinTxn::drop` frees old reader slots!
+        let (small_gate, _) =
+            DurabilityGate::open(small.clone(), OsVfs::new(), tmp_small.path(), DurabilityMode::Grouped).unwrap();
+        for _ in 0..6 {
+            small_gate.sync().unwrap();
+        }
+        // `sync_under_write` fails closed when `map_broken == true`.
+        small.inner().map_broken.store(true, Ordering::Release);
+        {
+            let wg = small.lock_map_write();
+            assert!(matches!(small.sync_under_write(&wg), Err(StorageError::Corrupted(_))));
         }
     }
 }

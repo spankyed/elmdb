@@ -161,6 +161,10 @@ pub struct SimKvStore {
     inner: Arc<Mutex<StoreInner>>,
     fail_next_sync: Arc<AtomicU32>,
     fail_next_pin: Arc<AtomicU32>,
+    fail_next_read_map_resized: Arc<AtomicU32>,
+    fail_next_pin_map_resized: Arc<AtomicU32>,
+    fail_next_grow_io: Arc<AtomicU32>,
+    peer_commit_on_next_adopt: Arc<AtomicU32>,
 }
 
 impl SimKvStore {
@@ -181,6 +185,10 @@ impl SimKvStore {
             })),
             fail_next_sync: Arc::new(AtomicU32::new(0)),
             fail_next_pin: Arc::new(AtomicU32::new(0)),
+            fail_next_read_map_resized: Arc::new(AtomicU32::new(0)),
+            fail_next_pin_map_resized: Arc::new(AtomicU32::new(0)),
+            fail_next_grow_io: Arc::new(AtomicU32::new(0)),
+            peer_commit_on_next_adopt: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -192,6 +200,26 @@ impl SimKvStore {
     /// Injects `count` upcoming `refresh_durable_pin` / post-remap re-pin failures (e.g. `ReadersFull`).
     pub fn inject_pin_failures(&self, count: u32) {
         self.fail_next_pin.store(count, AtomicOrdering::Release);
+    }
+
+    /// Injects `count` upcoming `MapResized` errors on `begin_read()`.
+    pub fn inject_read_map_resized(&self, count: u32) {
+        self.fail_next_read_map_resized.store(count, AtomicOrdering::Release);
+    }
+
+    /// Injects `count` upcoming `MapResized` errors on `refresh_durable_pin()`.
+    pub fn inject_pin_map_resized(&self, count: u32) {
+        self.fail_next_pin_map_resized.store(count, AtomicOrdering::Release);
+    }
+
+    /// Injects `count` upcoming non-Corrupted `ReadersFull` errors on `grow_map_locked` / `adopt_resized_map_locked`.
+    pub fn inject_remap_failures(&self, count: u32) {
+        self.fail_next_grow_io.store(count, AtomicOrdering::Release);
+    }
+
+    /// Simulates a cross-process peer commit landing during the next `adopt_resized_map_locked`.
+    pub fn inject_peer_commit_on_adopt(&self, count: u32) {
+        self.peer_commit_on_next_adopt.store(count, AtomicOrdering::Release);
     }
 
     /// Simulates power loss: drops all uncommitted and unsynced commits, reverting the store
@@ -693,6 +721,13 @@ impl KvStore for SimKvStore {
     fn lock_map_write(&self) -> Self::MapWriteGuard<'_> {}
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
+        if self
+            .fail_next_read_map_resized
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StorageError::MapResized);
+        }
         let mut inner = self.inner.lock();
         let snapshot = Arc::clone(&inner.committed);
         *inner.active_readers.entry(snapshot.txnid).or_insert(0) += 1;
@@ -745,6 +780,13 @@ impl KvStore for SimKvStore {
     }
 
     fn refresh_durable_pin_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
+        if self
+            .fail_next_pin_map_resized
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StorageError::MapResized);
+        }
         if self.fail_next_pin.try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1)).is_ok()
         {
             return Err(StorageError::ReadersFull);
@@ -776,6 +818,13 @@ impl KvStore for SimKvStore {
         min_size: Option<usize>,
         pin_after: bool,
     ) -> Result<usize, StorageError> {
+        if self
+            .fail_next_grow_io
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StorageError::ReadersFull);
+        }
         let new_size = {
             let mut inner = self.inner.lock();
             inner.pinned_txnid = None;
@@ -794,9 +843,25 @@ impl KvStore for SimKvStore {
         _map_guard: &Self::MapWriteGuard<'_>,
         pin_after: bool,
     ) -> Result<usize, StorageError> {
+        if self
+            .fail_next_grow_io
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StorageError::ReadersFull);
+        }
         let size = {
             let mut inner = self.inner.lock();
             inner.pinned_txnid = None;
+            if self
+                .peer_commit_on_next_adopt
+                .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                let mut next = (*inner.committed).clone();
+                next.txnid = next.txnid.saturating_add(1);
+                inner.committed = Arc::new(next);
+            }
             inner.config.map_size
         };
         if pin_after {

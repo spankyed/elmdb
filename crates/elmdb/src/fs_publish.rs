@@ -43,12 +43,10 @@ fn resolve_path_preserving_missing(path: &Path) -> Result<PathBuf> {
                         format!("path '{}' cannot traverse '..' after a nonexistent segment", path.display()),
                     ));
                 }
-                if !resolved.as_os_str().is_empty() {
-                    resolved = fs::canonicalize(&resolved).map_err(|e| {
-                        ElmdbError::new(ErrorCode::Io, format!("cannot canonicalize '{}': {e}", resolved.display()))
-                    })?;
-                    resolved.pop();
-                }
+                resolved = fs::canonicalize(&resolved).map_err(|e| {
+                    ElmdbError::new(ErrorCode::Io, format!("cannot canonicalize '{}': {e}", resolved.display()))
+                })?;
+                resolved.pop();
             }
             Component::Normal(seg) => {
                 resolved.push(seg);
