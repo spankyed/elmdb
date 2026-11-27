@@ -2054,6 +2054,50 @@ fn batch_d_literal_keys_soft_trash_filtered_in_degrees_has_link_and_traversals()
     });
     assert_eq!(qe.execute(&engine, &hl_target, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![ka]));
 
+    // EdgeDir::In with explicit targets (live, trashed, and non-matching) on LiteralKeys([kc]).
+    let hl_in_live = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![kc]))),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::In, target: Some(ka) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hl_in_live, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![kc]));
+
+    let hl_in_trashed = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![kc]))),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::In, target: Some(kb) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hl_in_trashed, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![]));
+
+    let hl_in_mismatch = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![kc]))),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::In, target: Some(kc) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    assert_eq!(qe.execute(&engine, &hl_in_mismatch, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![]));
+
+    // Live Type source pushes HasLink { target: Some(kc) } into `HasLinkDriveFromTarget`.
+    let hl_pushdown = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Filter {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            expr: FilterExpr::HasLink { rel_kinds: vec![ids.cites], dir: EdgeDir::Out, target: Some(kc) },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    let hl_push_out = qe.execute(&engine, &hl_pushdown, ExecBudgets::default()).unwrap();
+    assert_eq!(hl_push_out.result, QueryResult::Ids(vec![ka]));
+    assert!(
+        hl_push_out.explain.pushed_filters.iter().any(|s| s == "HasLinkDriveFromTarget"),
+        "live Type HasLink with explicit target must push down via HasLinkDriveFromTarget: {:?}",
+        hl_push_out.explain.pushed_filters
+    );
+
     // 3. Hops & ShortestPath from LiteralKeys([B]) return empty while include_trashed: true includes B.
     let hops_trashed = LogicalPlan::new(LogicalNode::Terminal {
         input: Box::new(LogicalNode::Traverse {
@@ -2073,7 +2117,7 @@ fn batch_d_literal_keys_soft_trash_filtered_in_degrees_has_link_and_traversals()
     });
     assert_eq!(qe.execute(&engine, &sp_trashed, ExecBudgets::default()).unwrap().result, QueryResult::Ids(vec![]));
 
-    // 4. Explicit `include_trashed: true` DOES include B in Degrees, HasLink, Hops, and ShortestPath.
+    // 4. Explicit `include_trashed: true` DOES include B in Degrees and HasLink.
     let deg_incl = LogicalPlan::new(LogicalNode::Terminal {
         input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: true })),
         terminal: TerminalSpec::Degrees { rel_kinds: vec![ids.cites], dir: EdgeDir::Both },
@@ -2278,7 +2322,7 @@ fn batch_d_leiden_normalizes_extreme_weights_without_overflow() {
     };
     assert_eq!(groups, vec![vec![k1, k2], vec![k3, k4]]);
 
-    // Unweighted Leiden still works cleanly (guards `max_w > 0.0` fallback to `scale = 1.0`).
+    // Unweighted Leiden still groups connected edges cleanly (guards `max_w > 0.0` fallback to `scale = 1.0`).
     let unweighted_plan = LogicalPlan::new(LogicalNode::GraphAnalyze {
         input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![k1, k2, k3, k4]))),
         spec: GraphAnalyzeSpec::Leiden {
@@ -2294,7 +2338,21 @@ fn batch_d_leiden_normalizes_extreme_weights_without_overflow() {
     else {
         panic!("expected GraphGroups");
     };
-    assert!(!unweighted_groups.is_empty());
+    assert!(
+        unweighted_groups.iter().any(|g| g.len() > 1),
+        "unweighted Leiden must retain edges instead of returning all singletons: {unweighted_groups:?}"
+    );
+
+    // Direct CsrGraph with an injected f64::INFINITY weight must not poison `max_w` and drop finite edges.
+    let manual = elmdb_query::CsrGraph {
+        keys: vec![k1, k2, k3],
+        key_to_idx: [(k1, 0), (k2, 1), (k3, 2)].into_iter().collect(),
+        offsets: vec![0, 2, 3, 3],
+        targets: vec![1, 2, 0],
+        weights: Some(vec![10.0, f64::INFINITY, 10.0]),
+    };
+    let manual_groups = elmdb_query::leiden_communities(&manual, 1.0, 7, 5).unwrap();
+    assert_eq!(manual_groups, vec![vec![k1, k2], vec![k3]]);
 }
 
 #[test]
