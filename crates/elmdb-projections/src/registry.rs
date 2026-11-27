@@ -237,7 +237,7 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                         };
                         write_build_state(txn, dbs, def.id, &next_state)?;
                     }
-                    Err(err) => {
+                    Err(err) if is_deterministic_build_failure(err.code) => {
                         write_build_state(
                             txn,
                             dbs,
@@ -245,6 +245,10 @@ impl<S: KvStore, V: Vfs> ProjectionRegistry<S, V> {
                             &BuildState::Failed { code: err.code, message: err.message },
                         )?;
                     }
+                    // Propagate infrastructure/transient errors (`StorageFull`/`MapFull`, `Io`,
+                    // `ResourceLimit`, `DurabilityFailed`, `Cancelled`, `Poisoned`, etc.) so
+                    // `retry_on_map_full()` can auto-grow and healthy indexes are never poisoned.
+                    Err(err) => return Err(err),
                 }
                 return Ok(Some(()));
             }
@@ -587,4 +591,25 @@ impl<S: KvStore, V: Vfs> ProjectionSink<S, V> for ProjectionRegistry<S, V> {
         }
         Ok(())
     }
+}
+
+/// Allowlist of deterministic data/schema errors that genuinely fail an index build.
+/// Infrastructure and transient errors (`StorageFull`/`MapFull`, `Io`, `ResourceLimit`,
+/// `DurabilityFailed`, `Cancelled`, `Poisoned`, etc.) are NOT in this allowlist and propagate
+/// so `retry_on_map_full()` can auto-grow and transient failures never poison healthy indexes.
+fn is_deterministic_build_failure(code: ErrorCode) -> bool {
+    matches!(
+        code,
+        ErrorCode::UniqueViolation
+            | ErrorCode::ValidationFailed
+            | ErrorCode::InvalidSchema
+            | ErrorCode::InvalidArgument
+            | ErrorCode::EndpointMismatch
+            | ErrorCode::CardinalityViolation
+            | ErrorCode::CycleDetected
+            | ErrorCode::UnknownType
+            | ErrorCode::UnknownField
+            | ErrorCode::UnknownRelation
+            | ErrorCode::UnknownIndex
+    )
 }

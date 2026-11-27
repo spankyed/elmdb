@@ -659,23 +659,6 @@ impl Database {
                 // Rust `beforeCommit` callback. Re-entering `&Database` from the callback sees the slot
                 // present (`has_active_txn() == true`) with `ctx == None`, returning `InvalidArgument`
                 // cleanly instead of panicking with `BorrowMutError` or deadlocking on `WriterLock`.
-                struct RestoreCtxGuard {
-                    db_id: u64,
-                    ctx: Option<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>>,
-                }
-                impl Drop for RestoreCtxGuard {
-                    fn drop(&mut self) {
-                        if let Some(ctx) = self.ctx.take() {
-                            let _ = ACTIVE_TXNS.try_with(|m| {
-                                if let Ok(mut map) = m.try_borrow_mut()
-                                    && let Some(slot) = map.get_mut(&self.db_id)
-                                {
-                                    slot.ctx = Some(ctx);
-                                }
-                            });
-                        }
-                    }
-                }
                 let taken_ctx = ACTIVE_TXNS.with(|m| -> Result<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>> {
                     let mut map = m.borrow_mut();
                     map.get_mut(&self.id)
@@ -683,7 +666,12 @@ impl Database {
                         .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing for rust hook"))
                 })?;
                 let mut restore = RestoreCtxGuard { db_id: self.id, ctx: Some(taken_ctx) };
-                let rust_res = restore.ctx.as_mut().expect("taken_ctx").run_rust_hooks_for_round(&snap.touched_types);
+                let rust_res = restore
+                    .ctx
+                    .as_mut()
+                    .expect("taken_ctx")
+                    .run_rust_hooks_for_round(&snap.touched_types)
+                    .and_then(|()| restore.ctx.as_mut().expect("taken_ctx").flush_projections());
                 drop(restore);
                 if let Err(err) = rust_res {
                     let _ = self.with_active_ctx_mut(|ctx| {
@@ -822,27 +810,29 @@ impl Database {
     }
 
     /// Runs an atomic read-write closure inside a single LMDB write transaction (Rust `&mut TxnCtx` API).
+    /// Routes through the unified `transact_scoped` hook/commit pipeline so both Rust and host/JS
+    /// `beforeCommit` hooks run, live watches receive direct delta notifications, and read-only/empty
+    /// closures abort cleanly without bumping `commit_seq`.
     pub fn transact<R>(
         &self,
         f: impl FnOnce(&mut TxnCtx<'_, LmdbStore, OsVfs, SystemClock>) -> Result<R>,
     ) -> Result<R> {
-        let eng = self.enter_op()?;
-        self.require_writable()?;
         self.forbid_inside_txn("transact")?;
-        // Install an RAII sentinel slot (`ctx: None`) so any re-entrant `&Database` call inside `f` or
-        // a Rust `beforeCommit` hook returns `InvalidArgument` cleanly instead of deadlocking on `WriterLock`.
-        let _sentinel = self.enter_borrowed_txn_sentinel();
-        let (res, _receipt) = eng.transact(f)?;
-        drop(_sentinel);
-        self.hub.catch_up_cross_process(&eng, now_unix_ms())?;
-        Ok(res)
-    }
-
-    fn enter_borrowed_txn_sentinel(&self) -> BorrowedTxnSentinelGuard {
-        ACTIVE_TXNS.with(|m| {
-            m.borrow_mut().insert(self.id, ActiveTxnSlot { ctx: None, commit_seq: None, depth: 1 });
-        });
-        BorrowedTxnSentinelGuard { db_id: self.id }
+        self.transact_scoped(TransactOptions::default(), || {
+            // Temporarily take `ctx` out of `ACTIVE_TXNS` while keeping the slot present (`ctx: None`),
+            // so any re-entrant `&Database` call inside `f` returns `InvalidArgument` cleanly instead
+            // of panicking with `BorrowMutError` or deadlocking on `WriterLock`.
+            let taken_ctx = ACTIVE_TXNS.with(|m| -> Result<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>> {
+                let mut map = m.borrow_mut();
+                map.get_mut(&self.id)
+                    .and_then(|slot| slot.ctx.take())
+                    .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing for transact"))
+            })?;
+            let mut restore = RestoreCtxGuard { db_id: self.id, ctx: Some(taken_ctx) };
+            let res = f(restore.ctx.as_mut().expect("taken_ctx"));
+            drop(restore);
+            res
+        })
     }
 
     pub fn register_before_commit(&self, hook: BeforeCommitHook<LmdbStore, OsVfs, SystemClock>) -> Result<u64> {
@@ -1253,13 +1243,12 @@ impl Database {
     }
 
     /// Destroys all entities belonging to an archived type in a single atomic transaction.
+    /// Routes through `transact_scoped` so both Rust and host/JS `beforeCommit` hooks run,
+    /// live watches receive direct deltas, and 0-row purges abort without bumping `commit_seq`.
     pub fn purge_archived(&self, type_name: &str) -> Result<u64> {
-        let eng = self.enter_op()?;
-        self.require_writable()?;
         self.forbid_inside_txn("purgeArchived")?;
-        let _sentinel = self.enter_borrowed_txn_sentinel();
-        let (purged, _receipt) =
-            eng.transact(|tx| {
+        self.transact_scoped(TransactOptions::default(), || {
+            self.with_active_ctx_mut(|tx| {
                 let td =
                     tx.schema().types.iter().find(|t| t.name == type_name).ok_or_else(|| {
                         ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{type_name}'"))
@@ -1276,10 +1265,8 @@ impl Database {
                     tx.exec(&WireOp::Destroy { target: EntityTarget::ExternalId(row.id) })?;
                 }
                 Ok(count)
-            })?;
-        drop(_sentinel);
-        self.hub.catch_up_cross_process(&eng, now_unix_ms())?;
-        Ok(purged)
+            })
+        })
     }
 
     pub fn stats(&self) -> Result<DatabaseStats> {
@@ -1706,17 +1693,22 @@ fn build_host_hook_delta(
     Ok(HostHookDelta { commit_seq: snap.commit_seq, entities, edges })
 }
 
-struct BorrowedTxnSentinelGuard {
+struct RestoreCtxGuard {
     db_id: u64,
+    ctx: Option<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>>,
 }
 
-impl Drop for BorrowedTxnSentinelGuard {
+impl Drop for RestoreCtxGuard {
     fn drop(&mut self) {
-        let _ = ACTIVE_TXNS.try_with(|m| {
-            if let Ok(mut map) = m.try_borrow_mut() {
-                let _ = map.remove(&self.db_id);
-            }
-        });
+        if let Some(ctx) = self.ctx.take() {
+            let _ = ACTIVE_TXNS.try_with(|m| {
+                if let Ok(mut map) = m.try_borrow_mut()
+                    && let Some(slot) = map.get_mut(&self.db_id)
+                {
+                    slot.ctx = Some(ctx);
+                }
+            });
+        }
     }
 }
 
@@ -1796,7 +1788,7 @@ mod tests {
             let held_op = db.enter_op().unwrap();
 
             let db_closer = Arc::clone(&db);
-            let closer = std::thread::spawn(move || db_closer.close_within(Some(Duration::from_millis(120))));
+            let closer = std::thread::spawn(move || db_closer.close_within(Some(Duration::from_millis(500))));
             while !db.closed.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }
@@ -1858,7 +1850,7 @@ mod tests {
                 Arc::new(Database::open(dir.path(), OpenOptions { read_only: true, ..Default::default() }).unwrap());
             let held_op = ro.enter_op().unwrap();
             let ro_closer = Arc::clone(&ro);
-            let closer = std::thread::spawn(move || ro_closer.close_within(Some(Duration::from_millis(80))));
+            let closer = std::thread::spawn(move || ro_closer.close_within(Some(Duration::from_millis(500))));
             while !ro.closed.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }

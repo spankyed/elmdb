@@ -966,11 +966,25 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             }
             ctx.flush_projections()?;
             ctx.run_before_commit_cascade()?;
-            ctx.finalize_commit_log()?;
 
             let created_ids: Vec<String> = batch_slots.into_iter().map(|(_, id)| id).collect();
-            let (receipt, summary_out) = ctx.commit_with_summary(flags.contains(CommitReturnFlags::FULL_CHANGESET))?;
-            Ok(BatchOutcome { commit_seq, receipt, created_ids, summary: summary_out })
+            match ctx.finish_and_commit(flags.contains(CommitReturnFlags::FULL_CHANGESET))? {
+                Some((committed_seq, receipt, summary_out)) => {
+                    Ok(BatchOutcome { commit_seq: committed_seq, receipt, created_ids, summary: summary_out })
+                }
+                None => {
+                    let ro = self.gate.begin_read()?;
+                    let current_seq = read_commit_seq(&ro, &self.dbs)?;
+                    let txnid = ro.txnid();
+                    drop(ro);
+                    Ok(BatchOutcome {
+                        commit_seq: current_seq,
+                        receipt: CommitReceipt { txnid, roots_sha256: [0u8; 32] },
+                        created_ids,
+                        summary: None,
+                    })
+                }
+            }
         })
     }
 
@@ -1134,9 +1148,15 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         let value = f(&mut ctx)?;
         ctx.flush_projections()?;
         ctx.run_before_commit_cascade()?;
-        ctx.finalize_commit_log()?;
-        let (receipt, _) = ctx.commit_with_summary(false)?;
-        Ok((value, receipt))
+        match ctx.finish_and_commit(false)? {
+            Some((_seq, receipt, _)) => Ok((value, receipt)),
+            None => {
+                let ro = self.gate.begin_read()?;
+                let txnid = ro.txnid();
+                drop(ro);
+                Ok((value, CommitReceipt { txnid, roots_sha256: [0u8; 32] }))
+            }
+        }
     }
 
     /// Atomically increments named transactional counter `name` by 1 and returns the new value (`1, 2, ...`).
@@ -1329,7 +1349,10 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         &self.txn
     }
 
+    /// Returns a mutable reference to the underlying `GatedWriteTxn` and marks the transaction dirty
+    /// so raw sub-DB writes are never silently aborted by `finish_and_commit`.
     pub fn txn_mut(&mut self) -> &mut GatedWriteTxn<'a, S, V> {
+        self.dirty = true;
         &mut self.txn
     }
 
@@ -1548,7 +1571,8 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         }
     }
 
-    fn flush_projections(&mut self) -> Result<()> {
+    /// Flushes all pending entity and edge deltas into derived projections for RYOW visibility.
+    pub fn flush_projections(&mut self) -> Result<()> {
         if self.pending_deltas.is_empty() {
             self.pending_deltas = DeltaBatch::new();
             return Ok(());
@@ -1826,6 +1850,8 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     raw_val.validate_canonical()?;
                     if let Some(fdef) = tdef.field_by_name(fname) {
                         let resolved = self.validate_and_resolve_field(fdef, raw_val, slots)?;
+                        // Scrub any stale extra entry shadowed by a schema-evolved/renamed declared field.
+                        next.extra.remove(fname);
                         if next.fields.get(&fdef.id) != Some(&resolved) {
                             changed_fields.insert(fdef.id);
                             next.fields.insert(fdef.id, resolved);
@@ -1875,6 +1901,8 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                                 format!("cannot unset required field '{}.{}'", tdef.name, fdef.name),
                             ));
                         }
+                        // Scrub any stale extra entry shadowed by a schema-evolved/renamed declared field.
+                        next.extra.remove(fname);
                         if next.fields.remove(&fdef.id).is_some() {
                             changed_fields.insert(fdef.id);
                         }
@@ -3237,6 +3265,44 @@ pub fn scan_edges_by_kind<R: KvRead>(txn: &R, dbs: &SystemDbs, kind: RelKindId) 
     Ok(out)
 }
 
+/// Merges packed declared fields and dynamic `extra` fields with canonical 3-tier precedence:
+/// **Active Declared > Extra > Archived Declared**.
+///
+/// - Active declared fields exclusively own their names so stale `extra` entries from prior
+///   schema states can never clobber or resurrect them.
+/// - Live `extra` entries written after a declared field was archived override the stale archived
+///   value, matching `read_single_field` / `get_field`.
+fn merge_row_fields<F>(
+    tdef: &crate::TypeDef,
+    packed_fields: BTreeMap<FieldId, CanonicalValue>,
+    packed_extra: BTreeMap<String, CanonicalValue>,
+    mut transform_declared: F,
+) -> Result<BTreeMap<String, CanonicalValue>>
+where
+    F: FnMut(CanonicalValue) -> Result<CanonicalValue>,
+{
+    let mut fields = BTreeMap::new();
+    let mut active_declared = Vec::new();
+    for (fid, val) in packed_fields {
+        if let Some(fdef) = tdef.field_by_id(fid) {
+            if fdef.archived {
+                fields.insert(fdef.name.clone(), transform_declared(val)?);
+            } else {
+                active_declared.push((fdef.name.clone(), val));
+            }
+        }
+    }
+    for (k, v) in packed_extra {
+        if tdef.field_by_name(&k).is_none() {
+            fields.insert(k, v);
+        }
+    }
+    for (name, val) in active_declared {
+        fields.insert(name, transform_declared(val)?);
+    }
+    Ok(fields)
+}
+
 pub fn read_raw_stored_row<R: KvRead>(
     txn: &R,
     schema: &CompiledSchema,
@@ -3251,15 +3317,7 @@ pub fn read_raw_stored_row<R: KvRead>(
         .type_by_id(packed.header.type_id)
         .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
 
-    let mut fields = BTreeMap::new();
-    for (fid, val) in packed.fields {
-        if let Some(fdef) = tdef.field_by_id(fid) {
-            fields.insert(fdef.name.clone(), val);
-        }
-    }
-    for (k, v) in packed.extra {
-        fields.insert(k, v);
-    }
+    let fields = merge_row_fields(tdef, packed.fields, packed.extra, Ok)?;
 
     let trashed = packed.header.is_trashed();
     Ok(Some(StoredRow {
@@ -3290,16 +3348,9 @@ pub fn read_stored_row<R: KvRead>(
         .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
 
     let mut ref_cache: FxHashMap<u64, String> = FxHashMap::default();
-    let mut fields = BTreeMap::new();
-    for (fid, val) in packed.fields {
-        if let Some(fdef) = tdef.field_by_id(fid) {
-            let resolved = resolve_refs_to_strings(txn, dbs, val, &mut ref_cache)?;
-            fields.insert(fdef.name.clone(), resolved);
-        }
-    }
-    for (k, v) in packed.extra {
-        fields.insert(k, v);
-    }
+    let fields = merge_row_fields(tdef, packed.fields, packed.extra, |val| {
+        resolve_refs_to_strings(txn, dbs, val, &mut ref_cache)
+    })?;
 
     let trashed = packed.header.is_trashed();
     Ok(Some(StoredRow {
