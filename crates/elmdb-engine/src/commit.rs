@@ -255,6 +255,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Default for HookRegistry<S, V, C> {
 struct DeltaBatch {
     entities: BTreeMap<EntityKey, EntityDelta>,
     edges: BTreeMap<RelKey, EdgeDelta>,
+    edge_endpoint_types: FxHashMap<RelKey, (Option<TypeId>, Option<TypeId>)>,
     touched_types: TypeMask,
     touched_rel_kinds: BTreeSet<RelKindId>,
     tombstones: Vec<(EntityKey, TypeId, String)>,
@@ -265,6 +266,7 @@ impl DeltaBatch {
         Self {
             entities: BTreeMap::new(),
             edges: BTreeMap::new(),
+            edge_endpoint_types: FxHashMap::default(),
             touched_types: TypeMask::empty(),
             touched_rel_kinds: BTreeSet::new(),
             tombstones: Vec::new(),
@@ -280,7 +282,6 @@ impl DeltaBatch {
         changed_fields: FieldMask,
         liveness_changed: bool,
     ) {
-        self.touched_types.insert(type_id);
         match self.entities.get_mut(&key) {
             Some(existing) => {
                 if existing.before.is_none() && after.is_none() {
@@ -302,23 +303,59 @@ impl DeltaBatch {
         }
     }
 
-    fn record_edge(&mut self, key: RelKey, kind: RelKindId, before: Option<PackedEdge>, after: Option<PackedEdge>) {
-        self.touched_rel_kinds.insert(kind);
+    fn record_edge(
+        &mut self,
+        key: RelKey,
+        kind: RelKindId,
+        before: Option<PackedEdge>,
+        after: Option<PackedEdge>,
+        endpoint_types: (Option<TypeId>, Option<TypeId>),
+    ) {
         match self.edges.get_mut(&key) {
             Some(existing) => {
                 if existing.before.is_none() && after.is_none() {
                     // Linked and unlinked in the same transaction -> net no-op.
                     self.edges.remove(&key);
+                    self.edge_endpoint_types.remove(&key);
                 } else {
                     existing.after = after;
+                    let entry = self.edge_endpoint_types.entry(key).or_insert((None, None));
+                    if endpoint_types.0.is_some() {
+                        entry.0 = endpoint_types.0;
+                    }
+                    if endpoint_types.1.is_some() {
+                        entry.1 = endpoint_types.1;
+                    }
                 }
             }
             None => {
                 if before.is_some() || after.is_some() {
                     self.edges.insert(key, EdgeDelta { key, kind, before, after });
+                    self.edge_endpoint_types.insert(key, endpoint_types);
                 }
             }
         }
+    }
+
+    fn recompute_touched(&mut self) {
+        let mut types = TypeMask::empty();
+        for d in self.entities.values() {
+            types.insert(d.type_id);
+        }
+        let mut rels = BTreeSet::new();
+        for (&rk, e) in &self.edges {
+            rels.insert(e.kind);
+            if let Some(&(src_ty, dst_ty)) = self.edge_endpoint_types.get(&rk) {
+                if let Some(t) = src_ty {
+                    types.insert(t);
+                }
+                if let Some(t) = dst_ty {
+                    types.insert(t);
+                }
+            }
+        }
+        self.touched_types = types;
+        self.touched_rel_kinds = rels;
     }
 
     fn is_empty(&self) -> bool {
@@ -1460,6 +1497,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 
     fn flush_projections(&mut self) -> Result<()> {
         if self.pending_deltas.is_empty() {
+            self.pending_deltas = DeltaBatch::new();
             return Ok(());
         }
         self.dirty = true;
@@ -1469,8 +1507,6 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 
         self.engine.projections.apply_deltas(&mut self.txn, &self.schema, &self.engine.dbs, &entity_vec, &edge_vec)?;
 
-        self.round_touched_types.union_with(&batch.touched_types);
-        self.total_deltas.touched_types.union_with(&batch.touched_types);
         for d in entity_vec {
             self.round_deltas.record_entity(
                 d.key,
@@ -1483,13 +1519,14 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             self.total_deltas.record_entity(d.key, d.type_id, d.before, d.after, d.changed_fields, d.liveness_changed);
         }
         for e in edge_vec {
-            self.round_deltas.record_edge(e.key, e.kind, e.before.clone(), e.after.clone());
-            self.total_deltas.record_edge(e.key, e.kind, e.before, e.after);
+            let ep = batch.edge_endpoint_types.get(&e.key).copied().unwrap_or((None, None));
+            self.round_deltas.record_edge(e.key, e.kind, e.before.clone(), e.after.clone(), ep);
+            self.total_deltas.record_edge(e.key, e.kind, e.before, e.after, ep);
         }
         self.total_deltas.tombstones.extend(batch.tombstones);
-        if self.round_deltas.is_empty() {
-            self.round_touched_types = TypeMask::empty();
-        }
+        self.round_deltas.recompute_touched();
+        self.total_deltas.recompute_touched();
+        self.round_touched_types = self.round_deltas.touched_types.clone();
         Ok(())
     }
 
@@ -1955,9 +1992,13 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 };
                 self.txn.put(self.engine.dbs.relations, &rel_key.to_ne_bytes(), &edge.encode())?;
                 self.write_adj_entries(&edge)?;
-                self.pending_deltas.record_edge(rel_key, rdef.id, None, Some(edge));
-                self.pending_deltas.touched_types.insert(src_hdr.type_id);
-                self.pending_deltas.touched_types.insert(dst_hdr.type_id);
+                self.pending_deltas.record_edge(
+                    rel_key,
+                    rdef.id,
+                    None,
+                    Some(edge),
+                    (Some(src_hdr.type_id), Some(dst_hdr.type_id)),
+                );
                 Ok(())
             }
             WireOp::Unlink { source, rel_kind, target } => {
@@ -2330,13 +2371,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         self.txn.del(self.engine.dbs.relations, &rel_key.to_ne_bytes())?;
 
         // Track endpoint types so `beforeCommit` hooks watching those types see the unlink!
-        if let Ok(hdr) = self.load_row_header(edge.src) {
-            self.pending_deltas.touched_types.insert(hdr.type_id);
-        }
-        if let Ok(hdr) = self.load_row_header(edge.dst) {
-            self.pending_deltas.touched_types.insert(hdr.type_id);
-        }
-        self.pending_deltas.record_edge(rel_key, edge.kind, Some(edge), None);
+        let src_ty = self.load_row_header(edge.src).ok().map(|h| h.type_id);
+        let dst_ty = self.load_row_header(edge.dst).ok().map(|h| h.type_id);
+        self.pending_deltas.record_edge(rel_key, edge.kind, Some(edge), None, (src_ty, dst_ty));
         Ok(())
     }
 

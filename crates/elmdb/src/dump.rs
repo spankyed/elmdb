@@ -336,13 +336,16 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
         },
     )?;
 
-    // Build a relaxed staging schema so forward/cyclic Refs, List<Ref>, DanglingRefs, and trashed
-    // unique-key collisions load cleanly in 2 passes before restoring exact schema & unique indexes!
+    // Build a relaxed staging schema so forward/cyclic Refs, List<Ref>, DanglingRefs, required archived
+    // fields, post-creation required/non-null/additionalFields evolutions, and trashed unique-key
+    // collisions all load cleanly before Pass 6 restores the exact full & active schemas!
     let mut staging_schema = payload.full_schema.clone();
     for tdef in staging_schema.types.values_mut() {
+        tdef.additional_fields = true;
         for fdef in tdef.fields.values_mut() {
+            fdef.optional = true;
+            fdef.nullable = true;
             if field_spec_contains_ref(&fdef.kind) {
-                fdef.optional = true;
                 relax_field_spec_for_staging(&mut fdef.kind);
             }
         }

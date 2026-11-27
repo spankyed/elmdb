@@ -1056,7 +1056,7 @@ fn batch1_dump_load_refs_list_refs_archived_fields_timestamps_and_protocol_guard
 
     let mut task = TypeDefinition::default();
     task.fields.insert("title".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
-    task.fields.insert("legacy".into(), FieldDefinition { kind: FieldSpec::String, optional: true, nullable: true });
+    task.fields.insert("legacy".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
     task.fields.insert(
         "parent".into(),
         FieldDefinition {
@@ -1149,6 +1149,7 @@ fn batch1_dump_load_refs_list_refs_archived_fields_timestamps_and_protocol_guard
             external_id: Some("t-2".into()),
             fields: vec![
                 ("title".into(), CanonicalValue::String("Second".into())),
+                ("legacy".into(), CanonicalValue::String("old-2".into())),
                 ("parent".into(), CanonicalValue::String("p-1".into())),
                 ("deps".into(), CanonicalValue::Array(vec![CanonicalValue::String("t-1".into())])),
             ],
@@ -1180,11 +1181,22 @@ fn batch1_dump_load_refs_list_refs_archived_fields_timestamps_and_protocol_guard
     ])
     .unwrap();
 
-    // Archive field `legacy` and relation `REL_ARCHIVED` (with ZERO archived types!) to test P0-3 & P1-5.
+    // Archive REQUIRED field `legacy` and relation `REL_ARCHIVED` (with ZERO archived types!),
+    // then create `t-3` WITHOUT `legacy` to verify dump::load staging relaxes archived required fields!
     let mut evolved = schema.clone();
     evolved.types.get_mut("Task").unwrap().fields.remove("legacy");
     evolved.relations.remove("REL_ARCHIVED");
     db.set_schema(&evolved).unwrap();
+    db.execute_batch(&[WireOp::Create {
+        type_name: "Task".into(),
+        external_id: Some("t-3".into()),
+        fields: vec![
+            ("title".into(), CanonicalValue::String("AfterArchive".into())),
+            ("parent".into(), CanonicalValue::String("p-1".into())),
+            ("deps".into(), CanonicalValue::Array(vec![])),
+        ],
+    }])
+    .unwrap();
 
     // P1-5: `compiled_to_raw_schema` must omit archived fields & relations cleanly.
     let raw_roundtrip = compiled_to_raw_schema(&db.schema().unwrap());
@@ -1229,7 +1241,7 @@ fn batch1_dump_load_refs_list_refs_archived_fields_timestamps_and_protocol_guard
     assert!(!loaded_schema.types["Task"].fields.contains_key("legacy"));
     assert!(!loaded_schema.relations.contains_key("REL_ARCHIVED"));
 
-    // P1-5: Archiving `Other` still allows querying `Other` via QuerySource::Type & QuerySource::Types!
+    // P1-5: Archiving `Other` still allows querying `Other` via QuerySource::Type AND QuerySource::Types + filter!
     let mut no_other = evolved.clone();
     no_other.types.remove("Other");
     loaded.set_schema(&no_other).unwrap();
@@ -1245,6 +1257,23 @@ fn batch1_dump_load_refs_list_refs_archived_fields_timestamps_and_protocol_guard
         )
         .unwrap();
     match ans.body {
+        elmdb::protocol::QueryAnswerBody::Ids { ids } => assert_eq!(ids, vec!["reused-id".to_owned()]),
+        other => panic!("expected Ids, got {other:?}"),
+    }
+    let ans_multi = loaded
+        .execute_query_spec(
+            &QuerySpec {
+                source: QuerySource::Types { type_names: vec!["Task".into(), "Other".into()], include_trashed: false },
+                steps: vec![QueryStep::Filter {
+                    expr: QueryFilter::Eq { field: "label".into(), value: serde_json::json!("Different Type") },
+                }],
+                terminal: Some(QueryTerminal::Ids),
+                explain: false,
+            },
+            elmdb::ExecBudgets::default(),
+        )
+        .unwrap();
+    match ans_multi.body {
         elmdb::protocol::QueryAnswerBody::Ids { ids } => assert_eq!(ids, vec!["reused-id".to_owned()]),
         other => panic!("expected Ids, got {other:?}"),
     }

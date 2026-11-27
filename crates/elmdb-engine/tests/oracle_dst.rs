@@ -705,6 +705,27 @@ fn batch1_spilled_extra_patch_live_kind_change_refusal_and_ephemeral_delta_foldi
             Ok(())
         })
         .unwrap();
+    // Also verify mixed batch: ephemeral Task create+destroy + real Audit create MUST NOT spuriously fire Task hook!
+    engine
+        .transact(|ctx| {
+            ctx.exec_batch_and_flush(&[
+                WireOp::Create {
+                    type_name: "Task".into(),
+                    external_id: Some("Task-ephemeral-mixed".into()),
+                    fields: vec![("title".into(), CanonicalValue::String("TempMixed".into()))],
+                },
+                WireOp::Destroy { target: EntityTarget::BatchSlot(0) },
+                WireOp::Create {
+                    type_name: "Audit".into(),
+                    external_id: Some("Audit-real".into()),
+                    fields: vec![("msg".into(), CanonicalValue::String("real audit".into()))],
+                },
+            ])?;
+            Ok(())
+        })
+        .unwrap();
     assert_eq!(saw_hook.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert!(engine.get_row("Task-ephemeral").unwrap().is_none());
+    assert!(engine.get_row("Task-ephemeral-mixed").unwrap().is_none());
+    assert!(engine.get_row("Audit-real").unwrap().is_some());
 }

@@ -296,15 +296,19 @@ impl ResultEncoder {
         if let Some(&id) = self.str_to_id.get(s) {
             return Ok(id);
         }
-        let id = u16::try_from(self.dict.len())
-            .map_err(|_| ElmdbError::new(ErrorCode::ResourceLimit, "response string dictionary > 65535"))?;
+        // Keep `dict.len() <= u16::MAX` (65,535 entries, indices `0..=65534`) so `finish()`'s
+        // `u16` `dict_len` header never wraps `65536 as u16 == 0`.
+        if self.dict.len() >= usize::from(u16::MAX) {
+            return Err(ElmdbError::new(ErrorCode::ResourceLimit, "response string dictionary > 65535"));
+        }
+        let id = u16::try_from(self.dict.len()).expect("checked < u16::MAX");
         self.dict.push(s.to_owned());
         self.str_to_id.insert(s.to_owned(), id);
         Ok(id)
     }
 
-    /// Resolves `entity_key` via `resolve_fn` at most once per response and interns its external ID
-    /// when dictionary capacity permits, returning `Ok(None)` if the `u16` dictionary is full.
+    /// Resolves `entity_key` via `resolve_fn` at most once per response and interns its external ID,
+    /// returning `ErrorCode::ResourceLimit` if the `u16` dictionary is at capacity (65,535 entries).
     pub fn intern_entity_ref<F>(&mut self, entity_key: u64, resolve_fn: F) -> Result<u16>
     where
         F: FnOnce(u64) -> Result<String>,
@@ -330,7 +334,8 @@ impl ResultEncoder {
             self.entity_to_dict_id.insert(entity_key, id);
             return Ok(Ok(id));
         }
-        if let Ok(dict_id) = u16::try_from(self.dict.len()) {
+        if self.dict.len() < usize::from(u16::MAX) {
+            let dict_id = u16::try_from(self.dict.len()).expect("checked < u16::MAX");
             self.dict.push(ext_id.clone());
             self.str_to_id.insert(ext_id, dict_id);
             self.entity_to_dict_id.insert(entity_key, dict_id);
@@ -395,7 +400,7 @@ impl ResultEncoder {
                         if let Some(&ref_sym) = self.str_to_id.get(ext.as_str()) {
                             self.body.push(0xFE);
                             self.body.extend_from_slice(&ref_sym.to_le_bytes());
-                        } else if self.dict.len() <= usize::from(u16::MAX) {
+                        } else if self.dict.len() < usize::from(u16::MAX) {
                             let ref_sym = self.intern(ext)?;
                             self.body.push(0xFE);
                             self.body.extend_from_slice(&ref_sym.to_le_bytes());
@@ -433,9 +438,10 @@ impl ResultEncoder {
 
     /// Finalizes the frame: `[MAGIC:4][dict_len:2][dict_strings...][row_count:4][body...]`.
     pub fn finish(self) -> Vec<u8> {
+        let dict_len = u16::try_from(self.dict.len()).expect("response string dictionary length fits u16");
         let mut out = Vec::with_capacity(16 + self.dict.len() * 12 + self.body.len());
         out.extend_from_slice(&RESULT_MAGIC);
-        out.extend_from_slice(&(self.dict.len() as u16).to_le_bytes());
+        out.extend_from_slice(&dict_len.to_le_bytes());
         for s in &self.dict {
             write_u32(s.len(), &mut out);
             out.extend_from_slice(s.as_bytes());
@@ -736,5 +742,19 @@ mod tests {
         assert_eq!(decoded.rows[0].id, "row-0");
         assert_eq!(decoded.rows[row_count - 1].id, format!("row-{}", row_count - 1));
         assert!(!decoded.dict.iter().any(|s| s == "BadType" || s == "brand_new_field"));
+
+        // Also test hitting the exact 65,535-entry dictionary ceiling with 66,000 distinct EntityRef targets:
+        // dict_len MUST stay 65,535 (never wrap 65536 as u16 == 0) and overflow refs fall back cleanly to inline strings.
+        let mut enc_refs = ResultEncoder::new();
+        for i in 0u64..66_000 {
+            let id = format!("r-{i}");
+            let r = CanonicalValue::EntityRef(i + 1);
+            enc_refs.push_row(&id, "Item", &[("parent", &r)], |k| Ok(format!("target-{k}"))).unwrap();
+        }
+        let frame_refs = enc_refs.finish();
+        let dec_refs = ResultDecoder::decode(&frame_refs).unwrap();
+        assert_eq!(dec_refs.dict.len(), usize::from(u16::MAX));
+        assert_eq!(dec_refs.rows.len(), 66_000);
+        assert_eq!(dec_refs.rows[65_999].fields[0], ("parent".into(), CanonicalValue::String("target-66000".into())));
     }
 }

@@ -1292,21 +1292,26 @@ fn resolve_field_def<'a>(
         return Ok((fdef.id, &fdef.kind));
     }
     let mut found: Option<(FieldId, &'a FieldKind)> = None;
-    for tdef in schema.types.iter().filter(|t| !t.archived) {
-        if let Some(fdef) = tdef.field_by_name(field) {
-            match found {
-                None => found = Some((fdef.id, &fdef.kind)),
-                Some((prev_id, prev_kind)) => {
-                    if prev_id != fdef.id || prev_kind != &fdef.kind {
-                        return Err(ElmdbError::new(
-                            ErrorCode::InvalidArgument,
-                            format!(
-                                "field '{field}' is ambiguous across types (different field IDs or kinds); scope the query to a single type"
-                            ),
-                        ));
+    for include_archived in [false, true] {
+        for tdef in schema.types.iter().filter(|t| t.archived == include_archived) {
+            if let Some(fdef) = tdef.field_by_name(field) {
+                match found {
+                    None => found = Some((fdef.id, &fdef.kind)),
+                    Some((prev_id, prev_kind)) => {
+                        if prev_id != fdef.id || prev_kind != &fdef.kind {
+                            return Err(ElmdbError::new(
+                                ErrorCode::InvalidArgument,
+                                format!(
+                                    "field '{field}' is ambiguous across types (different field IDs or kinds); scope the query to a single type"
+                                ),
+                            ));
+                        }
                     }
                 }
             }
+        }
+        if found.is_some() {
+            break;
         }
     }
     found.ok_or_else(|| ElmdbError::new(ErrorCode::UnknownField, format!("unknown field '{field}'")))
