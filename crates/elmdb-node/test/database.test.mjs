@@ -475,10 +475,11 @@ test('PR #268 Batch 3: unified JSON-to-JS numbers (> u32::MAX, no BigInt) and be
 
 test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL across N-API boundary', (t) => {
   const tmp = mkdtempSync(join(tmpdir(), 'elmdb-node-mapfull-'));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
-
   const db = Database.open(join(tmp, 'db'), { mapSizeBytes: 512 * 1024 });
-  t.after(() => { try { db.close(); } catch {} });
+  t.after(() => {
+    try { db.close(); } catch { /* already closed */ }
+    rmSync(tmp, { recursive: true, force: true });
+  });
 
   db.setSchema({
     types: { Blob: { fields: { body: { type: 'bytes' } }, indexes: {} } },
