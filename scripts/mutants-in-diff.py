@@ -837,7 +837,7 @@ def main(argv=None):
         if "diagnostics" in features:
             feat_args.append(f"{name}/diagnostics")
         if "failpoints" in features:
-            feat_args.append("elmdb/failpoints")
+            feat_args.append("failpoints")
         with_features = ["--features", ",".join(feat_args)] if feat_args else []
         results = out / name / "mutants.out"
         # Every mutant a run of this diff caught, the last run's among them, which a run that was stopped never added

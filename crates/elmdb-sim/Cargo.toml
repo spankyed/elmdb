@@ -9,6 +9,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = []
+failpoints = ["elmdb-storage/failpoints"]
+
 [dependencies]
 elmdb-storage.workspace = true
 sha2.workspace = true

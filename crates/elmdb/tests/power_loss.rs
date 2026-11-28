@@ -318,13 +318,23 @@ fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_
     }
 }
 
-const TORN_SEQ_ITEMS: usize = 40;
+const TORN_SEQ_ITEMS: usize = 32;
+
+fn torn_seq_schema() -> Schema {
+    // Plain string field (no Text index) so 32 x 32 KiB incompressible rows stay ~1.1 MiB << 32 MiB
+    // map size and never trigger proactive `grow_map()` auto-sync during unsynced D+1..D+3 commits.
+    let mut fields = BTreeMap::new();
+    fields.insert("c".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    let mut types = BTreeMap::new();
+    types.insert("Task".into(), TypeDefinition { fields, indexes: BTreeMap::new(), ..Default::default() });
+    Schema { dollar_schema: None, types, relations: BTreeMap::new() }
+}
 
 fn torn_seq_payload(i: usize, tag: &str) -> String {
-    // 80 KiB incompressible deterministic payload (40 items ≈ 3.2 MiB) so a single bulk commit
+    // 32 KiB incompressible deterministic payload (32 items ≈ 1.0 MiB) so a single bulk commit
     // always produces multiple FUSE data-page writes before LMDB's final 4 KiB meta-page write.
     let mut state = 0x517c_c1b7_u32 ^ (i as u32).wrapping_mul(2_246_822_519) ^ (tag.len() as u32);
-    let body: String = (0..80 * 1024)
+    let body: String = (0..32 * 1024)
         .map(|_| {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             char::from(b'!' + (state >> 24) as u8 % 90)
@@ -373,9 +383,9 @@ fn child_writes_torn_seq() {
         },
     )
     .unwrap();
-    db.set_schema(&schema()).unwrap();
+    db.set_schema(&torn_seq_schema()).unwrap();
 
-    // Snapshot D: write 40 x 80 KiB (~3.2 MiB) and flush() so D is synced to disk and pinned.
+    // Snapshot D: write 32 x 32 KiB (~1.0 MiB) and flush() so D is synced to disk and pinned.
     let create_d: Vec<WireOp> = (0..TORN_SEQ_ITEMS)
         .map(|i| WireOp::Create {
             type_name: "Task".into(),

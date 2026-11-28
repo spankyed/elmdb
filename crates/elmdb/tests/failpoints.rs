@@ -126,9 +126,15 @@ fn lmdb_env_set_mapsize_failpoint_fails_closed_as_corrupted() {
     db.set_schema(&simple_schema()).unwrap();
 
     failpoints::fail_once_at(points::LMDB_ENV_SET_MAPSIZE, dir.path());
-    // Write strictly more than the 256 KiB map so MapFull -> grow_map -> mdb_env_set_mapsize
-    // fires deterministically on both 4 KiB (Linux/Windows) and 16 KiB (macOS) page sizes!
-    let big = "x".repeat(300 * 1024);
+    // Write strictly more than the 256 KiB map of INCOMPRESSIBLE data (so Zstd row compression
+    // cannot shrink it) so MapFull -> grow_map -> mdb_env_set_mapsize fires on all page sizes!
+    let mut state = 0x9e37_79b9_u32;
+    let big: String = (0..300 * 1024)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            char::from(b'!' + (state >> 24) as u8 % 90)
+        })
+        .collect();
     let err = create_note(&db, "huge", &big).unwrap_err();
     assert_eq!(err.code, ErrorCode::Corrupted, "failed map grow must fail closed as Corrupted: {err:?}");
 

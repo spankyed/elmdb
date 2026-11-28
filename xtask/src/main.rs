@@ -1737,7 +1737,7 @@ fn verify_no_failpoints_in_tree(tree: &str) -> Result<(), String> {
             saw_storage = true;
         }
         let cleaned_feats = feats_part.trim().strip_suffix(" (*)").unwrap_or(feats_part.trim());
-        if matches!(pkg, "elmdb-storage" | "elmdb-lmdb" | "elmdb")
+        if matches!(pkg, "elmdb-storage" | "elmdb-sim" | "elmdb-lmdb" | "elmdb")
             && cleaned_feats.split(',').map(str::trim).any(|f| f == "failpoints")
         {
             violations.push(format!("{pkg} ({cleaned_feats})"));
