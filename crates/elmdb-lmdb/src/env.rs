@@ -244,7 +244,11 @@ pub(crate) struct DbiCache {
 /// so `grow_map` / `adopt_resized_map` never deadlock; instead, both remap paths drop any active pin
 /// and `assert!(slot.is_none())` under L2 `MapGate::write()` strictly before `mdb_env_set_mapsize`,
 /// and immediately re-acquire a fresh pin before releasing `MapGate::write()`.
-pub(crate) struct DurablePinTxn(NonNull<ffi::MDB_txn>);
+pub struct DurablePinTxn {
+    raw: NonNull<ffi::MDB_txn>,
+    txnid: u64,
+    env_ptr: usize,
+}
 
 // SAFETY: `LmdbStore` opens with `MDB_NOTLS`, so an `MDB_RDONLY` transaction's reader slot is
 // tied to the `MDB_txn` struct rather than TLS and may be held and aborted from any synchronized thread.
@@ -252,10 +256,10 @@ unsafe impl Send for DurablePinTxn {}
 
 impl Drop for DurablePinTxn {
     fn drop(&mut self) {
-        // SAFETY: `self.0` is a live `MDB_RDONLY` `MDB_txn` owned exclusively by this wrapper;
+        // SAFETY: `self.raw` is a live `MDB_RDONLY` `MDB_txn` owned exclusively by this wrapper;
         // `LmdbEnvInner::drop` and both `mdb_env_set_mapsize` paths drop all pins before unmapping/closing `MDB_env`.
         unsafe {
-            ffi::mdb_txn_abort(self.0.as_ptr());
+            ffi::mdb_txn_abort(self.raw.as_ptr());
         }
     }
 }
@@ -367,18 +371,27 @@ impl LmdbEnvInner {
     pub(crate) fn open_durable_pin_txn(&self) -> Result<DurablePinTxn, StorageError> {
         self.check_map_ok()?;
         let _publish = self.dbi_publish_gate.read_txn();
-        Ok(DurablePinTxn(self.begin_raw_ro_txn_locked()?))
+        let raw = self.begin_raw_ro_txn_locked()?;
+        // SAFETY: `raw` is a live `MDB_RDONLY` transaction opened above while L2+L4 are held.
+        let txnid = unsafe { ffi::mdb_txn_id(raw.as_ptr()) } as u64;
+        Ok(DurablePinTxn { raw, txnid, env_ptr: self.env.as_ptr() as usize })
+    }
+
+    /// Installs a previously prepared durable pin (dropping any prior pin after `synced.v2` is durable).
+    pub(crate) fn install_durable_pin_token(&self, new_pin: DurablePinTxn) {
+        assert_eq!(new_pin.env_ptr, self.env.as_ptr() as usize, "DurablePinTxn must belong to the same LmdbStore");
+        let old_pin = {
+            let mut slot = self.durable_pin.lock();
+            slot.replace(new_pin)
+        };
+        drop(old_pin);
     }
 
     /// Opens a new durable pin at the current tip *before* aborting the previous pin (zero unpinned window).
     /// Caller MUST hold L2 `MapGate` (read or write).
     pub(crate) fn refresh_durable_pin_under_map_lock(&self) -> Result<(), StorageError> {
         let new_pin = self.open_durable_pin_txn()?;
-        let old_pin = {
-            let mut slot = self.durable_pin.lock();
-            slot.replace(new_pin)
-        };
-        drop(old_pin);
+        self.install_durable_pin_token(new_pin);
         Ok(())
     }
 
@@ -807,6 +820,7 @@ impl KvStore for LmdbStore {
     type OwnedRwTxn = LmdbRwTxn<'static>;
     type MapReadGuard = LmdbMapReadGuard;
     type MapWriteGuard<'a> = LmdbMapWriteGuard<'a>;
+    type DurablePinToken = DurablePinTxn;
 
     fn lock_map_read(&self) -> Self::MapReadGuard {
         LmdbMapReadGuard { _guard: self.inner.map_gate.read_arc(), env_ptr: self.inner.env.as_ptr() as usize }
@@ -1060,14 +1074,25 @@ impl KvStore for LmdbStore {
         Ok(())
     }
 
-    fn refresh_durable_pin(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+    fn prepare_durable_pin(&self, map_guard: &Self::MapReadGuard) -> Result<Self::DurablePinToken, StorageError> {
         self.inner.assert_map_guard(map_guard)?;
-        self.inner.refresh_durable_pin_under_map_lock()
+        self.inner.open_durable_pin_txn()
     }
 
-    fn refresh_durable_pin_under_write(&self, map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
+    fn prepare_durable_pin_under_write(
+        &self,
+        map_guard: &Self::MapWriteGuard<'_>,
+    ) -> Result<Self::DurablePinToken, StorageError> {
         self.inner.assert_map_write_guard(map_guard)?;
-        self.inner.refresh_durable_pin_under_map_lock()
+        self.inner.open_durable_pin_txn()
+    }
+
+    fn pin_txnid(token: &Self::DurablePinToken) -> u64 {
+        token.txnid
+    }
+
+    fn install_durable_pin(&self, token: Self::DurablePinToken) {
+        self.inner.install_durable_pin_token(token);
     }
 
     fn lock_scope_id(&self) -> LockScopeId {

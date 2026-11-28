@@ -733,6 +733,8 @@ mod tests {
             // Also write a raw non-sub-DB entry into `MAIN_DBI` to exercise `MDB_INCOMPATIBLE` skipping!
             let mut raw_k = to_mdb_val(b"plain_main_entry");
             let mut raw_v = to_mdb_val(b"not_a_subdb");
+            // SAFETY: `rw.active_raw()` is an active LMDB write transaction on this thread and
+            // `raw_k`/`raw_v` point to valid local byte slices for the duration of `mdb_put`.
             let rc = unsafe { ffi::mdb_put(rw.active_raw(), store.inner().main_dbi, &mut raw_k, &mut raw_v, 0) };
             assert_eq!(rc, ffi::MDB_SUCCESS);
             let (_, mg) = rw.commit_raw().unwrap();
@@ -1130,16 +1132,20 @@ mod tests {
             LmdbConfig { map_size: 256 * 1024, max_dbs: 32, max_readers: 2, no_sync: true, ..LmdbConfig::default() },
         )
         .unwrap();
-        // Direct `refresh_durable_pin` & `refresh_durable_pin_under_write` acquire the pin.
+        // Direct `prepare_durable_pin` & `prepare_durable_pin_under_write` acquire & install the pin.
         {
+            let expected_txnid = small.last_txnid().unwrap();
             let rg = small.lock_map_read();
-            small.refresh_durable_pin(&rg).unwrap();
+            let tok = small.prepare_durable_pin(&rg).unwrap();
+            assert_eq!(LmdbStore::pin_txnid(&tok), expected_txnid);
+            small.install_durable_pin(tok);
             assert!(small.has_durable_pin());
             drop(rg);
             small.inner().clear_durable_pin_before_remap();
             assert!(!small.has_durable_pin());
             let wg = small.lock_map_write();
-            small.refresh_durable_pin_under_write(&wg).unwrap();
+            let tok = small.prepare_durable_pin_under_write(&wg).unwrap();
+            small.install_durable_pin(tok);
             assert!(small.has_durable_pin());
             drop(wg);
         }
@@ -1147,7 +1153,7 @@ mod tests {
         {
             let foreign_wg = store.lock_map_write();
             assert!(matches!(small.sync_under_write(&foreign_wg), Err(StorageError::InvalidState(_))));
-            assert!(matches!(small.refresh_durable_pin_under_write(&foreign_wg), Err(StorageError::InvalidState(_))));
+            assert!(matches!(small.prepare_durable_pin_under_write(&foreign_wg), Err(StorageError::InvalidState(_))));
             assert!(matches!(small.grow_map_locked(&foreign_wg, None, false), Err(StorageError::InvalidState(_))));
         }
         // 6 consecutive `sync()` refreshes on `max_readers = 2` prove `DurablePinTxn::drop` frees old reader slots!

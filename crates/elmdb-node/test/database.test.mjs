@@ -481,10 +481,11 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  db.setSchema({
+  const blobSchema = {
     types: { Blob: { fields: { body: { type: 'bytes' } }, indexes: {} } },
     relations: {},
-  });
+  };
+  db.setSchema(blobSchema);
 
   // Full 8-bit uniform pseudo-random bytes (8.0 bits/byte entropy) defeat zstd FSE on every OS/page size.
   const incompressibleBytes = (len, seed) => {
@@ -541,7 +542,8 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
   assert.ok(db.query({ source: { kind: 'type', typeName: 'Blob' }, steps: [], terminal: { kind: 'ids' } }).ids.includes('big-node-tx'));
 
   // 3. Standalone executeWireBatch whose JS beforeCommit hook writes directly via executeWireBatch and
-  //    hits real MDB_MAP_FULL auto-grows and retries cleanly!
+  //    hits real MDB_MAP_FULL MUST NOT silently re-run hooks: first call fails with STORAGE_FULL with
+  //    hookCalls === 1, mapSizeBytes grows, and an explicit caller retry succeeds with hookCalls === 2!
   const sizeBeforeHook = db.stats().mapSizeBytes;
   const hugeHookWire = buildWireBatch((b) => {
     b.create('Blob', { body: incompressibleBytes(sizeBeforeHook * 2 + 64 * 1024, 2) }, 'hook-big-node');
@@ -554,11 +556,56 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
     }
     return null;
   });
-  db.executeWireBatch(buildWireBatch((b) => {
+  const triggerWire = buildWireBatch((b) => {
     b.create('Blob', { body: new Uint8Array([4, 5, 6]) }, 'hook-trigger-node');
-  }));
-  assert.ok(hookCalls >= 2, `expected beforeCommit retry after MapFull (hookCalls=${hookCalls})`);
-  assert.ok(db.stats().mapSizeBytes > sizeBeforeHook);
+  });
+  assert.throws(
+    () => db.executeWireBatch(triggerWire),
+    (err) => err.code === 'STORAGE_FULL',
+  );
+  assert.equal(hookCalls, 1, `beforeCommit hook must run once on MapFull (got ${hookCalls})`);
+  const sizeAfterFirstHook = db.stats().mapSizeBytes;
+  assert.ok(sizeAfterFirstHook > sizeBeforeHook, `expected mapSizeBytes to grow (${sizeAfterFirstHook} <= ${sizeBeforeHook})`);
+
+  // Explicit caller retry doubles again if needed and succeeds cleanly.
+  let extraDoublings = 0;
+  for (;;) {
+    try {
+      db.executeWireBatch(triggerWire);
+      break;
+    } catch (e) {
+      if (e.code === 'STORAGE_FULL' && extraDoublings < 4) {
+        extraDoublings += 1;
+        continue;
+      }
+      throw e;
+    }
+  }
+  assert.equal(hookCalls, 2 + extraDoublings);
   assert.ok(db.query({ source: { kind: 'type', typeName: 'Blob' }, steps: [], terminal: { kind: 'ids' } }).ids.includes('hook-big-node'));
   db.unregisterBeforeCommit(hReal);
+
+  // 4. `db.transact()` MUST propagate a `grow_map` failure (e.g. `DURABILITY_FAILED` on an
+  //    unacknowledged reboot Grouped DB) instead of rethrowing the inner JS `STORAGE_FULL`!
+  const grpDir = join(tmp, 'grouped-grow-err');
+  const g1 = Database.open(grpDir, { durability: 'grouped', mapSizeBytes: 512 * 1024 });
+  g1.setSchema(blobSchema);
+  g1.close();
+  rmSync(join(grpDir, 'synced.v2'));
+  const g2 = Database.open(grpDir, { durability: 'grouped', mapSizeBytes: 512 * 1024 });
+  try {
+    assert.equal(g2.openReport().status, 'unsyncedAfterReboot');
+    const unackedWire = buildWireBatch((b) => {
+      b.create('Blob', { body: incompressibleBytes(g2.stats().mapSizeBytes + 8 * 1024, 5) }, 'unacked-big-node');
+    });
+    assert.throws(
+      () =>
+        g2.transact(() => {
+          g2.executeWireBatch(unackedWire);
+        }),
+      (err) => err.code === 'DURABILITY_FAILED',
+    );
+  } finally {
+    g2.close();
+  }
 });

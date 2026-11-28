@@ -107,6 +107,9 @@ pub trait KvStore: Send + Sync {
     type MapWriteGuard<'a>
     where
         Self: 'a;
+    /// Opaque handle representing a staged durable-snapshot pin opened *before* reading the
+    /// active meta receipt and syncing, then installed only after `synced.v2` is persisted.
+    type DurablePinToken: Send;
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError>;
     fn begin_write(&self, map_guard: Self::MapReadGuard) -> Result<Self::RwTxn<'_>, StorageError>;
@@ -162,20 +165,19 @@ pub trait KvStore: Send + Sync {
     fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError>;
     /// Flushes the store to stable storage while the caller holds exclusive L2 `MapWriteGuard`.
     fn sync_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError>;
-    /// Pins (or refreshes the pin on) the current committed snapshot so the storage backend's
-    /// freelist cannot recycle pages belonging to the last durable snapshot under `MDB_NOSYNC`.
-    ///
-    /// Implementations MUST open the new read-only snapshot pin *before* releasing any prior pin
-    /// (zero unpinned window), MUST require L2 `MapGate::read()` while opening the pin (never
-    /// across the pin's lifetime, so `grow_map`/`adopt_resized_map` never deadlock), and MUST
-    /// release and re-acquire the pin around `mdb_env_set_mapsize`.
-    fn refresh_durable_pin(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
-        Ok(())
-    }
-    /// Overlaps a fresh durable pin before releasing any prior pin while holding exclusive L2 `MapWriteGuard`.
-    fn refresh_durable_pin_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
-        Ok(())
-    }
+    /// Opens a fresh read-only durable-snapshot pin at the current tip *before* syncing and
+    /// *without* dropping any prior pin (zero unpinned window, and guarantees `pin_txnid <= receipt.txnid`
+    /// even if a concurrent cross-process writer commits during `sync()`).
+    fn prepare_durable_pin(&self, map_guard: &Self::MapReadGuard) -> Result<Self::DurablePinToken, StorageError>;
+    /// Opens a fresh staged durable pin while holding exclusive L2 `MapWriteGuard`.
+    fn prepare_durable_pin_under_write(
+        &self,
+        map_guard: &Self::MapWriteGuard<'_>,
+    ) -> Result<Self::DurablePinToken, StorageError>;
+    /// Returns the MVCC transaction ID pinned by `token`.
+    fn pin_txnid(token: &Self::DurablePinToken) -> u64;
+    /// Installs a previously prepared durable pin (dropping any prior pin after `synced.v2` is durable).
+    fn install_durable_pin(&self, token: Self::DurablePinToken);
     /// Returns the debug lock-hierarchy scope ID for this store instance so higher layers
     /// (`DurabilityGate`, `Engine`) bind their L1–L5 locks to the same per-database scope.
     fn lock_scope_id(&self) -> LockScopeId;

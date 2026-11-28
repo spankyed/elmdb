@@ -429,6 +429,8 @@ pub struct TxnCtx<'a, S: KvStore, V: Vfs, C: Clock> {
     pending_deltas: DeltaBatch,
     /// Stack of saved delta frames for explicit nested savepoints (`push_savepoint` / `abort_savepoint`).
     saved_frames: Vec<SavedDeltaFrame>,
+    /// True once any `beforeCommit` hook callback has actually been invoked in this attempt.
+    hooks_invoked: bool,
 }
 
 /// Alias exposed to `beforeCommit` callbacks (same capabilities, inside a nested savepoint).
@@ -525,6 +527,14 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
                     txn.put(dbs.meta, META_MAINT_SEQ_KEY, &0u64.to_le_bytes())?;
                 }
                 txn.commit()?;
+                if gate.mode() == elmdb_storage::DurabilityMode::Grouped
+                    && report.status == elmdb_storage::RecoveryStatus::Fresh
+                {
+                    // Seal the initial bootstrap commit so a same-boot crash before the first user sync
+                    // recovers as `SameBootUnsyncedTail` (unblocking `grow_map` and `backup_into`), while
+                    // a real reboot or missing-sidecar recovery still fails closed as `UnsyncedAfterReboot`.
+                    gate.sync()?;
+                }
                 (dbs, schema, pool)
             }
         };
@@ -941,52 +951,85 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
     }
 
     pub fn execute_batch_with_flags(&self, ops: &[WireOp], flags: CommitReturnFlags) -> Result<BatchOutcome> {
-        self.retry_on_map_full(|| {
-            let (txn, schema) = self.begin_write_with_fresh_schema()?;
-            let commit_seq = self.next_commit_seq(&txn)?;
-            let now_ms = self.clock.now_ms();
+        const MAX_GROWTH_RETRIES: usize = 8;
+        for attempt in 0..=MAX_GROWTH_RETRIES {
+            let mut before = self.gate.map_size();
+            let mut hooks_invoked = false;
+            let res = (|| -> Result<BatchOutcome> {
+                let (txn, schema) = self.begin_write_with_fresh_schema()?;
+                before = self.gate.map_size();
+                let commit_seq = self.next_commit_seq(&txn)?;
+                let now_ms = self.clock.now_ms();
 
-            let mut ctx = TxnCtx {
-                engine: EngineRef::Borrowed(self),
-                txn,
-                schema,
-                commit_seq,
-                now_ms,
-                dirty: false,
-                total_deltas: DeltaBatch::new(),
-                round_deltas: DeltaBatch::new(),
-                active_hook_deltas: None,
-                round_touched_types: TypeMask::empty(),
-                pending_deltas: DeltaBatch::new(),
-                saved_frames: Vec::new(),
-            };
+                let mut ctx = TxnCtx {
+                    engine: EngineRef::Borrowed(self),
+                    txn,
+                    schema,
+                    commit_seq,
+                    now_ms,
+                    dirty: false,
+                    total_deltas: DeltaBatch::new(),
+                    round_deltas: DeltaBatch::new(),
+                    active_hook_deltas: None,
+                    round_touched_types: TypeMask::empty(),
+                    pending_deltas: DeltaBatch::new(),
+                    saved_frames: Vec::new(),
+                    hooks_invoked: false,
+                };
 
-            let mut batch_slots: Vec<(EntityKey, String)> = Vec::new();
-            for op in ops {
-                ctx.apply_op(op, &mut batch_slots)?;
-            }
-            ctx.flush_projections()?;
-            ctx.run_before_commit_cascade()?;
-
-            let created_ids: Vec<String> = batch_slots.into_iter().map(|(_, id)| id).collect();
-            match ctx.finish_and_commit(flags.contains(CommitReturnFlags::FULL_CHANGESET))? {
-                Some((committed_seq, receipt, summary_out)) => {
-                    Ok(BatchOutcome { commit_seq: committed_seq, receipt, created_ids, summary: summary_out })
+                let mut batch_slots: Vec<(EntityKey, String)> = Vec::new();
+                for op in ops {
+                    ctx.apply_op(op, &mut batch_slots)?;
                 }
-                None => {
-                    let ro = self.gate.begin_read()?;
-                    let current_seq = read_commit_seq(&ro, &self.dbs)?;
-                    let txnid = ro.txnid();
-                    drop(ro);
-                    Ok(BatchOutcome {
-                        commit_seq: current_seq,
-                        receipt: CommitReceipt { txnid, roots_sha256: [0u8; 32] },
-                        created_ids,
-                        summary: None,
-                    })
+                ctx.flush_projections()?;
+                let cascade_res = ctx.run_before_commit_cascade();
+                hooks_invoked = ctx.hooks_invoked;
+                cascade_res?;
+
+                let created_ids: Vec<String> = batch_slots.into_iter().map(|(_, id)| id).collect();
+                match ctx.finish_and_commit(flags.contains(CommitReturnFlags::FULL_CHANGESET))? {
+                    Some((committed_seq, receipt, summary_out)) => {
+                        Ok(BatchOutcome { commit_seq: committed_seq, receipt, created_ids, summary: summary_out })
+                    }
+                    None => {
+                        let ro = self.gate.begin_read()?;
+                        let current_seq = read_commit_seq(&ro, &self.dbs)?;
+                        let txnid = ro.txnid();
+                        drop(ro);
+                        Ok(BatchOutcome {
+                            commit_seq: current_seq,
+                            receipt: CommitReceipt { txnid, roots_sha256: [0u8; 32] },
+                            created_ids,
+                            summary: None,
+                        })
+                    }
                 }
+            })();
+
+            match res {
+                Ok(v) => return Ok(v),
+                Err(err) if err.is_map_full() => {
+                    if hooks_invoked {
+                        // Never silently re-run `beforeCommit` hooks: grow the map once after releasing
+                        // L2+L3, propagate any grow failure, and surface `StorageFull` for caller retry.
+                        let target = before.saturating_mul(2);
+                        self.gate.grow_map(Some(target))?;
+                        return Err(err);
+                    }
+                    if attempt < MAX_GROWTH_RETRIES {
+                        let target = before.saturating_mul(2);
+                        let after = self.gate.grow_map(Some(target))?;
+                        if after <= before {
+                            return Err(err);
+                        }
+                        continue;
+                    }
+                    return Err(err);
+                }
+                Err(err) => return Err(err),
             }
-        })
+        }
+        unreachable!("loop returns on final attempt")
     }
 
     /// Begins an owned `'static` (but `!Send`) write `TxnCtx` for callback-scoped synchronous
@@ -1013,6 +1056,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             round_touched_types: TypeMask::empty(),
             pending_deltas: DeltaBatch::new(),
             saved_frames: Vec::new(),
+            hooks_invoked: false,
         })
     }
 
@@ -1199,6 +1243,7 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             round_touched_types: TypeMask::empty(),
             pending_deltas: DeltaBatch::new(),
             saved_frames: Vec::new(),
+            hooks_invoked: false,
         };
 
         let value = f(&mut ctx)?;
@@ -1530,9 +1575,15 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                 .collect()
         };
         for cb in matching {
+            self.hooks_invoked = true;
             cb(self)?;
         }
         Ok(())
+    }
+
+    /// Returns `true` if any `beforeCommit` hook callback was actually invoked in this transaction attempt.
+    pub fn hooks_invoked(&self) -> bool {
+        self.hooks_invoked
     }
 
     /// Clears `active_hook_deltas` at the end of a host-driven hook round.
@@ -1623,19 +1674,33 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
     }
 
     /// Executes `f` inside a native LMDB nested savepoint, rolling back BOTH LMDB state AND
-    /// in-memory delta/hook accumulators cleanly on `Err`.
+    /// in-memory delta/hook accumulators cleanly on `Err` OR panic unwind.
     pub fn savepoint<T, F>(&mut self, f: F) -> Result<T>
     where
         F: FnOnce(&mut Self) -> Result<T>,
     {
         let depth = self.push_savepoint()?;
-        match f(self) {
+        struct SavepointGuard<'b, 'a, S: KvStore, V: Vfs, C: Clock> {
+            ctx: &'b mut TxnCtx<'a, S, V, C>,
+            depth: u32,
+            armed: bool,
+        }
+        impl<S: KvStore, V: Vfs, C: Clock> Drop for SavepointGuard<'_, '_, S, V, C> {
+            fn drop(&mut self) {
+                if self.armed {
+                    self.ctx.abort_savepoint(self.depth);
+                }
+            }
+        }
+        let mut guard = SavepointGuard { ctx: self, depth, armed: true };
+        match f(guard.ctx) {
             Ok(v) => {
-                self.commit_savepoint(depth)?;
+                guard.armed = false;
+                guard.ctx.commit_savepoint(depth)?;
                 Ok(v)
             }
             Err(err) => {
-                self.abort_savepoint(depth);
+                // `guard` drops with `armed == true` and aborts savepoint `depth`.
                 Err(err)
             }
         }
@@ -1706,6 +1771,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             self.active_hook_deltas = Some(std::mem::replace(&mut self.round_deltas, DeltaBatch::new()));
             let depth = self.txn.begin_savepoint()?;
             for cb in matching {
+                self.hooks_invoked = true;
                 if let Err(err) = cb(self) {
                     self.active_hook_deltas = None;
                     while self.txn.savepoint_depth() >= depth {
@@ -2934,7 +3000,7 @@ fn load_schema_and_pool<R: KvRead>(txn: &R, dbs: &SystemDbs) -> Result<(Compiled
     Ok((schema, pool))
 }
 
-fn read_single_field<R: KvRead>(
+pub fn read_single_field<R: KvRead>(
     txn: &R,
     schema: &CompiledSchema,
     dbs: &SystemDbs,
@@ -2970,13 +3036,17 @@ fn read_single_field<R: KvRead>(
             return Ok(Some(val));
         }
     }
-    // Tier 3: Archived Declared fallback (matching `merge_row_fields`).
-    if let Some(fdef) = tdef.fields.iter().find(|f| f.name == field_name)
-        && let Some(val) = decode_single_field(raw, fdef.id, |fid| {
-            Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
-        })?
-    {
-        return Ok(Some(resolve_refs_to_strings(txn, dbs, val, &mut ref_cache)?));
+    // Tier 3: Archived Declared fallback (iterating in reverse FieldId order to match `merge_row_fields`,
+    // where ascending `BTreeMap<FieldId, _>` insertion lets the highest `FieldId` win if names collide).
+    for fdef in tdef.fields.iter().rev() {
+        if fdef.archived
+            && fdef.name == field_name
+            && let Some(val) = decode_single_field(raw, fdef.id, |fid| {
+                Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
+            })?
+        {
+            return Ok(Some(resolve_refs_to_strings(txn, dbs, val, &mut ref_cache)?));
+        }
     }
     Ok(None)
 }

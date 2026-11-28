@@ -1249,3 +1249,205 @@ fn pr268_batch2_atomic_exec_batch_archived_fields_restore_extras_and_abort_savep
         assert!(cur.first().unwrap().is_none(), "shrinking spilled extra inline must delete orphaned blob");
     }
 }
+
+#[test]
+fn phase0a_rust_hook_no_rerun_on_map_full_savepoint_panic_guard_and_archived_tiebreak() {
+    use elmdb_engine::{BeforeCommitHook, CompiledSchema, FieldDef, FieldId, FieldKind, TypeDef, TypeId, TypeMask};
+    use elmdb_storage::{DurabilityMode, KvStore, RecoveryStatus, Vfs};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // 1. `Engine::execute_batch` with a Rust `beforeCommit` hook hitting `MapFull` MUST NOT auto-rerun
+    //    the hook: first call fails with StorageFull (runs == 1), map grows 2x, explicit retry succeeds (runs == 2)!
+    let vfs = SimVfs::new(BootId([0x61; 16]));
+    let dir = Path::new("/phase0a_hook_db");
+    let store = SimKvStore::new(SimKvConfig { map_size: 256 * 1024, ..SimKvConfig::default() });
+    let (engine, rep) =
+        Engine::open(store.clone(), vfs.clone(), SimClock::new(1000), dir, DurabilityMode::Grouped).unwrap();
+    assert_eq!(rep.status, RecoveryStatus::Fresh);
+    assert!(vfs.exists(&dir.join("synced.v2")), "fresh Grouped Engine must seal synced.v2 at bootstrap");
+
+    let mut schema = RawSchema::default();
+    let mut blob_fields = BTreeMap::new();
+    blob_fields.insert("body".into(), RawField { kind: RawFieldKind::Bytes, optional: false, nullable: false });
+    schema.types.insert("Blob".into(), RawType { fields: blob_fields, ..RawType::default() });
+    engine.set_schema(&schema).unwrap();
+
+    // Unsynced Grouped write + same-boot reopen -> `SameBootUnsyncedTail` (NOT `UnsyncedAfterReboot`).
+    engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Blob".into(),
+            external_id: Some("seed-1".into()),
+            fields: vec![("body".into(), CanonicalValue::Bytes(vec![1, 2, 3]))],
+        }])
+        .unwrap();
+    drop(engine);
+
+    let (engine2, rep2) =
+        Engine::open(store.clone(), vfs.clone(), SimClock::new(2000), dir, DurabilityMode::Grouped).unwrap();
+    assert_eq!(rep2.status, RecoveryStatus::SameBootUnsyncedTail);
+
+    // Real reboot with unsynced write still reports `UnsyncedAfterReboot`!
+    engine2
+        .execute_batch(&[WireOp::Create {
+            type_name: "Blob".into(),
+            external_id: Some("seed-2".into()),
+            fields: vec![("body".into(), CanonicalValue::Bytes(vec![4, 5, 6]))],
+        }])
+        .unwrap();
+    drop(engine2);
+    vfs.crash_power_loss(&mut SimRng::seeded(7), true);
+    let (engine3, rep3) =
+        Engine::open(store.clone(), vfs.clone(), SimClock::new(3000), dir, DurabilityMode::Grouped).unwrap();
+    assert_eq!(rep3.status, RecoveryStatus::UnsyncedAfterReboot);
+    engine3.acknowledge_restore().unwrap();
+
+    // Rust `beforeCommit` hook hitting real `MapFull` on `Engine::execute_batch`:
+    let before_map = store.map_size();
+    let mut big_bytes = Vec::with_capacity(before_map + 32 * 1024);
+    let mut x = 0x1234_5678_9abc_def0_u64;
+    for _ in 0..(before_map + 32 * 1024) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        big_bytes.push((x >> 24) as u8);
+    }
+    let hook_runs = Arc::new(AtomicUsize::new(0));
+    let hook_runs_c = Arc::clone(&hook_runs);
+    let big_for_hook = big_bytes.clone();
+    let hid = engine3.register_before_commit(BeforeCommitHook {
+        wants: TypeMask::all(),
+        callback: Arc::new(move |ctx| {
+            if ctx
+                .entity_deltas()
+                .iter()
+                .any(|d| d.after.as_ref().is_some_and(|r| r.header.ext_id == "rust-hook-trigger"))
+            {
+                hook_runs_c.fetch_add(1, Ordering::SeqCst);
+                ctx.exec_batch_and_flush(&[WireOp::Create {
+                    type_name: "Blob".into(),
+                    external_id: Some("rust-hook-big".into()),
+                    fields: vec![("body".into(), CanonicalValue::Bytes(big_for_hook.clone()))],
+                }])?;
+            }
+            Ok(())
+        }),
+    });
+    let trigger = vec![WireOp::Create {
+        type_name: "Blob".into(),
+        external_id: Some("rust-hook-trigger".into()),
+        fields: vec![("body".into(), CanonicalValue::Bytes(vec![9]))],
+    }];
+    let err = engine3.execute_batch(&trigger).unwrap_err();
+    assert!(err.is_map_full(), "expected MapFull, got {err:?}");
+    assert_eq!(hook_runs.load(Ordering::SeqCst), 1, "Rust beforeCommit hook must run once on MapFull");
+    assert!(store.map_size() > before_map, "map must have grown before returning StorageFull");
+    assert!(engine3.get_row("rust-hook-big").unwrap().is_none());
+
+    // Explicit caller retry succeeds with hook_runs == 2 (or 2 + extra doublings).
+    let mut retries = 0usize;
+    loop {
+        match engine3.execute_batch(&trigger) {
+            Ok(_) => break,
+            Err(e) if e.is_map_full() && retries < 4 => retries += 1,
+            Err(e) => panic!("unexpected retry error: {e:?}"),
+        }
+    }
+    assert_eq!(hook_runs.load(Ordering::SeqCst), 2 + retries);
+    assert!(engine3.get_row("rust-hook-big").unwrap().is_some());
+    assert!(engine3.unregister_before_commit(hid));
+
+    // 2. `TxnCtx::savepoint` panic-safety RAII guard rolls back panicked savepoint & leaves outer txn intact!
+    let mut owned = Arc::new(engine3).begin_owned_txn().unwrap();
+    owned
+        .exec_batch_and_flush(&[WireOp::Create {
+            type_name: "Blob".into(),
+            external_id: Some("outer-ok".into()),
+            fields: vec![("body".into(), CanonicalValue::Bytes(vec![1]))],
+        }])
+        .unwrap();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = owned.savepoint(|ctx| -> elmdb_wire::Result<()> {
+            ctx.exec_batch_and_flush(&[WireOp::Create {
+                type_name: "Blob".into(),
+                external_id: Some("inner-panicked".into()),
+                fields: vec![("body".into(), CanonicalValue::Bytes(vec![2]))],
+            }])?;
+            panic!("simulated panic inside savepoint");
+        });
+    }));
+    assert!(caught.is_err());
+    assert_eq!(owned.txn().savepoint_depth(), 0, "panicked savepoint must be aborted on unwind");
+    assert!(owned.get_row("outer-ok").unwrap().is_some());
+    assert!(owned.get_row("inner-panicked").unwrap().is_none());
+    owned.finish_and_commit(false).unwrap();
+
+    // 3. Duplicate archived field tie-break: `read_single_field` and `merge_row_fields` MUST agree
+    //    (highest FieldId wins if two archived fields ever share a name in a CompiledSchema).
+    let vfs2 = SimVfs::new(BootId([0x62; 16]));
+    let dir2 = Path::new("/phase0a_arch_tie");
+    let store2 = SimKvStore::new(SimKvConfig::default());
+    let (eng_tie, _) = Engine::open(store2, vfs2, SimClock::new(1000), dir2, DurabilityMode::Strict).unwrap();
+    let mut s_dup = RawSchema::default();
+    let mut item_fields = BTreeMap::new();
+    item_fields.insert("a".into(), RawField { kind: RawFieldKind::String, optional: true, nullable: false });
+    item_fields.insert("b".into(), RawField { kind: RawFieldKind::String, optional: true, nullable: false });
+    s_dup.types.insert("Item".into(), RawType { fields: item_fields, ..RawType::default() });
+    eng_tie.set_schema(&s_dup).unwrap();
+    eng_tie
+        .execute_batch(&[WireOp::Create {
+            type_name: "Item".into(),
+            external_id: Some("dup-1".into()),
+            fields: vec![
+                ("a".into(), CanonicalValue::String("older-fid".into())),
+                ("b".into(), CanonicalValue::String("newer-fid".into())),
+            ],
+        }])
+        .unwrap();
+    let (ro, base_sc) = eng_tie.begin_read_pinned().unwrap();
+    let t0 = base_sc.type_by_name("Item").unwrap();
+    let fa = t0.field_by_name("a").unwrap().id;
+    let fb = t0.field_by_name("b").unwrap().id;
+    assert!(fa.0 < fb.0);
+    let synth = CompiledSchema {
+        epoch: base_sc.epoch + 1,
+        types: vec![TypeDef {
+            id: TypeId(t0.id.0),
+            name: t0.name.clone(),
+            short_code: t0.short_code.clone(),
+            additional_fields: false,
+            change_order: false,
+            declared_by: None,
+            archived: false,
+            fields: vec![
+                FieldDef {
+                    id: FieldId(fa.0),
+                    name: "shared".into(),
+                    kind: FieldKind::String,
+                    optional: true,
+                    nullable: false,
+                    archived: true,
+                },
+                FieldDef {
+                    id: FieldId(fb.0),
+                    name: "shared".into(),
+                    kind: FieldKind::String,
+                    optional: true,
+                    nullable: false,
+                    archived: true,
+                },
+            ],
+            next_field_id: t0.next_field_id,
+        }],
+        relations: vec![],
+        indexes: vec![],
+        next_type_id: base_sc.next_type_id,
+        next_rel_kind_id: base_sc.next_rel_kind_id,
+        next_index_id: base_sc.next_index_id,
+    };
+    let dbs = eng_tie.dbs();
+    let ek = elmdb_engine::lookup_ext_id_in_txn(&ro, &dbs, "dup-1").unwrap().unwrap();
+    let row = elmdb_engine::read_stored_row(&ro, &synth, &dbs, ek).unwrap().unwrap();
+    let single = elmdb_engine::read_single_field(&ro, &synth, &dbs, "dup-1", "shared").unwrap();
+    assert_eq!(row.fields.get("shared"), Some(&CanonicalValue::String("newer-fid".into())));
+    assert_eq!(single, row.fields.get("shared").cloned());
+}

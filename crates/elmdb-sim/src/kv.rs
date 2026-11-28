@@ -715,6 +715,7 @@ impl KvStore for SimKvStore {
     type OwnedRwTxn = SimRwTxn;
     type MapReadGuard = ();
     type MapWriteGuard<'a> = ();
+    type DurablePinToken = u64;
 
     fn lock_map_read(&self) -> Self::MapReadGuard {}
 
@@ -775,11 +776,14 @@ impl KvStore for SimKvStore {
         Ok(())
     }
 
-    fn refresh_durable_pin(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
-        self.refresh_durable_pin_under_write(&())
+    fn prepare_durable_pin(&self, _map_guard: &Self::MapReadGuard) -> Result<Self::DurablePinToken, StorageError> {
+        self.prepare_durable_pin_under_write(&())
     }
 
-    fn refresh_durable_pin_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
+    fn prepare_durable_pin_under_write(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+    ) -> Result<Self::DurablePinToken, StorageError> {
         if self
             .fail_next_pin_map_resized
             .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
@@ -791,9 +795,15 @@ impl KvStore for SimKvStore {
         {
             return Err(StorageError::ReadersFull);
         }
-        let mut inner = self.inner.lock();
-        inner.pinned_txnid = Some(inner.committed.txnid);
-        Ok(())
+        Ok(self.inner.lock().committed.txnid)
+    }
+
+    fn pin_txnid(token: &Self::DurablePinToken) -> u64 {
+        *token
+    }
+
+    fn install_durable_pin(&self, token: Self::DurablePinToken) {
+        self.inner.lock().pinned_txnid = Some(token);
     }
 
     fn lock_scope_id(&self) -> LockScopeId {
@@ -833,7 +843,8 @@ impl KvStore for SimKvStore {
             inner.config.map_size
         };
         if pin_after {
-            self.refresh_durable_pin_under_write(&())?;
+            let tok = self.prepare_durable_pin_under_write(&())?;
+            self.install_durable_pin(tok);
         }
         Ok(new_size)
     }
@@ -865,7 +876,8 @@ impl KvStore for SimKvStore {
             inner.config.map_size
         };
         if pin_after {
-            self.refresh_durable_pin_under_write(&())?;
+            let tok = self.prepare_durable_pin_under_write(&())?;
+            self.install_durable_pin(tok);
         }
         Ok(size)
     }

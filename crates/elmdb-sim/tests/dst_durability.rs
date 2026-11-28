@@ -746,5 +746,46 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         let adopt_err = grp.begin_read().err().expect("failed Grouped adopt re-pin must error");
         assert!(matches!(adopt_err, StorageError::DurabilityFailed(_)), "got {adopt_err:?}");
         assert!(grp.is_poisoned(), "failed Grouped adopt re-pin MUST poison gate");
+
+        // 5. Phase 0A: Staged durable pin preserves prior pin if sync/sidecar write fails,
+        //    and Strict post-commit sidecar failure explicitly signals commit may have landed!
+        let vfs_p = SimVfs::new(BootId([0x41; 16]));
+        let dir_p = PathBuf::from("/staged_pin_and_strict_msg");
+        let store_p = SimKvStore::new(SimKvConfig::default());
+        let (grp_p, _) = DurabilityGate::open(store_p.clone(), vfs_p.clone(), &dir_p, DurabilityMode::Grouped).unwrap();
+        {
+            let mut tx = grp_p.begin_write().unwrap();
+            let db = tx.open_subdb("d", DbFlags::DEFAULT).unwrap();
+            tx.put(db, b"k1", b"v1").unwrap();
+            tx.commit().unwrap();
+        }
+        grp_p.sync().unwrap();
+        let first_pin = store_p.pinned_txnid().expect("pin set after first sync");
+        {
+            let mut tx = grp_p.begin_write().unwrap();
+            let db = tx.open_subdb("d", DbFlags::DEFAULT).unwrap();
+            tx.put(db, b"k2", b"v2").unwrap();
+            tx.commit().unwrap();
+        }
+        // Fail store sync -> staged pin must NOT overwrite `first_pin`!
+        store_p.inject_sync_failures(1);
+        assert!(grp_p.sync().is_err());
+        assert_eq!(store_p.pinned_txnid(), Some(first_pin), "failed sync must keep prior durable pin intact");
+
+        let vfs_st = SimVfs::new(BootId([0x42; 16]));
+        let dir_st = PathBuf::from("/strict_post_commit_msg");
+        let store_st = SimKvStore::new(SimKvConfig::default());
+        let (strict_g, _) =
+            DurabilityGate::open(store_st.clone(), vfs_st.clone(), &dir_st, DurabilityMode::Strict).unwrap();
+        let mut tx = strict_g.begin_write().unwrap();
+        let db = tx.open_subdb("d", DbFlags::DEFAULT).unwrap();
+        tx.put(db, b"k", b"v").unwrap();
+        store_st.inject_sync_failures(1);
+        let commit_err = tx.commit().unwrap_err();
+        let msg = format!("{commit_err}");
+        assert!(
+            msg.contains("may have landed before sidecar sync failed"),
+            "Strict post-commit sidecar error must explicitly warn commit may have landed; got: {msg}"
+        );
     }
 }
