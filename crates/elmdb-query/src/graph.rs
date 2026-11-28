@@ -137,7 +137,7 @@ impl ExactSum {
         if mid == 0.0 {
             return tiny.total();
         }
-        if combined.parts.iter().all(|&p| ((p * EXACT_SCALE_UP) * EXACT_SCALE_UP).is_finite()) {
+        if combined.parts.iter().all(|&p| (p * EXACT_SCALE_UP).is_finite()) {
             for &p in &combined.parts {
                 tiny.add(p * EXACT_SCALE_UP);
             }

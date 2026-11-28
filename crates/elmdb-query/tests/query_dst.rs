@@ -1838,6 +1838,7 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
     // sub-`2^-450` part (`2^-502 + 2^-503`) in `tiny` -> MUST enter the unscaled fold branch so the
     // `tiny` part rounds `2^-449` up by 1 ULP (`2^-501`), killing inner `* -> +` on line 140!
     let two_neg_449 = f64::from_bits((1023u64 - 449) << 52);
+    let two_neg_501 = f64::from_bits((1023u64 - 501) << 52);
     let two_neg_502 = f64::from_bits((1023u64 - 502) << 52);
     let two_neg_503 = f64::from_bits((1023u64 - 503) << 52);
     let mut es_fold = ExactSum::default();
@@ -1847,7 +1848,7 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
     assert!(es_fold.add(two_neg_449));
     assert!(es_fold.add(two_neg_502));
     assert!(es_fold.add(two_neg_503));
-    assert!(es_fold.try_total().unwrap() > two_neg_449);
+    assert_eq!(es_fold.try_total(), Some(two_neg_449 + two_neg_501));
 
     // `[f64::MAX, 2^970 (half-ULP), 1e-200]`: genuine positive overflow MUST stay in the scaled
     // branch and return `+inf` (never `NaN` from unscaled `f64::MAX + 2^970` inside `tiny`),
