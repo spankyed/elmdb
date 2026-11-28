@@ -318,10 +318,10 @@ fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_
     }
 }
 
-const TORN_SEQ_ITEMS: usize = 32;
+const TORN_SEQ_ITEMS: usize = 48;
 
 fn torn_seq_schema() -> Schema {
-    // Plain string field (no Text index) so 32 x 32 KiB incompressible rows stay ~1.1 MiB << 32 MiB
+    // Plain string field (no Text index) so 48 x 32 KiB incompressible rows stay ~1.6 MiB << 32 MiB
     // map size and never trigger proactive `grow_map()` auto-sync during unsynced D+1..D+3 commits.
     let mut fields = BTreeMap::new();
     fields.insert("c".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
@@ -331,8 +331,8 @@ fn torn_seq_schema() -> Schema {
 }
 
 fn torn_seq_payload(i: usize, tag: &str) -> String {
-    // 32 KiB incompressible deterministic payload (32 items ≈ 1.0 MiB) so a single bulk commit
-    // always produces multiple FUSE data-page writes before LMDB's final 4 KiB meta-page write.
+    // 32 KiB incompressible deterministic payload (48 items ≈ 1.5 MiB) so a single bulk commit
+    // produces ~12 FUSE data-page writes before LMDB's final 4 KiB meta-page write.
     let mut state = 0x517c_c1b7_u32 ^ (i as u32).wrapping_mul(2_246_822_519) ^ (tag.len() as u32);
     let body: String = (0..32 * 1024)
         .map(|_| {
@@ -385,7 +385,7 @@ fn child_writes_torn_seq() {
     .unwrap();
     db.set_schema(&torn_seq_schema()).unwrap();
 
-    // Snapshot D: write 32 x 32 KiB (~1.0 MiB) and flush() so D is synced to disk and pinned.
+    // Snapshot D: write 48 x 32 KiB (~1.5 MiB) and flush() so D is synced to disk and pinned.
     let create_d: Vec<WireOp> = (0..TORN_SEQ_ITEMS)
         .map(|i| WireOp::Create {
             type_name: "Task".into(),
@@ -398,7 +398,7 @@ fn child_writes_torn_seq() {
     println!("synced {TORN_SEQ_ITEMS}");
     let _ = std::io::stdout().flush();
 
-    // Unsynced D+1: destroy all 40 tasks so LMDB places D's ~3.2 MiB of pages onto the freelist.
+    // Unsynced D+1: destroy all 48 tasks so LMDB places D's ~1.5 MiB of pages onto the freelist.
     let destroy_d: Vec<WireOp> = (0..TORN_SEQ_ITEMS)
         .map(|i| WireOp::Destroy { target: EntityTarget::ExternalId(format!("Task-{i:03}")) })
         .collect();
@@ -418,8 +418,8 @@ fn child_writes_torn_seq() {
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
 
-    // Unsynced D+3: write 40 x 80 KiB (~3.2 MiB) of brand-new data pages. LazyFS persists only
-    // the first 2..3 data-page writes and crashes BEFORE D+3's final meta-page write!
+    // Unsynced D+3: write 48 x 32 KiB (~1.5 MiB) of brand-new data pages (~12 FUSE writes). LazyFS
+    // persists writes 1..2 or 2..3 (data pages) and crashes well BEFORE D+3's final meta-page write.
     let overwrite_ops: Vec<WireOp> = (0..TORN_SEQ_ITEMS)
         .map(|i| WireOp::Create {
             type_name: "Task".into(),
@@ -470,10 +470,11 @@ fn a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_
     let heal = std::env::var("ELMDB_TORN_HEAL").expect("ELMDB_TORN_HEAL");
     let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
 
-    // Use `persist="1"` so LazyFS persists ONLY D+3's first data-page write (sorted by lowest
-    // `pgno`, where unpinned freelist reuse overwrites D's pages first) and crashes strictly BEFORE
-    // persisting write 2 (which may be D+3's meta page when pinned pages flush in one contiguous run).
-    for (round, persist) in ["1", "1"].into_iter().enumerate() {
+    // Persist writes 1..2 and 2..3 of D+3's ~12 FUSE data-page writes (~1.5 MiB total): write 1 is
+    // LMDB's low-pgno metadata/branch flush, while writes 2..3 are the first 128-256 KiB of overflow
+    // data pages (which smash D's pages when unpinned, or land safely past D when pinned), and LazyFS
+    // crashes many writes before LMDB's final meta-page write.
+    for (round, persist) in ["1,2", "2,3"].into_iter().enumerate() {
         let path = dir.join(format!("round-{round}"));
         let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.args(["--ignored", "--exact", "child_writes_torn_seq", "--nocapture"])
