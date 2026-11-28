@@ -76,6 +76,8 @@ const NAPI_INVALID_ARG_CODES: Readonly<Record<string, true>> = Object.freeze({
   BigIntExpected: true,
 });
 
+const EARS_ERROR_BRAND = Symbol('elmdb.EarsError');
+
 /**
  * Typed error raised by `@elmdb/ears` carrying a canonical `EarsErrorCode`.
  */
@@ -86,12 +88,27 @@ export class EarsError extends Error {
     super(message, options?.cause !== undefined ? { cause: options.cause } : undefined);
     this.name = 'EarsError';
     this.code = code;
+    Object.defineProperty(this, EARS_ERROR_BRAND, {
+      value: true,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
   }
 }
 
-/** Type guard for `EarsError`. */
+/** Type guard for `EarsError`, safe against revoked/hostile Proxies and prototype-spoofed objects. */
 export function isEarsError(error: unknown): error is EarsError {
-  return error instanceof EarsError;
+  if (typeof error !== 'object' || error === null) return false;
+  try {
+    if (!(error instanceof EarsError)) return false;
+    const desc = Object.getOwnPropertyDescriptor(error, EARS_ERROR_BRAND);
+    if (desc?.value !== true || desc.configurable !== false || desc.writable !== false) return false;
+    const code = (error as { readonly code?: unknown }).code;
+    return typeof code === 'string' && Object.prototype.hasOwnProperty.call(KNOWN_ERROR_CODES, code);
+  } catch {
+    return false;
+  }
 }
 
 function safeReadProperty(obj: object, prop: string): unknown {
@@ -117,7 +134,7 @@ function safeStringify(value: unknown): string {
  * Used by `transact()` to wrap engine errors into `EarsError` while preserving user domain errors verbatim.
  */
 export function hasKnownErrorCode(error: unknown): boolean {
-  if (error instanceof EarsError) return true;
+  if (isEarsError(error)) return true;
   if (typeof error === 'object' && error !== null) {
     const maybeCode = safeReadProperty(error, 'code');
     if (typeof maybeCode === 'string') {
@@ -135,7 +152,7 @@ export function hasKnownErrorCode(error: unknown): boolean {
  * while preserving its canonical `code` and original error as `cause`.
  */
 export function toEarsError(error: unknown, fallbackCode: EarsErrorCode = 'INTERNAL'): EarsError {
-  if (error instanceof EarsError) return error;
+  if (isEarsError(error)) return error;
   if (typeof error === 'object' && error !== null) {
     const maybeCode = safeReadProperty(error, 'code');
     const maybeMessage = safeReadProperty(error, 'message');

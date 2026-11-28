@@ -1,3 +1,4 @@
+import * as vm from 'node:vm';
 import { afterEach, describe, expect, it } from 'vitest';
 import { EarsError, createEarsEngine, isEarsError, type Schema } from '../src/index.ts';
 import { createTemporaryDatabases } from '../src/lmdb/index.ts';
@@ -501,12 +502,18 @@ describe('@elmdb/ears algebraic QueryBuilder', () => {
       expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
     );
 
-    // 4. Shared non-cyclic DAG references, Uint8Array, valid Date, and allowlisted primitives succeed cleanly.
+    // 4. Shared non-cyclic DAG references, Uint8Array, valid Date (including cross-realm Date and reparented Uint8Array),
+    //    and allowlisted primitives succeed cleanly.
     const shared = { nested: 'ok' };
+    const xRealmDate = vm.runInNewContext('new Date(1700000000000)') as unknown;
+    const xRealmBytes = vm.runInNewContext('new Uint8Array([3, 4])') as unknown;
+    const reparentedBytes = Object.setPrototypeOf(new Uint8Array([5, 6]), Object.prototype) as unknown;
     const dagSpec = engine.query
       .of('Doc')
-      .where('title', { eq: [shared, shared, new Uint8Array([1, 2]), new Date(1_700_000_000_000), null, true, 42] })
+      .where('title', { eq: [shared, shared, new Uint8Array([1, 2]), xRealmBytes, new Date(1_700_000_000_000), xRealmDate, null, true, 42] })
+      .where('title', xRealmDate as unknown as string)
+      .where('title', reparentedBytes as unknown as string)
       .toSpec();
-    expect(dagSpec.steps).toHaveLength(1);
+    expect(dagSpec.steps).toHaveLength(3);
   });
 });

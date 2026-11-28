@@ -898,6 +898,57 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     expect(errors).toEqual([]);
     expect(w.active).toBe(true);
     expect(engine.watches.settled()).toBe(true);
+    // Out-of-safe-integer `flushSync(1e20)` rejects cleanly with INVALID_ARGUMENT instead of silently swallowing.
+    expect(() => engine.watches.flushSync(1e20)).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
     w.stop();
+
+    // Throwing `observer.finish` during `register()` unregisters the Rust watch so `settled()` never wedges false!
+    const handle3 = temps.open({ schema: watchSchema });
+    const eng3 = createEarsEngine({
+      database: handle3.database,
+      clock: createFakeClock(90_000),
+      observer: {
+        start(op) {
+          return () => {
+            if (op.watch) throw new Error('register finish boom');
+          };
+        },
+      },
+    });
+    expect(() => eng3.query.of('Task').watchCount(() => {}, { minGapMs: 0 })).toThrow('register finish boom');
+    expect(eng3.watches.activeCount).toBe(0);
+    eng3.create('Task', { title: 'after-failed-register', done: false });
+    expect(eng3.watches.settled()).toBe(true);
+
+    // Throwing `clock.now()` when a scheduled timer fires does NOT crash or strand dirty watches!
+    const base4 = createFakeClock(95_000);
+    let failTimerNowOnce = false;
+    const timerClock: EarsClock = {
+      now() {
+        if (failTimerNowOnce) {
+          failTimerNowOnce = false;
+          throw new Error('timer fire clock boom');
+        }
+        return base4.now();
+      },
+      setTimeout: (cb, ms) => base4.setTimeout(cb, ms),
+      clearTimeout: (h) => base4.clearTimeout(h),
+    };
+    const handle4 = temps.open({ schema: watchSchema });
+    const timerErrors: string[] = [];
+    const timerCounts: number[] = [];
+    const eng4 = createEarsEngine({
+      database: handle4.database,
+      clock: timerClock,
+      onWatchError: (e) => timerErrors.push(e.message),
+    });
+    const w4 = eng4.query.of('Task').watchCount((c) => timerCounts.push(c), { minGapMs: 0, adaptiveMultiplier: 0 });
+    eng4.create('Task', { title: 'timer-resilient', done: false });
+    failTimerNowOnce = true;
+    base4.advance(10);
+    expect(timerErrors.some((m) => m.includes('timer fire clock boom'))).toBe(true);
+    expect(timerCounts).toEqual([0, 1]);
+    expect(eng4.watches.settled()).toBe(true);
+    w4.stop();
   });
 });

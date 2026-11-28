@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 /** @type {typeof import('../index.js')} */
@@ -126,6 +127,12 @@ test('buildWireBatch rejects async/thenable callbacks, __proto__, non-plain obje
   Object.defineProperty(realWithFakeLen, 'byteLength', { value: 99999 });
   const encodedReal = buildWireBatch((x) => { x.create('Item', { title: 'ok', raw: realWithFakeLen }); });
   assert.ok(encodedReal.byteLength < 100);
+
+  // Cross-realm Date and Uint8Array encode cleanly via intrinsic brand checks
+  const crossRealmDate = vm.runInNewContext('new Date(1700000000000)');
+  const crossRealmBytes = vm.runInNewContext('new Uint8Array([1, 2, 3])');
+  const encodedCross = buildWireBatch((x) => { x.create('Item', { title: 'xrealm', ts: crossRealmDate, raw: crossRealmBytes }); });
+  assert.ok(encodedCross.byteLength > 0);
 
   // Lone UTF-16 surrogates rejected in field names and nested object keys (while valid emoji surrogate pairs succeed)
   assert.throws(() => buildWireBatch((x) => { x.create('Item', { ['bad\uD800key']: 1 }); }), /surrogate/);

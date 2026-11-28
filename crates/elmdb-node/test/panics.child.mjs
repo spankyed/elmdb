@@ -44,6 +44,29 @@ const call = async (db) => {
       });
       return db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'must-not-commit' }, 'Note-leaked'); }));
     }
+    case 'transact.swallowed-panic-in-then':
+      return db.transact(() => {
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'must-not-commit' }, 'Note-leaked'); }));
+        return {
+          get then() {
+            try { db.get('Note-kept'); } catch { /* swallow PANICKED */ }
+            return undefined;
+          },
+        };
+      });
+    case 'beforeCommit.swallowed-panic-in-then': {
+      db.registerBeforeCommit(['Note'], () => {
+        const derived = buildWireBatch((b) => { b.create('Note', { title: 'derived-leaked' }, 'Note-derived'); });
+        Object.defineProperty(derived, 'then', {
+          get() {
+            try { db.get('Note-kept'); } catch { /* swallow PANICKED */ }
+            return undefined;
+          },
+        });
+        return derived;
+      });
+      return db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'must-not-commit' }, 'Note-leaked'); }));
+    }
     default: throw new Error(`unknown test export ${name}`);
   }
 };

@@ -40,6 +40,21 @@ function asRealUint8Array(v) {
 }
 
 /**
+ * Brand-checks a genuine `Date` (including cross-realm `Date` instances) via intrinsic
+ * `Date.prototype.getTime`, returning `null` for non-Dates and prototype-spoofed objects.
+ * @param {unknown} v
+ * @returns {number | null}
+ */
+function asRealDateMs(v) {
+  if (v === null || typeof v !== 'object') return null;
+  try {
+    return DATE_GET_TIME.call(v);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Returns true if `s` contains any unpaired UTF-16 surrogate code unit (`0xD800..=0xDFFF`),
  * which `TextEncoder` would silently replace with U+FFFD and could collide distinct JS keys.
  * @param {string} s
@@ -199,18 +214,13 @@ class WireWriter {
     if (value instanceof BatchSlot) {
       throw new TypeError('BatchSlot cannot be passed as a field value; use link() or an explicit externalId');
     }
-    if (value instanceof Date) {
-      let ms;
-      try {
-        ms = DATE_GET_TIME.call(value);
-      } catch {
-        throw new TypeError('Invalid Date object (prototype-spoofed Date is not permitted)');
-      }
-      if (!Number.isFinite(ms)) {
+    const dateMs = asRealDateMs(value);
+    if (dateMs !== null) {
+      if (!Number.isFinite(dateMs)) {
         throw new RangeError('Invalid Date timestamp');
       }
       this.u8(5); // Timestamp
-      this.i64(BigInt(Math.trunc(ms)));
+      this.i64(BigInt(Math.trunc(dateMs)));
       this.u32(0);
       return;
     }

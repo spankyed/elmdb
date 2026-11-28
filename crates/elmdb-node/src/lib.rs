@@ -714,23 +714,29 @@ impl Database {
                     thrown_js = Some(napi::Error::from_status(napi::Status::from(call_st)));
                     return Err(ElmdbError::new(ErrorCode::Cancelled, "JS transaction callback threw"));
                 }
-                // Re-check handle health before committing: if a nested call panicked and JS caught it,
-                // the poisoned handle MUST abort with `PANICKED` rather than committing partial writes!
-                if let Some(refused) = self.health.refusal("Database.transact") {
-                    return Err(refused);
-                }
-                match check_not_thenable_raw(raw_env, ret) {
-                    ThenableCheck::Value(v) => Ok(v),
-                    ThenableCheck::AsyncForbidden => Err(ElmdbError::new(
-                        ErrorCode::AsyncCallbackForbidden,
-                        "synchronous callback must not return a Promise or thenable",
-                    )),
+                let val = match check_not_thenable_raw(raw_env, ret) {
+                    ThenableCheck::Value(v) => v,
+                    ThenableCheck::AsyncForbidden => {
+                        return Err(ElmdbError::new(
+                            ErrorCode::AsyncCallbackForbidden,
+                            "synchronous callback must not return a Promise or thenable",
+                        ));
+                    }
                     ThenableCheck::JsThrown(raw_exc, js_err) => {
                         thrown_raw_exc = raw_exc;
                         thrown_js = Some(js_err);
-                        Err(ElmdbError::new(ErrorCode::Cancelled, "JS getter threw while inspecting return value"))
+                        return Err(ElmdbError::new(
+                            ErrorCode::Cancelled,
+                            "JS getter threw while inspecting return value",
+                        ));
                     }
+                };
+                // Re-check handle health AFTER both callback execution and `.then` inspection (which can
+                // run arbitrary JS getters): a poisoned handle must NEVER commit partial writes!
+                if let Some(refused) = self.health.refusal("Database.transact") {
+                    return Err(refused);
                 }
+                Ok(val)
             });
 
             match outcome {
@@ -916,7 +922,6 @@ impl Database {
                                 None => Ok(None),
                                 Some(func) => {
                                     let call_res = call_js_hook_sync(&js_env, func, payload);
-                                    // Re-check handle health after hook execution: a panicked handle must never commit!
                                     if let Some(refused) = hook_health.refusal("Database.beforeCommit") {
                                         return Err(refused);
                                     }
@@ -930,9 +935,17 @@ impl Database {
                                             ));
                                         }
                                         ThenableCheck::JsThrown(raw_exc, e) => {
+                                            if let Some(refused) = hook_health.refusal("Database.beforeCommit") {
+                                                return Err(refused);
+                                            }
                                             return Err(extract_hook_error_value(js_env.raw(), raw_exc, e));
                                         }
                                     };
+                                    // Re-check handle health AFTER `.then` inspection too: a hostile `.then` getter
+                                    // can trigger and swallow a nested panic before returning a wire batch!
+                                    if let Some(refused) = hook_health.refusal("Database.beforeCommit") {
+                                        return Err(refused);
+                                    }
                                     let vtype = ret
                                         .get_type()
                                         .map_err(|e| extract_and_clear_hook_error(&js_env, e))?;

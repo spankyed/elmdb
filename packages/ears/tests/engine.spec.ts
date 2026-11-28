@@ -630,7 +630,30 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     expect(hostileErr.code).toBe('INVALID_ARGUMENT');
     expect(hostileErr.message).toBe('[unstringifiable error]');
 
-    // 2. `beforeCommit` callable thenable AND async batch builder preserve `ASYNC_CALLBACK_FORBIDDEN`.
+    // Revoked Proxy, hostile `getPrototypeOf` Proxy, and prototype-spoofed `EarsError` must never crash!
+    const { proxy: revokedProxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    const hostileProtoProxy = new Proxy({}, {
+      getPrototypeOf() {
+        throw new Error('getPrototypeOf boom');
+      },
+    });
+    const spoofedEarsErr = Object.create(EarsError.prototype) as Record<string, unknown>;
+    Object.defineProperty(spoofedEarsErr, 'code', {
+      get() {
+        throw new Error('spoofed code boom');
+      },
+    });
+    for (const hostile of [revokedProxy, hostileProtoProxy, spoofedEarsErr]) {
+      expect(isEarsError(hostile)).toBe(false);
+      expect(hasKnownErrorCode(hostile)).toBe(false);
+      const wrapped = toEarsError(hostile);
+      expect(isEarsError(wrapped)).toBe(true);
+      expect(wrapped.code).toBe('INTERNAL');
+    }
+
+    // 2. `beforeCommit` callable thenable, async batch builder, AND stateful `.then` getter on Uint8Array
+    //    all preserve `ASYNC_CALLBACK_FORBIDDEN`.
     const callableThenable = Object.assign(() => {}, {
       then() {},
     });
@@ -639,6 +662,26 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
       expect.objectContaining({ code: 'ASYNC_CALLBACK_FORBIDDEN' }),
     );
     unsubCallable();
+
+    const unsubStatefulThen = engine.beforeCommit(['Task'], () => {
+      const payload = encodeBatch((b) => { b.create('Task', { title: 'derived', done: false }); });
+      let reads = 0;
+      Object.defineProperty(payload, 'then', {
+        get() {
+          return reads++ === 0 ? () => {} : undefined;
+        },
+      });
+      return payload;
+    });
+    expect(() => engine.create('Task', { title: 'stateful-then', done: false })).toThrowError(
+      expect.objectContaining({ code: 'ASYNC_CALLBACK_FORBIDDEN' }),
+    );
+    unsubStatefulThen();
+
+    // Prototype-spoofed Uint8Array passed to executeWireBatch throws EarsError('INVALID_ARGUMENT'), not unwrapped TypeError.
+    expect(() => engine.executeWireBatch(Object.create(Uint8Array.prototype) as Uint8Array)).toThrowError(
+      expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+    );
 
     const unsubAsyncBuilder = engine.beforeCommit(
       ['Task'],
@@ -710,5 +753,29 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
     expect(() => eng2.admin.driveBackgroundWork(10)).toThrowError(expect.objectContaining({ code: 'IO' }));
     expect(notified).toBeGreaterThanOrEqual(1);
     wh2.stop();
+
+    // Throwing clock.now() inside `finally { pump.notifyMutation(); }` must NEVER mask the original DB error!
+    let failNotifyClock = false;
+    const eng3 = createEarsEngine({
+      database: wrappedDb,
+      clock: {
+        now() {
+          if (failNotifyClock) throw new Error('clock boom during notify');
+          return 1_000;
+        },
+        setTimeout: globalThis.setTimeout,
+        clearTimeout: (h) => globalThis.clearTimeout(h as ReturnType<typeof globalThis.setTimeout>),
+      },
+    });
+    const wh3 = eng3.query.of('Task').watchCount(() => {}, { minGapMs: 0 });
+    failNotifyClock = true;
+    expect(() => eng3.admin.flush()).toThrowError(
+      expect.objectContaining({ code: 'IO', message: 'flush partial failure' }),
+    );
+    await expect(eng3.admin.flushAsync()).rejects.toMatchObject({
+      code: 'IO',
+      message: 'flushAsync partial failure',
+    });
+    wh3.stop();
   });
 });

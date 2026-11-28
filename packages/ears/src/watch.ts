@@ -190,6 +190,7 @@ export class WatchPump implements WatchController {
   #pumping = false;
   #rescheduleAfterPump = false;
   #stopped = false;
+  #lastNowMs = 0;
 
   constructor(
     db: EarsDatabase,
@@ -216,9 +217,13 @@ export class WatchPump implements WatchController {
   #nowMs(): number {
     const raw = this.#clock.now();
     if (typeof raw !== 'number' || !Number.isFinite(raw)) {
-      return 0;
+      return this.#lastNowMs;
     }
-    return Math.max(0, Math.trunc(raw));
+    const clamped = Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(raw)));
+    if (clamped > this.#lastNowMs) {
+      this.#lastNowMs = clamped;
+    }
+    return clamped;
   }
 
   get activeCount(): number {
@@ -249,7 +254,17 @@ export class WatchPump implements WatchController {
       finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
       throw earsErr;
     }
-    finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    try {
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    } catch (observerErr) {
+      // Never leak an unregistered Rust watch (or wedge settled() to false) if observer.finish throws.
+      try {
+        this.#db.unregisterWatch(reg.watchId);
+      } catch {
+        // Best-effort if DB closed.
+      }
+      throw observerErr;
+    }
 
     const entry: WatchEntry = {
       id: reg.watchId,
@@ -320,7 +335,19 @@ export class WatchPump implements WatchController {
       this.#rescheduleAfterPump = true;
       return;
     }
-    this.#scheduleNext(this.#nowMs());
+    try {
+      this.#scheduleNext(this.#nowMs());
+    } catch (err) {
+      // Isolate clock/timer errors so callers invoking notifyMutation() in `finally` never mask DB errors.
+      const earsErr = toEarsError(err);
+      if (this.#onWatchError) {
+        try {
+          this.#onWatchError(earsErr);
+        } catch {
+          // Isolate throwing error handler.
+        }
+      }
+    }
   }
 
   catchUpCrossProcess(): number[] {
@@ -347,8 +374,16 @@ export class WatchPump implements WatchController {
     if (nowMs === undefined) {
       startMs = this.#nowMs();
     } else {
-      if (typeof nowMs !== 'number' || !Number.isFinite(nowMs) || nowMs < 0) {
-        throw new EarsError('INVALID_ARGUMENT', `nowMs must be a non-negative finite number, got ${String(nowMs)}`);
+      if (
+        typeof nowMs !== 'number'
+        || !Number.isFinite(nowMs)
+        || nowMs < 0
+        || Math.trunc(nowMs) > Number.MAX_SAFE_INTEGER
+      ) {
+        throw new EarsError(
+          'INVALID_ARGUMENT',
+          `nowMs must be a non-negative safe integer timestamp, got ${String(nowMs)}`,
+        );
       }
       startMs = Math.trunc(nowMs);
     }
@@ -453,7 +488,19 @@ export class WatchPump implements WatchController {
     const run = (): void => {
       this.#cancelTimer = undefined;
       if (this.#stopped) return;
-      this.#drain(this.#nowMs(), true);
+      let fireNow = this.#lastNowMs;
+      try {
+        fireNow = this.#nowMs();
+      } catch (clockErr) {
+        if (this.#onWatchError) {
+          try {
+            this.#onWatchError(toEarsError(clockErr));
+          } catch {
+            // Isolate throwing error handler.
+          }
+        }
+      }
+      this.#drain(fireNow, true);
     };
     if ('after' in this.#clock && typeof this.#clock.after === 'function') {
       this.#cancelTimer = this.#clock.after(delay, run);
@@ -574,7 +621,20 @@ export class WatchPump implements WatchController {
       const maxIterations = Math.max(64, this.#entries.size * 8);
       for (let i = 0; i < maxIterations; i++) {
         if (this.#stopped || this.#entries.size === 0) break;
-        const nowMs = scheduleTail ? this.#nowMs() : startNowMs;
+        let nowMs = startNowMs;
+        if (scheduleTail) {
+          try {
+            nowMs = this.#nowMs();
+          } catch (clockErr) {
+            if (this.#onWatchError) {
+              try {
+                this.#onWatchError(toEarsError(clockErr));
+              } catch {
+                // Isolate throwing error handler.
+              }
+            }
+          }
+        }
         const elapsedTurnMs = Math.max(0, nowMs - turnStart);
         let watchId: number | undefined;
 
@@ -696,7 +756,7 @@ export class WatchPump implements WatchController {
             }
             failedThisTurn.add(entry.id);
             const policy = WATCH_ERROR_POLICY[earsErr.code];
-            if (policy === 'fatal_handle') {
+            if (policy === 'fatal_handle' || earsErr.code === 'CLOSED') {
               needsAbort = false;
               this.#failStopHandle(earsErr, entry);
               break;

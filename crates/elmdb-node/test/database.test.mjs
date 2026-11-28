@@ -457,4 +457,18 @@ test('PR #268 Batch 3: unified JSON-to-JS numbers (> u32::MAX, no BigInt) and be
     (err) => err.code === 'ASYNC_CALLBACK_FORBIDDEN',
   );
   db.unregisterBeforeCommit(hAsyncNested);
+
+  // Hostile `.code` getter on a thrown hook error clears pending exception and still extracts `.message`.
+  const hHostileCode = db.registerBeforeCommit(['Metric'], () => {
+    const errObj = {
+      get code() { throw new Error('hostile code getter'); },
+      message: 'keep-this-hook-message',
+    };
+    throw errObj;
+  });
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.patch('m-1', { bigPos: 8_000_000_000 }); })),
+    (err) => err.code === 'HOOK_ABORTED' && err.message.includes('keep-this-hook-message'),
+  );
+  db.unregisterBeforeCommit(hHostileCode);
 });

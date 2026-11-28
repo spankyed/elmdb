@@ -15,6 +15,16 @@ const TYPED_ARRAY_TAG_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO
 const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'buffer')?.get;
 const TYPED_ARRAY_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'byteOffset')?.get;
 const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'byteLength')?.get;
+const DATE_GET_TIME = Date.prototype.getTime;
+
+function asRealDateMs(value: unknown): number | null {
+  if (value === null || typeof value !== 'object') return null;
+  try {
+    return DATE_GET_TIME.call(value);
+  } catch {
+    return null;
+  }
+}
 
 function asRealUint8Array(value: unknown): Uint8Array | null {
   if (
@@ -245,8 +255,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
     typeof value !== 'object'
     || value === null
     || Array.isArray(value)
-    || value instanceof Uint8Array
-    || value instanceof Date
+    || asRealUint8Array(value) !== null
+    || asRealDateMs(value) !== null
   ) {
     return false;
   }
@@ -284,18 +294,13 @@ function normalizeQueryValue(
     // Rust protocol `coerce_json_for_field` decodes `Bytes` fields from JSON `number[]` (0..=255).
     return Array.from(realBytes);
   }
-  if (value instanceof Date) {
-    let ms: number;
-    try {
-      ms = Date.prototype.getTime.call(value);
-    } catch {
-      throw new EarsError('INVALID_ARGUMENT', 'Invalid Date passed to query filter or cursor');
-    }
-    if (!Number.isFinite(ms)) {
+  const dateMs = asRealDateMs(value);
+  if (dateMs !== null) {
+    if (!Number.isFinite(dateMs)) {
       throw new EarsError('INVALID_ARGUMENT', 'Invalid Date passed to query filter or cursor');
     }
     // Rust protocol `coerce_json_for_field` accepts epoch milliseconds for `Timestamp` fields.
-    return ms;
+    return dateMs;
   }
   if (Array.isArray(value)) {
     if (depth >= MAX_QUERY_VALUE_DEPTH) {
