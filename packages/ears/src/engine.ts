@@ -153,7 +153,7 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
   let hookDepth = 0;
   let outerTxnMutated = false;
   const isInWriteTxn = (): boolean => txnDepth > 0 || hookDepth > 0;
-  const pump = new WatchPump(db, clock, options.onWatchError, observer, options.watchTurnSliceMs);
+  const pump = new WatchPump(db, clock, options.onWatchError, observer, options.watchTurnSliceMs, isInWriteTxn);
   const query = createQueryRoot(db, pump, observer, isInWriteTxn);
 
   const runBatchPayload = (payload: Uint8Array, ops = 1): BatchResult => {
@@ -281,8 +281,9 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         more = db.driveBackgroundWork(maxEntities);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
       return more;
     },
     flush(): void {
@@ -290,16 +291,18 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         db.flush();
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
     },
     async flushAsync(): Promise<void> {
       try {
         await db.flushAsync();
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
     },
     check(indexName?: string): CheckReport {
       try {
@@ -574,10 +577,13 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
             hookDepth++;
             try {
               const ret: unknown = callback(delta);
+              if (isThenable(ret)) {
+                return ret;
+              }
               if (typeof ret === 'function') {
                 return encodeBatch(ret as (b: BatchWriter) => void);
               }
-              // Pass thenables and invalid return types straight to the native binding so it raises
+              // Pass invalid return types straight to the native binding so it raises
               // exact `ASYNC_CALLBACK_FORBIDDEN` / `INVALID_ARGUMENT` error codes cleanly.
               return ret;
             } finally {

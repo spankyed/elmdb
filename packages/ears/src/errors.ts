@@ -94,14 +94,32 @@ export function isEarsError(error: unknown): error is EarsError {
   return error instanceof EarsError;
 }
 
+function safeReadProperty(obj: object, prop: string): unknown {
+  try {
+    return (obj as Record<string, unknown>)[prop];
+  } catch {
+    return undefined;
+  }
+}
+
+function safeStringify(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'symbol') return value.toString();
+  try {
+    return String(value);
+  } catch {
+    return '[unstringifiable error]';
+  }
+}
+
 /**
  * Returns true if `error` is an `EarsError` or carries a canonical elmdb / N-API error code.
  * Used by `transact()` to wrap engine errors into `EarsError` while preserving user domain errors verbatim.
  */
 export function hasKnownErrorCode(error: unknown): boolean {
   if (error instanceof EarsError) return true;
-  if (typeof error === 'object' && error !== null && 'code' in error) {
-    const maybeCode = (error as { readonly code?: unknown }).code;
+  if (typeof error === 'object' && error !== null) {
+    const maybeCode = safeReadProperty(error, 'code');
     if (typeof maybeCode === 'string') {
       return (
         Object.prototype.hasOwnProperty.call(KNOWN_ERROR_CODES, maybeCode)
@@ -119,8 +137,8 @@ export function hasKnownErrorCode(error: unknown): boolean {
 export function toEarsError(error: unknown, fallbackCode: EarsErrorCode = 'INTERNAL'): EarsError {
   if (error instanceof EarsError) return error;
   if (typeof error === 'object' && error !== null) {
-    const maybeCode = 'code' in error ? (error as { readonly code?: unknown }).code : undefined;
-    const maybeMessage = 'message' in error ? (error as { readonly message?: unknown }).message : undefined;
+    const maybeCode = safeReadProperty(error, 'code');
+    const maybeMessage = safeReadProperty(error, 'message');
     let code: EarsErrorCode = fallbackCode;
     if (typeof maybeCode === 'string') {
       if (Object.prototype.hasOwnProperty.call(KNOWN_ERROR_CODES, maybeCode)) {
@@ -129,8 +147,8 @@ export function toEarsError(error: unknown, fallbackCode: EarsErrorCode = 'INTER
         code = 'INVALID_ARGUMENT';
       }
     }
-    const message = typeof maybeMessage === 'string' && maybeMessage.length > 0 ? maybeMessage : String(error);
+    const message = typeof maybeMessage === 'string' && maybeMessage.length > 0 ? maybeMessage : safeStringify(error);
     return new EarsError(code, message, { cause: error });
   }
-  return new EarsError(fallbackCode, String(error), { cause: error });
+  return new EarsError(fallbackCode, safeStringify(error), { cause: error });
 }

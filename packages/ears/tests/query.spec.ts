@@ -481,6 +481,10 @@ describe('@elmdb/ears algebraic QueryBuilder', () => {
       new Int32Array([1, 2]),
       Object.create(Date.prototype) as unknown,
       Object.create(Uint8Array.prototype) as unknown,
+      Object.setPrototypeOf(new Int32Array([1, 2]), Uint8Array.prototype) as unknown,
+      Object.setPrototypeOf(new DataView(new ArrayBuffer(4)), Uint8Array.prototype) as unknown,
+      { ['\uD800']: 1 },
+      { ['\uDC00']: 1 },
       throwingCtor,
     ]) {
       expect(() => engine.query.of('Doc').where('title', nonPlain as unknown as string)).toThrowError(

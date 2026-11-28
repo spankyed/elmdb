@@ -64,3 +64,11 @@ test('an export panics only where it was asked to', (t) => {
     assert.match(ran.stderr, /Database\.stats: undefined/, asked);
   }
 });
+
+test('transact and beforeCommit abort with PANICKED and persist zero writes when JS swallows a nested panic', (t) => {
+  for (const scenario of ['transact.swallowed-panic', 'beforeCommit.swallowed-panic']) {
+    const ran = run(seeded(t), scenario, 'Database.get');
+    assert.equal(ran.status, 0, `${scenario}: ${ran.signal ?? ''}\n${ran.stdout}\n${ran.stderr}`);
+    assert.equal(ran.stdout, `${scenario} panicked, and the process lives\n`);
+  }
+});

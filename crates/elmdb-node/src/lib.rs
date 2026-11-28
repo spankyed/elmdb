@@ -95,10 +95,20 @@ fn now_unix_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Unified `serde_json::Value -> napi::Unknown` converter used by every N-API surface (sync, async,
+/// and `beforeCommit` hooks) so finite JSON integers `> u32::MAX` (timestamps, `mapSizeBytes`, safe
+/// integers like `5e9`) consistently cross as JS `number` matching `.d.ts` and `JSON.stringify`.
+pub(crate) fn json_value_to_js(env: &Env, val: serde_json::Value) -> napi::Result<Unknown<'static>> {
+    // SAFETY: `env.raw()` is the active N-API environment on the current JS thread.
+    let raw = unsafe { <serde_json::Value as ToNapiValue>::to_napi_value(env.raw(), val)? };
+    // SAFETY: `raw` was produced on `env.raw()` by `ToNapiValue::to_napi_value`.
+    unsafe { Unknown::from_napi_value(env.raw(), raw) }
+}
+
 fn to_js_json(env: &Env, v: &impl serde::Serialize) -> Result<Unknown<'static>, Code> {
     let val = serde_json::to_value(v)
         .map_err(|e| napi::Error::new(Code(ErrorCode::Internal.as_str()), format!("serialize failed: {e}")))?;
-    env.to_js_value(&val).map_err(|e| napi::Error::new(Code("GenericFailure"), e.reason.clone()))
+    json_value_to_js(env, val).map_err(|e| napi::Error::new(Code("GenericFailure"), e.reason.clone()))
 }
 
 /// Normalizes exact whole-number JSON floats produced by `napi-rs` for JS `number` values outside `i32`
@@ -263,6 +273,7 @@ fn extract_hook_error_value(
     raw_exc: Option<napi::sys::napi_value>,
     err: napi::Error,
 ) -> ElmdbError {
+    let mut code = ErrorCode::HookAborted;
     let mut extracted: Option<String> = None;
 
     // SAFETY: `raw_env` is the active N-API environment on the current JS thread and `raw_exc` came from it.
@@ -272,17 +283,31 @@ fn extract_hook_error_value(
         if let Ok(vtype) = exc.get_type()
             && matches!(vtype, ValueType::Object | ValueType::Function)
             && let Ok(obj) = exc.coerce_to_object()
-            && let Ok(msg_val) = obj.get_named_property_unchecked::<Unknown<'_>>("message")
-            && matches!(msg_val.get_type(), Ok(ValueType::String))
-            && let Ok(js_str) = msg_val.coerce_to_string()
-            && let Ok(utf8) = js_str.into_utf8()
-            && let Ok(s) = utf8.as_str()
-            && !s.is_empty()
         {
-            extracted = Some(s.to_owned());
+            if let Ok(code_val) = obj.get_named_property_unchecked::<Unknown<'_>>("code")
+                && matches!(code_val.get_type(), Ok(ValueType::String))
+                && let Ok(js_str) = code_val.coerce_to_string()
+                && let Ok(utf8) = js_str.into_utf8()
+                && let Ok(s) = utf8.as_str()
+                && s == ErrorCode::AsyncCallbackForbidden.as_str()
+            {
+                code = ErrorCode::AsyncCallbackForbidden;
+            }
+            // Clear any exception thrown by a hostile `.code` getter before reading `.message`.
+            clear_pending_exception(raw_env);
+
+            if let Ok(msg_val) = obj.get_named_property_unchecked::<Unknown<'_>>("message")
+                && matches!(msg_val.get_type(), Ok(ValueType::String))
+                && let Ok(js_str) = msg_val.coerce_to_string()
+                && let Ok(utf8) = js_str.into_utf8()
+                && let Ok(s) = utf8.as_str()
+                && !s.is_empty()
+            {
+                extracted = Some(s.to_owned());
+            }
+            // If reading `.message` threw a hostile getter error, clear it before falling back.
+            clear_pending_exception(raw_env);
         }
-        // If reading `.message` threw a hostile getter error, clear it before falling back.
-        clear_pending_exception(raw_env);
 
         if extracted.is_none() {
             if let Ok(js_str) = exc.coerce_to_string()
@@ -299,7 +324,7 @@ fn extract_hook_error_value(
     let message = extracted
         .or_else(|| (!err.reason.is_empty()).then_some(err.reason))
         .unwrap_or_else(|| "beforeCommit hook aborted".to_owned());
-    ElmdbError::new(ErrorCode::HookAborted, message)
+    ElmdbError::new(code, message)
 }
 
 /// Clears any pending N-API exception raised by a JS `beforeCommit` hook, extracts its `.message`
@@ -319,7 +344,7 @@ fn call_js_hook_sync<'env>(
     payload: serde_json::Value,
 ) -> elmdb::Result<Unknown<'static>> {
     let raw_env = env.raw();
-    let arg_val = env.to_js_value(&payload).map_err(|e| extract_and_clear_hook_error(env, e))?;
+    let arg_val = json_value_to_js(env, payload).map_err(|e| extract_and_clear_hook_error(env, e))?;
     let raw_arg = arg_val.raw();
     let mut recv = std::ptr::null_mut();
     let mut ret = std::ptr::null_mut();
@@ -689,6 +714,11 @@ impl Database {
                     thrown_js = Some(napi::Error::from_status(napi::Status::from(call_st)));
                     return Err(ElmdbError::new(ErrorCode::Cancelled, "JS transaction callback threw"));
                 }
+                // Re-check handle health before committing: if a nested call panicked and JS caught it,
+                // the poisoned handle MUST abort with `PANICKED` rather than committing partial writes!
+                if let Some(refused) = self.health.refusal("Database.transact") {
+                    return Err(refused);
+                }
                 match check_not_thenable_raw(raw_env, ret) {
                     ThenableCheck::Value(v) => Ok(v),
                     ThenableCheck::AsyncForbidden => Err(ElmdbError::new(
@@ -823,6 +853,7 @@ impl Database {
             let js_key = NEXT_JS_HOOK_KEY.fetch_add(1, Ordering::Relaxed);
             JS_HOOKS.with(|m| m.borrow_mut().insert(js_key, (env.raw(), func_ref)));
             let expected_thread: ThreadId = std::thread::current().id();
+            let hook_health = self.health.clone();
 
             let register_res = self.inner.register_host_before_commit(
                 wants,
@@ -884,7 +915,12 @@ impl Database {
                             match maybe_func? {
                                 None => Ok(None),
                                 Some(func) => {
-                                    let ret = call_js_hook_sync(&js_env, func, payload)?;
+                                    let call_res = call_js_hook_sync(&js_env, func, payload);
+                                    // Re-check handle health after hook execution: a panicked handle must never commit!
+                                    if let Some(refused) = hook_health.refusal("Database.beforeCommit") {
+                                        return Err(refused);
+                                    }
+                                    let ret = call_res?;
                                     let ret = match check_not_thenable(&js_env, ret) {
                                         ThenableCheck::Value(v) => v,
                                         ThenableCheck::AsyncForbidden => {

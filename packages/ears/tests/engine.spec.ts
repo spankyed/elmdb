@@ -595,4 +595,120 @@ describe('@elmdb/ears engine, batches, hooks, schema evolution & durability', ()
       expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
     );
   });
+
+  it('PR #268 Batch 3: crash-proof toEarsError/hasKnownErrorCode, beforeCommit ASYNC_CALLBACK_FORBIDDEN, flushSync in txn, and finally notifyMutation', async () => {
+    const handle = temps.open({ schema: baseSchema });
+    const engine = createEarsEngine({ database: handle.database });
+
+    // 1. Crash-proof `toEarsError` and `hasKnownErrorCode` against `Object.create(null)` & throwing getters.
+    const nullProto = Object.create(null) as unknown;
+    expect(hasKnownErrorCode(nullProto)).toBe(false);
+    const nullErr = toEarsError(nullProto);
+    expect(nullErr).toBeInstanceOf(EarsError);
+    expect(nullErr.code).toBe('INTERNAL');
+    expect(nullErr.message).toBe('[unstringifiable error]');
+
+    const hostileGetters = Object.defineProperties({}, {
+      code: {
+        get() {
+          throw new Error('code getter boom');
+        },
+      },
+      message: {
+        get() {
+          throw new Error('message getter boom');
+        },
+      },
+      toString: {
+        value() {
+          throw new Error('toString boom');
+        },
+      },
+    });
+    expect(hasKnownErrorCode(hostileGetters)).toBe(false);
+    const hostileErr = toEarsError(hostileGetters, 'INVALID_ARGUMENT');
+    expect(hostileErr.code).toBe('INVALID_ARGUMENT');
+    expect(hostileErr.message).toBe('[unstringifiable error]');
+
+    // 2. `beforeCommit` callable thenable AND async batch builder preserve `ASYNC_CALLBACK_FORBIDDEN`.
+    const callableThenable = Object.assign(() => {}, {
+      then() {},
+    });
+    const unsubCallable = engine.beforeCommit(['Task'], () => callableThenable as unknown as void);
+    expect(() => engine.create('Task', { title: 'callable-thenable', done: false })).toThrowError(
+      expect.objectContaining({ code: 'ASYNC_CALLBACK_FORBIDDEN' }),
+    );
+    unsubCallable();
+
+    const unsubAsyncBuilder = engine.beforeCommit(
+      ['Task'],
+      () => (async () => {}) as unknown as (b: Parameters<typeof encodeBatch>[0] extends (x: infer W) => void ? W : never) => void,
+    );
+    expect(() => engine.create('Task', { title: 'async-builder', done: false })).toThrowError(
+      expect.objectContaining({ code: 'ASYNC_CALLBACK_FORBIDDEN' }),
+    );
+    unsubAsyncBuilder();
+
+    // 3. `watches.flushSync()` inside `transact()` fails fast with `INVALID_ARGUMENT` WITHOUT unregistering healthy watches!
+    const watchCounts: number[] = [];
+    const wh = engine.query.of('Task').watchCount((c) => watchCounts.push(c), {
+      minGapMs: 0,
+      adaptiveMultiplier: 0,
+    });
+    expect(watchCounts).toEqual([0]);
+    engine.transact(() => {
+      engine.create('Task', { title: 'inside-txn', done: false }, 'b3-txn-1');
+      expect(() => engine.watches.flushSync()).toThrowError(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+      );
+      expect(wh.active).toBe(true);
+    });
+    expect(wh.active).toBe(true);
+    engine.watches.flushSync();
+    expect(watchCounts).toEqual([0, 1]);
+    wh.stop();
+
+    // 4. `flush()`, `flushAsync()`, and `driveBackgroundWork()` notify watches in `finally` even when throwing after partial progress.
+    let notified = 0;
+    const rawDb = handle.database;
+    const wrappedDb = new Proxy(rawDb, {
+      get(target, prop, receiver) {
+        if (prop === 'tickWatches') {
+          return (nowMs: number) => {
+            notified++;
+            return target.tickWatches(nowMs);
+          };
+        }
+        if (prop === 'flush') {
+          return () => {
+            throw new EarsError('IO', 'flush partial failure');
+          };
+        }
+        if (prop === 'flushAsync') {
+          return async () => {
+            throw new EarsError('IO', 'flushAsync partial failure');
+          };
+        }
+        if (prop === 'driveBackgroundWork') {
+          return () => {
+            throw new EarsError('IO', 'bg partial failure');
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const eng2 = createEarsEngine({ database: wrappedDb });
+    const wh2 = eng2.query.of('Task').watchCount(() => {}, { minGapMs: 0 });
+    notified = 0;
+    expect(() => eng2.admin.flush()).toThrowError(expect.objectContaining({ code: 'IO' }));
+    expect(notified).toBeGreaterThanOrEqual(1);
+    notified = 0;
+    await expect(eng2.admin.flushAsync()).rejects.toMatchObject({ code: 'IO' });
+    expect(notified).toBeGreaterThanOrEqual(1);
+    notified = 0;
+    expect(() => eng2.admin.driveBackgroundWork(10)).toThrowError(expect.objectContaining({ code: 'IO' }));
+    expect(notified).toBeGreaterThanOrEqual(1);
+    wh2.stop();
+  });
 });

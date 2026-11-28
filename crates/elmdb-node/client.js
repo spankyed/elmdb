@@ -4,6 +4,63 @@
 'use strict';
 
 const TEXT_ENCODER = new TextEncoder();
+const TYPED_ARRAY_PROTO = Object.getPrototypeOf(Uint8Array.prototype);
+const TYPED_ARRAY_TAG_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, Symbol.toStringTag)?.get;
+const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'buffer')?.get;
+const TYPED_ARRAY_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'byteOffset')?.get;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'byteLength')?.get;
+const DATE_GET_TIME = Date.prototype.getTime;
+
+/**
+ * Brand-checks a genuine `Uint8Array` (including Node `Buffer` and cross-realm `Uint8Array`)
+ * via `%TypedArray%.prototype[Symbol.toStringTag]`, rejecting prototype-spoofed objects.
+ * @param {unknown} v
+ * @returns {Uint8Array | null}
+ */
+function asRealUint8Array(v) {
+  if (
+    v === null ||
+    typeof v !== 'object' ||
+    !TYPED_ARRAY_TAG_GETTER ||
+    !TYPED_ARRAY_BUFFER_GETTER ||
+    !TYPED_ARRAY_BYTE_OFFSET_GETTER ||
+    !TYPED_ARRAY_BYTE_LENGTH_GETTER
+  ) {
+    return null;
+  }
+  try {
+    if (TYPED_ARRAY_TAG_GETTER.call(v) !== 'Uint8Array') return null;
+    const buffer = /** @type {ArrayBufferLike} */ (TYPED_ARRAY_BUFFER_GETTER.call(v));
+    const byteOffset = /** @type {number} */ (TYPED_ARRAY_BYTE_OFFSET_GETTER.call(v));
+    const byteLength = /** @type {number} */ (TYPED_ARRAY_BYTE_LENGTH_GETTER.call(v));
+    return new Uint8Array(buffer, byteOffset, byteLength);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns true if `s` contains any unpaired UTF-16 surrogate code unit (`0xD800..=0xDFFF`),
+ * which `TextEncoder` would silently replace with U+FFFD and could collide distinct JS keys.
+ * @param {string} s
+ * @returns {boolean}
+ */
+function hasLoneSurrogate(s) {
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i++;
+      } else {
+        return true;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /** Branded intra-batch reference returned by `WireBatchBuilder.create(...)`. */
 class BatchSlot {
@@ -143,7 +200,12 @@ class WireWriter {
       throw new TypeError('BatchSlot cannot be passed as a field value; use link() or an explicit externalId');
     }
     if (value instanceof Date) {
-      const ms = value.getTime();
+      let ms;
+      try {
+        ms = DATE_GET_TIME.call(value);
+      } catch {
+        throw new TypeError('Invalid Date object (prototype-spoofed Date is not permitted)');
+      }
       if (!Number.isFinite(ms)) {
         throw new RangeError('Invalid Date timestamp');
       }
@@ -152,10 +214,11 @@ class WireWriter {
       this.u32(0);
       return;
     }
-    if (value instanceof Uint8Array) {
+    const realBytes = asRealUint8Array(value);
+    if (realBytes !== null) {
       this.u8(9); // Bytes
-      this.u32(value.byteLength);
-      this.raw(value);
+      this.u32(realBytes.byteLength);
+      this.raw(realBytes);
       return;
     }
     if (Array.isArray(value)) {
@@ -181,6 +244,9 @@ class WireWriter {
         if (key === '__proto__') {
           throw new TypeError("Reserved key '__proto__' is not permitted");
         }
+        if (hasLoneSurrogate(key)) {
+          throw new TypeError('Object key contains an unpaired UTF-16 surrogate');
+        }
         const v = obj[key];
         if (v !== undefined) {
           entries.push([TEXT_ENCODER.encode(key), v]);
@@ -188,6 +254,11 @@ class WireWriter {
       }
       // Strictly sort keys in UTF-8 byte order to match Rust `str::cmp`.
       entries.sort((a, b) => compareBytes(a[0], b[0]));
+      for (let i = 1; i < entries.length; i++) {
+        if (compareBytes(entries[i - 1][0], entries[i][0]) === 0) {
+          throw new TypeError('Object contains duplicate keys after UTF-8 encoding');
+        }
+      }
       this.u32(entries.length);
       const start = this.len;
       for (let i = 0; i < entries.length; i++) {
@@ -212,6 +283,9 @@ class WireWriter {
     for (const key of Object.keys(fields)) {
       if (key === '__proto__') {
         throw new TypeError("Reserved field name '__proto__' is not permitted");
+      }
+      if (hasLoneSurrogate(key)) {
+        throw new TypeError('Field name contains an unpaired UTF-16 surrogate');
       }
       const val = fields[key];
       if (val !== undefined) pairs.push([key, val]);
