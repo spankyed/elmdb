@@ -30,21 +30,29 @@ fn check_cancel(cancel: Option<&AtomicBool>) -> Result<()> {
 // Shewchuk's Exact Floating-Point Expansion (`ExactSum`)
 // ---------------------------------------------------------------------------
 
-/// Order-independent exact floating-point accumulator (Shewchuk expansion), rounding once to nearest-even.
+/// `2^-512`: exact power-of-two downscale for large values (`|x| >= 2^500`), preventing
+/// intermediate `f64` overflow (e.g. `[f64::MAX, f64::MAX, -f64::MAX]`) with zero rounding error.
+const EXACT_SCALE_DOWN: f64 = f64::from_bits((1023u64 - 512) << 52);
+/// `2^+512`: exact inverse of `EXACT_SCALE_DOWN`.
+const EXACT_SCALE_UP: f64 = f64::from_bits((1023u64 + 512) << 52);
+/// `2^+500`: boundary separating the scaled high band from the unscaled low band.
+const EXACT_HIGH_THRESHOLD: f64 = f64::from_bits((1023u64 + 500) << 52);
+/// `2^+1000`: threshold below which unscaled high-band parts safely fold into the low band.
+const EXACT_UNSCALED_FOLD_LIMIT: f64 = f64::from_bits((1023u64 + 1000) << 52);
+/// `2^-510`: minimum magnitude whose `EXACT_SCALE_DOWN` product stays normal (`>= 2^-1022`).
+const EXACT_LOW_NORMAL_MIN: f64 = f64::from_bits((1023u64 - 510) << 52);
+/// `2^-500`: tiny tie-break sentinel in scaled space (935+ bits below ULP when `|high| >= 2^1000`).
+const EXACT_TINY_SIGN: f64 = f64::from_bits((1023u64 - 500) << 52);
+
 #[derive(Debug, Default, Clone)]
-pub struct ExactSum {
+struct ShewchukBand {
     parts: Vec<f64>,
 }
 
-impl ExactSum {
-    /// Adds `x` to the expansion. Returns `false` (leaving the accumulator unchanged) if `x` is
-    /// non-finite or adding `x` would overflow `f64`.
-    pub fn add(&mut self, mut x: f64) -> bool {
-        if !x.is_finite() {
-            return false;
-        }
+impl ShewchukBand {
+    fn add(&mut self, mut x: f64) {
         if x == 0.0 {
-            return true;
+            return;
         }
         let mut next = Vec::with_capacity(self.parts.len() + 1);
         for &part in &self.parts {
@@ -53,26 +61,19 @@ impl ExactSum {
                 std::mem::swap(&mut x, &mut y);
             }
             let sum = x + y;
-            if !sum.is_finite() {
-                return false;
-            }
             let lost = y - (sum - x);
             if lost != 0.0 {
                 next.push(lost);
             }
             x = sum;
         }
-        if !x.is_finite() {
-            return false;
-        }
         if x != 0.0 {
             next.push(x);
         }
         self.parts = next;
-        true
     }
 
-    pub fn total(&self) -> f64 {
+    fn total(&self) -> f64 {
         let mut parts = self.parts.iter().rev();
         let mut total = parts.next().copied().unwrap_or(0.0);
         let mut lost = 0.0;
@@ -94,6 +95,73 @@ impl ExactSum {
             }
         }
         total + 0.0
+    }
+}
+
+/// Order-independent exact floating-point accumulator (two-band scaled Shewchuk expansion),
+/// immune to intermediate `f64` overflow and rounding once to nearest-even.
+#[derive(Debug, Default, Clone)]
+pub struct ExactSum {
+    low: ShewchukBand,
+    high: ShewchukBand,
+}
+
+impl ExactSum {
+    /// Adds `x` to the expansion. Returns `false` (leaving the accumulator unchanged) only if `x` is
+    /// non-finite; finite inputs never fail from intermediate overflow.
+    pub fn add(&mut self, x: f64) -> bool {
+        if !x.is_finite() {
+            return false;
+        }
+        if x == 0.0 {
+            return true;
+        }
+        if x.abs() >= EXACT_HIGH_THRESHOLD {
+            self.high.add(x * EXACT_SCALE_DOWN);
+        } else {
+            self.low.add(x);
+        }
+        true
+    }
+
+    /// Returns the exact nearest-even finite `f64` sum, or `None` if the true mathematical sum
+    /// overflows finite `f64` (order-independent across all permutations).
+    pub fn try_total(&self) -> Option<f64> {
+        if self.high.parts.is_empty() {
+            let v = self.low.total();
+            return v.is_finite().then_some(v);
+        }
+        let can_fold_unscaled = self.high.parts.iter().all(|&p| {
+            let unscaled = p * EXACT_SCALE_UP;
+            unscaled.is_finite() && unscaled.abs() < EXACT_UNSCALED_FOLD_LIMIT
+        });
+        if can_fold_unscaled {
+            let mut combined = self.low.clone();
+            for &p in &self.high.parts {
+                combined.add(p * EXACT_SCALE_UP);
+            }
+            let v = combined.total();
+            return v.is_finite().then_some(v);
+        }
+        let mut combined = self.high.clone();
+        let mut tiny = ShewchukBand::default();
+        for &p in &self.low.parts {
+            if p.abs() >= EXACT_LOW_NORMAL_MIN {
+                combined.add(p * EXACT_SCALE_DOWN);
+            } else {
+                tiny.add(p);
+            }
+        }
+        let tiny_total = tiny.total();
+        if tiny_total != 0.0 {
+            combined.add(tiny_total.signum() * EXACT_TINY_SIGN);
+        }
+        let unscaled = combined.total() * EXACT_SCALE_UP;
+        unscaled.is_finite().then_some(unscaled)
+    }
+
+    pub fn total(&self) -> f64 {
+        self.try_total().unwrap_or(f64::INFINITY)
     }
 }
 

@@ -201,6 +201,10 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         errorCode: earsErr.code,
       });
       throw earsErr;
+    } finally {
+      if (!isInWriteTxn()) {
+        pump.notifyMutation();
+      }
     }
     if (ops > 0 && isInWriteTxn()) {
       outerTxnMutated = true;
@@ -211,9 +215,6 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       requestBytes,
       responseBytes: 0,
     });
-    if (!isInWriteTxn()) {
-      pump.notifyMutation();
-    }
     return result;
   };
 
@@ -249,14 +250,13 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       }
     },
     setSchema(schema: Schema): SchemaChange {
-      let change: SchemaChange;
       try {
-        change = db.setSchema(schema);
+        return db.setSchema(schema);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
-      return change;
     },
     getSchema(): Schema {
       try {
@@ -266,44 +266,40 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       }
     },
     renameType(oldType: string, newType: string, rewriteIds?: boolean): number {
-      let count: number;
       try {
-        count = db.renameType(oldType, newType, rewriteIds);
+        return db.renameType(oldType, newType, rewriteIds);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
-      return count;
     },
     renameField(typeName: string, oldField: string, newField: string): number {
-      let count: number;
       try {
-        count = db.renameField(typeName, oldField, newField);
+        return db.renameField(typeName, oldField, newField);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
-      return count;
     },
     renameRelation(oldRel: string, newRel: string): number {
-      let count: number;
       try {
-        count = db.renameRelation(oldRel, newRel);
+        return db.renameRelation(oldRel, newRel);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
-      return count;
     },
     purgeArchived(typeName: string): number {
-      let count: number;
       try {
-        count = db.purgeArchived(typeName);
+        return db.purgeArchived(typeName);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
-      return count;
     },
     driveBackgroundWork(maxEntities?: number): boolean {
       let more: boolean;
@@ -353,16 +349,18 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         db.rebuild(indexName);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
     },
     async rebuildAsync(indexName?: string): Promise<void> {
       try {
         await db.rebuildAsync(indexName);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
     },
     stats(): DatabaseStats {
       try {
@@ -498,9 +496,12 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         const earsErr = toEarsError(error);
         finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
         throw earsErr;
+      } finally {
+        if (!isInWriteTxn()) {
+          pump.notifyMutation();
+        }
       }
       finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-      pump.notifyMutation();
     },
     batch,
     executeWireBatch: (payload: Uint8Array): BatchResult => runBatchPayload(payload, wireBatchOpCount(payload)),
@@ -531,7 +532,6 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         }, opts) as T;
       } catch (error) {
         outerTxnMutated = prevOuterMutated;
-        txnDepth--;
         if (hasKnownErrorCode(error)) {
           const earsErr = toEarsError(error);
           finish?.({ outcome: 'aborted', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
@@ -539,17 +539,18 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         }
         finish?.({ outcome: 'aborted', requestBytes: 0, responseBytes: 0 });
         throw error;
+      } finally {
+        txnDepth--;
+        if (isOuter) {
+          pump.notifyMutation();
+        }
       }
-      txnDepth--;
       finish?.({
         outcome: 'ok',
         ...(commitSeq !== undefined && { sequence: commitSeq }),
         requestBytes: 0,
         responseBytes: 0,
       });
-      if (isOuter) {
-        pump.notifyMutation();
-      }
       return value;
     },
     pendingCommitSeq(): number | null {

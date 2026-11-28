@@ -49,6 +49,18 @@ fn bad_arg(msg: impl Into<String>) -> napi::Error<Code> {
     napi::Error::new(Code(ErrorCode::InvalidArgument.as_str()), msg.into())
 }
 
+fn strict_str(s: napi::JsString<'_>) -> Result<String, Code> {
+    let utf16 = s.into_utf16().map_err(|e| bad_arg(format!("invalid string argument: {e}")))?;
+    // `JsStringUtf16::as_slice()` includes the trailing NUL written by `napi_get_value_string_utf16`.
+    let raw = utf16.as_slice();
+    let units = raw.strip_suffix(&[0]).unwrap_or(raw);
+    String::from_utf16(units).map_err(|_| bad_arg("string argument contains an unpaired UTF-16 surrogate"))
+}
+
+fn strict_opt_str(s: Option<napi::JsString<'_>>) -> Result<Option<String>, Code> {
+    s.map(strict_str).transpose()
+}
+
 const MAX_SAFE_JS_INT: f64 = 9_007_199_254_740_991.0;
 
 fn whole(name: &str, value: Option<f64>, least: f64) -> Result<Option<u64>, Code> {
@@ -567,9 +579,14 @@ impl Task for OpenTask {
 impl Database {
     /// Opens an existing elmdb v2 database or creates a new one in `dir`.
     #[napi(factory)]
-    pub fn open(env: Env, dir: String, options: Option<OpenOptions>) -> Result<Database, Code> {
+    pub fn open(
+        env: Env,
+        #[napi(ts_arg_type = "string")] dir: napi::JsString<'_>,
+        options: Option<OpenOptions>,
+    ) -> Result<Database, Code> {
         guarded("Database.open", || {
             process::claim()?;
+            let dir = strict_str(dir)?;
             let (opts, schema) = parse_open_options(options)?;
             let db = Arc::new(elmdb::Database::open(&dir, opts.clone()).map_err(to_js)?);
             if let Some(s) = schema {
@@ -588,9 +605,13 @@ impl Database {
 
     /// Opens an elmdb v2 database asynchronously on Node's worker pool.
     #[napi(ts_return_type = "Promise<Database>")]
-    pub fn open_async(dir: String, options: Option<OpenOptions>) -> Result<AsyncTask<OpenTask>, Code> {
+    pub fn open_async(
+        #[napi(ts_arg_type = "string")] dir: napi::JsString<'_>,
+        options: Option<OpenOptions>,
+    ) -> Result<AsyncTask<OpenTask>, Code> {
         guarded("Database.openAsync", || {
             process::claim()?;
+            let dir = strict_str(dir)?;
             let (opts, schema) = parse_open_options(options)?;
             Ok(AsyncTask::new(OpenTask { dir: PathBuf::from(dir), opts, schema, failed: None }))
         })
@@ -598,9 +619,15 @@ impl Database {
 
     /// Loads a portable v2 JSON dump file into a brand-new database directory.
     #[napi(ts_return_type = "DumpReport")]
-    pub fn load(env: Env, dump_file: String, target_dir: String) -> Result<Unknown<'static>, Code> {
+    pub fn load(
+        env: Env,
+        #[napi(ts_arg_type = "string")] dump_file: napi::JsString<'_>,
+        #[napi(ts_arg_type = "string")] target_dir: napi::JsString<'_>,
+    ) -> Result<Unknown<'static>, Code> {
         guarded("Database.load", || {
             process::claim()?;
+            let dump_file = strict_str(dump_file)?;
+            let target_dir = strict_str(target_dir)?;
             let report = elmdb::dump::load(&dump_file, &target_dir).map_err(to_js)?;
             to_js_json(&env, &report)
         })
@@ -649,24 +676,45 @@ impl Database {
     }
 
     #[napi]
-    pub fn rename_type(&self, old_type: String, new_type: String, rewrite_ids: Option<bool>) -> Result<f64, Code> {
+    pub fn rename_type(
+        &self,
+        #[napi(ts_arg_type = "string")] old_type: napi::JsString<'_>,
+        #[napi(ts_arg_type = "string")] new_type: napi::JsString<'_>,
+        rewrite_ids: Option<bool>,
+    ) -> Result<f64, Code> {
         self.health.guarded("Database.renameType", || {
+            let old_type = strict_str(old_type)?;
+            let new_type = strict_str(new_type)?;
             let epoch = self.inner.rename_type(&old_type, &new_type, rewrite_ids.unwrap_or(false)).map_err(to_js)?;
             Ok(epoch as f64)
         })
     }
 
     #[napi]
-    pub fn rename_field(&self, type_name: String, old_field: String, new_field: String) -> Result<f64, Code> {
+    pub fn rename_field(
+        &self,
+        #[napi(ts_arg_type = "string")] type_name: napi::JsString<'_>,
+        #[napi(ts_arg_type = "string")] old_field: napi::JsString<'_>,
+        #[napi(ts_arg_type = "string")] new_field: napi::JsString<'_>,
+    ) -> Result<f64, Code> {
         self.health.guarded("Database.renameField", || {
+            let type_name = strict_str(type_name)?;
+            let old_field = strict_str(old_field)?;
+            let new_field = strict_str(new_field)?;
             let epoch = self.inner.rename_field(&type_name, &old_field, &new_field).map_err(to_js)?;
             Ok(epoch as f64)
         })
     }
 
     #[napi]
-    pub fn rename_relation(&self, old_rel: String, new_rel: String) -> Result<f64, Code> {
+    pub fn rename_relation(
+        &self,
+        #[napi(ts_arg_type = "string")] old_rel: napi::JsString<'_>,
+        #[napi(ts_arg_type = "string")] new_rel: napi::JsString<'_>,
+    ) -> Result<f64, Code> {
         self.health.guarded("Database.renameRelation", || {
+            let old_rel = strict_str(old_rel)?;
+            let new_rel = strict_str(new_rel)?;
             let epoch = self.inner.rename_relation(&old_rel, &new_rel).map_err(to_js)?;
             Ok(epoch as f64)
         })
@@ -775,8 +823,9 @@ impl Database {
     /// Atomically increments and returns the named persistent counter (`1, 2, 3, ...`).
     /// Participates in the active `transact()` / `beforeCommit` savepoint and rolls back on abort.
     #[napi]
-    pub fn next_counter(&self, name: String) -> Result<f64, Code> {
+    pub fn next_counter(&self, #[napi(ts_arg_type = "string")] name: napi::JsString<'_>) -> Result<f64, Code> {
         self.health.guarded("Database.nextCounter", || {
+            let name = strict_str(name)?;
             let val = self.inner.next_counter(&name).map_err(to_js)?;
             counter_to_js_safe(val)
         })
@@ -784,8 +833,9 @@ impl Database {
 
     /// Reads the current value of the named persistent counter (`0` if unset), with RYOW inside `transact()`.
     #[napi]
-    pub fn get_counter(&self, name: String) -> Result<f64, Code> {
+    pub fn get_counter(&self, #[napi(ts_arg_type = "string")] name: napi::JsString<'_>) -> Result<f64, Code> {
         self.health.guarded("Database.getCounter", || {
+            let name = strict_str(name)?;
             let val = self.inner.get_counter(&name).map_err(to_js)?;
             counter_to_js_safe(val)
         })
@@ -794,8 +844,13 @@ impl Database {
     /// Sets the named persistent counter (e.g. preserving imported high-water marks).
     /// Participates in the active `transact()` / `beforeCommit` savepoint and rolls back on abort.
     #[napi]
-    pub fn set_counter(&self, name: String, value: f64) -> Result<(), Code> {
+    pub fn set_counter(
+        &self,
+        #[napi(ts_arg_type = "string")] name: napi::JsString<'_>,
+        value: f64,
+    ) -> Result<(), Code> {
         self.health.guarded("Database.setCounter", || {
+            let name = strict_str(name)?;
             let val = whole("value", Some(value), 0.0)?.expect("present");
             self.inner.set_counter(&name, val).map_err(to_js)
         })
@@ -803,8 +858,15 @@ impl Database {
 
     /// Sets primary vector embeddings for `extId` on `indexName`.
     #[napi]
-    pub fn set_embeddings(&self, index_name: String, ext_id: String, vectors: Vec<Vec<f64>>) -> Result<(), Code> {
+    pub fn set_embeddings(
+        &self,
+        #[napi(ts_arg_type = "string")] index_name: napi::JsString<'_>,
+        #[napi(ts_arg_type = "string")] ext_id: napi::JsString<'_>,
+        vectors: Vec<Vec<f64>>,
+    ) -> Result<(), Code> {
         self.health.guarded("Database.setEmbeddings", || {
+            let index_name = strict_str(index_name)?;
+            let ext_id = strict_str(ext_id)?;
             let mut f32_vecs = Vec::with_capacity(vectors.len());
             for v in vectors {
                 let mut out = Vec::with_capacity(v.len());
@@ -822,8 +884,9 @@ impl Database {
 
     /// Permanently destroys all entities belonging to an archived type.
     #[napi]
-    pub fn purge_archived(&self, type_name: String) -> Result<f64, Code> {
+    pub fn purge_archived(&self, #[napi(ts_arg_type = "string")] type_name: napi::JsString<'_>) -> Result<f64, Code> {
         self.health.guarded("Database.purgeArchived", || {
+            let type_name = strict_str(type_name)?;
             let count = self.inner.purge_archived(&type_name).map_err(to_js)?;
             Ok(count as f64)
         })
@@ -841,7 +904,7 @@ impl Database {
     pub fn register_before_commit(
         &self,
         env: Env,
-        type_names: Option<Vec<String>>,
+        #[napi(ts_arg_type = "Array<string> | null | undefined")] type_names: Option<Vec<napi::JsString<'_>>>,
         #[napi(
             ts_arg_type = "(delta: { commitSeq: number; entities: Array<{ id: string; typeName: string; op: 'create' | 'update' | 'trash' | 'restore' | 'destroy' }>; edges: Array<{ relKind: string; op: 'link' | 'unlink' | 'update'; sourceId: string; targetId: string }> }) => unknown"
         )]
@@ -854,7 +917,8 @@ impl Database {
                 None => TypeMask::all(),
                 Some(names) => {
                     let mut m = TypeMask::empty();
-                    for name in names {
+                    for raw_name in names {
+                        let name = strict_str(raw_name)?;
                         let td = schema.type_by_name(&name).ok_or_else(|| {
                             to_js(ElmdbError::new(ErrorCode::UnknownType, format!("unknown type '{name}'")))
                         })?;
@@ -1011,8 +1075,13 @@ impl Database {
 
     /// Reads one entity row by external ID with all `EntityRef`s resolved in a single pinned MVCC snapshot.
     #[napi(ts_return_type = "Row | null")]
-    pub fn get(&self, env: Env, ext_id: String) -> Result<Unknown<'static>, Code> {
+    pub fn get(
+        &self,
+        env: Env,
+        #[napi(ts_arg_type = "string")] ext_id: napi::JsString<'_>,
+    ) -> Result<Unknown<'static>, Code> {
         self.health.guarded("Database.get", || {
+            let ext_id = strict_str(ext_id)?;
             let row = self.inner.get_row_resolved(&ext_id).map_err(to_js)?;
             to_js_json(&env, &row)
         })
@@ -1023,11 +1092,14 @@ impl Database {
     pub fn get_edges(
         &self,
         env: Env,
-        ext_id: String,
-        rel_kind: Option<String>,
-        dir: Option<String>,
+        #[napi(ts_arg_type = "string")] ext_id: napi::JsString<'_>,
+        #[napi(ts_arg_type = "string | null | undefined")] rel_kind: Option<napi::JsString<'_>>,
+        #[napi(ts_arg_type = "string | null | undefined")] dir: Option<napi::JsString<'_>>,
     ) -> Result<Unknown<'static>, Code> {
         self.health.guarded("Database.getEdges", || {
+            let ext_id = strict_str(ext_id)?;
+            let rel_kind = strict_opt_str(rel_kind)?;
+            let dir = strict_opt_str(dir)?;
             let d = parse_edge_dir(dir.as_deref())?;
             let out = self.inner.get_edges_resolved(&ext_id, rel_kind.as_deref(), d).map_err(to_js)?;
             to_js_json(&env, &out)
@@ -1226,8 +1298,13 @@ impl Database {
     }
 
     #[napi(ts_return_type = "CheckReport")]
-    pub fn check(&self, env: Env, index_name: Option<String>) -> Result<Unknown<'static>, Code> {
+    pub fn check(
+        &self,
+        env: Env,
+        #[napi(ts_arg_type = "string | null | undefined")] index_name: Option<napi::JsString<'_>>,
+    ) -> Result<Unknown<'static>, Code> {
         self.health.guarded("Database.check", || {
+            let index_name = strict_opt_str(index_name)?;
             let rep = self.inner.check(index_name.as_deref()).map_err(to_js)?;
             to_js_json(&env, &rep)
         })
@@ -1236,9 +1313,10 @@ impl Database {
     #[napi(ts_return_type = "Promise<CheckReport>")]
     pub fn check_async(
         &self,
-        index_name: Option<String>,
+        #[napi(ts_arg_type = "string | null | undefined")] index_name: Option<napi::JsString<'_>>,
     ) -> Result<AsyncTask<Job<serde_json::Value, Unknown<'static>>>, Code> {
         self.health.guarded("Database.checkAsync", || {
+            let index_name = strict_opt_str(index_name)?;
             Ok(AsyncTask::new(Job::new(
                 self.inner.again(),
                 self.health.clone(),
@@ -1254,13 +1332,23 @@ impl Database {
     }
 
     #[napi]
-    pub fn rebuild(&self, index_name: Option<String>) -> Result<(), Code> {
-        self.health.guarded("Database.rebuild", || self.inner.rebuild(index_name.as_deref()).map_err(to_js))
+    pub fn rebuild(
+        &self,
+        #[napi(ts_arg_type = "string | null | undefined")] index_name: Option<napi::JsString<'_>>,
+    ) -> Result<(), Code> {
+        self.health.guarded("Database.rebuild", || {
+            let index_name = strict_opt_str(index_name)?;
+            self.inner.rebuild(index_name.as_deref()).map_err(to_js)
+        })
     }
 
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn rebuild_async(&self, index_name: Option<String>) -> Result<AsyncTask<Job<(), ()>>, Code> {
+    pub fn rebuild_async(
+        &self,
+        #[napi(ts_arg_type = "string | null | undefined")] index_name: Option<napi::JsString<'_>>,
+    ) -> Result<AsyncTask<Job<(), ()>>, Code> {
         self.health.guarded("Database.rebuildAsync", || {
+            let index_name = strict_opt_str(index_name)?;
             Ok(AsyncTask::new(Job::new(
                 self.inner.again(),
                 self.health.clone(),
@@ -1288,8 +1376,13 @@ impl Database {
     }
 
     #[napi]
-    pub fn backup(&self, target_dir: String, overwrite_backup: Option<bool>) -> Result<(), Code> {
+    pub fn backup(
+        &self,
+        #[napi(ts_arg_type = "string")] target_dir: napi::JsString<'_>,
+        overwrite_backup: Option<bool>,
+    ) -> Result<(), Code> {
         self.health.guarded("Database.backup", || {
+            let target_dir = strict_str(target_dir)?;
             let mode = if overwrite_backup.unwrap_or(false) { BackupInto::Backups } else { BackupInto::New };
             self.inner.backup_into(&target_dir, mode).map_err(to_js)
         })
@@ -1298,10 +1391,11 @@ impl Database {
     #[napi(ts_return_type = "Promise<void>")]
     pub fn backup_async(
         &self,
-        target_dir: String,
+        #[napi(ts_arg_type = "string")] target_dir: napi::JsString<'_>,
         overwrite_backup: Option<bool>,
     ) -> Result<AsyncTask<Job<(), ()>>, Code> {
         self.health.guarded("Database.backupAsync", || {
+            let target_dir = strict_str(target_dir)?;
             let mode = if overwrite_backup.unwrap_or(false) { BackupInto::Backups } else { BackupInto::New };
             Ok(AsyncTask::new(Job::new(
                 self.inner.again(),
@@ -1314,8 +1408,13 @@ impl Database {
     }
 
     #[napi(ts_return_type = "DumpReport")]
-    pub fn dump(&self, env: Env, target_file: String) -> Result<Unknown<'static>, Code> {
+    pub fn dump(
+        &self,
+        env: Env,
+        #[napi(ts_arg_type = "string")] target_file: napi::JsString<'_>,
+    ) -> Result<Unknown<'static>, Code> {
         self.health.guarded("Database.dump", || {
+            let target_file = strict_str(target_file)?;
             let rep = elmdb::dump::dump(&self.inner, &target_file).map_err(to_js)?;
             to_js_json(&env, &rep)
         })

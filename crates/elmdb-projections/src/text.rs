@@ -840,25 +840,46 @@ pub fn prefix_terms<R: KvRead>(
 
 /// Analyzes a sequence of phrase elements into `(term, relative_position)` pairs, preserving
 /// co-located compound code tokens (e.g. `THR-12` emits `"thr"` and `"thr-12"` at `rel_pos = 0`
-/// and `"12"` at `rel_pos = 1`, followed by the next element at `rel_pos = 2`).
+/// and `"12"` at `rel_pos = 1`, followed by the next element at `rel_pos = 2`) and preserving
+/// oversized (`> MAX_TERM_BYTES`) words so phrases containing or ending on an unindexed long
+/// word never silently truncate and falsely match shorter prefixes.
 pub fn analyze_phrase(terms: &[String], stem_lang: Option<&str>) -> Vec<(String, u32)> {
+    let stemmer = stem_lang.and_then(stem_algorithm).map(Stemmer::create);
     let mut out = Vec::new();
     let mut base_pos = 0u32;
     for t in terms {
-        let toks = analyze_text(t, stem_lang);
-        if toks.is_empty() {
+        let mut words: Vec<(String, u32, usize, usize)> = Vec::new();
+        for token in t.as_str().tokenize() {
+            if !token.is_word() || token.lemma().is_empty() {
+                continue;
+            }
+            words.push((token.lemma().to_owned(), words.len() as u32, token.byte_start, token.byte_end));
+        }
+        if words.is_empty() {
             let lower = t.to_lowercase();
             if !lower.is_empty() {
                 out.push((lower, base_pos));
                 base_pos = base_pos.saturating_add(1);
             }
         } else {
-            let mut max_pos = 0u32;
-            for tok in toks {
-                max_pos = max_pos.max(tok.position);
-                out.push((tok.term, base_pos.saturating_add(tok.position)));
+            for (idx, (lemma, pos, _byte_start, byte_end)) in words.iter().enumerate() {
+                let stemmed = match &stemmer {
+                    Some(s) => s.stem(lemma).into_owned(),
+                    None => lemma.clone(),
+                };
+                out.push((stemmed, base_pos.saturating_add(*pos)));
+                if let Some((next_lemma, _, next_start, _)) = words.get(idx + 1)
+                    && t.get(*byte_end..*next_start) == Some("-")
+                    && lemma.chars().all(char::is_alphabetic)
+                    && next_lemma.chars().all(|c| c.is_ascii_digit())
+                {
+                    let code = format!("{lemma}-{next_lemma}");
+                    if code.len() <= MAX_TERM_BYTES {
+                        out.push((code, base_pos.saturating_add(*pos)));
+                    }
+                }
             }
-            base_pos = base_pos.saturating_add(max_pos.saturating_add(1));
+            base_pos = base_pos.saturating_add(words.len() as u32);
         }
     }
     out
@@ -1821,5 +1842,22 @@ mod tests {
         write_varint(1, &mut dup_blk);
         write_varint(1, &mut dup_blk);
         assert_eq!(PostingBlock::decode(&dup_blk).unwrap_err().code, ErrorCode::Corrupted);
+    }
+
+    #[test]
+    fn analyze_phrase_preserves_words_longer_than_128_bytes() {
+        let long_word = "a".repeat(MAX_TERM_BYTES + 10);
+        let single_str = vec![format!("hello {long_word}")];
+        let terms = analyze_phrase(&single_str, None);
+        assert_eq!(terms, vec![("hello".to_owned(), 0), (long_word.clone(), 1)]);
+
+        let split_str = vec!["hello".to_owned(), long_word.clone()];
+        assert_eq!(analyze_phrase(&split_str, None), vec![("hello".to_owned(), 0), (long_word.clone(), 1)]);
+
+        let code_and_long = vec![format!("THR-12 {long_word}")];
+        assert_eq!(
+            analyze_phrase(&code_and_long, None),
+            vec![("thr".to_owned(), 0), ("thr-12".to_owned(), 0), ("12".to_owned(), 1), (long_word, 2)]
+        );
     }
 }

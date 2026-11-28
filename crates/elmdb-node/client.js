@@ -77,6 +77,9 @@ function hasLoneSurrogate(s) {
   return false;
 }
 
+/** @type {WeakMap<BatchSlot, WireBatchBuilder>} */
+const SLOT_OWNERS = new WeakMap();
+
 /** Branded intra-batch reference returned by `WireBatchBuilder.create(...)`. */
 class BatchSlot {
   /** @param {number} index */
@@ -158,14 +161,30 @@ class WireWriter {
     this.raw(bytes);
   }
 
-  /** @param {string | BatchSlot} target */
-  target(target) {
+  /** @param {string} s @param {string} label */
+  ident(s, label) {
+    if (typeof s !== 'string') {
+      throw new TypeError(`Expected string for ${label}, got ${typeof s}`);
+    }
+    if (hasLoneSurrogate(s)) {
+      throw new TypeError(`${label} contains an unpaired UTF-16 surrogate`);
+    }
+    const bytes = TEXT_ENCODER.encode(s);
+    this.u32(bytes.length);
+    this.raw(bytes);
+  }
+
+  /** @param {string | BatchSlot} target @param {WireBatchBuilder} owner */
+  target(target, owner) {
     if (target instanceof BatchSlot) {
+      if (SLOT_OWNERS.get(target) !== owner) {
+        throw new TypeError('BatchSlot does not belong to this WireBatchBuilder');
+      }
       this.u8(1);
       this.u32(target.slot);
     } else if (typeof target === 'string') {
       this.u8(0);
-      this.str(target);
+      this.ident(target, 'Entity ID');
     } else {
       throw new TypeError('Entity target must be a string external ID or a BatchSlot');
     }
@@ -345,6 +364,7 @@ class WireBatchBuilder {
    */
   create(typeName, fields, externalId) {
     const slot = new BatchSlot(this._nextSlot++);
+    SLOT_OWNERS.set(slot, this);
     this._ops.push({ tag: 1, typeName, externalId, fields: fields === undefined ? {} : fields });
     return slot;
   }
@@ -437,33 +457,33 @@ class WireBatchBuilder {
       w.u8(op.tag);
       switch (op.tag) {
         case 1:
-          w.str(op.typeName);
+          w.ident(op.typeName, 'Type name');
           if (op.externalId !== undefined && op.externalId !== null) {
             w.u8(1);
-            w.str(op.externalId);
+            w.ident(op.externalId, 'Entity ID');
           } else {
             w.u8(0);
           }
           w.fieldPairs(op.fields);
           break;
         case 2:
-          w.target(op.target);
+          w.target(op.target, this);
           w.fieldPairs(op.fields);
           break;
         case 3:
-          w.target(op.target);
+          w.target(op.target, this);
           w.u32(op.fields.length);
-          for (const f of op.fields) w.str(f);
+          for (const f of op.fields) w.ident(f, 'Field name');
           break;
         case 4:
         case 5:
         case 6:
-          w.target(op.target);
+          w.target(op.target, this);
           break;
         case 7:
-          w.target(op.source);
-          w.str(op.relKind);
-          w.target(op.target);
+          w.target(op.source, this);
+          w.ident(op.relKind, 'Relation kind');
+          w.target(op.target, this);
           if (op.weight !== undefined && op.weight !== null) {
             if (typeof op.weight !== 'number' || !Number.isFinite(op.weight)) {
               throw new RangeError('Link weight must be a finite number');
@@ -481,16 +501,16 @@ class WireBatchBuilder {
           }
           break;
         case 8:
-          w.target(op.source);
+          w.target(op.source, this);
           if (op.relKind !== undefined && op.relKind !== null) {
             w.u8(1);
-            w.str(op.relKind);
+            w.ident(op.relKind, 'Relation kind');
           } else {
             w.u8(0);
           }
           if (op.target !== undefined && op.target !== null) {
             w.u8(1);
-            w.target(op.target);
+            w.target(op.target, this);
           } else {
             w.u8(0);
           }

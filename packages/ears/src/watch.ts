@@ -223,7 +223,7 @@ export class WatchPump implements WatchController {
     if (clamped > this.#lastNowMs) {
       this.#lastNowMs = clamped;
     }
-    return clamped;
+    return this.#lastNowMs;
   }
 
   get activeCount(): number {
@@ -370,7 +370,13 @@ export class WatchPump implements WatchController {
   }
 
   flushSync(nowMs?: number): number {
-    if (this.#isInWriteTxn?.()) {
+    let dbInWriteTxn = false;
+    try {
+      dbInWriteTxn = this.#db.pendingCommitSeq() !== null;
+    } catch {
+      // If the handle is closed/poisoned, fall through so `#stopped` / `#drain` handles it cleanly.
+    }
+    if (this.#isInWriteTxn?.() || dbInWriteTxn) {
       throw new EarsError(
         'INVALID_ARGUMENT',
         'watches.flushSync() cannot be called inside an active write transaction or beforeCommit hook',
