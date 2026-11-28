@@ -481,20 +481,21 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
   t.after(() => { try { db.close(); } catch {} });
 
   db.setSchema({
-    types: { Blob: { fields: { body: { type: 'string' } }, indexes: {} } },
+    types: { Blob: { fields: { body: { type: 'bytes' } }, indexes: {} } },
     relations: {},
   });
 
-  const incompressibleAscii = (len, seed) => {
+  // Full 8-bit uniform pseudo-random bytes (8.0 bits/byte entropy) defeat zstd FSE on every OS/page size.
+  const incompressibleBytes = (len, seed) => {
     let x = (seed >>> 0) || 1;
     const bytes = new Uint8Array(len);
     for (let i = 0; i < len; i += 1) {
       x ^= (x << 13) >>> 0;
       x ^= (x >>> 17) >>> 0;
       x ^= (x << 5) >>> 0;
-      bytes[i] = 33 + (x % 90);
+      bytes[i] = (x >>> 16) & 0xff;
     }
-    return Buffer.from(bytes).toString('ascii');
+    return bytes;
   };
 
   // 1. Spoofed STORAGE_FULL thrown from a JS beforeCommit hook (without hitting real MDB_MAP_FULL on this DB)
@@ -506,7 +507,7 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
     throw err;
   });
   assert.throws(
-    () => db.executeWireBatch(buildWireBatch((b) => { b.create('Blob', { body: 'tiny' }, 'spoof-1'); })),
+    () => db.executeWireBatch(buildWireBatch((b) => { b.create('Blob', { body: new Uint8Array([1, 2, 3]) }, 'spoof-1'); })),
     (err) => err.code === 'HOOK_ABORTED',
   );
   assert.equal(db.stats().mapSizeBytes, beforeSize);
@@ -516,7 +517,7 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
   //    and succeeds on caller retry!
   const bigLen = beforeSize + 8 * 1024;
   const bigWire = buildWireBatch((b) => {
-    b.create('Blob', { body: incompressibleAscii(bigLen, 1) }, 'big-node-tx');
+    b.create('Blob', { body: incompressibleBytes(bigLen, 1) }, 'big-node-tx');
   });
   let threwInsideCallback = false;
   assert.throws(
@@ -536,13 +537,13 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
   db.transact(() => {
     db.executeWireBatch(bigWire);
   });
-  assert.equal(db.get('big-node-tx')?.fields.body.length, bigLen);
+  assert.ok(db.query({ source: { kind: 'type', typeName: 'Blob' }, steps: [], terminal: { kind: 'ids' } }).ids.includes('big-node-tx'));
 
   // 3. Standalone executeWireBatch whose JS beforeCommit hook writes directly via executeWireBatch and
   //    hits real MDB_MAP_FULL auto-grows and retries cleanly!
   const sizeBeforeHook = db.stats().mapSizeBytes;
   const hugeHookWire = buildWireBatch((b) => {
-    b.create('Blob', { body: incompressibleAscii(sizeBeforeHook * 2 + 64 * 1024, 2) }, 'hook-big-node');
+    b.create('Blob', { body: incompressibleBytes(sizeBeforeHook * 2 + 64 * 1024, 2) }, 'hook-big-node');
   });
   let hookCalls = 0;
   const hReal = db.registerBeforeCommit(['Blob'], (delta) => {
@@ -553,10 +554,10 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
     return null;
   });
   db.executeWireBatch(buildWireBatch((b) => {
-    b.create('Blob', { body: 'small' }, 'hook-trigger-node');
+    b.create('Blob', { body: new Uint8Array([4, 5, 6]) }, 'hook-trigger-node');
   }));
   assert.ok(hookCalls >= 2, `expected beforeCommit retry after MapFull (hookCalls=${hookCalls})`);
   assert.ok(db.stats().mapSizeBytes > sizeBeforeHook);
-  assert.ok(db.get('hook-big-node'));
+  assert.ok(db.query({ source: { kind: 'type', typeName: 'Blob' }, steps: [], terminal: { kind: 'ids' } }).ids.includes('hook-big-node'));
   db.unregisterBeforeCommit(hReal);
 });

@@ -3101,7 +3101,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
         Database::open(tmp.path().join("db"), OpenOptions { map_size: Some(512 * 1024), ..OpenOptions::default() })
             .unwrap();
     let mut fields = BTreeMap::new();
-    fields.insert("body".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    fields.insert("body".into(), FieldDefinition { kind: FieldSpec::Bytes, optional: false, nullable: false });
     let mut types = BTreeMap::new();
     types.insert(
         "Blob".into(),
@@ -3145,7 +3145,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
         .execute_batch(&[WireOp::Create {
             type_name: "Blob".into(),
             external_id: Some("spoof-trigger".into()),
-            fields: vec![("body".into(), CanonicalValue::String("small".into()))],
+            fields: vec![("body".into(), CanonicalValue::Bytes(b"small".to_vec()))],
         }])
         .unwrap_err();
     assert_eq!(spoof_err.code, ErrorCode::HookAborted);
@@ -3163,7 +3163,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
         .execute_batch(&[WireOp::Create {
             type_name: "Blob".into(),
             external_id: Some("async-trigger".into()),
-            fields: vec![("body".into(), CanonicalValue::String("small".into()))],
+            fields: vec![("body".into(), CanonicalValue::Bytes(b"small".to_vec()))],
         }])
         .unwrap_err();
     assert_eq!(async_err.code, ErrorCode::AsyncCallbackForbidden);
@@ -3171,15 +3171,16 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
 
     // 4. Real MDB_MAP_FULL inside `transact_scoped` mapped to `Cancelled` (exact elmdb-node pattern)
     //    MUST grow the map so caller retry succeeds!
-    //    Use deterministic incompressible ASCII so zstd cannot shrink it below `map_size`.
-    let incompressible = |len: usize, seed: u64| -> String {
+    //    Use full 8-bit uniform pseudo-random bytes (8.0 bits/byte Shannon entropy) so zstd FSE
+    //    cannot shrink the payload below `map_size` on any OS/page size.
+    let incompressible = |len: usize, seed: u64| -> Vec<u8> {
         let mut x = seed ^ 0x9e37_79b9_7f4a_7c15;
-        let mut out = String::with_capacity(len);
+        let mut out = Vec::with_capacity(len);
         for _ in 0..len {
             x ^= x << 13;
             x ^= x >> 7;
             x ^= x << 17;
-            out.push((b'!' + (x % 90) as u8) as char);
+            out.push((x >> 24) as u8);
         }
         out
     };
@@ -3187,7 +3188,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
     let big_ops = vec![WireOp::Create {
         type_name: "Blob".into(),
         external_id: Some("big-tx".into()),
-        fields: vec![("body".into(), CanonicalValue::String(incompressible(big_len, 1)))],
+        fields: vec![("body".into(), CanonicalValue::Bytes(incompressible(big_len, 1)))],
     }];
     let first_err = db
         .transact_scoped(TransactOptions::default(), || -> Result<()> {
@@ -3234,7 +3235,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
                         .execute_batch(&[WireOp::Create {
                             type_name: "Blob".into(),
                             external_id: Some("caught-big".into()),
-                            fields: vec![("body".into(), CanonicalValue::String(catch_payload.clone()))],
+                            fields: vec![("body".into(), CanonicalValue::Bytes(catch_payload.clone()))],
                         }])
                         .unwrap_err();
                     assert!(err.is_map_full());
@@ -3258,7 +3259,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
         .execute_batch(&[WireOp::Create {
             type_name: "Blob".into(),
             external_id: Some("caught-then-spoof".into()),
-            fields: vec![("body".into(), CanonicalValue::String("small".into()))],
+            fields: vec![("body".into(), CanonicalValue::Bytes(b"small".to_vec()))],
         }])
         .unwrap_err();
     assert_eq!(spoof_after_err.code, ErrorCode::HookAborted);
@@ -3286,7 +3287,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
                     db_for_hook.execute_batch(&[WireOp::Create {
                         type_name: "Blob".into(),
                         external_id: Some("hook-big-written".into()),
-                        fields: vec![("body".into(), CanonicalValue::String(real_hook_payload.clone()))],
+                        fields: vec![("body".into(), CanonicalValue::Bytes(real_hook_payload.clone()))],
                     }])?;
                 }
                 Ok(None)
@@ -3297,7 +3298,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
         .execute_batch(&[WireOp::Create {
             type_name: "Blob".into(),
             external_id: Some("hook-big-trigger".into()),
-            fields: vec![("body".into(), CanonicalValue::String("small".into()))],
+            fields: vec![("body".into(), CanonicalValue::Bytes(b"small".to_vec()))],
         }])
         .unwrap();
     assert!(hook_runs.load(Ordering::SeqCst) >= 2, "expected MapFull retry");

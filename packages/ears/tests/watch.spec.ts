@@ -867,7 +867,7 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     w2.stop();
   });
 
-  it('PR #268 Batch 3: createSystemClock is monotonic integer ms and fractional clocks never kill watches (3.6)', async () => {
+  it('PR #268 Batch 3: createSystemClock is monotonic integer ms and fractional clocks never kill watches (3.6)', () => {
     const sys = createSystemClock();
     const t1 = sys.now();
     const t2 = sys.now();
