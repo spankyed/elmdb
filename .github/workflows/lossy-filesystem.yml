@@ -71,6 +71,9 @@ jobs:
           log_all_operations=false
           logfile=""
           EOF
+          # torn-seq commands do not read faults-done.fifo; omitting fifo_path_completed stops LazyFS's fault worker
+          # from blocking on open(faults-done.fifo, O_WRONLY) after a fresh remount.
+          sed 's|^fifo_path_completed=.*|fifo_path_completed=""|' "$RUNNER_TEMP/lazyfs.toml" > "$RUNNER_TEMP/lazyfs-seq.toml"
           # Mounts LazyFS with the config it is given, once whatever was mounted is gone: one that crashed as it tore a
           # write leaves its mount behind it
           cat > "$RUNNER_TEMP/mount.sh" <<EOF
@@ -115,6 +118,10 @@ jobs:
           sh "$RUNNER_TEMP/mount.sh" "$RUNNER_TEMP/lazyfs.toml"
           sudo sh -c 'echo 1 > /proc/sys/vm/drop_caches'
           EOF
+          cat > "$RUNNER_TEMP/heal-seq.sh" <<EOF
+          sh "$RUNNER_TEMP/mount.sh" "$RUNNER_TEMP/lazyfs-seq.toml"
+          sudo sh -c 'echo 1 > /proc/sys/vm/drop_caches'
+          EOF
 
       - name: Each database opens at its writer's last sync
         env:
@@ -148,9 +155,10 @@ jobs:
         env:
           ELMDB_SEQ_DIR: ${{ runner.temp }}/lazyfs.mnt/seq-pinned
           ELMDB_SEQ_ARM: ${{ runner.temp }}/arm-seq.sh
-          ELMDB_TORN_HEAL: ${{ runner.temp }}/heal.sh
+          ELMDB_TORN_HEAL: ${{ runner.temp }}/heal-seq.sh
           SEQ_TEST: a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_intact
         run: |
+          sh "$RUNNER_TEMP/heal-seq.sh"
           mkdir -p "$ELMDB_SEQ_DIR"
           cargo test -p elmdb --features failpoints --test power_loss -- --ignored --exact "$SEQ_TEST" --nocapture --test-threads=1
 
@@ -158,10 +166,11 @@ jobs:
         env:
           ELMDB_SEQ_DIR: ${{ runner.temp }}/lazyfs.mnt/seq-unpinned
           ELMDB_SEQ_ARM: ${{ runner.temp }}/arm-seq.sh
-          ELMDB_TORN_HEAL: ${{ runner.temp }}/heal.sh
+          ELMDB_TORN_HEAL: ${{ runner.temp }}/heal-seq.sh
           ELMDB_LOSSY_UNPINNED: "1"
           SEQ_TEST: a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_intact
         run: |
+          sh "$RUNNER_TEMP/heal-seq.sh"
           mkdir -p "$ELMDB_SEQ_DIR"
           if cargo test -p elmdb --features failpoints --test power_loss -- --ignored --exact "$SEQ_TEST" --nocapture --test-threads=1 > unpinned.log 2>&1; then
             cat unpinned.log
