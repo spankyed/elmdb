@@ -759,6 +759,13 @@ impl KvStore for SimKvStore {
         self.map_gate.write()
     }
 
+    /// Begins a read-only MVCC snapshot transaction.
+    ///
+    /// Note: unlike `LmdbStore::begin_read`, `SimRoTxn` intentionally does not acquire L2
+    /// `MapGate::read_arc()` so single-thread DST tests (`dst_durability.rs`) can hold multiple
+    /// concurrent `SimRoTxn`s alongside `SimRwTxn` on the same thread without triggering the
+    /// non-recursive L2 debug tracker. L2 `MapGate` read/write exclusion is modeled directly in
+    /// `elmdb-storage::locks::model` (`locks_model.rs`).
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
         if take_fault_u32(&self.fail_next_read_map_resized) {
             return Err(StorageError::MapResized);

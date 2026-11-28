@@ -1,22 +1,21 @@
 """Mutate the code the Shuttle models hold, and test each mutant against those models, which no other run does.
 
 `python3 scripts/mutants-models.py [MODEL ...] [--iterations N] [--jobs J] [--list]`: for each model named (all by
-default), cargo-mutants over the source file the model holds, built with `--cfg shuttle` in release, each mutant
-tested by that model's cases alone, at `N` schedules (`ELMDB_SHUTTLE_ITERATIONS`). A mutant that survives is tested
-once more at ten times the schedules, since Shuttle's are random and a weak mutant can pass one run by chance. Exits
-nonzero when one survives both, and writes `target/mutants-models/report.md`, which the weekly workflow
-(`.github/workflows/model-mutants.yml`) files as an issue.
+default), cargo-mutants over the modelled source scope, built with `--cfg shuttle` on `--profile model-mutants`
+(optimized without LTO), each mutant tested by that model's `--lib` cases alone at `N` schedules
+(`ELMDB_SHUTTLE_ITERATIONS`). A mutant that survives is tested once more at ten times the schedules, since Shuttle's
+schedules are randomized. Exits nonzero when one survives both, and writes `target/mutants-models/report.md`, which
+`.github/workflows/model-mutants.yml` files as an issue.
 
 The per-pull-request gate (`scripts/mutants-in-diff.py`) tests mutants against the suite a plain build runs, which
-holds none of the models: so `.cargo/mutants.toml` excludes from it what only a model tells apart, saying so. This run
-is what checks those exclusions. It reads the source's `// mutant-skip:` comments, each naming a mutant no input tells
-from the code, and none of `.cargo/mutants.toml`'s: a mutant that file excludes because "the model holds it" is tested
-here, and reported where the model doesn't.
+holds none of the models. This script excludes lines compiled out under `--cfg shuttle` (`shuttle-linux`), reads
+inline `// mutant-skip:` comments (not `.cargo/mutants.toml`'s), and checks each model's concurrency scope.
 
 A timeout is caught: a mutant that hangs a model's schedule is one the model tells apart. A mutant whose test allocates
-without end would take the machine, so on Linux each test runs under a limit of its address space.
+without end would take the machine, so on Linux each test runs under an 8 GiB virtual-memory cap.
 """
 import argparse
+import importlib.util
 import os
 from pathlib import Path
 import re
@@ -25,12 +24,39 @@ import subprocess
 import sys
 import tomllib
 
-# Each model: (source file mutated, test package, nextest regex prefix matching that model's cases alone)
+# Load `compiled_out` from `scripts/mutants-in-diff.py` so compiled-out `#[cfg(not(any(loom, shuttle)))]`
+# and `#[cfg(loom)]` blocks are never mutated under `--cfg shuttle`.
+_MID_SPEC = importlib.util.spec_from_file_location("mutants_in_diff", Path(__file__).with_name("mutants-in-diff.py"))
+assert _MID_SPEC and _MID_SPEC.loader
+_mid = importlib.util.module_from_spec(_MID_SPEC)
+_MID_SPEC.loader.exec_module(_mid)
+
+# Each model: (source file, test package, nextest regex prefix, optional --re scope regex for modelled methods)
 MODELS = {
-    "locks": ("crates/elmdb-storage/src/locks.rs", "elmdb-storage", "locks::model"),
-    "durability": ("crates/elmdb-storage/src/durability.rs", "elmdb-sim", "durability_model"),
-    "lifecycle": ("crates/elmdb/src/db.rs", "elmdb", "db::lifecycle_model"),
-    "invalidation": ("crates/elmdb-invalidation/src/lib.rs", "elmdb-invalidation", "model"),
+    "locks": (
+        "crates/elmdb-storage/src/locks.rs",
+        "elmdb-storage",
+        "locks::model",
+        r"(tracker::|DomainToken|SchemaEpochLock|MapGate|WriterLock|DbiPublishGate|MetaLock::(new_in_scope|lock)|MetaRwLock)",
+    ),
+    "durability": (
+        "crates/elmdb-storage/src/durability.rs",
+        "elmdb-sim",
+        "durability_model",
+        r"DurabilityGate<S, V>::(begin_read|begin_write\b|sync\b|acknowledge_restore|grow_map|adopt_and_pin_grouped|check_poisoned|poison\b|persist_durable_locked)",
+    ),
+    "lifecycle": (
+        "crates/elmdb/src/lifecycle.rs",
+        "elmdb",
+        "lifecycle::model",
+        None,
+    ),
+    "invalidation": (
+        "crates/elmdb-invalidation/src/lib.rs",
+        "elmdb-invalidation",
+        "model",
+        r"LiveQueryHub::(register_query_watch\b|rerun_query_watch\b|unregister_watch|notify_commit|notify_schema_change_with_maint|stop_watches)",
+    ),
 }
 
 parser = argparse.ArgumentParser()
@@ -65,20 +91,32 @@ if sys.platform == "linux":
     env["CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER"] = str(guard)
 
 
-def run(name, path, package, test_filter, iterations, only=None):
+def compiled_out_excludes(path):
+    """Regexes excluding lines compiled out under `--cfg shuttle` on Linux."""
+    lines = sorted(_mid.compiled_out(root, path, "shuttle-linux"))
+    if not lines:
+        return []
+    line_alts = "|".join(str(n) for n in lines)
+    return [f"^{re.escape(path)}:({line_alts}):"]
+
+
+def run(name, path, package, test_filter, scope_re, iterations, only=None):
     """cargo-mutants over `path`, `only` the mutants named if given: the names of those that survived"""
     output = out / name
     command = [
         "cargo", "mutants", "--no-config", "--file", path, "--test-package", package, "--test-tool", "nextest",
-        "--profile", "release", "--timeout-multiplier", "3", "--jobs", args.jobs, "--output", str(output),
+        "--profile", "model-mutants", "--timeout-multiplier", "3", "--jobs", args.jobs, "--output", str(output),
     ]
-    for pattern in skips:
+    for pattern in skips + compiled_out_excludes(path):
         command += ["--exclude-re", pattern]
-    for mutant in only or []:
-        command += ["--re", f"^{re.escape(mutant)}$"]
+    if only is not None:
+        for mutant in only:
+            command += ["--re", f"^{re.escape(mutant)}$"]
+    elif scope_re:
+        command += ["--re", scope_re]
     if args.list:
         command.append("--list")
-    command += ["--", "-E", f"test(/^{re.escape(test_filter)}::/)"]
+    command += ["--", "--lib", "-E", f"test(/^{re.escape(test_filter)}::/)"]
     run_env = {**env, "ELMDB_SHUTTLE_ITERATIONS": str(iterations)}
     finished = subprocess.run(command, env=run_env)
     # 0: all caught; 2: a mutant missed; 3: a timeout, which is caught here
@@ -91,13 +129,13 @@ def run(name, path, package, test_filter, iterations, only=None):
 report = ["# Mutants the Shuttle models don't catch", ""]
 survived = 0
 for name in models:
-    path, package, test_filter = MODELS[name]
-    missed = run(name, path, package, test_filter, args.iterations)
+    path, package, test_filter, scope_re = MODELS[name]
+    missed = run(name, path, package, test_filter, scope_re, args.iterations)
     if args.list:
         continue
     # Each again, alone, at ten times the schedules: one that survives that is reported. A name in `missed.txt` is
     # the whole of what `--re` matches: its file, line and column, and what it replaces
-    again = run(f"{name}-again", path, package, test_filter, args.iterations * 10, only=missed) if missed else []
+    again = run(f"{name}-again", path, package, test_filter, scope_re, args.iterations * 10, only=missed) if missed else []
     survived += len(again)
     report.append(f"## `{name}`: `{path}`, held by `{package}` (`{test_filter}`)")
     report.append("")

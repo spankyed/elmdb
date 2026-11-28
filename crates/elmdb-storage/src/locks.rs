@@ -36,7 +36,7 @@ pub mod sync {
     #[cfg(not(any(loom, shuttle)))]
     pub use parking_lot::{Mutex as PlainMutex, MutexGuard as PlainMutexGuard};
     #[cfg(not(any(loom, shuttle)))]
-    pub use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    pub use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
     #[cfg(not(any(loom, shuttle)))]
     pub use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
     #[cfg(not(any(loom, shuttle)))]
@@ -54,7 +54,7 @@ pub mod sync {
     #[cfg(shuttle)]
     pub use super::model::{PlainMutex, PlainMutexGuard};
     #[cfg(shuttle)]
-    pub use shuttle::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    pub use shuttle::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
     #[cfg(shuttle)]
     pub use shuttle::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
     #[cfg(shuttle)]
@@ -669,5 +669,15 @@ mod tests {
         let mut lock = MetaLock::new(Some(42u32));
         assert_eq!(lock.take_unlocked(), Some(42));
         assert_eq!(lock.take_unlocked(), None);
+    }
+
+    #[test]
+    fn dbi_publish_gate_new_in_scope_isolates_from_default_scope() {
+        let default_pub = DbiPublishGate::new();
+        let fresh_pub = DbiPublishGate::new_in_scope(LockScopeId::fresh());
+        // Holding L4 on DEFAULT scope while acquiring L4 on a fresh scope must succeed (proving `new_in_scope`
+        // actually stores the caller's scope rather than `LockScopeId::DEFAULT`).
+        let _g_default = default_pub.read_txn();
+        let _g_fresh = fresh_pub.read_txn();
     }
 }

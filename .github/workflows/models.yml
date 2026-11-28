@@ -1,6 +1,7 @@
 # Concurrency models with deeper bounds than a pull request's run: Loom one preemption further
 # (`LOOM_MAX_PREEMPTIONS=4`), Shuttle a hundred times the schedules (`10_000_000`) across all four
-# v2 models (`docs/architecture/testing.md`, Concurrency models).
+# v2 models, sharded across 4 parallel Shuttle runners so each model gets its own 120-minute budget
+# (`docs/architecture/testing.md`, Concurrency models).
 name: models
 
 on:
@@ -25,10 +26,18 @@ jobs:
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - run: cargo test -p elmdb-storage --release --lib locks::model
-      - run: cargo test -p elmdb --release --lib db::lifecycle_model
+      - run: cargo test -p elmdb --release --lib lifecycle::model
 
   shuttle:
-    name: concurrency models, deep (Shuttle)
+    name: concurrency models, deep (Shuttle — ${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: locks, package: elmdb-storage, filter: locks::model }
+          - { name: durability, package: elmdb-sim, filter: durability_model }
+          - { name: lifecycle, package: elmdb, filter: lifecycle::model }
+          - { name: invalidation, package: elmdb-invalidation, filter: model }
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -39,7 +48,4 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      - run: cargo test -p elmdb-storage --release --lib locks::model
-      - run: cargo test -p elmdb-sim --release --lib durability_model
-      - run: cargo test -p elmdb --release --lib db::lifecycle_model
-      - run: cargo test -p elmdb-invalidation --release --lib model
+      - run: cargo test -p ${{ matrix.package }} --release --lib ${{ matrix.filter }}

@@ -76,10 +76,10 @@ Four production concurrency models run in CI (`ci.yml` `loom` and `shuttle` jobs
 2. **Durability gate (`crates/elmdb-sim/src/durability_model.rs` — Shuttle):** real `DurabilityGate<SimKvStore, SimVfs>`
    under concurrent Grouped writes, `sync()`, `grow_map()`, `unacked_reboot` + `acknowledge_restore()`, fail-stop
    poisoning, and `MapResized`/peer-commit pin retries.
-3. **Database close & drain lifecycle (`crates/elmdb/src/db_lifecycle_model.rs` — Loom + Shuttle):** real
-   `DbLifecycle<T>` `enter_op()`/`LifecycleGuard`/`close()` `SeqCst` + `Condvar` drain handshake guaranteeing
-   `Arc::strong_count == 1` before handle teardown, concurrent `close()` waiter outcome sharing, zero-timeout behavior,
-   and `MarkCloseDone` panic safety.
+3. **Database close & drain lifecycle (`crates/elmdb/src/lifecycle.rs` & `db_lifecycle_model.rs` — Loom + Shuttle):**
+   real `DbLifecycle<T>` `enter_op()`/`LifecycleGuard`/`close()` `SeqCst` + `Condvar` drain handshake guaranteeing
+   `Arc::strong_count == 1` before handle teardown, concurrent `close()` waiter outcome sharing, zero-timeout &
+   bounded-yield behavior, and `MarkCloseDone` panic safety.
 4. **Live-query hub & scheduler (`crates/elmdb-invalidation/src/model.rs` — Shuttle):** real `LiveQueryHub` +
    `Engine<SimKvStore, SimVfs, SimClock>` + `QueryEngine` verifying zero-false-negative concurrent registration/commit,
    overlapping `rerun_query_watch` `run_id` + 3-clock fencing, and race-free `stop_watches()` / `unregister_watch()`.
@@ -89,7 +89,7 @@ Four production concurrency models run in CI (`ci.yml` `loom` and `shuttle` jobs
 RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
   cargo test -p elmdb-storage --release --lib locks::model
 RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
-  cargo test -p elmdb --release --lib db::lifecycle_model
+  cargo test -p elmdb --release --lib lifecycle::model
 
 # Fast PR-tier Shuttle runs (100,000 schedules per case by default)
 RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
@@ -97,7 +97,7 @@ RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
 RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
   cargo test -p elmdb-sim --release --lib durability_model
 RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
-  cargo test -p elmdb --release --lib db::lifecycle_model
+  cargo test -p elmdb --release --lib lifecycle::model
 RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
   cargo test -p elmdb-invalidation --release --lib model
 ```
@@ -152,7 +152,7 @@ python3 scripts/mutants-models.py durability
 
 - `.cargo/config.toml` points `TMPDIR` / `TMP` / `TEMP` at the checkout's `tmp/` directory.
 - `cargo xtask sweep` (invoked by `cargo xtask pre-push`) bounds `target/`, `target/loom`, `target/shuttle`, and the
-  scratch target (`cargo xtask scratch-target`) and refuses local builds below 20 GB free disk space.
+  scratch target (`cargo xtask scratch-target`); `cargo xtask pre-push` refuses local builds below 20 GB free disk space.
 - `cargo xtask compare` alternates commands across two git revisions in isolated worktrees under `target/compare/`.
 
 ## Platforms & releases

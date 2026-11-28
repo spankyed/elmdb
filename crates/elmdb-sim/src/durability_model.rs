@@ -3,11 +3,16 @@
 //!
 //! Verifies:
 //! - Concurrent Grouped commits, `sync()`, and `grow_map()` / `adopt_resized_map()` preserve
-//!   monotonic `txnid`, durable-pin protection (`pinned_txnid <= sealed_txnid`), and crash safety.
-//! - `unacked_reboot` blocks all writes and syncs across concurrent threads until `acknowledge_restore()`.
+//!   monotonic `txnid`, durable-pin protection (`pinned_txnid <= durable_txnid`), and crash safety
+//!   across 3+ post-remap unsynced commits (`D+1..D+3`, triggering `SimKvStore`'s freelist-reuse check).
+//! - `unacked_reboot` blocks sidecar sealing (`sync()` returns `Ok(None)`) and `copy_compacted()`
+//!   across concurrent threads until `acknowledge_restore()` succeeds.
 //! - Permanent fail-stop poisoning on sync failure blocks all subsequent concurrent readers,
 //!   writers, and syncers with `StorageError::Poisoned`.
-//! - Concurrent `MapResized` and peer-commit races during Grouped pin-and-seal retry safely.
+//! - Concurrent peer commits between `prepare_durable_pin` and `active_receipt`, plus `MapResized`
+//!   and `peer_commit_on_adopt` races, retry cleanly without ever leaving `pinned > sealed`.
+
+use std::path::Path;
 
 use elmdb_storage::locks::model::{Arc, AtomicBool, Ordering, explore, thread};
 use elmdb_storage::{BootId, DbFlags, DurabilityGate, DurabilityMode, KvRead, RecoveryStatus, StorageError};
@@ -64,12 +69,18 @@ fn grouped_concurrent_writes_sync_and_remap_preserve_pin_and_crash_safety() {
 
         assert!(r1.txnid >= 2);
         assert!(new_size >= SimKvConfig::default().map_size * 2);
-        // After sync + grow_map, Grouped mode must ALWAYS still hold a durable pin!
-        assert!(store.pinned_txnid().is_some(), "Grouped durable pin lost across concurrent sync/grow_map");
+        // After sync + grow_map, Grouped mode must ALWAYS still hold a durable pin <= durable_txnid!
+        let durable = store.durable_txnid();
+        assert!(
+            store.pinned_txnid().is_some_and(|p| p <= durable),
+            "Grouped durable pin {:?} must be present and <= durable_txnid {durable}",
+            store.pinned_txnid()
+        );
 
-        // Perform two more unsynced commits and simulate sudden power loss + reboot:
-        // durable pages must never be overwritten because the pin protects them!
-        for i in 0..2u8 {
+        // Perform 3 unsynced commits (D+1, D+2, D+3) and simulate sudden power loss + reboot:
+        // 3 unsynced commits cross SimKvStore's `freed_at + 2` freelist-reuse threshold, proving
+        // the durable pin genuinely protected durable pages across concurrent sync & remap!
+        for i in 0..3u8 {
             let mut w = gate.begin_write().expect("post-remap write");
             let db = w.open_subdb("data", DbFlags::DEFAULT).expect("subdb");
             w.put(db, &[b'x', i], b"unsynced").expect("put");
@@ -93,7 +104,7 @@ fn grouped_concurrent_writes_sync_and_remap_preserve_pin_and_crash_safety() {
 }
 
 #[test]
-fn unacked_reboot_blocks_concurrent_writes_and_sync_until_acknowledged() {
+fn unacked_reboot_blocks_sidecar_sealing_and_backup_until_acknowledged() {
     explore(|| {
         let store = SimKvStore::new(SimKvConfig::default());
         let vfs = SimVfs::new(BootId([0x11; 16]));
@@ -113,9 +124,10 @@ fn unacked_reboot_blocks_concurrent_writes_and_sync_until_acknowledged() {
             DurabilityGate::open(store.clone(), vfs.clone(), "/sim-db", DurabilityMode::Grouped).expect("reopen");
         assert_eq!(report.status, RecoveryStatus::UnsyncedAfterReboot);
         assert!(gate.has_unacked_reboot());
+        // Before acknowledgment, backup (`copy_compacted`) MUST fail closed!
+        assert!(matches!(gate.copy_compacted(Path::new("/sim-bak")), Err(StorageError::DurabilityFailed(_))));
 
         let gate = Arc::new(gate);
-        let ack_done = Arc::new(AtomicBool::new(false));
 
         let t_writer = {
             let gate = Arc::clone(&gate);
@@ -129,26 +141,21 @@ fn unacked_reboot_blocks_concurrent_writes_and_sync_until_acknowledged() {
 
         let t_syncer = {
             let gate = Arc::clone(&gate);
-            let ack_done = Arc::clone(&ack_done);
             thread::spawn(move || {
-                let before_ack = !ack_done.load(Ordering::Acquire);
                 let slot = gate.sync().expect("sync during unacked reboot must flush without failing");
                 if slot.is_some() {
                     // `sync()` may ONLY seal `synced.v2` (`Some(slot)`) once `acknowledge_restore()`
                     // has cleared `unacked_reboot`!
                     assert!(!gate.has_unacked_reboot(), "sync() sealed sidecar while unacked_reboot was still set");
                 }
-                let _ = before_ack;
             })
         };
 
         let t_ack = {
             let gate = Arc::clone(&gate);
-            let ack_done = Arc::clone(&ack_done);
             thread::spawn(move || {
                 let slot = gate.acknowledge_restore().expect("acknowledge_restore");
                 assert!(slot.is_some(), "acknowledge_restore in Grouped mode must seal a SyncSlot");
-                ack_done.store(true, Ordering::Release);
             })
         };
 
@@ -208,16 +215,20 @@ fn sync_failure_permanently_poisons_concurrent_readers_and_writers() {
         let t_writer = {
             let gate = Arc::clone(&gate);
             let sync_failed = Arc::clone(&sync_failed);
-            thread::spawn(move || match gate.begin_write() {
-                Ok(mut w) => {
-                    let db = w.open_subdb("data", DbFlags::DEFAULT).expect("subdb");
-                    w.put(db, b"k2", b"v2").expect("put");
-                    let _ = w.commit();
-                }
-                Err(StorageError::Poisoned(_)) => {}
-                Err(other) => {
-                    let _ = sync_failed.load(Ordering::SeqCst);
-                    panic!("unexpected writer error: {other:?}");
+            thread::spawn(move || {
+                let already_poisoned = sync_failed.load(Ordering::SeqCst);
+                match gate.begin_write() {
+                    Ok(mut w) => {
+                        assert!(!already_poisoned, "writer begun AFTER sync failure poisoned gate must fail closed");
+                        let db = w.open_subdb("data", DbFlags::DEFAULT).expect("subdb");
+                        w.put(db, b"k2", b"v2").expect("put");
+                        match w.commit() {
+                            Ok(_) | Err(StorageError::Poisoned(_)) => {}
+                            Err(other) => panic!("unexpected commit error: {other:?}"),
+                        }
+                    }
+                    Err(StorageError::Poisoned(_)) => {}
+                    Err(other) => panic!("unexpected writer error: {other:?}"),
                 }
             })
         };
@@ -243,13 +254,13 @@ fn grouped_pin_race_and_map_resized_retries_safely_under_concurrency() {
             w.put(db, b"k0", b"v0").expect("put");
             w.commit().expect("commit");
         }
-        // Inject both a MapResized on pin and a peer-commit mismatch between pin and receipt!
-        store.inject_pin_map_resized(1);
+        // Phase 1: Inject ONLY a peer commit between `prepare_durable_pin` (P) and `active_receipt` (S)
+        // so `persist_durable_locked` genuinely exercises the `P <= S` pin-before-receipt path!
         store.inject_peer_commit_on_receipt(1);
 
         let t_sync = {
             let gate = Arc::clone(&gate);
-            thread::spawn(move || gate.sync().expect("sync must recover via bounded retry"))
+            thread::spawn(move || gate.sync().expect("sync must seal P <= S cleanly"))
         };
 
         let t_writer = {
@@ -267,5 +278,13 @@ fn grouped_pin_race_and_map_resized_retries_safely_under_concurrency() {
 
         let pinned = store.pinned_txnid().expect("pin must be installed after sync");
         assert!(pinned <= slot.txnid, "pin {pinned} must never exceed sealed txnid {}", slot.txnid);
+
+        // Phase 2: Inject `MapResized` on pin + peer commit on adopt, proving `adopt_and_pin_grouped`
+        // retries cleanly and still leaves `pinned <= sealed`!
+        store.inject_pin_map_resized(1);
+        store.inject_peer_commit_on_adopt(1);
+        let slot2 = gate.sync().expect("sync after MapResized + peer commit on adopt").expect("slot2");
+        let pinned2 = store.pinned_txnid().expect("pin after adopt");
+        assert!(pinned2 <= slot2.txnid, "pin {pinned2} must never exceed sealed txnid {}", slot2.txnid);
     });
 }

@@ -109,6 +109,14 @@ debug = "line-tables-only"
 inherits = "test"
 debug = 0
 
+# Optimized build without LTO for weekly Shuttle model-mutation runs (`scripts/mutants-models.py`),
+# keeping per-mutant rebuild times fast while running 200k..2M Shuttle schedules at release speed.
+[profile.model-mutants]
+inherits = "release"
+lto = false
+codegen-units = 16
+debug = 0
+
 [profile.release]
 lto = true
 codegen-units = 1

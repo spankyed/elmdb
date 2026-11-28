@@ -10,6 +10,7 @@ pub mod db;
 pub mod diagnostics;
 pub mod dump;
 pub(crate) mod fs_publish;
+pub(crate) mod lifecycle;
 pub mod protocol;
 
 pub use db::{

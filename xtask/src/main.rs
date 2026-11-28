@@ -117,6 +117,7 @@ const SYNC_CHECKED_CRATES: &[&str] = &[
     "elmdb-lmdb",
     "elmdb-projections",
     "elmdb-query",
+    "elmdb-sim",
     "elmdb-storage",
     "elmdb-vec",
     "elmdb-wire",

@@ -137,13 +137,15 @@ impl<T> Drop for ModelMutexGuard<T> {
 
 struct ModelRwState<T> {
     readers: usize,
+    waiting_writers: usize,
     writer: bool,
     value: Option<std::sync::Arc<T>>,
 }
 
-/// Safe owned-guard reader-writer lock backed by Loom/Shuttle `Mutex` + `Condvar`.
-/// Supports concurrent `read()` / `'static` `read_arc()` and exclusive `write()` with
-/// `#![forbid(unsafe_code)]`.
+/// Safe write-preferring owned-guard reader-writer lock backed by Loom/Shuttle `Mutex` + `Condvar`,
+/// mirroring `parking_lot::RwLock`'s writer-preference so models catch reader-stall deadlocks
+/// (e.g. `DbiPublishGate` lane ordering). Supports concurrent `read()` / `'static` `read_arc()`
+/// and exclusive `write()` with `#![forbid(unsafe_code)]`.
 pub(super) struct ModelRwLock<T> {
     inner: std::sync::Arc<(sync::Mutex<ModelRwState<T>>, sync::Condvar)>,
 }
@@ -164,7 +166,12 @@ impl<T> ModelRwLock<T> {
     pub(super) fn new(value: T) -> Self {
         Self {
             inner: std::sync::Arc::new((
-                sync::Mutex::new(ModelRwState { readers: 0, writer: false, value: Some(std::sync::Arc::new(value)) }),
+                sync::Mutex::new(ModelRwState {
+                    readers: 0,
+                    waiting_writers: 0,
+                    writer: false,
+                    value: Some(std::sync::Arc::new(value)),
+                }),
                 sync::Condvar::new(),
             )),
         }
@@ -173,7 +180,9 @@ impl<T> ModelRwLock<T> {
     pub(super) fn read_owned(&self) -> ModelRwReadGuard<T> {
         let (mu, cv) = &*self.inner;
         let mut st = mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        while st.writer {
+        // Mirror `parking_lot::RwLock`'s write-preferring semantics: new readers wait behind
+        // a queued writer so models detect any lock-ordering bug that would stall readers.
+        while st.writer || st.waiting_writers > 0 {
             st = cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         st.readers += 1;
@@ -185,9 +194,11 @@ impl<T> ModelRwLock<T> {
     pub(super) fn write_owned(&self) -> ModelRwWriteGuard<T> {
         let (mu, cv) = &*self.inner;
         let mut st = mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.waiting_writers += 1;
         while st.writer || st.readers > 0 {
             st = cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
         }
+        st.waiting_writers -= 1;
         st.writer = true;
         let arc = st.value.take().expect("ModelRwLock value present for writer");
         let value = std::sync::Arc::try_unwrap(arc).ok().expect("zero readers implies unique Arc owner");
@@ -255,8 +266,8 @@ mod tests {
     use super::*;
     use crate::locks::{DbiPublishGate, LockScopeId, MapGate, MetaLock, MetaRwLock, SchemaEpochLock, WriterLock};
 
-    /// Model 1a: L1..L5 strict hierarchy under concurrent readers, writers, and map resizers
-    /// never deadlocks and maintains mutual exclusion across `MapGate::write()` vs `read_arc()`.
+    /// Model 1a: L1..L5 strict hierarchy under concurrent readers, writers (with schema epoch bump),
+    /// and map resizers never deadlocks and maintains mutual exclusion across `MapGate::write()`.
     #[test]
     fn map_gate_resize_excludes_all_readers_and_writers() {
         explore(|| {
@@ -266,6 +277,7 @@ mod tests {
             let writer = Arc::new(WriterLock::new_in_scope(scope, 0u64));
             let meta = Arc::new(MetaLock::new_in_scope(scope, 0u64));
             let active_readers = Arc::new(AtomicUsize::new(0));
+            let active_writers = Arc::new(AtomicUsize::new(0));
             let resizing = Arc::new(AtomicBool::new(false));
 
             let t_reader = {
@@ -289,23 +301,30 @@ mod tests {
             };
 
             let t_writer = {
+                let schema = Arc::clone(&schema);
                 let map = Arc::clone(&map);
                 let writer = Arc::clone(&writer);
                 let meta = Arc::clone(&meta);
+                let active_writers = Arc::clone(&active_writers);
                 let resizing = Arc::clone(&resizing);
                 thread::spawn(move || {
+                    let mut s = schema.write();
                     let r = map.read_arc();
+                    active_writers.fetch_add(1, Ordering::SeqCst);
                     assert!(!resizing.load(Ordering::SeqCst), "writer entered during active MapGate::write");
                     let mut w = writer.lock_arc();
+                    *s += 1;
                     *w += 1;
                     let mut m = meta.lock();
                     *m += *r;
+                    active_writers.fetch_sub(1, Ordering::SeqCst);
                 })
             };
 
             let t_resizer = {
                 let map = Arc::clone(&map);
                 let active_readers = Arc::clone(&active_readers);
+                let active_writers = Arc::clone(&active_writers);
                 let resizing = Arc::clone(&resizing);
                 thread::spawn(move || {
                     let mut g = map.write();
@@ -314,6 +333,11 @@ mod tests {
                         active_readers.load(Ordering::SeqCst),
                         0,
                         "MapGate::write entered while readers were active"
+                    );
+                    assert_eq!(
+                        active_writers.load(Ordering::SeqCst),
+                        0,
+                        "MapGate::write entered while writers were active"
                     );
                     *g += 1;
                     resizing.store(false, Ordering::SeqCst);
@@ -324,6 +348,7 @@ mod tests {
             t_writer.join().unwrap();
             t_resizer.join().unwrap();
 
+            assert_eq!(*schema.read(), 1);
             assert_eq!(*map.read(), 2);
             assert_eq!(*writer.lock(), 1);
             assert!(*meta.lock() >= 1);
@@ -331,10 +356,9 @@ mod tests {
     }
 
     /// Model 1b: `DbiPublishGate` dual-lane barrier serializes `write()` against BOTH
-    /// `read_txn()` (short readers) and `read_copy()` (long backups) while letting `read_txn()`
-    /// make progress even while a `read_copy()` holds the copy lane and a publisher waits!
+    /// `read_txn()` (short readers) and `read_copy()` (long backups).
     #[test]
-    fn dbi_publish_gate_dual_lane_exclusion_and_reader_progress() {
+    fn dbi_publish_gate_dual_lane_exclusion() {
         explore(|| {
             let scope = LockScopeId::fresh();
             let gate = Arc::new(DbiPublishGate::new_in_scope(scope));
@@ -395,7 +419,57 @@ mod tests {
         });
     }
 
-    /// Model 1c: Cross-database nested locks with distinct `LockScopeId`s never trigger false
+    /// Model 1c: With write-preferring `ModelRwLock`, a publisher blocked on a long `read_copy()`
+    /// MUST NOT park on `pub_lock` and stall concurrent `read_txn()` readers!
+    /// Here `t_copy` holds `read_copy()` until `t_reader` finishes `read_txn()` (synchronized via
+    /// Condvar), while `t_pub` concurrently attempts `gate.write()`. If `write()` ever acquired
+    /// `pub_lock` before `copy_lock` (or collapsed the two lanes), this deadlocks immediately!
+    #[test]
+    fn dbi_publish_gate_blocked_publisher_never_stalls_read_txn() {
+        explore(|| {
+            let scope = LockScopeId::fresh();
+            let gate = Arc::new(DbiPublishGate::new_in_scope(scope));
+            let reader_done = Arc::new((sync::Mutex::new(false), sync::Condvar::new()));
+
+            // Hold `read_copy()` on the main thread before spawning publisher & reader so
+            // `t_pub` is guaranteed to block waiting on `copy_lock` while `t_reader` runs!
+            let copy_guard = gate.read_copy();
+
+            let t_pub = {
+                let gate = Arc::clone(&gate);
+                thread::spawn(move || {
+                    let _g = gate.write();
+                })
+            };
+
+            let t_reader = {
+                let gate = Arc::clone(&gate);
+                let reader_done = Arc::clone(&reader_done);
+                thread::spawn(move || {
+                    let _r = gate.read_txn();
+                    let (mu, cv) = &*reader_done;
+                    let mut done = mu.lock().unwrap();
+                    *done = true;
+                    cv.notify_all();
+                })
+            };
+
+            // Wait for `t_reader` to complete `read_txn()` BEFORE releasing `copy_guard`!
+            {
+                let (mu, cv) = &*reader_done;
+                let mut done = mu.lock().unwrap();
+                while !*done {
+                    done = cv.wait(done).unwrap();
+                }
+            }
+            drop(copy_guard);
+
+            t_reader.join().unwrap();
+            t_pub.join().unwrap();
+        });
+    }
+
+    /// Model 1d: Cross-database nested locks with distinct `LockScopeId`s never trigger false
     /// lock-order panics even under interleaved concurrent threads sharing the same Loom/Shuttle host.
     #[test]
     fn distinct_scopes_per_simulated_thread_never_cross_contaminate() {
@@ -437,17 +511,38 @@ mod tests {
         });
     }
 
-    /// Model 1d: Holding a lock on a thread and attempting an inversion on that same simulated
-    /// thread panics cleanly even when other threads concurrently hold locks in the same scope.
+    /// Model 1e: Holding a lock on a thread and attempting an inversion on that same simulated
+    /// thread panics cleanly even when a sibling thread concurrently holds locks in the same scope.
     #[test]
-    #[should_panic(expected = "lock order violation")]
     fn same_scope_inversion_panics_under_model_tracker() {
         explore(|| {
             let scope = LockScopeId::fresh();
-            let l3 = WriterLock::new_in_scope(scope, ());
-            let l2 = MapGate::new_in_scope(scope, ());
-            let _g3 = l3.lock();
-            let _g2 = l2.read();
+            let l1 = Arc::new(SchemaEpochLock::new_in_scope(scope, ()));
+            let l2 = Arc::new(MapGate::new_in_scope(scope, ()));
+            let l3 = Arc::new(WriterLock::new_in_scope(scope, ()));
+
+            let sibling = {
+                let l1 = Arc::clone(&l1);
+                let l2 = Arc::clone(&l2);
+                thread::spawn(move || {
+                    let _g1 = l1.read();
+                    let _g2 = l2.read();
+                })
+            };
+
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _g3 = l3.lock();
+                let _g2 = l2.read();
+            }));
+            sibling.join().unwrap();
+
+            let payload = caught.expect_err("lock inversion must panic");
+            let msg = payload
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| payload.downcast_ref::<&str>().copied())
+                .unwrap_or("");
+            assert!(msg.contains("lock order violation"), "unexpected panic message: {msg:?}");
         });
     }
 }

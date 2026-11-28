@@ -195,11 +195,18 @@ fn overlapping_reruns_and_concurrent_commits_respect_run_id_fencing_and_converge
             })
         };
 
-        let (o1, _) = t_rerun1.join().unwrap();
-        let (o2, _) = t_rerun2.join().unwrap();
+        let (o1, d1) = t_rerun1.join().unwrap();
+        let (o2, d2) = t_rerun2.join().unwrap();
         t_commit2.join().unwrap();
 
-        let saw_two = [&o1, &o2].iter().any(|o| matches!(&o.result, QueryResult::Ids(ids) if ids.len() == 2));
+        let len_of = |o: &QueryOutput| match &o.result {
+            QueryResult::Ids(ids) => ids.len(),
+            other => panic!("unexpected result: {other:?}"),
+        };
+        let (l1, l2) = (len_of(&o1), len_of(&o2));
+        let saw_two = l1 == 2 || l2 == 2;
+        // At least one concurrent rerun must have delivered a new answer (from initial 0 -> 1 or 2).
+        assert!(d1 || d2, "at least one rerun after mutation must deliver");
 
         // If neither concurrent rerun observed both notes, the hub MUST NOT report settled;
         // draining one final tick+rerun MUST converge to 2 rows and settle cleanly (never wedged!).
@@ -212,11 +219,20 @@ fn overlapping_reruns_and_concurrent_commits_respect_run_id_fencing_and_converge
             let (final_out, _) = hub
                 .rerun_query_watch(wid, &engine, &qe, &plan, ExecBudgets::default(), 10_000, 1, hash_output)
                 .expect("final rerun");
-            match final_out.result {
-                QueryResult::Ids(ids) => assert_eq!(ids.len(), 2),
-                other => panic!("unexpected result: {other:?}"),
-            }
+            assert_eq!(len_of(&final_out), 2);
         }
+        assert!(hub.watches_settled());
+
+        // Regression guard: verify `last_result_hash` settled at the 2-row hash and was NOT
+        // clobbered backwards to the stale 1-row hash by a late-finishing overlapping rerun!
+        let (check_out, check_deliver) = hub
+            .rerun_query_watch(wid, &engine, &qe, &plan, ExecBudgets::default(), 20_000, 1, hash_output)
+            .expect("hash stability check rerun");
+        assert_eq!(len_of(&check_out), 2);
+        assert!(
+            !check_deliver,
+            "settled watch must hold 2-row hash (late overlapping rerun must not have clobbered last_result_hash)"
+        );
         assert!(hub.watches_settled());
     });
 }

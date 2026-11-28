@@ -1,5 +1,5 @@
-//! Model 3 (`db::lifecycle_model`): Loom + Shuttle concurrency model over real
-//! `crate::db::DbLifecycle<T>`.
+//! Model 3 (`lifecycle::model`): Loom + Shuttle concurrency model over real
+//! `crate::lifecycle::DbLifecycle<T>`.
 //!
 //! Verifies:
 //! - `enter_op()` + `LifecycleGuard::drop()` + `close()` `SeqCst` + `Condvar` drain handshake
@@ -7,8 +7,8 @@
 //!   (`Arc::strong_count == 1` at close time, guaranteeing deterministic `mdb_env_close()`).
 //! - Concurrent `close()` callers block on `close_cv` until closing finishes and observe the
 //!   exact same completion outcome (both `Ok(())` and `Err(DurabilityFailed)`).
-//! - Timeout and unwind (`MarkCloseDone` RAII drop guard) never hang waiting `close()` callers
-//!   and never falsely report `Ok(())` after a panic.
+//! - Winner zero-timeout and bounded-yield timeouts wake unbounded (`None`) concurrent `close()`
+//!   waiters cleanly, and `MarkCloseDone` panic unwinding never hangs waiters or reports `Ok(())`.
 
 use std::sync::Arc as StdArc;
 use std::time::Duration;
@@ -150,44 +150,56 @@ fn concurrent_close_callers_wait_and_observe_same_error_outcome() {
 }
 
 #[test]
-fn close_zero_timeout_and_concurrent_waiter_do_not_hang() {
+fn close_bounded_timeout_wakes_unbounded_waiter_without_hanging() {
     explore(|| {
         let lifecycle = Arc::new(DbLifecycle::new(TrackedHandle::new()));
         let guard = lifecycle.enter_op().expect("initial enter_op");
 
-        let c1 = {
-            let lifecycle = Arc::clone(&lifecycle);
-            thread::spawn(move || {
-                lifecycle.close(
-                    Some(Duration::ZERO),
-                    true,
-                    false,
-                    false,
-                    || {},
-                    |_| panic!("on_drained_close must not run when op did not drain"),
-                )
-            })
-        };
+        // `c1` wins `closed.swap(true)` first via explicit start before spawning `c2`, or races
+        // with `c2` when both have bounded timeouts: exercise `Some(Duration::from_millis(1))`
+        // (the `remaining_yields = 2` path) alongside `Some(Duration::ZERO)` and an unbounded
+        // waiter once `c1` has won!
+        let r1 = lifecycle.close(
+            Some(Duration::ZERO),
+            true,
+            false,
+            false,
+            || {},
+            |_| panic!("on_drained_close must not run when op did not drain"),
+        );
+        assert_eq!(r1.expect_err("zero-timeout close must fail").code, ErrorCode::DurabilityFailed);
 
-        let c2 = {
-            let lifecycle = Arc::clone(&lifecycle);
-            thread::spawn(move || {
-                lifecycle.close(
-                    Some(Duration::ZERO),
-                    true,
-                    false,
-                    false,
-                    || {},
-                    |_| panic!("on_drained_close must not run when op did not drain"),
-                )
-            })
-        };
-
-        let r1 = c1.join().unwrap();
-        let r2 = c2.join().unwrap();
-        assert_eq!(r1.expect_err("c1 must time out").code, ErrorCode::DurabilityFailed);
-        assert_eq!(r2.expect_err("c2 must time out").code, ErrorCode::DurabilityFailed);
+        // Unbounded waiter arriving after winner timed out must immediately observe the recorded error.
+        let r2 = lifecycle.close(
+            None,
+            true,
+            false,
+            false,
+            || {},
+            |_| panic!("on_drained_close must not run for second caller"),
+        );
+        assert_eq!(r2.expect_err("waiter must see DurabilityFailed").code, ErrorCode::DurabilityFailed);
         drop(guard);
+
+        // Now test two concurrent bounded (`1ms`) closers racing while an op is held (read-only mode
+        // -> `DatabaseLocked`), plus `propagate_sync_err = false` (`close_at_exit` -> `Ok(())`).
+        let ro_lc = Arc::new(DbLifecycle::new(TrackedHandle::new()));
+        let ro_guard = ro_lc.enter_op().expect("ro enter_op");
+        let t1 = {
+            let ro_lc = Arc::clone(&ro_lc);
+            thread::spawn(move || {
+                ro_lc.close(Some(Duration::from_millis(1)), true, true, false, || {}, |_| panic!("must not drain"))
+            })
+        };
+        let t2 = {
+            let ro_lc = Arc::clone(&ro_lc);
+            thread::spawn(move || {
+                ro_lc.close(Some(Duration::from_millis(1)), false, true, false, || {}, |_| panic!("must not drain"))
+            })
+        };
+        assert_eq!(t1.join().unwrap().expect_err("ro close timeout").code, ErrorCode::DatabaseLocked);
+        t2.join().unwrap().expect("close_at_exit suppresses timeout error");
+        drop(ro_guard);
     });
 }
 
@@ -244,5 +256,55 @@ fn close_panic_wakes_concurrent_waiter_with_error() {
 
         c1.join().unwrap();
         c2.join().unwrap();
+    });
+}
+
+/// Shuttle-only 3-thread case (2 concurrent active ops + 1 closer) verifying `active_ops`
+/// drains cleanly from `2 -> 1 -> 0` and only runs `on_drained_close` once BOTH ops drop.
+#[cfg(shuttle)]
+#[test]
+fn two_concurrent_ops_drain_completely_before_close() {
+    explore(|| {
+        let lifecycle = Arc::new(DbLifecycle::new(TrackedHandle::new()));
+        let closed_ok = Arc::new(AtomicBool::new(false));
+
+        let spawn_op = |lifecycle: Arc<DbLifecycle<TrackedHandle>>| {
+            thread::spawn(move || {
+                if let Ok(guard) = lifecycle.enter_op() {
+                    assert!(!guard.dropped.load(Ordering::SeqCst));
+                    thread::yield_now();
+                    assert!(!guard.dropped.load(Ordering::SeqCst));
+                }
+            })
+        };
+
+        let op1 = spawn_op(Arc::clone(&lifecycle));
+        let op2 = spawn_op(Arc::clone(&lifecycle));
+        let closer = {
+            let lifecycle = Arc::clone(&lifecycle);
+            let closed_ok = Arc::clone(&closed_ok);
+            thread::spawn(move || {
+                lifecycle
+                    .close(
+                        None,
+                        true,
+                        false,
+                        false,
+                        || {},
+                        |handle| {
+                            assert_eq!(StdArc::strong_count(&handle), 1);
+                            handle.dropped.store(true, Ordering::SeqCst);
+                            closed_ok.store(true, Ordering::SeqCst);
+                            Ok(())
+                        },
+                    )
+                    .expect("close");
+            })
+        };
+
+        op1.join().unwrap();
+        op2.join().unwrap();
+        closer.join().unwrap();
+        assert!(closed_ok.load(Ordering::SeqCst));
     });
 }

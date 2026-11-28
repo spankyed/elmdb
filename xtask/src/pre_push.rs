@@ -57,7 +57,7 @@ const THEN: &[Step] = &[
     },
     Step {
         name: "concurrency models (Loom: lifecycle)",
-        command: &["cargo", "test", "-p", "elmdb", "--release", "--lib", "db::lifecycle_model"],
+        command: &["cargo", "test", "-p", "elmdb", "--release", "--lib", "lifecycle::model"],
         env: &[("RUSTFLAGS", "--cfg loom"), ("LOOM_MAX_PREEMPTIONS", "3"), ("CARGO_TARGET_DIR", "target/loom")],
         stdout_to: None,
         expect: None,
@@ -78,7 +78,7 @@ const THEN: &[Step] = &[
     },
     Step {
         name: "concurrency models (Shuttle: lifecycle)",
-        command: &["cargo", "test", "-p", "elmdb", "--release", "--lib", "db::lifecycle_model"],
+        command: &["cargo", "test", "-p", "elmdb", "--release", "--lib", "lifecycle::model"],
         env: &[("RUSTFLAGS", "--cfg shuttle"), ("CARGO_TARGET_DIR", "target/shuttle")],
         stdout_to: None,
         expect: None,
