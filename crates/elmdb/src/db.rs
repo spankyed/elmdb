@@ -92,6 +92,18 @@ struct ActiveTxnSlot {
     ctx: Option<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>>,
     commit_seq: Option<u64>,
     depth: usize,
+    saw_map_full: bool,
+}
+
+impl ActiveTxnSlot {
+    fn record_result<T>(&mut self, res: Result<T>) -> Result<T> {
+        if let Err(ref err) = res
+            && err.is_map_full()
+        {
+            self.saw_map_full = true;
+        }
+        res
+    }
 }
 
 thread_local! {
@@ -356,13 +368,16 @@ impl Database {
             let slot = map
                 .get_mut(&self.id)
                 .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "expected active transaction on calling thread"))?;
-            let ctx = slot.ctx.as_mut().ok_or_else(|| {
-                ElmdbError::new(
-                    ErrorCode::InvalidArgument,
-                    "cannot call Database methods re-entrantly while a Rust beforeCommit hook owns &mut TxnCtx; use the TxnCtx argument instead",
-                )
-            })?;
-            f(ctx)
+            let res = {
+                let ctx = slot.ctx.as_mut().ok_or_else(|| {
+                    ElmdbError::new(
+                        ErrorCode::InvalidArgument,
+                        "cannot call Database methods re-entrantly while a Rust beforeCommit hook owns &mut TxnCtx; use the TxnCtx argument instead",
+                    )
+                })?;
+                f(ctx)
+            };
+            slot.record_result(res)
         })
     }
 
@@ -508,13 +523,16 @@ impl Database {
                 let slot = map
                     .get_mut(&self.id)
                     .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "expected active transaction"))?;
-                let ctx = slot.ctx.as_mut().ok_or_else(|| {
-                    ElmdbError::new(
-                        ErrorCode::InvalidArgument,
-                        "cannot nest transact() while a Rust beforeCommit hook owns &mut TxnCtx; use the TxnCtx argument instead",
-                    )
-                })?;
-                let depth = ctx.push_savepoint()?;
+                let depth_res = {
+                    let ctx = slot.ctx.as_mut().ok_or_else(|| {
+                        ElmdbError::new(
+                            ErrorCode::InvalidArgument,
+                            "cannot nest transact() while a Rust beforeCommit hook owns &mut TxnCtx; use the TxnCtx argument instead",
+                        )
+                    })?;
+                    ctx.push_savepoint()
+                };
+                let depth = slot.record_result(depth_res)?;
                 slot.depth += 1;
                 Ok(depth)
             })?;
@@ -555,6 +573,7 @@ impl Database {
                                 Err(ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on savepoint commit"))
                             }
                         };
+                        let commit_res = slot.record_result(commit_res);
                         slot.depth = slot.depth.saturating_sub(1);
                         commit_res
                     })?;
@@ -580,33 +599,39 @@ impl Database {
         // concurrent threads target the exact overflowed `before * 2` idempotently after `OuterGuard`
         // drops and releases L2 + L3.
         let mut map_size_before = eng.gate().map_size();
+        let mut saw_map_full = false;
         let result = (|| -> Result<(R, Option<(u64, elmdb_storage::CommitReceipt)>)> {
             let ctx = eng.arc().begin_owned_txn()?;
             map_size_before = eng.gate().map_size();
             let commit_seq = ctx.commit_seq();
             ACTIVE_TXNS.with(|m| {
-                m.borrow_mut()
-                    .insert(self.id, ActiveTxnSlot { ctx: Some(ctx), commit_seq: Some(commit_seq), depth: 1 });
+                m.borrow_mut().insert(
+                    self.id,
+                    ActiveTxnSlot { ctx: Some(ctx), commit_seq: Some(commit_seq), depth: 1, saw_map_full: false },
+                );
             });
 
-            struct OuterGuard {
+            struct OuterGuard<'a> {
                 db_id: u64,
                 armed: bool,
+                saw_map_full: &'a mut bool,
             }
-            impl Drop for OuterGuard {
+            impl Drop for OuterGuard<'_> {
                 fn drop(&mut self) {
                     if self.armed {
                         let _ = ACTIVE_TXNS.try_with(|m| {
-                            if let Ok(mut map) = m.try_borrow_mut() {
+                            if let Ok(mut map) = m.try_borrow_mut()
+                                && let Some(slot) = map.remove(&self.db_id)
+                            {
                                 // Dropping `ActiveTxnSlot` aborts the root LMDB RwTxn and releases WriterLock.
-                                let _ = map.remove(&self.db_id);
+                                *self.saw_map_full |= slot.saw_map_full;
                             }
                         });
                     }
                 }
             }
 
-            let mut guard = OuterGuard { db_id: self.id, armed: true };
+            let mut guard = OuterGuard { db_id: self.id, armed: true, saw_map_full: &mut saw_map_full };
             let value = f()?;
             if opts.run_before_commit {
                 self.run_combined_hook_cascade(&eng)?;
@@ -615,6 +640,8 @@ impl Database {
             let slot = ACTIVE_TXNS
                 .with(|m| m.borrow_mut().remove(&self.id))
                 .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
+            *guard.saw_map_full |= slot.saw_map_full;
+            drop(guard);
             let ctx =
                 slot.ctx.ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on commit"))?;
             let committed_schema = Arc::clone(ctx.schema());
@@ -631,10 +658,11 @@ impl Database {
             Ok((value, out_meta))
         })();
         if let Err(ref err) = result
-            && err.is_map_full()
+            && (err.is_map_full() || saw_map_full)
         {
             // `OuterGuard` has dropped and released L2 + L3; grow idempotently so caller retry succeeds
-            // without silently re-executing the user's closure.
+            // without silently re-executing the user's closure (even when a host callback mapped MapFull
+            // across an FFI boundary like N-API `Cancelled`).
             let _ = eng.gate().grow_map(Some(map_size_before.saturating_mul(2)));
         }
         result
@@ -716,7 +744,18 @@ impl Database {
                             }
                         }
                         Ok(None) => {}
-                        Err(err) => {
+                        Err(mut err) => {
+                            let saw_map_full = ACTIVE_TXNS.with(|m| {
+                                m.try_borrow()
+                                    .ok()
+                                    .and_then(|map| map.get(&self.id).map(|s| s.saw_map_full))
+                                    .unwrap_or(false)
+                            });
+                            if err.is_map_full() && !saw_map_full {
+                                // Only honor `StorageFull` from a host hook as `MapFull` if this transaction
+                                // actually hit `MDB_MAP_FULL` on this database (never on a spoofed or foreign error).
+                                err = ElmdbError::new(ErrorCode::HookAborted, err.message);
+                            }
                             let _ = self.with_active_ctx_mut(|ctx| {
                                 ctx.abort_savepoint(sp);
                                 Ok(())
@@ -763,8 +802,11 @@ impl Database {
                 Ok(res) => break res,
                 Err(err) if err.is_map_full() && attempts < 8 => {
                     attempts += 1;
-                    let target = before.saturating_mul(2);
-                    let after = eng.gate().grow_map(Some(target))?;
+                    let mut after = eng.gate().map_size();
+                    if after <= before {
+                        let target = before.saturating_mul(2);
+                        after = eng.gate().grow_map(Some(target))?;
+                    }
                     if after <= before {
                         return Err(err);
                     }

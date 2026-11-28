@@ -273,7 +273,7 @@ fn extract_hook_error_value(
     raw_exc: Option<napi::sys::napi_value>,
     err: napi::Error,
 ) -> ElmdbError {
-    let mut code = ErrorCode::HookAborted;
+    let mut js_code: Option<String> = None;
     let mut extracted: Option<String> = None;
 
     // SAFETY: `raw_env` is the active N-API environment on the current JS thread and `raw_exc` came from it.
@@ -289,9 +289,8 @@ fn extract_hook_error_value(
                 && let Ok(js_str) = code_val.coerce_to_string()
                 && let Ok(utf8) = js_str.into_utf8()
                 && let Ok(s) = utf8.as_str()
-                && s == ErrorCode::AsyncCallbackForbidden.as_str()
             {
-                code = ErrorCode::AsyncCallbackForbidden;
+                js_code = Some(s.to_owned());
             }
             // Clear any exception thrown by a hostile `.code` getter before reading `.message`.
             clear_pending_exception(raw_env);
@@ -324,6 +323,13 @@ fn extract_hook_error_value(
     let message = extracted
         .or_else(|| (!err.reason.is_empty()).then_some(err.reason))
         .unwrap_or_else(|| "beforeCommit hook aborted".to_owned());
+    let code = match js_code.as_deref() {
+        Some(c) if c == ErrorCode::AsyncCallbackForbidden.as_str() => ErrorCode::AsyncCallbackForbidden,
+        Some(c) if c == ErrorCode::StorageFull.as_str() && message.starts_with("storage map is full") => {
+            ErrorCode::StorageFull
+        }
+        _ => ErrorCode::HookAborted,
+    };
     ElmdbError::new(code, message)
 }
 

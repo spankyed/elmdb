@@ -950,5 +950,73 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     expect(timerCounts).toEqual([0, 1]);
     expect(eng4.watches.settled()).toBe(true);
     w4.stop();
+
+    // Cross-batch P2: if a sibling watch is dirtied during `registerWatch` (by a real cross-process
+    // `setSchema` bump) and the new watch's `observer.finish` throws, the sibling watch MUST still be
+    // scheduled and rerun cleanly without requiring a manual `flushSync()`!
+    const handle5 = temps.open({ schema: watchSchema });
+    const clock5 = createFakeClock(100_000);
+    let failSecondRegisterFinish = false;
+    const siblingCounts: number[] = [];
+    const eng5 = createEarsEngine({
+      database: handle5.database,
+      clock: clock5,
+      observer: {
+        start(op) {
+          return () => {
+            if (op.watch && failSecondRegisterFinish) {
+              failSecondRegisterFinish = false;
+              throw new Error('second register finish boom');
+            }
+          };
+        },
+      },
+    });
+    const siblingWatch = eng5.query.of('Task').watchCount((c) => siblingCounts.push(c), {
+      minGapMs: 0,
+      adaptiveMultiplier: 0,
+    });
+    expect(siblingCounts).toEqual([0]);
+
+    // Child process bumps schema and inserts a row without eng5 calling catchUpCrossProcess.
+    execFileSync(
+      process.execPath,
+      [
+        '-e',
+        `const { Database } = require(${JSON.stringify(nativeElmdbPath)});
+         const { buildWireBatch } = require(${JSON.stringify(clientElmdbPath)});
+         const db = Database.open(${JSON.stringify(handle5.path)}, { durability: 'strict' });
+         try {
+           db.setSchema({
+             types: {
+               Task: {
+                 fields: {
+                   title: { type: 'string' },
+                   done: { type: 'boolean' },
+                   priority: { type: 'integer', optional: true },
+                 },
+                 indexes: { byDone: { kind: 'value', fields: ['done'] } },
+               },
+               Other: { fields: { name: { type: 'string' } }, indexes: {} },
+             },
+             relations: {},
+           });
+           db.executeWireBatch(buildWireBatch((b) => { b.create('Task', { title: 'from-peer', done: false }, 'peer-t1'); }));
+         } finally {
+           db.close();
+         }`,
+      ],
+      { stdio: 'inherit' },
+    );
+
+    // Registering a new watch on eng5 discovers the peer schema bump (dirtying siblingWatch),
+    // then throws in `observer.finish`. The new watch is unregistered, AND siblingWatch is scheduled!
+    failSecondRegisterFinish = true;
+    expect(() => eng5.query.of('Task').watchCount(() => {}, { minGapMs: 0 })).toThrow('second register finish boom');
+    expect(eng5.watches.activeCount).toBe(1);
+    clock5.advance(10);
+    expect(siblingCounts).toEqual([0, 1]);
+    expect(eng5.watches.settled()).toBe(true);
+    siblingWatch.stop();
   });
 });
