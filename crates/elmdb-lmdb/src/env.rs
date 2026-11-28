@@ -1022,7 +1022,7 @@ impl KvStore for LmdbStore {
         if pin_after {
             self.inner.acquire_pin_retrying_resize_under_write()?;
         }
-        Ok(actual)
+        Ok(self.inner.current_map_size().max(actual))
     }
 
     fn adopt_resized_map_locked(

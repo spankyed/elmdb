@@ -950,5 +950,144 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     expect(timerCounts).toEqual([0, 1]);
     expect(eng4.watches.settled()).toBe(true);
     w4.stop();
+
+    // Cross-batch P2: if a sibling watch is dirtied during `registerWatch` (by a real cross-process
+    // `setSchema` bump) and the new watch's `observer.finish` throws, the sibling watch MUST still be
+    // scheduled and rerun cleanly without requiring a manual `flushSync()`!
+    const handle5 = temps.open({ schema: watchSchema });
+    const clock5 = createFakeClock(100_000);
+    let failSecondRegisterFinish = false;
+    const siblingCounts: number[] = [];
+    const eng5 = createEarsEngine({
+      database: handle5.database,
+      clock: clock5,
+      observer: {
+        start(op) {
+          return () => {
+            if (op.watch && failSecondRegisterFinish) {
+              failSecondRegisterFinish = false;
+              throw new Error('second register finish boom');
+            }
+          };
+        },
+      },
+    });
+    const siblingWatch = eng5.query.of('Task').watchCount((c) => siblingCounts.push(c), {
+      minGapMs: 0,
+      adaptiveMultiplier: 0,
+    });
+    expect(siblingCounts).toEqual([0]);
+
+    // Child process bumps schema and inserts a row without eng5 calling catchUpCrossProcess.
+    execFileSync(
+      process.execPath,
+      [
+        '-e',
+        `const { Database } = require(${JSON.stringify(nativeElmdbPath)});
+         const { buildWireBatch } = require(${JSON.stringify(clientElmdbPath)});
+         const db = Database.open(${JSON.stringify(handle5.path)}, { durability: 'strict' });
+         try {
+           db.setSchema({
+             types: {
+               Task: {
+                 fields: {
+                   title: { type: 'string' },
+                   done: { type: 'boolean' },
+                   priority: { type: 'integer', optional: true },
+                 },
+                 indexes: { byDone: { kind: 'value', fields: ['done'] } },
+               },
+               Other: { fields: { name: { type: 'string' } }, indexes: {} },
+             },
+             relations: {},
+           });
+           db.executeWireBatch(buildWireBatch((b) => { b.create('Task', { title: 'from-peer', done: false }, 'peer-t1'); }));
+         } finally {
+           db.close();
+         }`,
+      ],
+      { stdio: 'inherit' },
+    );
+
+    // Registering a new watch on eng5 discovers the peer schema bump (dirtying siblingWatch),
+    // then throws in `observer.finish`. The new watch is unregistered, AND siblingWatch is scheduled!
+    failSecondRegisterFinish = true;
+    expect(() => eng5.query.of('Task').watchCount(() => {}, { minGapMs: 0 })).toThrow('second register finish boom');
+    expect(eng5.watches.activeCount).toBe(1);
+    clock5.advance(10);
+    expect(siblingCounts).toEqual([0, 1]);
+    expect(eng5.watches.settled()).toBe(true);
+    siblingWatch.stop();
+
+    // PR #272 review fixes:
+    // (a) Throwing custom clock `clearTimeout` during `register()` cleanup must NOT mask `observer.finish()`'s
+    //     error and must still clear active watches & settle `onSettled()`.
+    const handle6 = temps.open({ schema: watchSchema });
+    const base6 = createFakeClock(110_000);
+    let throwOnClearTimeout = false;
+    let failSettledFatal = false;
+    const hostileClearClock: EarsClock = {
+      now: () => base6.now(),
+      setTimeout: (cb, ms) => base6.setTimeout(cb, ms),
+      clearTimeout(h) {
+        base6.clearTimeout(h);
+        if (throwOnClearTimeout) throw new Error('clock clearTimeout boom');
+      },
+    };
+    const wrappedDb6 = new Proxy(handle6.database, {
+      get(target, prop, receiver) {
+        if (prop === 'watchesSettled') {
+          return () => {
+            if (failSettledFatal) throw new EarsError('PANICKED', 'simulated handle panic');
+            return target.watchesSettled();
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    let closeAndThrowInFinish = false;
+    let settledResolved = false;
+    const eng6 = createEarsEngine({
+      database: wrappedDb6,
+      clock: hostileClearClock,
+      observer: {
+        start(op) {
+          return () => {
+            if (op.watch && closeAndThrowInFinish) {
+              closeAndThrowInFinish = false;
+              failSettledFatal = true;
+              throw new Error('original finish error');
+            }
+          };
+        },
+      },
+    });
+    const w6 = eng6.query.of('Task').watchCount(() => {}, { minGapMs: 500, adaptiveMultiplier: 0 });
+    eng6.create('Task', { title: 'arm-timer', done: false }); // arms timer on w6
+    const unsubSettled6 = eng6.watches.onSettled(() => {
+      settledResolved = true;
+    });
+    throwOnClearTimeout = true;
+    closeAndThrowInFinish = true;
+    expect(() => eng6.query.of('Task').watchCount(() => {}, { minGapMs: 0 })).toThrow('original finish error');
+    expect(w6.active).toBe(false);
+    expect(eng6.watches.activeCount).toBe(0);
+    expect(eng6.watches.settled()).toBe(true);
+    expect(settledResolved).toBe(true);
+    unsubSettled6();
+
+    // (b) Hostile getter on `options.onError` / `options.immediate` fails BEFORE registering in Rust (no leak).
+    const handle7 = temps.open({ schema: watchSchema });
+    const eng7 = createEarsEngine({ database: handle7.database, clock: createFakeClock(120_000) });
+    const hostileOpts = {
+      get onError() {
+        throw new Error('hostile onError getter');
+      },
+    };
+    expect(() => eng7.query.of('Task').watchCount(() => {}, hostileOpts as never)).toThrow('hostile onError getter');
+    expect(eng7.watches.activeCount).toBe(0);
+    eng7.create('Task', { title: 'no-leak-7', done: false });
+    expect(eng7.watches.settled()).toBe(true);
   });
 });

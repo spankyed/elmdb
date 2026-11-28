@@ -243,6 +243,9 @@ export class WatchPump implements WatchController {
     if (options?.mode !== undefined) policy.mode = options.mode;
     if (options?.minGapMs !== undefined) policy.minGapMs = options.minGapMs;
     if (options?.adaptiveMultiplier !== undefined) policy.adaptiveMultiplier = options.adaptiveMultiplier;
+    // Read remaining option getters BEFORE registering in Rust so a hostile getter never leaks `reg.watchId`.
+    const onError = options?.onError;
+    const immediate = options?.immediate !== false;
 
     const nowMs = this.#nowMs();
     const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
@@ -254,79 +257,83 @@ export class WatchPump implements WatchController {
       finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
       throw earsErr;
     }
+
     try {
-      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-    } catch (observerErr) {
-      // Never leak an unregistered Rust watch (or wedge settled() to false) if observer.finish throws.
       try {
-        this.#db.unregisterWatch(reg.watchId);
-      } catch {
-        // Best-effort if DB closed.
-      }
-      throw observerErr;
-    }
-
-    const entry: WatchEntry = {
-      id: reg.watchId,
-      spec,
-      deliver,
-      onError: options?.onError,
-      active: true,
-      lastCostMs: 1,
-      backoffMs: 0,
-      backoffUntilMs: 0,
-    };
-    this.#entries.set(reg.watchId, entry);
-
-    if (options?.immediate !== false) {
-      try {
-        deliver(reg.answer);
-      } catch (error) {
+        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      } catch (observerErr) {
+        // Never leak an unregistered Rust watch (or wedge settled() to false) if observer.finish throws.
         try {
-          this.#reportError(entry, toEarsError(error), false);
-        } catch (handlerError) {
-          // Never leak the registered watch if the caller's error handler rethrows before we return WatchHandle.
-          this.#unregister(entry.id);
-          throw handlerError;
+          this.#db.unregisterWatch(reg.watchId);
+        } catch {
+          // Best-effort if DB closed.
         }
+        throw observerErr;
       }
-    } else if (onSuppressImmediate !== undefined) {
-      try {
-        onSuppressImmediate(reg.answer);
-      } catch (error) {
+
+      const entry: WatchEntry = {
+        id: reg.watchId,
+        spec,
+        deliver,
+        onError,
+        active: true,
+        lastCostMs: 1,
+        backoffMs: 0,
+        backoffUntilMs: 0,
+      };
+      this.#entries.set(reg.watchId, entry);
+
+      if (immediate) {
         try {
-          this.#reportError(entry, toEarsError(error), false);
-        } catch (handlerError) {
-          // Never leak the registered watch if seeding/error handler throws before we return WatchHandle.
-          this.#unregister(entry.id);
-          throw handlerError;
+          deliver(reg.answer);
+        } catch (error) {
+          try {
+            this.#reportError(entry, toEarsError(error), false);
+          } catch (handlerError) {
+            // Never leak the registered watch if the caller's error handler rethrows before we return WatchHandle.
+            this.#unregister(entry.id);
+            throw handlerError;
+          }
+        }
+      } else if (onSuppressImmediate !== undefined) {
+        try {
+          onSuppressImmediate(reg.answer);
+        } catch (error) {
+          try {
+            this.#reportError(entry, toEarsError(error), false);
+          } catch (handlerError) {
+            // Never leak the registered watch if seeding/error handler throws before we return WatchHandle.
+            this.#unregister(entry.id);
+            throw handlerError;
+          }
+        }
+      }
+
+      const self = this;
+      return {
+        get id(): number {
+          return entry.id;
+        },
+        get active(): boolean {
+          return entry.active;
+        },
+        stop(): void {
+          self.#unregister(entry.id);
+        },
+      };
+    } finally {
+      // If a cross-process schema bump during registration or a concurrent write inside the
+      // immediate callback dirtied this or any sibling watch, schedule a wake even on error cleanup.
+      if (!this.#stopped && this.#entries.size > 0) {
+        try {
+          if (!this.#db.watchesSettled()) {
+            this.#scheduleNext(this.#nowMs());
+          }
+        } catch (err) {
+          this.#handlePumpReadError(err);
         }
       }
     }
-
-    // If a concurrent write landed during registration or inside the immediate callback, schedule a wake.
-    if (entry.active && !this.#stopped) {
-      try {
-        if (!this.#db.watchesSettled()) {
-          this.#scheduleNext(this.#nowMs());
-        }
-      } catch (err) {
-        this.#handlePumpReadError(err);
-      }
-    }
-
-    const self = this;
-    return {
-      get id(): number {
-        return entry.id;
-      },
-      get active(): boolean {
-        return entry.active;
-      },
-      stop(): void {
-        self.#unregister(entry.id);
-      },
-    };
   }
 
   notifyMutation(): void {
@@ -478,7 +485,11 @@ export class WatchPump implements WatchController {
     if (this.#cancelTimer !== undefined) {
       const cancel = this.#cancelTimer;
       this.#cancelTimer = undefined;
-      cancel();
+      try {
+        cancel();
+      } catch {
+        // Never let a throwing custom clock cancel function mask errors or wedge cleanup/settlement.
+      }
     }
   }
 
