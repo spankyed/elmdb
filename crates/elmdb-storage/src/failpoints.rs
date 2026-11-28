@@ -130,9 +130,7 @@ mod imp {
             if let Some(name) = cur.file_name() {
                 tail.push(name.to_os_string());
             }
-            if !parent.as_os_str().is_empty()
-                && let Ok(mut base) = std::fs::canonicalize(parent)
-            {
+            if let Ok(mut base) = std::fs::canonicalize(parent) {
                 for part in tail.into_iter().rev() {
                     base.push(part);
                 }
@@ -441,6 +439,20 @@ mod tests {
         assert!(imp::has_path_entry(points::FS_PUBLISH_RENAME, path));
         assert!(runs_at(points::FS_PUBLISH_RENAME, path));
         assert_eq!(path_count.load(Ordering::SeqCst), 3);
+        assert!(!imp::has_path_entry(points::FS_PUBLISH_RENAME, path));
+
+        // Running the sole callback while `fail_once == 0 && fail_while == 1` must keep the entry
+        // alive for the live `FailWhileGuard` (kills `&& -> ||` on `runs_at` cleanup).
+        let g4 = fail_while_at(points::FS_PUBLISH_RENAME, path);
+        let pc4 = Arc::clone(&path_count);
+        run_once_at(points::FS_PUBLISH_RENAME, path, move || {
+            pc4.fetch_add(1, Ordering::SeqCst);
+        });
+        assert!(runs_at(points::FS_PUBLISH_RENAME, path));
+        assert_eq!(path_count.load(Ordering::SeqCst), 4);
+        assert!(imp::has_path_entry(points::FS_PUBLISH_RENAME, path));
+        assert!(fails_at(points::FS_PUBLISH_RENAME, path));
+        drop(g4);
         assert!(!imp::has_path_entry(points::FS_PUBLISH_RENAME, path));
     }
 }

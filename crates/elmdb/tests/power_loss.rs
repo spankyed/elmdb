@@ -470,7 +470,10 @@ fn a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_
     let heal = std::env::var("ELMDB_TORN_HEAL").expect("ELMDB_TORN_HEAL");
     let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
 
-    for (round, persist) in ["1,2", "1,2,3"].into_iter().enumerate() {
+    // Use `persist="1"` so LazyFS persists ONLY D+3's first data-page write (sorted by lowest
+    // `pgno`, where unpinned freelist reuse overwrites D's pages first) and crashes strictly BEFORE
+    // persisting write 2 (which may be D+3's meta page when pinned pages flush in one contiguous run).
+    for (round, persist) in ["1", "1"].into_iter().enumerate() {
         let path = dir.join(format!("round-{round}"));
         let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.args(["--ignored", "--exact", "child_writes_torn_seq", "--nocapture"])
