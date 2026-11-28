@@ -52,6 +52,7 @@ def mounted(binary: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+scratch_target = subprocess.check_output(["cargo", "xtask", "scratch-target"], cwd=Path.cwd(), text=True).strip()
 positive = mounted(executable(Path.cwd(), dict(os.environ)))
 print(positive.stdout)
 assert positive.returncode == 0 and "ELMDB_READ_ONLY_MOUNT_OK" in positive.stdout
@@ -86,7 +87,7 @@ with tempfile.TemporaryDirectory(prefix="elmdb-erofs-mutation-") as temporary:
             self.vfs.lock_file(&self.sidecar_lock_path).map(Some)?"""
     assert code.count(target) == 1, "expected exact sidecar lock block in durability.rs"
     source.write_text(code.replace(target, replacement))
-    negative = mounted(executable(root, {**os.environ, "CARGO_TARGET_DIR": str(root / "target")}))
+    negative = mounted(executable(root, {**os.environ, "CARGO_TARGET_DIR": scratch_target}))
     if not (
         negative.returncode != 0
         and "running 1 test" in negative.stdout

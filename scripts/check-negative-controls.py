@@ -34,6 +34,7 @@ def main() -> None:
 
     # 2. Disposable-copy negative control: disable Grouped durable pin installation in `durability.rs`
     #    and prove the DST freelist-reuse crash test fails loudly!
+    scratch_target = subprocess.check_output(["cargo", "xtask", "scratch-target"], cwd=Path.cwd(), text=True).strip()
     with tempfile.TemporaryDirectory(prefix="elmdb-neg-control-") as temporary:
         root = Path(temporary)
         with tarfile.open(fileobj=io.BytesIO(subprocess.check_output(["git", "archive", "HEAD"]))) as archive:
@@ -47,7 +48,7 @@ def main() -> None:
 
         negative = run_test(
             root,
-            {**os.environ, "CARGO_TARGET_DIR": str(root / "target")},
+            {**os.environ, "CARGO_TARGET_DIR": scratch_target},
             "elmdb-sim",
             "dst_durability",
             "dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_unacked_reboot",

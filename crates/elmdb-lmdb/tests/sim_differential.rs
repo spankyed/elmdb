@@ -3,7 +3,7 @@
 //! 1. Multi-snapshot MVCC reader visibility across interleaved puts/overwrites/deletes/truncates.
 //! 2. Freelist page reuse: Grouped durable pin keeps synced pages intact on disk across `D+1..D+10`
 //!    overwrites, while unpinned commits overwrite `D`'s pages (matching `SimKvStore`'s corruption model).
-//! 3. External `MAP_RESIZED` adoption on `begin_read` and `begin_write`.
+//! 3. External `MAP_RESIZED` adoption on `begin_read` followed by post-resize writes.
 //! 4. Crash & reboot `DurabilityGate` `RecoveryStatus` transitions (`Fresh`, `Clean`,
 //!    `SameBootUnsyncedTail`, `RebootVerified`, `UnsyncedAfterReboot` + `acknowledge_restore()`).
 
@@ -444,14 +444,35 @@ fn sim_and_lmdb_map_resized_adoption_matches() {
     sim.inject_read_map_resized(1);
 
     // Both gates must transparently adopt the resize on `begin_read()` and observe identical entries & map size!
-    let l_ro = l_gate.begin_read().unwrap();
-    let s_ro = s_gate.begin_read().unwrap();
-    let ldb = l_gate.open_subdb_ro(&l_ro, "data", DbFlags::DEFAULT).unwrap().unwrap();
-    let sdb = s_gate.open_subdb_ro(&s_ro, "data", DbFlags::DEFAULT).unwrap().unwrap();
-    assert_eq!(l_ro.entries(ldb).unwrap(), s_ro.entries(sdb).unwrap());
-    assert_eq!(l_ro.get(ldb, b"grown_key").unwrap(), Some(&b"from_child"[..]));
-    assert!(l_gate.map_size() >= 4 * 1024 * 1024);
-    assert!(s_gate.map_size() >= 4 * 1024 * 1024);
+    {
+        let l_ro = l_gate.begin_read().unwrap();
+        let s_ro = s_gate.begin_read().unwrap();
+        let ldb = l_gate.open_subdb_ro(&l_ro, "data", DbFlags::DEFAULT).unwrap().unwrap();
+        let sdb = s_gate.open_subdb_ro(&s_ro, "data", DbFlags::DEFAULT).unwrap().unwrap();
+        assert_eq!(l_ro.entries(ldb).unwrap(), s_ro.entries(sdb).unwrap());
+        assert_eq!(l_ro.get(ldb, b"grown_key").unwrap(), Some(&b"from_child"[..]));
+        assert!(l_gate.map_size() >= 4 * 1024 * 1024);
+        assert!(s_gate.map_size() >= 4 * 1024 * 1024);
+    }
+
+    // Both gates must also commit identically via `begin_write()` immediately after adopting the resize.
+    {
+        let mut lw = l_gate.begin_write().unwrap();
+        let ldb = lw.open_subdb("data", DbFlags::DEFAULT).unwrap();
+        lw.put(ldb, b"after_resize_write", b"ok").unwrap();
+        lw.commit().unwrap();
+
+        let mut sw = s_gate.begin_write().unwrap();
+        let sdb = sw.open_subdb("data", DbFlags::DEFAULT).unwrap();
+        sw.put(sdb, b"after_resize_write", b"ok").unwrap();
+        sw.commit().unwrap();
+    }
+    let l_ro2 = l_gate.begin_read().unwrap();
+    let s_ro2 = s_gate.begin_read().unwrap();
+    let ldb = l_gate.open_subdb_ro(&l_ro2, "data", DbFlags::DEFAULT).unwrap().unwrap();
+    let sdb = s_gate.open_subdb_ro(&s_ro2, "data", DbFlags::DEFAULT).unwrap().unwrap();
+    assert_eq!(l_ro2.get(ldb, b"after_resize_write").unwrap(), s_ro2.get(sdb, b"after_resize_write").unwrap());
+    assert_eq!(l_ro2.entries(ldb).unwrap(), s_ro2.entries(sdb).unwrap());
 }
 
 #[test]

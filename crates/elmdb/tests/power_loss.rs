@@ -417,9 +417,30 @@ fn child_writes_torn_seq() {
             fields: vec![("c".into(), CanonicalValue::String(torn_seq_payload(i, "overwritten")))],
         })
         .collect();
-    let _ = db.execute_batch(&overwrite_ops);
-    println!("wrote torn-seq reuse batch");
-    let _ = std::io::stdout().flush();
+    if db.execute_batch(&overwrite_ops).is_ok() {
+        println!("wrote torn-seq reuse batch");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// Child verifier for `torn-seq` so an LMDB debug `SIGABRT`/`SIGSEGV` on a deliberately corrupted
+/// unpinned snapshot is caught cleanly by the parent and reported with `round <r>, synced at <n>`.
+#[test]
+#[ignore = "run only by the LazyFS torn-seq test as a child verifier"]
+fn child_verify_torn_seq_snapshot() {
+    let Ok(path) = std::env::var("ELMDB_LOSSY_DB") else {
+        return;
+    };
+    let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
+    let expected = torn_seq_expected_model();
+    let (actual, open_report) = held_at(Path::new(&path), TORN_SEQ_ITEMS)
+        .unwrap_or_else(|e| panic!("failed to reopen/check after torn-seq: {e}"));
+    assert_eq!(actual, expected, "model mismatch after torn-seq");
+    if !unpinned {
+        assert_eq!(open_report.status, "clean", "unexpected open_report {open_report:?}");
+        assert_eq!(open_report.durable_txnid, Some(open_report.observed_txnid));
+        assert!(open_report.valid_slots >= 1);
+    }
 }
 
 /// Run over LazyFS (`.github/workflows/lossy-filesystem.yml`): persists unsynced data-page writes
@@ -438,7 +459,6 @@ fn a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_
     let arm_seq = std::env::var("ELMDB_SEQ_ARM").expect("ELMDB_SEQ_ARM");
     let heal = std::env::var("ELMDB_TORN_HEAL").expect("ELMDB_TORN_HEAL");
     let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
-    let expected = torn_seq_expected_model();
 
     for (round, persist) in ["1,2", "1,2,3"].into_iter().enumerate() {
         let path = dir.join(format!("round-{round}"));
@@ -496,15 +516,23 @@ fn a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_
         let healed = Command::new("sh").arg(&heal).status().unwrap();
         assert!(healed.success(), "round {round}: heal.sh failed");
 
-        let (actual, open_report) = held_at(&path, TORN_SEQ_ITEMS).unwrap_or_else(|e| {
-            panic!("round {round}, synced at {synced}: failed to reopen/check after torn-seq persist={persist}: {e}")
-        });
-        assert_eq!(actual, expected, "round {round}, synced at {synced}: model mismatch after torn-seq");
-        if !unpinned {
-            assert_eq!(open_report.status, "clean", "round {round}: unexpected open_report {open_report:?}");
-            assert_eq!(open_report.durable_txnid, Some(open_report.observed_txnid));
-            assert!(open_report.valid_slots >= 1);
+        // Isolate post-crash verification in a child process so any LMDB SIGABRT/SIGSEGV on a
+        // deliberately corrupted unpinned snapshot still reports `round {round}, synced at {synced}`.
+        let mut verify_cmd = Command::new(std::env::current_exe().unwrap());
+        verify_cmd
+            .args(["--ignored", "--exact", "child_verify_torn_seq_snapshot", "--nocapture"])
+            .env("ELMDB_LOSSY_DB", &path);
+        if unpinned {
+            verify_cmd.env("ELMDB_LOSSY_UNPINNED", "1");
         }
+        let verify_out = verify_cmd.output().unwrap();
+        assert!(
+            verify_out.status.success(),
+            "round {round}, synced at {synced}: child verification failed after torn-seq persist={persist} ({:?}):\nstdout:\n{}\nstderr:\n{}",
+            verify_out.status,
+            String::from_utf8_lossy(&verify_out.stdout),
+            String::from_utf8_lossy(&verify_out.stderr)
+        );
     }
 }
 

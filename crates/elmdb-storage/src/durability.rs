@@ -558,7 +558,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// external cross-process map resizes (`MDB_MAP_RESIZED`).
     /// Fails closed if the durability gate is poisoned.
     pub fn begin_read(&self) -> Result<S::RoTxn<'_>, StorageError> {
-        for _ in 0..8 {
+        for _ in 0..32 {
             self.check_poisoned()?;
             match self.store.begin_read() {
                 Ok(ro) => return Ok(ro),

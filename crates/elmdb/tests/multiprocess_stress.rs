@@ -371,11 +371,13 @@ fn child_open_and_write_then_exit() {
 #[ignore = "child helper for process_claim_collision_and_killed_writer_lock_recovery"]
 fn child_killed_holding_reader_and_flock() {
     let dir = std::env::var("ELMDB_MP_DIR").expect("ELMDB_MP_DIR");
-    let db = Database::open(&dir, OpenOptions::default()).unwrap();
-    // Acquire a shared OS flock on `synced.v2.lock` and a live LMDB reader slot, then stall until killed.
+    // Open in Grouped mode and flush so this child holds a LIVE `MDB_RDONLY` durable pin slot in
+    // `lock.mdb` at the moment it is killed, PLUS an exclusive OS flock on `synced.v2.lock`.
+    let db =
+        Database::open(&dir, OpenOptions { durability: DurabilityMode::Grouped, ..OpenOptions::default() }).unwrap();
+    db.flush().unwrap();
     let vfs = elmdb_storage::OsVfs::new();
     let _flock = vfs.lock_file(&Path::new(&dir).join("synced.v2.lock")).unwrap();
-    let _row = db.get_row("from-peer-proc").unwrap();
     println!("holding-locks");
     let _ = std::io::stdout().flush();
     std::thread::sleep(Duration::from_secs(60));

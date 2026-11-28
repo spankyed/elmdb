@@ -89,7 +89,8 @@ impl OracleRefState {
     }
 
     fn slug_owner(&self, slug: &str) -> Option<&str> {
-        self.rows.iter().find(|(_, r)| r.slug.as_deref() == Some(slug)).map(|(id, _)| id.as_str())
+        // Unique indexes only track live (non-trashed) rows (`ProjectionRegistry::live_view`).
+        self.rows.iter().find(|(_, r)| !r.trashed && r.slug.as_deref() == Some(slug)).map(|(id, _)| id.as_str())
     }
 }
 
@@ -340,7 +341,14 @@ impl ReferenceStateMachine for OracleRefMachine {
             }
             Transition::Restore { id_idx } => {
                 let id = ID_POOL[*id_idx];
-                if let Some(row) = state.rows.get_mut(id)
+                let slug_conflict = state
+                    .rows
+                    .get(id)
+                    .filter(|r| r.trashed)
+                    .and_then(|r| r.slug.as_deref())
+                    .is_some_and(|s| state.slug_owner(s).is_some_and(|o| o != id));
+                if !slug_conflict
+                    && let Some(row) = state.rows.get_mut(id)
                     && row.trashed
                 {
                     row.trashed = false;
@@ -781,8 +789,13 @@ impl StateMachineTest for OracleSut {
                 match pre.rows.get(id) {
                     None => assert_eq!(res.unwrap_err().code, ErrorCode::EntityNotFound),
                     Some(r) if !r.trashed => assert_eq!(res.unwrap_err().code, ErrorCode::EntityNotTrashed),
-                    Some(_) => {
-                        res.unwrap();
+                    Some(r) => {
+                        if r.slug.as_deref().is_some_and(|s| pre.slug_owner(s).is_some_and(|o| o != id)) {
+                            assert_eq!(res.unwrap_err().code, ErrorCode::UniqueViolation);
+                            record_step("refusal_unique_violation");
+                        } else {
+                            res.unwrap();
+                        }
                     }
                 }
             }
@@ -835,7 +848,7 @@ impl StateMachineTest for OracleSut {
                     let err = res.unwrap_err();
                     assert!(matches!(err.code, ErrorCode::EntityNotFound | ErrorCode::RelationNotFound));
                 } else {
-                    let _ = res;
+                    res.unwrap();
                 }
             }
             Transition::NestedSavepoint { keep_idx, abort_idx } => {
@@ -976,8 +989,40 @@ prop_state_machine! {
 
 #[test]
 fn step_coverage_guard_runs_all_oracle_transitions() {
+    // First verify that the randomized `transition_strategy()` actually generates EVERY transition
+    // variant (proving no variant is dead/unreachable under proptest).
+    {
+        use proptest::strategy::ValueTree;
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::deterministic();
+        let strat = transition_strategy();
+        let mut generated = BTreeSet::new();
+        for _ in 0..400 {
+            let t = strat.new_tree(&mut runner).unwrap().current();
+            let name = match t {
+                Transition::Create { .. } => "create",
+                Transition::Patch { .. } => "patch",
+                Transition::Unset { .. } => "unset",
+                Transition::Trash { .. } => "trash",
+                Transition::Restore { .. } => "restore",
+                Transition::Destroy { .. } => "destroy",
+                Transition::Link { .. } => "link",
+                Transition::Unlink { .. } => "unlink",
+                Transition::NestedSavepoint { .. } => "nested_savepoint",
+                Transition::OuterRollback { .. } => "outer_rollback",
+                Transition::RenameExtraField => "rename_field",
+                Transition::ArchiveAndPurgeExtra => "archive_and_purge",
+                Transition::DumpLoadVerify => "dump_load",
+                Transition::CheckInvariants => "check_invariants",
+            };
+            generated.insert(name);
+        }
+        assert_eq!(generated.len(), 14, "transition_strategy() failed to generate all 14 variants: {generated:?}");
+    }
+
     // Run a targeted deterministic sweep using the same StateMachineTest harness so step coverage
-    // is guaranteed even when cargo runs individual tests in isolation.
+    // (including trashed-slug reuse + restore UniqueViolation) is guaranteed in isolated test processes.
     let mut ref_state = OracleRefState::new();
     let mut sut = OracleSut::init_test(&ref_state);
     let script = vec![
@@ -1022,9 +1067,20 @@ fn step_coverage_guard_runs_all_oracle_transitions() {
         Transition::Link { src_idx: 0, dst_idx: 1 },
         Transition::Unlink { src_idx: 0, dst_idx: 1 },
         Transition::Link { src_idx: 0, dst_idx: 1 },
-        Transition::Trash { id_idx: 1 },
+        Transition::Trash { id_idx: 1 }, // frees slug s-gamma (`slug_idx: Some(2)`)
         Transition::Patch { id_idx: 1, status_idx: 0, slug_idx: None, body_idx: 0, extra: None }, // EntityTrashed
-        Transition::Restore { id_idx: 1 },
+        Transition::Create {
+            id_idx: 5,
+            title_idx: 2,
+            status_idx: 0,
+            slug_idx: Some(2), // reuses slug freed by trashed n1!
+            label_idx: 0,
+            body_idx: 0,
+            extra: None,
+        },
+        Transition::Restore { id_idx: 1 }, // UniqueViolation against live n5!
+        Transition::Destroy { id_idx: 5 }, // frees slug again
+        Transition::Restore { id_idx: 1 }, // now succeeds!
         Transition::Unset { id_idx: 1, clear_slug: true, clear_extra: false },
         Transition::NestedSavepoint { keep_idx: 2, abort_idx: 3 },
         Transition::OuterRollback { abort_idx: 4 },

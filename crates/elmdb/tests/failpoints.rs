@@ -126,8 +126,9 @@ fn lmdb_env_set_mapsize_failpoint_fails_closed_as_corrupted() {
     db.set_schema(&simple_schema()).unwrap();
 
     failpoints::fail_once_at(points::LMDB_ENV_SET_MAPSIZE, dir.path());
-    // Write enough bytes to trigger MapFull -> grow_map -> mdb_env_set_mapsize failpoint!
-    let big = "x".repeat(200 * 1024);
+    // Write strictly more than the 256 KiB map so MapFull -> grow_map -> mdb_env_set_mapsize
+    // fires deterministically on both 4 KiB (Linux/Windows) and 16 KiB (macOS) page sizes!
+    let big = "x".repeat(300 * 1024);
     let err = create_note(&db, "huge", &big).unwrap_err();
     assert_eq!(err.code, ErrorCode::Corrupted, "failed map grow must fail closed as Corrupted: {err:?}");
 
@@ -257,32 +258,46 @@ fn skip_grouped_durable_pin_failpoint_leaves_grouped_flush_unpinned_for_negative
     db.close().unwrap();
 
     // 2. DurabilityGate<SimKvStore, SimVfs> proof: SKIP_GROUPED_DURABLE_PIN actually skips installing
-    //    the durable pin so unsynced D+1..D+4 overwrites corrupt snapshot D on power loss!
+    //    the durable pin across sync(), grow_map(), and adopt_resized_map() so unsynced D+1..D+4
+    //    overwrites corrupt snapshot D on power loss!
     use elmdb_sim::{SimKvConfig, SimKvStore, SimVfs};
     use elmdb_storage::{BootId, DbFlags, DurabilityGate, KvRead, KvStore, StorageError};
 
-    let sim_dir = std::path::Path::new("/elmdb-fp-skip-pin-sim");
-    let _sim_guard = failpoints::fail_while_at(points::SKIP_GROUPED_DURABLE_PIN, sim_dir);
-    let sim = SimKvStore::new(SimKvConfig::default());
-    let vfs = SimVfs::new(BootId([0x77; 16]));
-    let (gate, _) = DurabilityGate::open(sim.clone(), vfs, sim_dir, DurabilityMode::Grouped).unwrap();
-    let sub = {
-        let mut w = gate.begin_write().unwrap();
-        let d = w.open_subdb("items", DbFlags::DEFAULT).unwrap();
-        w.put(d, b"k", b"durable-D").unwrap();
-        w.commit().unwrap();
-        d
-    };
-    gate.sync().unwrap();
-    for step in 1..=4u8 {
-        let mut w = gate.begin_write().unwrap();
-        w.put(sub, b"k", &[step; 64]).unwrap();
-        w.commit().unwrap();
+    for exercise in ["sync", "grow_map", "adopt_resized_map"] {
+        let sim_dir_str = format!("/elmdb-fp-skip-pin-sim-{exercise}");
+        let sim_dir = std::path::Path::new(&sim_dir_str);
+        let _sim_guard = failpoints::fail_while_at(points::SKIP_GROUPED_DURABLE_PIN, sim_dir);
+        let sim = SimKvStore::new(SimKvConfig::default());
+        let vfs = SimVfs::new(BootId([0x77; 16]));
+        let (gate, _) = DurabilityGate::open(sim.clone(), vfs, sim_dir, DurabilityMode::Grouped).unwrap();
+        let sub = {
+            let mut w = gate.begin_write().unwrap();
+            let d = w.open_subdb("items", DbFlags::DEFAULT).unwrap();
+            w.put(d, b"k", b"durable-D").unwrap();
+            w.commit().unwrap();
+            d
+        };
+        gate.sync().unwrap();
+        match exercise {
+            "grow_map" => {
+                gate.grow_map(Some(sim.map_size() * 2)).unwrap();
+            }
+            "adopt_resized_map" => {
+                sim.inject_read_map_resized(1);
+                let _ro = gate.begin_read().unwrap();
+            }
+            _ => {}
+        }
+        for step in 1..=4u8 {
+            let mut w = gate.begin_write().unwrap();
+            w.put(sub, b"k", &[step; 64]).unwrap();
+            w.commit().unwrap();
+        }
+        sim.crash_power_loss();
+        let ro = sim.begin_read().unwrap();
+        assert!(
+            matches!(ro.get(sub, b"k"), Err(StorageError::Corrupted(_))),
+            "SKIP_GROUPED_DURABLE_PIN ({exercise}) must leave Grouped snapshot D unpinned so freelist reuse corrupts D"
+        );
     }
-    sim.crash_power_loss();
-    let ro = sim.begin_read().unwrap();
-    assert!(
-        matches!(ro.get(sub, b"k"), Err(StorageError::Corrupted(_))),
-        "SKIP_GROUPED_DURABLE_PIN must leave Grouped snapshot D unpinned so freelist reuse corrupts D on power loss"
-    );
 }

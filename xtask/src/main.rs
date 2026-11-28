@@ -1704,7 +1704,17 @@ fn check_failpoints_off(root: &Path) -> Result<(), String> {
         let output = Command::new(env!("CARGO"))
             .arg("tree")
             .args(scope)
-            .args(["--edges", "normal,build", "--prefix", "none", "--format", "{p}|{f}"])
+            .args([
+                "--target",
+                "all",
+                "--no-dedupe",
+                "--edges",
+                "normal,build",
+                "--prefix",
+                "none",
+                "--format",
+                "{p}|{f}",
+            ])
             .current_dir(root)
             .output()
             .map_err(|e| format!("cargo tree didn't run: {e}"))?;
@@ -1726,10 +1736,11 @@ fn verify_no_failpoints_in_tree(tree: &str) -> Result<(), String> {
         if pkg == "elmdb-storage" {
             saw_storage = true;
         }
+        let cleaned_feats = feats_part.trim().strip_suffix(" (*)").unwrap_or(feats_part.trim());
         if matches!(pkg, "elmdb-storage" | "elmdb-lmdb" | "elmdb")
-            && feats_part.split(',').map(str::trim).any(|f| f == "failpoints")
+            && cleaned_feats.split(',').map(str::trim).any(|f| f == "failpoints")
         {
-            violations.push(format!("{pkg} ({})", feats_part.trim()));
+            violations.push(format!("{pkg} ({cleaned_feats})"));
         }
     }
     if !saw_storage {
