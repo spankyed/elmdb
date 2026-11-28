@@ -1834,16 +1834,31 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
     assert!(es_cancel_tiny.add(1e-300));
     assert_eq!(es_cancel_tiny.try_total(), Some(1e-300));
 
-    // High + low cancels to a small non-zero residual (< 2^512) -> folds quantitatively with tiny!
+    // High + low cancels to a small non-zero residual (`2^-449`) while `low` also keeps a separate
+    // sub-`2^-450` part (`2^-502 + 2^-503`) in `tiny` -> MUST enter the unscaled fold branch so the
+    // `tiny` part rounds `2^-449` up by 1 ULP (`2^-501`), killing inner `* -> +` on line 140!
     let two_neg_449 = f64::from_bits((1023u64 - 449) << 52);
-    let two_neg_451 = f64::from_bits((1023u64 - 451) << 52);
+    let two_neg_502 = f64::from_bits((1023u64 - 502) << 52);
+    let two_neg_503 = f64::from_bits((1023u64 - 503) << 52);
     let mut es_fold = ExactSum::default();
     assert!(es_fold.add(two_512));
     assert!(es_fold.add(-two_511));
     assert!(es_fold.add(-two_511));
     assert!(es_fold.add(two_neg_449));
-    assert!(es_fold.add(two_neg_451));
-    assert_eq!(es_fold.try_total(), Some(two_neg_449 + two_neg_451));
+    assert!(es_fold.add(two_neg_502));
+    assert!(es_fold.add(two_neg_503));
+    assert!(es_fold.try_total().unwrap() > two_neg_449);
+
+    // `[f64::MAX, 2^970 (half-ULP), 1e-200]`: genuine positive overflow MUST stay in the scaled
+    // branch and return `+inf` (never `NaN` from unscaled `f64::MAX + 2^970` inside `tiny`),
+    // killing outer `* -> +` and `* -> /` on line 140!
+    let half_ulp_max = f64::from_bits((1023u64 + 970) << 52);
+    let mut es_pos_ov_tiny = ExactSum::default();
+    assert!(es_pos_ov_tiny.add(f64::MAX));
+    assert!(es_pos_ov_tiny.add(half_ulp_max));
+    assert!(es_pos_ov_tiny.add(1e-200));
+    assert_eq!(es_pos_ov_tiny.try_total(), None);
+    assert_eq!(es_pos_ov_tiny.total(), f64::INFINITY);
 
     // Exact midpoint tie-breaks above 2^1000:
     // 1. `[2^1000, 2^947 (half-ULP), -1.0, 1e-200]`: true sum < midpoint -> rounds DOWN to `2^1000`!
@@ -1857,7 +1872,6 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
     assert_eq!(es_tie_down.try_total(), Some(two_1000));
 
     // 2. `[f64::MAX, 2^970 (half-ULP), -1.0, 1e-200]`: true sum < midpoint -> MUST NOT overflow (`Some(f64::MAX)`)!
-    let half_ulp_max = f64::from_bits((1023u64 + 970) << 52);
     let mut es_no_spurious_ov = ExactSum::default();
     assert!(es_no_spurious_ov.add(f64::MAX));
     assert!(es_no_spurious_ov.add(half_ulp_max));
