@@ -243,6 +243,9 @@ export class WatchPump implements WatchController {
     if (options?.mode !== undefined) policy.mode = options.mode;
     if (options?.minGapMs !== undefined) policy.minGapMs = options.minGapMs;
     if (options?.adaptiveMultiplier !== undefined) policy.adaptiveMultiplier = options.adaptiveMultiplier;
+    // Read remaining option getters BEFORE registering in Rust so a hostile getter never leaks `reg.watchId`.
+    const onError = options?.onError;
+    const immediate = options?.immediate !== false;
 
     const nowMs = this.#nowMs();
     const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
@@ -272,7 +275,7 @@ export class WatchPump implements WatchController {
         id: reg.watchId,
         spec,
         deliver,
-        onError: options?.onError,
+        onError,
         active: true,
         lastCostMs: 1,
         backoffMs: 0,
@@ -280,7 +283,7 @@ export class WatchPump implements WatchController {
       };
       this.#entries.set(reg.watchId, entry);
 
-      if (options?.immediate !== false) {
+      if (immediate) {
         try {
           deliver(reg.answer);
         } catch (error) {
@@ -482,7 +485,11 @@ export class WatchPump implements WatchController {
     if (this.#cancelTimer !== undefined) {
       const cancel = this.#cancelTimer;
       this.#cancelTimer = undefined;
-      cancel();
+      try {
+        cancel();
+      } catch {
+        // Never let a throwing custom clock cancel function mask errors or wedge cleanup/settlement.
+      }
     }
   }
 

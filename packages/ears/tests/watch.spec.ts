@@ -867,7 +867,7 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     w2.stop();
   });
 
-  it('PR #268 Batch 3: createSystemClock is monotonic integer ms and fractional clocks never kill watches (3.6)', () => {
+  it('PR #268 Batch 3: createSystemClock is monotonic integer ms and fractional clocks never kill watches (3.6)', async () => {
     const sys = createSystemClock();
     const t1 = sys.now();
     const t2 = sys.now();
@@ -1018,5 +1018,76 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     expect(siblingCounts).toEqual([0, 1]);
     expect(eng5.watches.settled()).toBe(true);
     siblingWatch.stop();
+
+    // PR #272 review fixes:
+    // (a) Throwing custom clock `clearTimeout` during `register()` cleanup must NOT mask `observer.finish()`'s
+    //     error and must still clear active watches & settle `onSettled()`.
+    const handle6 = temps.open({ schema: watchSchema });
+    const base6 = createFakeClock(110_000);
+    let throwOnClearTimeout = false;
+    let failSettledFatal = false;
+    const hostileClearClock: EarsClock = {
+      now: () => base6.now(),
+      setTimeout: (cb, ms) => base6.setTimeout(cb, ms),
+      clearTimeout(h) {
+        base6.clearTimeout(h);
+        if (throwOnClearTimeout) throw new Error('clock clearTimeout boom');
+      },
+    };
+    const wrappedDb6 = new Proxy(handle6.database, {
+      get(target, prop, receiver) {
+        if (prop === 'watchesSettled') {
+          return () => {
+            if (failSettledFatal) throw new EarsError('PANICKED', 'simulated handle panic');
+            return target.watchesSettled();
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    let closeAndThrowInFinish = false;
+    let settledResolved = false;
+    const eng6 = createEarsEngine({
+      database: wrappedDb6,
+      clock: hostileClearClock,
+      observer: {
+        start(op) {
+          return () => {
+            if (op.watch && closeAndThrowInFinish) {
+              closeAndThrowInFinish = false;
+              failSettledFatal = true;
+              throw new Error('original finish error');
+            }
+          };
+        },
+      },
+    });
+    const w6 = eng6.query.of('Task').watchCount(() => {}, { minGapMs: 500, adaptiveMultiplier: 0 });
+    eng6.create('Task', { title: 'arm-timer', done: false }); // arms timer on w6
+    const unsubSettled6 = eng6.watches.onSettled(() => {
+      settledResolved = true;
+    });
+    throwOnClearTimeout = true;
+    closeAndThrowInFinish = true;
+    expect(() => eng6.query.of('Task').watchCount(() => {}, { minGapMs: 0 })).toThrow('original finish error');
+    expect(w6.active).toBe(false);
+    expect(eng6.watches.activeCount).toBe(0);
+    expect(eng6.watches.settled()).toBe(true);
+    expect(settledResolved).toBe(true);
+    unsubSettled6();
+
+    // (b) Hostile getter on `options.onError` / `options.immediate` fails BEFORE registering in Rust (no leak).
+    const handle7 = temps.open({ schema: watchSchema });
+    const eng7 = createEarsEngine({ database: handle7.database, clock: createFakeClock(120_000) });
+    const hostileOpts = {
+      get onError() {
+        throw new Error('hostile onError getter');
+      },
+    };
+    expect(() => eng7.query.of('Task').watchCount(() => {}, hostileOpts as never)).toThrow('hostile onError getter');
+    expect(eng7.watches.activeCount).toBe(0);
+    eng7.create('Task', { title: 'no-leak-7', done: false });
+    expect(eng7.watches.settled()).toBe(true);
   });
 });

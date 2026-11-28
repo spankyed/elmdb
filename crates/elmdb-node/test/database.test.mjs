@@ -477,7 +477,7 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
   const tmp = mkdtempSync(join(tmpdir(), 'elmdb-node-mapfull-'));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
-  const db = Database.open(join(tmp, 'db'), { mapSizeBytes: 256 * 1024 });
+  const db = Database.open(join(tmp, 'db'), { mapSizeBytes: 512 * 1024 });
   t.after(() => { try { db.close(); } catch {} });
 
   db.setSchema({
@@ -514,7 +514,7 @@ test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL ac
 
   // 2. db.transact() hitting STORAGE_FULL via executeWireBatch throws STORAGE_FULL, grows mapSizeBytes,
   //    and succeeds on caller retry!
-  const bigLen = Math.floor((beforeSize * 7) / 8);
+  const bigLen = beforeSize + 8 * 1024;
   const bigWire = buildWireBatch((b) => {
     b.create('Blob', { body: incompressibleAscii(bigLen, 1) }, 'big-node-tx');
   });

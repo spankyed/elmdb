@@ -3094,8 +3094,11 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
     use elmdb_wire::ElmdbError;
 
     let tmp = tempdir().unwrap();
+    // Use 512 KiB initial map so `size_initial + 8 KiB` (520 KiB) is strictly larger than `map_size`
+    // on EVERY page size (4 KiB Linux/Windows/x64-macOS AND 16 KiB arm64-macOS) while fitting easily
+    // inside `1024 KiB` after a single 2x grow.
     let db =
-        Database::open(tmp.path().join("db"), OpenOptions { map_size: Some(256 * 1024), ..OpenOptions::default() })
+        Database::open(tmp.path().join("db"), OpenOptions { map_size: Some(512 * 1024), ..OpenOptions::default() })
             .unwrap();
     let mut fields = BTreeMap::new();
     fields.insert("body".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
@@ -3180,7 +3183,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
         }
         out
     };
-    let big_len = usize::try_from(size_initial).unwrap() * 7 / 8;
+    let big_len = usize::try_from(size_initial).unwrap() + 8 * 1024;
     let big_ops = vec![WireOp::Create {
         type_name: "Blob".into(),
         external_id: Some("big-tx".into()),
@@ -3210,12 +3213,68 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
     .unwrap();
     assert!(db.get_row("big-tx").unwrap().is_some());
 
-    // 5. Standalone `execute_batch` whose host `beforeCommit` hook writes directly and hits real MDB_MAP_FULL
-    //    auto-grows and retries cleanly!
+    // 5. Per-callback `map_full_count` scoping & `execute_batch` non-MapFull abort guard:
+    //    If Hook 1 hits and catches a real MapFull on this DB, Hook 2 spoofing `StorageFull` is STILL
+    //    downgraded to `HookAborted` (and does NOT retry/grow). Likewise, if a hook catches MapFull and
+    //    returns `HookAborted`, `execute_batch` returns `HookAborted` without retrying.
     let db_arc = Arc::new(db);
-    let db_for_hook = Arc::clone(&db_arc);
     let size_before_hook = db_arc.stats().unwrap().map_size_bytes;
     let hook_payload = incompressible(usize::try_from(size_before_hook).unwrap() * 2 + 64 * 1024, 2);
+    let db_for_catch = Arc::clone(&db_arc);
+    let catch_payload = hook_payload.clone();
+    let catch_runs = Arc::new(AtomicUsize::new(0));
+    let catch_runs_c = Arc::clone(&catch_runs);
+    let h_catch = db_arc
+        .register_host_before_commit(
+            TypeMask::all(),
+            Arc::new(move |delta| {
+                if delta.entities.iter().any(|e| e.id == "caught-then-spoof") {
+                    catch_runs_c.fetch_add(1, Ordering::SeqCst);
+                    let err = db_for_catch
+                        .execute_batch(&[WireOp::Create {
+                            type_name: "Blob".into(),
+                            external_id: Some("caught-big".into()),
+                            fields: vec![("body".into(), CanonicalValue::String(catch_payload.clone()))],
+                        }])
+                        .unwrap_err();
+                    assert!(err.is_map_full());
+                }
+                Ok(None)
+            }),
+        )
+        .unwrap();
+    let h_spoof_after = db_arc
+        .register_host_before_commit(
+            TypeMask::all(),
+            Arc::new(|delta| {
+                if delta.entities.iter().any(|e| e.id == "caught-then-spoof") {
+                    return Err(ElmdbError::new(ErrorCode::StorageFull, "storage map is full (spoofed after catch)"));
+                }
+                Ok(None)
+            }),
+        )
+        .unwrap();
+    let spoof_after_err = db_arc
+        .execute_batch(&[WireOp::Create {
+            type_name: "Blob".into(),
+            external_id: Some("caught-then-spoof".into()),
+            fields: vec![("body".into(), CanonicalValue::String("small".into()))],
+        }])
+        .unwrap_err();
+    assert_eq!(spoof_after_err.code, ErrorCode::HookAborted);
+    assert_eq!(
+        catch_runs.load(Ordering::SeqCst),
+        1,
+        "HookAborted after caught MapFull must NOT trigger execute_batch retry"
+    );
+    assert!(db_arc.unregister_before_commit(h_spoof_after));
+    assert!(db_arc.unregister_before_commit(h_catch));
+
+    // 6. Standalone `execute_batch` whose host `beforeCommit` hook writes directly and hits real MDB_MAP_FULL
+    //    auto-grows and retries cleanly!
+    let db_for_hook = Arc::clone(&db_arc);
+    let size_before_real = db_arc.stats().unwrap().map_size_bytes;
+    let real_hook_payload = incompressible(usize::try_from(size_before_real).unwrap() * 2 + 64 * 1024, 3);
     let hook_runs = Arc::new(AtomicUsize::new(0));
     let hook_runs_c = Arc::clone(&hook_runs);
     let h_real = db_arc
@@ -3227,7 +3286,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
                     db_for_hook.execute_batch(&[WireOp::Create {
                         type_name: "Blob".into(),
                         external_id: Some("hook-big-written".into()),
-                        fields: vec![("body".into(), CanonicalValue::String(hook_payload.clone()))],
+                        fields: vec![("body".into(), CanonicalValue::String(real_hook_payload.clone()))],
                     }])?;
                 }
                 Ok(None)
@@ -3242,7 +3301,7 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
         }])
         .unwrap();
     assert!(hook_runs.load(Ordering::SeqCst) >= 2, "expected MapFull retry");
-    assert!(db_arc.stats().unwrap().map_size_bytes > size_before_hook);
+    assert!(db_arc.stats().unwrap().map_size_bytes > size_before_real);
     assert!(db_arc.get_row("hook-big-written").unwrap().is_some());
     assert!(db_arc.unregister_before_commit(h_real));
     db_arc.close().unwrap();
