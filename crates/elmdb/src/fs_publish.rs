@@ -13,52 +13,69 @@ pub(crate) fn parent_dir(path: &Path) -> &Path {
     }
 }
 
-/// Lexically normalizes `.` and `..` components onto an absolute path without requiring
-/// intermediate segments to exist on disk.
-fn normalize_absolute(path: &Path) -> Result<PathBuf> {
-    let abs = std::env::current_dir()
-        .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot resolve current directory: {e}")))?
-        .join(path);
-    let mut out = PathBuf::new();
-    for comp in abs.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    Ok(out)
-}
-
 /// Resolves `path` to a canonicalized path even if trailing path components do not exist yet,
-/// by lexically normalizing `.`/`..`, canonicalizing the deepest existing ancestor, and
-/// re-appending the remaining suffix.
+/// walking components left-to-right and canonicalizing every existing prefix *before* applying `..`
+/// so symlinks cannot be folded away lexically before resolution.
+///
+/// Rejects `..` after a nonexistent path segment and rejects dangling symlinks (fail-closed).
 fn resolve_path_preserving_missing(path: &Path) -> Result<PathBuf> {
     if let Ok(canon) = fs::canonicalize(path) {
         return Ok(canon);
     }
-    let normalized = normalize_absolute(path)?;
-    let mut missing = Vec::new();
-    let mut cur = normalized.as_path();
-    loop {
-        if let Ok(canon) = fs::canonicalize(cur) {
-            let mut out = canon;
-            for part in missing.into_iter().rev() {
-                out.push(part);
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot resolve current directory: {e}")))?
+            .join(path)
+    };
+    let mut resolved = PathBuf::new();
+    let mut missing_started = false;
+    for comp in abs.components() {
+        match comp {
+            Component::Prefix(p) => resolved.push(p.as_os_str()),
+            Component::RootDir => resolved.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if missing_started {
+                    return Err(ElmdbError::new(
+                        ErrorCode::InvalidArgument,
+                        format!("path '{}' cannot traverse '..' after a nonexistent segment", path.display()),
+                    ));
+                }
+                resolved = fs::canonicalize(&resolved).map_err(|e| {
+                    ElmdbError::new(ErrorCode::Io, format!("cannot canonicalize '{}': {e}", resolved.display()))
+                })?;
+                resolved.pop();
             }
-            return Ok(out);
+            Component::Normal(seg) => {
+                resolved.push(seg);
+                if !missing_started {
+                    match fs::canonicalize(&resolved) {
+                        Ok(canon) => resolved = canon,
+                        Err(e) if e.kind() == ErrorKind::NotFound => {
+                            if let Ok(meta) = fs::symlink_metadata(&resolved)
+                                && meta.file_type().is_symlink()
+                            {
+                                return Err(ElmdbError::new(
+                                    ErrorCode::InvalidArgument,
+                                    format!("cannot publish through dangling symlink '{}'", resolved.display()),
+                                ));
+                            }
+                            missing_started = true;
+                        }
+                        Err(e) => {
+                            return Err(ElmdbError::new(
+                                ErrorCode::Io,
+                                format!("cannot canonicalize '{}': {e}", resolved.display()),
+                            ));
+                        }
+                    }
+                }
+            }
         }
-        let Some(name) = cur.file_name() else {
-            return Ok(normalized);
-        };
-        missing.push(name.to_os_string());
-        let Some(parent) = cur.parent() else {
-            return Ok(normalized);
-        };
-        cur = parent;
     }
+    Ok(resolved)
 }
 
 /// Rejects publishing into `source_dir` itself, any descendant inside `source_dir`,
@@ -103,9 +120,55 @@ pub(crate) fn atomic_publish_file_no_overwrite(tmp_path: &Path, target: &Path) -
     }
 }
 
+/// Strips trailing path separators and rejects targets ending in `.`, `..`, root, or a symlink.
+///
+/// Checking `symlink_metadata` on the trailing-separator-stripped path ensures `lstat(2)` / Win32
+/// inspects the symlink itself instead of following `link/` to its target directory.
+fn normalize_non_symlink_target_dir(target_dir: &Path) -> Result<(PathBuf, Option<fs::Metadata>)> {
+    // Reject trailing `/.` / `\.` explicitly because `Path::components()` silently drops non-leading `CurDir`
+    // (empty paths, bare `.`, `..`, and root are caught by `components().next_back()` below).
+    let raw = target_dir.to_string_lossy();
+    let trimmed = raw.trim_end_matches(['/', '\\']);
+    if trimmed.ends_with("/.") || trimmed.ends_with("\\.") {
+        return Err(ElmdbError::new(
+            ErrorCode::InvalidArgument,
+            format!("invalid publish target directory '{}'", target_dir.display()),
+        ));
+    }
+    match target_dir.components().next_back() {
+        Some(Component::Normal(_)) => {}
+        _ => {
+            return Err(ElmdbError::new(
+                ErrorCode::InvalidArgument,
+                format!("invalid publish target directory '{}'", target_dir.display()),
+            ));
+        }
+    }
+    let clean: PathBuf = target_dir.components().collect();
+    match fs::symlink_metadata(&clean) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(ElmdbError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("refusing to publish into symlink target '{}'", target_dir.display()),
+                ));
+            }
+            Ok((clean, Some(meta)))
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok((clean, None)),
+        Err(e) => Err(ElmdbError::new(
+            ErrorCode::Io,
+            format!("cannot inspect target directory '{}': {e}", target_dir.display()),
+        )),
+    }
+}
+
 /// Atomically publishes a pre-synced sibling staging directory `staging` to `target_dir`,
 /// accepting only a non-existent or empty `target_dir`, and fsyncs both `staging` and `parent`.
 pub(crate) fn atomic_publish_dir_new(staging: &Path, target_dir: &Path) -> Result<()> {
+    let (clean_target, _existing) = normalize_non_symlink_target_dir(target_dir)?;
+    let target_dir = clean_target.as_path();
+
     let vfs = OsVfs::new();
     vfs.sync_dir(staging)?;
 
@@ -184,14 +247,9 @@ pub(crate) fn atomic_publish_dir_replace(
     backup_marker: &str,
     nonce: u64,
 ) -> Result<()> {
-    if let Ok(meta) = fs::symlink_metadata(target_dir) {
-        if meta.file_type().is_symlink() {
-            return Err(ElmdbError::new(
-                ErrorCode::InvalidArgument,
-                format!("refusing to replace symlink backup target '{}'", target_dir.display()),
-            ));
-        }
-    } else {
+    let (clean_target, existing) = normalize_non_symlink_target_dir(target_dir)?;
+    let target_dir = clean_target.as_path();
+    if existing.is_none() {
         return atomic_publish_dir_new(staging, target_dir);
     }
 

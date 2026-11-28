@@ -529,12 +529,13 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             }
         };
 
+        let lock_scope = gate.store().lock_scope_id();
         let engine = Self {
             gate: Arc::new(gate),
             clock,
             dbs,
-            schema_state: SchemaEpochLock::new(SchemaState { schema: Arc::new(schema), pool }),
-            hooks: MetaLock::new(HookRegistry::default()),
+            schema_state: SchemaEpochLock::new_in_scope(lock_scope, SchemaState { schema: Arc::new(schema), pool }),
+            hooks: MetaLock::new_in_scope(lock_scope, HookRegistry::default()),
             projections,
         };
         Ok((engine, report))

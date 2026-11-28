@@ -176,6 +176,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         let dir = dir.as_ref().to_path_buf();
         let sidecar_path = dir.join(SYNC_SIDECAR_NAME);
         let sidecar_lock_path = dir.join(SYNC_LOCK_NAME);
+        let scope = store.lock_scope_id();
         Self {
             store,
             vfs,
@@ -184,10 +185,10 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             sidecar_lock_path,
             mode,
             read_only,
-            writer: WriterLock::new(WriterState::default()),
+            writer: WriterLock::new_in_scope(scope, WriterState::default()),
             unacked_reboot: AtomicBool::new(false),
             poisoned: AtomicBool::new(false),
-            poison_reason: MetaLock::new(None),
+            poison_reason: MetaLock::new_in_scope(scope, None),
         }
     }
 
@@ -222,9 +223,18 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// Creates a consistent compacted copy of the store in `target_dir` and writes + fsyncs
     /// a verified `synced.v2` sidecar matching the copied `data.mdb` active meta page.
     /// Automatically adopts cross-process `MDB_MAP_RESIZED` and retries if needed.
+    ///
+    /// Fails closed if `unacked_reboot` is set so an unacknowledged `UnsyncedAfterReboot`
+    /// database cannot be silently laundered into a `Clean` backup.
     pub fn copy_compacted(&self, target_dir: &Path) -> Result<(), StorageError> {
         let receipt = loop {
             self.check_poisoned()?;
+            if self.unacked_reboot.load(Ordering::Acquire) {
+                return Err(StorageError::DurabilityFailed(
+                    "cannot create backup while database has an unacknowledged reboot; call acknowledge_restore() first"
+                        .into(),
+                ));
+            }
             match self.store.copy_compacted(target_dir) {
                 Ok(r) => break r,
                 Err(StorageError::MapResized) => {
@@ -294,19 +304,96 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if self.read_only {
             return Err(StorageError::ReadOnly);
         }
-        match self.store.grow_map(min_size) {
-            Ok(size) => Ok(size),
-            Err(StorageError::Corrupted(msg)) => Err(self.poison_corrupted(msg)),
-            Err(err) => Err(err),
+        if self.mode == DurabilityMode::Grouped && self.unacked_reboot.load(Ordering::Acquire) {
+            return Err(StorageError::DurabilityFailed(
+                "cannot grow map while Grouped database has an unacknowledged reboot; call acknowledge_restore() first"
+                    .into(),
+            ));
         }
+        // Hold L2 `MapGate::write()` -> L3 `WriterLock` across the entire seal -> unpin -> remap -> re-pin
+        // -> verify sequence so no local writer can slip between sealing and re-pinning.
+        let map_write = self.store.lock_map_write();
+        let mut guard = self.writer.lock();
+        self.check_poisoned()?;
+        let pin_after = self.mode == DurabilityMode::Grouped && guard.recovered;
+        if pin_after {
+            let _ = self.persist_durable_locked(&mut guard, MapWitness::Write(&map_write), None, false)?;
+        }
+        let size = match self.store.grow_map_locked(&map_write, min_size, pin_after) {
+            Ok(size) => size,
+            Err(StorageError::Corrupted(msg)) => return Err(self.poison_corrupted(msg)),
+            Err(err) if pin_after => return Err(self.poison(format!("Grouped map grow/re-pin failed: {err}"))),
+            Err(err) => return Err(err),
+        };
+        if pin_after {
+            self.verify_and_seal_after_remap_locked(&mut guard, &map_write)?;
+        }
+        drop(guard);
+        drop(map_write);
+        Ok(size)
     }
 
     fn adopt_resized_map_checked(&self) -> Result<usize, StorageError> {
-        match self.store.adopt_resized_map() {
-            Ok(size) => Ok(size),
-            Err(StorageError::Corrupted(msg)) => Err(self.poison_corrupted(msg)),
-            Err(err) => Err(err),
+        self.adopt_resized_map_internal(false)
+    }
+
+    fn adopt_and_pin_grouped(&self, force_pin: bool) -> Result<(), StorageError> {
+        let _ = self.adopt_resized_map_internal(force_pin)?;
+        Ok(())
+    }
+
+    fn adopt_resized_map_internal(&self, force_pin: bool) -> Result<usize, StorageError> {
+        // Hold L2 `MapGate::write()` -> L3 `WriterLock` across seal -> unpin -> adopt -> re-pin -> verify
+        // so neither local writers nor cross-process commits can leave the pin ahead of `synced.v2`.
+        let map_write = self.store.lock_map_write();
+        let mut guard = self.writer.lock();
+        self.check_poisoned()?;
+        let pin_after = !self.read_only
+            && self.mode == DurabilityMode::Grouped
+            && guard.recovered
+            && (force_pin || !self.unacked_reboot.load(Ordering::Acquire));
+        if pin_after {
+            let _ = self.persist_durable_locked(&mut guard, MapWitness::Write(&map_write), None, false)?;
         }
+        let size = match self.store.adopt_resized_map_locked(&map_write, pin_after) {
+            Ok(size) => size,
+            Err(StorageError::Corrupted(msg)) => return Err(self.poison_corrupted(msg)),
+            Err(err) if pin_after => return Err(self.poison(format!("Grouped adopt_resized_map/re-pin failed: {err}"))),
+            Err(err) => return Err(err),
+        };
+        if pin_after {
+            self.verify_and_seal_after_remap_locked(&mut guard, &map_write)?;
+        }
+        drop(guard);
+        drop(map_write);
+        Ok(size)
+    }
+
+    /// Runs while holding L2 `MapGate::write()` + L3 `WriterLock` immediately after a Grouped remap:
+    /// if a cross-process peer committed during `mdb_env_set_mapsize`, seals the newer tip and
+    /// overlap-refreshes the pin before releasing L2+L3 so `durable_pin` never points to an unsynced txnid.
+    fn verify_and_seal_after_remap_locked(
+        &self,
+        guard: &mut WriterState,
+        map_write: &S::MapWriteGuard<'_>,
+    ) -> Result<(), StorageError> {
+        let receipt = match self.store.active_receipt() {
+            Ok(r) => r,
+            Err(err) => return Err(self.poison(format!("reading active meta after Grouped remap failed: {err}"))),
+        };
+        let sealed_txnid = guard.last_durable.map_or(0, |s| s.txnid);
+        if receipt.txnid > sealed_txnid {
+            let (_, need_adopt) =
+                self.persist_durable_locked(guard, MapWitness::Write(map_write), Some(receipt.txnid), true)?;
+            if need_adopt {
+                match self.store.adopt_resized_map_locked(map_write, true) {
+                    Ok(_) => {}
+                    Err(StorageError::Corrupted(msg)) => return Err(self.poison_corrupted(msg)),
+                    Err(err) => return Err(self.poison(format!("Grouped post-remap adopt failed: {err}"))),
+                }
+            }
+        }
+        Ok(())
     }
 
     fn read_sidecar_best(&self) -> Result<(bool, u8, Option<SyncSlot>, bool), StorageError> {
@@ -338,13 +425,14 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// the gate's sequence counter from the highest valid slot.
     pub fn recover(&self) -> Result<RecoveryReport, StorageError> {
         self.check_poisoned()?;
+        let map_guard = self.store.lock_map_read();
         let mut state = self.writer.lock();
         self.check_poisoned()?;
 
         // Serialize sidecar inspection against concurrent writers in other processes.
         // Read-only opens NEVER create `synced.v2.lock` (they take a shared lock only if it exists).
         // Tolerate read-only mounts (`PermissionDenied` / `ReadOnlyFilesystem`) gracefully.
-        let _sidecar_lock = if self.mode != DurabilityMode::Unsafe {
+        let sidecar_lock = if self.mode != DurabilityMode::Unsafe {
             let lock_res = if self.read_only {
                 self.vfs.lock_file_shared_if_exists(&self.sidecar_lock_path)
             } else {
@@ -368,7 +456,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
 
         // Read the sidecar strictly BEFORE `active_receipt()`! Because writers always commit `data.mdb`
         // before updating `synced.v2`, reading the sidecar first guarantees `durable.txnid <= observed_txnid`
-        // even for read-only opens when `synced.v2.lock` does not yet exist (`_sidecar_lock.is_none()`).
+        // even for read-only opens when `synced.v2.lock` does not yet exist (`sidecar_lock.is_none()`).
         let (sidecar_exists, valid_slots, best, empty_file) = self.read_sidecar_best()?;
         if sidecar_exists && !empty_file && valid_slots == 0 {
             return Err(StorageError::Corrupted(
@@ -417,6 +505,41 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         }
         self.unacked_reboot.store(status == RecoveryStatus::UnsyncedAfterReboot, Ordering::Release);
         state.recovered = true;
+
+        // Release `_sidecar_lock` BEFORE `persist_durable_locked` (which re-acquires it).
+        drop(sidecar_lock);
+
+        let mut need_adopt = false;
+        if self.mode == DurabilityMode::Grouped && !self.read_only {
+            match status {
+                RecoveryStatus::SameBootUnsyncedTail => {
+                    // Seal the same-boot unsynced tail FIRST so the pinned snapshot is genuinely durable
+                    // (otherwise pinning `D+k` while `synced.v2` still says `D` leaves `D`'s pages unpinned).
+                    let (_, adopt) = self.persist_durable_locked(
+                        &mut state,
+                        MapWitness::Read(&map_guard),
+                        Some(observed_txnid),
+                        true,
+                    )?;
+                    need_adopt = adopt;
+                }
+                RecoveryStatus::Clean | RecoveryStatus::RebootVerified => {
+                    match self.store.refresh_durable_pin(&map_guard) {
+                        Ok(()) => {}
+                        Err(StorageError::MapResized) => need_adopt = true,
+                        Err(err) => {
+                            return Err(self.poison(format!("failed to acquire Grouped durable pin: {err}")));
+                        }
+                    }
+                }
+                RecoveryStatus::Fresh | RecoveryStatus::UnsyncedAfterReboot => {}
+            }
+        }
+        drop(state);
+        drop(map_guard);
+        if need_adopt {
+            self.adopt_and_pin_grouped(false)?;
+        }
 
         Ok(RecoveryReport { status, durable: best, observed_txnid, observed_roots_sha256: observed_roots, valid_slots })
     }
@@ -550,9 +673,12 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             drop(map_guard);
             return Ok(None);
         }
-        let slot = self.persist_durable_locked(&mut guard, &map_guard, None)?;
+        let (slot, need_adopt) = self.persist_durable_locked(&mut guard, MapWitness::Read(&map_guard), None, true)?;
         drop(guard);
         drop(map_guard);
+        if need_adopt {
+            self.adopt_and_pin_grouped(false)?;
+        }
         Ok(Some(slot))
     }
 
@@ -577,10 +703,18 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             self.unacked_reboot.store(false, Ordering::Release);
             return Ok(None);
         }
-        let slot = self.persist_durable_locked(&mut guard, &map_guard, None)?;
-        self.unacked_reboot.store(false, Ordering::Release);
+        let (slot, need_adopt) = self.persist_durable_locked(&mut guard, MapWitness::Read(&map_guard), None, true)?;
+        if !need_adopt {
+            self.unacked_reboot.store(false, Ordering::Release);
+        }
         drop(guard);
         drop(map_guard);
+        if need_adopt {
+            // Pass `force_pin = true` so `adopt_resized_map_internal` seals and pins atomically under
+            // L2 write + L3 even while `unacked_reboot` is still true, clearing it only on success.
+            self.adopt_and_pin_grouped(true)?;
+            self.unacked_reboot.store(false, Ordering::Release);
+        }
         Ok(Some(slot))
     }
 
@@ -604,19 +738,20 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         StorageError::Corrupted(reason)
     }
 
-    fn persist_durable_locked(
+    fn persist_durable_locked<'a, 'b>(
         &self,
         state: &mut WriterState,
-        map_guard: &S::MapReadGuard,
+        map_witness: MapWitness<'a, 'b, S>,
         hint_txnid: Option<u64>,
-    ) -> Result<SyncSlot, StorageError> {
+        refresh_pin: bool,
+    ) -> Result<(SyncSlot, bool), StorageError> {
         // 1. Acquire cross-process sidecar lock FIRST so no peer can interleave slot updates.
         let _sidecar_lock = match self.vfs.lock_file(&self.sidecar_lock_path) {
             Ok(guard) => guard,
             Err(err) => return Err(self.poison(format!("sidecar lock failed: {err}"))),
         };
 
-        // 2. Read `(txnid, roots_sha256)` from the active meta page BEFORE `store.sync(map_guard)`!
+        // 2. Read `(txnid, roots_sha256)` from the active meta page BEFORE `store.sync(...)`!
         //    Because LMDB writes all data pages before the meta page, calling `fdatasync(data.mdb)`
         //    strictly AFTER reading `receipt` guarantees every byte of `receipt.txnid` (and every
         //    concurrent peer commit included in `receipt`) is durable on disk before `synced.v2`
@@ -634,8 +769,8 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             )));
         }
 
-        // 3. Flush `data.mdb` to stable storage while holding L2 `map_guard` (prevents `munmap` race).
-        if let Err(err) = self.store.sync(map_guard) {
+        // 3. Flush `data.mdb` to stable storage while holding L2 `map_witness` (prevents `munmap` race).
+        if let Err(err) = map_witness.sync(&self.store) {
             return Err(self.poison(format!("store sync failed: {err}")));
         }
 
@@ -707,7 +842,37 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
 
         state.next_seq = seq.saturating_add(1);
         state.last_durable = Some(slot);
-        Ok(slot)
+        let need_adopt = if refresh_pin && self.mode == DurabilityMode::Grouped && !self.read_only {
+            match map_witness.refresh_durable_pin(&self.store) {
+                Ok(()) => false,
+                Err(StorageError::MapResized) => true,
+                Err(err) => return Err(self.poison(format!("refreshing Grouped durable pin failed: {err}"))),
+            }
+        } else {
+            false
+        };
+        Ok((slot, need_adopt))
+    }
+}
+
+enum MapWitness<'a, 'b, S: KvStore + 'b> {
+    Read(&'a S::MapReadGuard),
+    Write(&'a S::MapWriteGuard<'b>),
+}
+
+impl<'a, 'b, S: KvStore + 'b> MapWitness<'a, 'b, S> {
+    fn sync(&self, store: &S) -> Result<(), StorageError> {
+        match self {
+            Self::Read(g) => store.sync(g),
+            Self::Write(g) => store.sync_under_write(g),
+        }
+    }
+
+    fn refresh_durable_pin(&self, store: &S) -> Result<(), StorageError> {
+        match self {
+            Self::Read(g) => store.refresh_durable_pin(g),
+            Self::Write(g) => store.refresh_durable_pin_under_write(g),
+        }
     }
 }
 
@@ -931,8 +1096,12 @@ impl<'a, S: KvStore + 'a, V: Vfs> GatedWriteTxn<'a, S, V> {
                 }
                 receipt
             } else {
-                let slot =
-                    gate.persist_durable_locked(self.writer_guard.state_mut(), &map_guard, Some(receipt.txnid))?;
+                let (slot, _) = gate.persist_durable_locked(
+                    self.writer_guard.state_mut(),
+                    MapWitness::Read(&map_guard),
+                    Some(receipt.txnid),
+                    false,
+                )?;
                 CommitReceipt { txnid: slot.txnid, roots_sha256: slot.roots_sha256 }
             }
         } else {

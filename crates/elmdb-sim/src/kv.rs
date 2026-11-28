@@ -4,7 +4,9 @@ use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
-use elmdb_storage::{CommitReceipt, DbFlags, KvCursor, KvEntry, KvRead, KvStore, KvWrite, StorageError, SubDbHandle};
+use elmdb_storage::{
+    CommitReceipt, DbFlags, KvCursor, KvEntry, KvRead, KvStore, KvWrite, LockScopeId, StorageError, SubDbHandle,
+};
 use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 
@@ -128,17 +130,41 @@ impl KvSnapshot {
 
 struct StoreInner {
     config: SimKvConfig,
+    lock_scope: LockScopeId,
     committed: Arc<KvSnapshot>,
     durable: Arc<KvSnapshot>,
     writer_active: bool,
+    /// Active `SimRoTxn` reader counts keyed by snapshot `txnid` (models LMDB `lock.mdb` reader slots).
+    active_readers: BTreeMap<u64, usize>,
+    /// Active `Grouped`-mode durable snapshot pin `txnid` (set by `refresh_durable_pin`, cleared on crash).
+    pinned_txnid: Option<u64>,
+    /// First mutating `txnid > durable.txnid` that freed pages belonging to `durable` (when `durable.txnid > 0`).
+    durable_freed_at: Option<u64>,
+    /// Set to `true` when an unsynced commit >= `durable_freed_at + 2` runs with no active reader or pin
+    /// at `<= durable.txnid` (exact LMDB `mdb_find_oldest` freelist page reuse semantics).
+    durable_tree_corrupted: bool,
+    /// Set on `crash_power_loss()` if `durable_tree_corrupted` was `true`: meta page still reports
+    /// `durable`'s `txnid`/`roots_sha256`, while reading tree pages fails with `StorageError::Corrupted`.
+    tree_corrupted_after_crash: bool,
+}
+
+impl StoreInner {
+    fn oldest_reader_or_pin(&self) -> Option<u64> {
+        [self.active_readers.keys().next().copied(), self.pinned_txnid].into_iter().flatten().min()
+    }
 }
 
 /// Pure-Rust CoW snapshot KV store mirroring LMDB MVCC, nested savepoints, `MDB_INTEGERKEY`,
-/// O(1) sub-DB truncation, and unsynced-vs-durable crash semantics.
+/// O(1) sub-DB truncation, freelist page reuse vs active reader/pin txnid, and unsynced-vs-durable crash semantics.
 #[derive(Clone)]
 pub struct SimKvStore {
     inner: Arc<Mutex<StoreInner>>,
     fail_next_sync: Arc<AtomicU32>,
+    fail_next_pin: Arc<AtomicU32>,
+    fail_next_read_map_resized: Arc<AtomicU32>,
+    fail_next_pin_map_resized: Arc<AtomicU32>,
+    fail_next_grow_io: Arc<AtomicU32>,
+    peer_commit_on_next_adopt: Arc<AtomicU32>,
 }
 
 impl SimKvStore {
@@ -147,11 +173,22 @@ impl SimKvStore {
         Self {
             inner: Arc::new(Mutex::new(StoreInner {
                 config,
+                lock_scope: LockScopeId::fresh(),
                 committed: Arc::clone(&empty),
                 durable: empty,
                 writer_active: false,
+                active_readers: BTreeMap::new(),
+                pinned_txnid: None,
+                durable_freed_at: None,
+                durable_tree_corrupted: false,
+                tree_corrupted_after_crash: false,
             })),
             fail_next_sync: Arc::new(AtomicU32::new(0)),
+            fail_next_pin: Arc::new(AtomicU32::new(0)),
+            fail_next_read_map_resized: Arc::new(AtomicU32::new(0)),
+            fail_next_pin_map_resized: Arc::new(AtomicU32::new(0)),
+            fail_next_grow_io: Arc::new(AtomicU32::new(0)),
+            peer_commit_on_next_adopt: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -160,12 +197,65 @@ impl SimKvStore {
         self.fail_next_sync.store(count, AtomicOrdering::Release);
     }
 
+    /// Injects `count` upcoming `refresh_durable_pin` / post-remap re-pin failures (e.g. `ReadersFull`).
+    pub fn inject_pin_failures(&self, count: u32) {
+        self.fail_next_pin.store(count, AtomicOrdering::Release);
+    }
+
+    /// Injects `count` upcoming `MapResized` errors on `begin_read()`.
+    pub fn inject_read_map_resized(&self, count: u32) {
+        self.fail_next_read_map_resized.store(count, AtomicOrdering::Release);
+    }
+
+    /// Injects `count` upcoming `MapResized` errors on `refresh_durable_pin()`.
+    pub fn inject_pin_map_resized(&self, count: u32) {
+        self.fail_next_pin_map_resized.store(count, AtomicOrdering::Release);
+    }
+
+    /// Injects `count` upcoming non-Corrupted `ReadersFull` errors on `grow_map_locked` / `adopt_resized_map_locked`.
+    pub fn inject_remap_failures(&self, count: u32) {
+        self.fail_next_grow_io.store(count, AtomicOrdering::Release);
+    }
+
+    /// Simulates a cross-process peer commit landing during the next `adopt_resized_map_locked`.
+    pub fn inject_peer_commit_on_adopt(&self, count: u32) {
+        self.peer_commit_on_next_adopt.store(count, AtomicOrdering::Release);
+    }
+
     /// Simulates power loss: drops all uncommitted and unsynced commits, reverting the store
-    /// back to the last `sync()`ed snapshot.
+    /// back to the last `sync()`ed snapshot. If LMDB's freelist recycled pages of the durable
+    /// snapshot because no reader/pin held `<= durable.txnid`, post-crash reads fail with `Corrupted`
+    /// even though the meta page still reports `durable`'s `txnid` and `roots_sha256`.
     pub fn crash_power_loss(&self) {
         let mut inner = self.inner.lock();
         inner.committed = Arc::clone(&inner.durable);
         inner.writer_active = false;
+        inner.active_readers.clear();
+        inner.pinned_txnid = None;
+        inner.durable_freed_at = None;
+        if inner.durable_tree_corrupted {
+            inner.tree_corrupted_after_crash = true;
+            inner.durable_tree_corrupted = false;
+        }
+    }
+
+    /// Simulates a process crash *without* an OS reboot: page cache (`committed`) survives,
+    /// while all in-process locks, readers, and durable pins are lost.
+    pub fn crash_process_same_boot(&self) {
+        let mut inner = self.inner.lock();
+        inner.writer_active = false;
+        inner.active_readers.clear();
+        inner.pinned_txnid = None;
+    }
+
+    /// Returns the currently pinned durable snapshot `txnid`, if any.
+    pub fn pinned_txnid(&self) -> Option<u64> {
+        self.inner.lock().pinned_txnid
+    }
+
+    /// Drops the durable snapshot pin without syncing (for testing unpinned freelist corruption).
+    pub fn clear_durable_pin_for_test(&self) {
+        self.inner.lock().pinned_txnid = None;
     }
 
     /// Simulates silent storage rollback to an earlier durable snapshot (for corruption tests).
@@ -207,7 +297,22 @@ impl Default for SimKvStore {
 }
 
 pub struct SimRoTxn {
+    inner: Arc<Mutex<StoreInner>>,
     snapshot: Arc<KvSnapshot>,
+    tree_corrupted: bool,
+}
+
+impl Drop for SimRoTxn {
+    fn drop(&mut self) {
+        let mut inner = self.inner.lock();
+        if let Some(count) = inner.active_readers.get_mut(&self.snapshot.txnid) {
+            if *count <= 1 {
+                inner.active_readers.remove(&self.snapshot.txnid);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
 }
 
 pub struct SimRwTxn {
@@ -369,14 +474,23 @@ impl KvRead for SimRoTxn {
         Self: 'a;
 
     fn get(&self, db: SubDbHandle, key: &[u8]) -> Result<Option<&[u8]>, StorageError> {
+        if self.tree_corrupted {
+            return Err(StorageError::Corrupted("freelist reused pages of durable snapshot before power loss".into()));
+        }
         read_get(&self.snapshot, db, key)
     }
 
     fn cursor(&self, db: SubDbHandle) -> Result<Self::Cursor<'_>, StorageError> {
+        if self.tree_corrupted {
+            return Err(StorageError::Corrupted("freelist reused pages of durable snapshot before power loss".into()));
+        }
         read_cursor(&self.snapshot, db)
     }
 
     fn entries(&self, db: SubDbHandle) -> Result<u64, StorageError> {
+        if self.tree_corrupted {
+            return Err(StorageError::Corrupted("freelist reused pages of durable snapshot before power loss".into()));
+        }
         read_entries(&self.snapshot, db)
     }
 
@@ -385,6 +499,9 @@ impl KvRead for SimRoTxn {
     }
 
     fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError> {
+        if self.tree_corrupted {
+            return Err(StorageError::Corrupted("freelist reused pages of durable snapshot before power loss".into()));
+        }
         read_open_subdb_existing(&self.snapshot, name, flags)
     }
 }
@@ -552,12 +669,23 @@ impl KvWrite for SimRwTxn {
             return Err(StorageError::SavepointMismatch { expected: 0, actual: depth });
         }
         let mut final_snap = self.stack.pop().expect("root snapshot");
-        if final_snap.dirty {
+        let was_dirty = final_snap.dirty;
+        if was_dirty {
             final_snap.txnid = final_snap.txnid.saturating_add(1);
             final_snap.dirty = false;
         }
         let receipt = CommitReceipt { txnid: final_snap.txnid, roots_sha256: final_snap.roots_sha256() };
         let mut inner = self.inner.lock();
+        if was_dirty && inner.durable.txnid > 0 {
+            let freed_at = *inner.durable_freed_at.get_or_insert(final_snap.txnid);
+            // LMDB keeps 2 meta slots, so pages freed at `freed_at` become eligible for freelist
+            // reuse on commit `freed_at + 2` unless an active reader or durable pin holds `<= durable.txnid`.
+            if final_snap.txnid >= freed_at.saturating_add(2)
+                && inner.oldest_reader_or_pin().is_none_or(|r| r > inner.durable.txnid)
+            {
+                inner.durable_tree_corrupted = true;
+            }
+        }
         inner.committed = Arc::new(final_snap);
         inner.writer_active = false;
         self.finished = true;
@@ -586,12 +714,25 @@ impl KvStore for SimKvStore {
     type RwTxn<'a> = SimRwTxn;
     type OwnedRwTxn = SimRwTxn;
     type MapReadGuard = ();
+    type MapWriteGuard<'a> = ();
 
     fn lock_map_read(&self) -> Self::MapReadGuard {}
 
+    fn lock_map_write(&self) -> Self::MapWriteGuard<'_> {}
+
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError> {
-        let inner = self.inner.lock();
-        Ok(SimRoTxn { snapshot: Arc::clone(&inner.committed) })
+        if self
+            .fail_next_read_map_resized
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StorageError::MapResized);
+        }
+        let mut inner = self.inner.lock();
+        let snapshot = Arc::clone(&inner.committed);
+        *inner.active_readers.entry(snapshot.txnid).or_insert(0) += 1;
+        let tree_corrupted = inner.tree_corrupted_after_crash;
+        Ok(SimRoTxn { inner: Arc::clone(&self.inner), snapshot, tree_corrupted })
     }
 
     fn begin_write(&self, map_guard: Self::MapReadGuard) -> Result<Self::RwTxn<'_>, StorageError> {
@@ -619,13 +760,44 @@ impl KvStore for SimKvStore {
     }
 
     fn sync(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+        self.sync_under_write(&())
+    }
+
+    fn sync_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
         if self.fail_next_sync.try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1)).is_ok()
         {
             return Err(StorageError::DurabilityFailed("injected sim store sync failure".into()));
         }
         let mut inner = self.inner.lock();
         inner.durable = Arc::clone(&inner.committed);
+        inner.durable_freed_at = None;
+        inner.durable_tree_corrupted = false;
         Ok(())
+    }
+
+    fn refresh_durable_pin(&self, _map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
+        self.refresh_durable_pin_under_write(&())
+    }
+
+    fn refresh_durable_pin_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
+        if self
+            .fail_next_pin_map_resized
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StorageError::MapResized);
+        }
+        if self.fail_next_pin.try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1)).is_ok()
+        {
+            return Err(StorageError::ReadersFull);
+        }
+        let mut inner = self.inner.lock();
+        inner.pinned_txnid = Some(inner.committed.txnid);
+        Ok(())
+    }
+
+    fn lock_scope_id(&self) -> LockScopeId {
+        self.inner.lock().lock_scope
     }
 
     fn last_txnid(&self) -> Result<u64, StorageError> {
@@ -640,11 +812,62 @@ impl KvStore for SimKvStore {
         self.inner.lock().config.map_size
     }
 
-    fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
-        let mut inner = self.inner.lock();
-        let target = min_size.unwrap_or_else(|| inner.config.map_size.saturating_mul(2));
-        inner.config.map_size = inner.config.map_size.max(target);
-        Ok(inner.config.map_size)
+    fn grow_map_locked(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+        min_size: Option<usize>,
+        pin_after: bool,
+    ) -> Result<usize, StorageError> {
+        if self
+            .fail_next_grow_io
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StorageError::ReadersFull);
+        }
+        let new_size = {
+            let mut inner = self.inner.lock();
+            inner.pinned_txnid = None;
+            let target = min_size.unwrap_or_else(|| inner.config.map_size.saturating_mul(2));
+            inner.config.map_size = inner.config.map_size.max(target);
+            inner.config.map_size
+        };
+        if pin_after {
+            self.refresh_durable_pin_under_write(&())?;
+        }
+        Ok(new_size)
+    }
+
+    fn adopt_resized_map_locked(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+        pin_after: bool,
+    ) -> Result<usize, StorageError> {
+        if self
+            .fail_next_grow_io
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(StorageError::ReadersFull);
+        }
+        let size = {
+            let mut inner = self.inner.lock();
+            inner.pinned_txnid = None;
+            if self
+                .peer_commit_on_next_adopt
+                .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                let mut next = (*inner.committed).clone();
+                next.txnid = next.txnid.saturating_add(1);
+                inner.committed = Arc::new(next);
+            }
+            inner.config.map_size
+        };
+        if pin_after {
+            self.refresh_durable_pin_under_write(&())?;
+        }
+        Ok(size)
     }
 
     fn page_size(&self) -> usize {

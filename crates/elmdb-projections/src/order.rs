@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use elmdb_engine::{EntityKey, FieldId, PackedRow, SystemDbs, read_packed_row};
-use elmdb_storage::{KvCursor, KvRead, MetaLock, SubDbHandle};
+use elmdb_storage::{KvCursor, KvRead, LockScopeId, MetaLock, SubDbHandle};
 use elmdb_wire::{CanonicalValue, ElmdbError, ErrorCode, Result};
 use icu_collator::{CollationKeySink, CollatorBorrowed, CollatorPreferences, options::CollatorOptions};
 use icu_locale_core::Locale;
@@ -47,7 +47,7 @@ pub struct CollatorCache {
 
 impl Default for CollatorCache {
     fn default() -> Self {
-        Self { inner: MetaLock::new(FxHashMap::default()) }
+        Self { inner: MetaLock::new_in_scope(LockScopeId::fresh(), FxHashMap::default()) }
     }
 }
 

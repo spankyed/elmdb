@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 
 use elmdb_engine::{FieldId, IndexId, RelKindId, TypeId};
-use elmdb_storage::MetaLock;
+use elmdb_storage::{LockScopeId, MetaLock};
 use elmdb_wire::CanonicalValue;
 use rustc_hash::FxHashMap;
 
@@ -332,15 +332,18 @@ impl Default for PlanCache {
 impl PlanCache {
     pub fn new(capacity: usize) -> Self {
         Self {
-            inner: MetaLock::new(CacheInner {
-                capacity: capacity.clamp(16, 4096),
-                epoch: 0,
-                maint_seq: 0,
-                map: FxHashMap::default(),
-                lru: VecDeque::new(),
-                hits: 0,
-                misses: 0,
-            }),
+            inner: MetaLock::new_in_scope(
+                LockScopeId::fresh(),
+                CacheInner {
+                    capacity: capacity.clamp(16, 4096),
+                    epoch: 0,
+                    maint_seq: 0,
+                    map: FxHashMap::default(),
+                    lru: VecDeque::new(),
+                    hits: 0,
+                    misses: 0,
+                },
+            ),
         }
     }
 
