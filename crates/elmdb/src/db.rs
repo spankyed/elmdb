@@ -22,7 +22,7 @@ use elmdb_projections::{BuildPolicy, ProjectionRegistry, rank};
 use elmdb_query::{EdgeDir, ExecBudgets, LogicalPlan, QueryEngine, QueryOutput};
 use elmdb_storage::{Clock, DurabilityMode, KvCursor, KvRead, OsVfs, SystemClock};
 use elmdb_vec::{DEFAULT_DRAIN_BATCH, VectorProjection, drain_pending_batch_with_receipt, read_entity_embeddings};
-use elmdb_wire::{ElmdbError, EntityTarget, ErrorCode, Result, WireOp, decode_batch};
+use elmdb_wire::{CanonicalValue, ElmdbError, EntityTarget, ErrorCode, Result, WireOp, decode_batch};
 
 use crate::protocol::{
     BatchResult, CheckReport, DatabaseStats, IndexStatus, OpenReport, QueryAnswer, QuerySpec, RelationRow, Row, Schema,
@@ -1547,6 +1547,16 @@ impl Database {
 
     /// Single-snapshot scan of schema, raw primary rows (preserving `EntityRef` vs `DanglingRef`),
     /// outgoing edges, embeddings, and named counters (used by `dump`).
+    pub(crate) fn restore_loaded_extra_fields(
+        &self,
+        extras: &[(String, BTreeMap<String, CanonicalValue>)],
+    ) -> Result<()> {
+        let eng = self.enter_op()?;
+        self.require_writable()?;
+        self.forbid_inside_txn("restoreLoadedExtraFields")?;
+        eng.restore_loaded_extra_fields(extras)
+    }
+
     pub(crate) fn snapshot_for_dump(&self) -> Result<DumpSnapshot> {
         let eng = self.enter_op()?;
         self.forbid_inside_txn("dump")?;
@@ -1560,8 +1570,8 @@ impl Database {
             while let Some((k, _)) = item {
                 if k.len() == 8 {
                     let ek = EntityKey::from_ne_bytes(k.try_into().expect("8"));
-                    if let Some(row) = elmdb_engine::read_raw_stored_row(&ro, &schema, &dbs, ek)? {
-                        rows.push(row);
+                    if let Some(row_and_extra) = elmdb_engine::read_raw_dump_row(&ro, &schema, &dbs, ek)? {
+                        rows.push(row_and_extra);
                     }
                 }
                 item = cur.next()?;
@@ -1569,14 +1579,14 @@ impl Database {
         }
 
         let mut edges = Vec::new();
-        for r in &rows {
+        for (r, _) in &rows {
             edges.extend(read_relations_out_in_txn(&ro, &schema, &dbs, &r.id, None)?);
         }
 
         let mut embeddings = Vec::new();
         for def in &schema.indexes {
             if let IndexKind::Vector { dims, .. } = &def.kind {
-                for r in &rows {
+                for (r, _) in &rows {
                     if r.type_id != def.type_id {
                         continue;
                     }
@@ -1594,7 +1604,7 @@ impl Database {
 
 pub(crate) struct DumpSnapshot {
     pub schema: Arc<CompiledSchema>,
-    pub rows: Vec<StoredRow>,
+    pub rows: Vec<(StoredRow, BTreeMap<String, CanonicalValue>)>,
     pub edges: Vec<StoredEdge>,
     pub embeddings: Vec<(String, String, Vec<Vec<f32>>)>,
     pub counters: BTreeMap<String, u64>,

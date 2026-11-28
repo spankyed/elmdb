@@ -111,7 +111,7 @@ impl LiveQueryHub {
         // P0-6: Mark `already_ran = true` even when `hash == None` (e.g. Imperative watches)!
         guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
         guard.scheduler.seed_snapshot(watch_id, (read_seq, read_maint_seq, read_epoch));
-        let stale = guard.index.register_after_read_with_maint(
+        let (stale, other_dirty) = guard.index.register_after_read_with_maint_and_others(
             watch_id,
             read_seq,
             read_maint_seq,
@@ -119,6 +119,9 @@ impl LiveQueryHub {
             &read_set,
             &current_schema,
         );
+        if !other_dirty.is_empty() {
+            guard.scheduler.mark_dirty(&other_dirty, now_ms);
+        }
         if stale {
             guard.scheduler.mark_dirty(&[watch_id], now_ms);
         }
@@ -168,7 +171,7 @@ impl LiveQueryHub {
             guard.scheduler.abandon_rerun(watch_id);
             return Ok((output, false));
         }
-        let stale = guard.index.register_after_read_with_maint(
+        let (stale, other_dirty) = guard.index.register_after_read_with_maint_and_others(
             watch_id,
             read_seq,
             read_maint_seq,
@@ -176,6 +179,9 @@ impl LiveQueryHub {
             &read_set,
             &current_schema,
         );
+        if !other_dirty.is_empty() {
+            guard.scheduler.mark_dirty(&other_dirty, now_ms);
+        }
         let should_deliver = guard.scheduler.finish_rerun(watch_id, run_id, snapshot, stale, now_ms, cost_ms, hash);
         Ok((output, should_deliver))
     }
@@ -223,7 +229,7 @@ impl LiveQueryHub {
         }
         guard.scheduler.register(watch_id, policy, now_ms, cost_ms, true, hash);
         guard.scheduler.seed_snapshot(watch_id, (read_seq, read_maint_seq, read_epoch));
-        let stale = guard.index.register_after_read_with_maint(
+        let (stale, other_dirty) = guard.index.register_after_read_with_maint_and_others(
             watch_id,
             read_seq,
             read_maint_seq,
@@ -231,6 +237,9 @@ impl LiveQueryHub {
             &read_set,
             &current_schema,
         );
+        if !other_dirty.is_empty() {
+            guard.scheduler.mark_dirty(&other_dirty, now_ms);
+        }
         if stale {
             guard.scheduler.mark_dirty(&[watch_id], now_ms);
         }
@@ -302,7 +311,7 @@ impl LiveQueryHub {
             guard.scheduler.abandon_rerun(watch_id);
             return Ok((answer, false));
         }
-        let stale = guard.index.register_after_read_with_maint(
+        let (stale, other_dirty) = guard.index.register_after_read_with_maint_and_others(
             watch_id,
             read_seq,
             read_maint_seq,
@@ -310,6 +319,9 @@ impl LiveQueryHub {
             &read_set,
             &current_schema,
         );
+        if !other_dirty.is_empty() {
+            guard.scheduler.mark_dirty(&other_dirty, now_ms);
+        }
         let should_deliver = guard.scheduler.finish_rerun(watch_id, run_id, snapshot, stale, now_ms, cost_ms, hash);
         Ok((answer, should_deliver))
     }

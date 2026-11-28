@@ -1780,3 +1780,114 @@ fn batch_e_scheduler_abort_backoff_and_monotonic_snapshot_fence() {
         elmdb_wire::ErrorCode::Closed
     );
 }
+
+#[test]
+fn pr268_batch2_cross_proc_schema_epoch_self_advances_and_dirties_sibling_watches() {
+    let (engine, _reg, ids) = open_sim();
+    let mut rs = ReadSet::new();
+    rs.record_type_scan(ids.note_type);
+
+    let schema_e1 = (*engine.schema()).clone();
+    let e1 = schema_e1.epoch;
+    let mut schema_e2 = schema_e1.clone();
+    schema_e2.epoch = e1 + 1;
+    let mut schema_e3 = schema_e1.clone();
+    schema_e3.epoch = e1 + 2;
+
+    // Register W1 and W2 at epoch e1.
+    let mut idx = InvalidationIndex::new_with_maint_seq(1, e1, 0);
+    assert!(!idx.register_after_read_with_maint(WatchId(1), 1, 0, e1, &rs, &schema_e1));
+    assert!(!idx.register_after_read_with_maint(WatchId(2), 1, 0, e1, &rs, &schema_e1));
+
+    // Single cross-proc bump (e1 -> e2): W1 reruns at e2 and sees current_schema at e2.
+    // W1 settles cleanly (`stale = false`), latest_schema_epoch advances to e2, and sibling W2 is returned dirty!
+    let (stale_w1, others_w1) =
+        idx.register_after_read_with_maint_and_others(WatchId(1), 1, 1, e2(&schema_e2), &rs, &schema_e2);
+    assert!(!stale_w1, "watch read at current cross-proc epoch must settle cleanly");
+    assert_eq!(others_w1, vec![WatchId(2)], "sibling watch must be dirtied on cross-proc schema bump");
+    assert_eq!(idx.stats().latest_schema_epoch, schema_e2.epoch);
+
+    // Double cross-proc bump (e2 -> e3 -> e4) while W2 only read at e3 while current_schema is already e4:
+    // W2 must stay stale for one final rerun at e4, latest_schema_epoch advances to e4, and W1 is dirtied!
+    let mut schema_e4 = schema_e1.clone();
+    schema_e4.epoch = e1 + 3;
+    let (stale_w2, others_w2) =
+        idx.register_after_read_with_maint_and_others(WatchId(2), 1, 2, schema_e3.epoch, &rs, &schema_e4);
+    assert!(stale_w2, "watch read at e3 while current schema is e4 must rerun once more");
+    assert_eq!(others_w2, vec![WatchId(1)]);
+    assert_eq!(idx.stats().latest_schema_epoch, schema_e4.epoch);
+
+    // Final rerun of W2 at e4 settles immediately with zero extra dirty siblings!
+    let (stale_w2_final, others_w2_final) =
+        idx.register_after_read_with_maint_and_others(WatchId(2), 1, 3, schema_e4.epoch, &rs, &schema_e4);
+    assert!(!stale_w2_final);
+    assert!(others_w2_final.is_empty());
+
+    // End-to-end LiveQueryHub test (both `register_query_watch` / `rerun_query_watch` and `*_in_snapshot`):
+    // Simulate a cross-proc `set_schema` by calling `engine.set_schema` WITHOUT notifying `hub`.
+    let qe = QueryEngine::default();
+    let hub = LiveQueryHub::from_engine(&engine, 8).unwrap();
+    let count_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+        terminal: TerminalSpec::Count,
+    });
+    let (w_a, _) = hub
+        .register_query_watch(&engine, &qe, &count_plan, ExecBudgets::default(), WatchPolicy::default(), 10, 1, |o| {
+            let QueryResult::Count(c) = o.result else { return None };
+            Some(hash_result_128(&c.to_le_bytes()))
+        })
+        .unwrap();
+    let (w_b, _) = hub
+        .register_query_watch_in_snapshot(
+            &engine,
+            &qe,
+            ExecBudgets::default(),
+            WatchPolicy::default(),
+            10,
+            1,
+            |_ro, _sc, exec, _| {
+                let out = exec(&count_plan)?;
+                let QueryResult::Count(c) = out.result else { panic!("count") };
+                Ok((c, Some(hash_result_128(&c.to_le_bytes()))))
+            },
+        )
+        .unwrap();
+    assert!(hub.watches_settled());
+
+    // Bump schema epoch on engine WITHOUT notifying `hub` (exact cross-process `set_schema` state).
+    let mut evolved = test_schema();
+    evolved
+        .types
+        .get_mut("Note")
+        .unwrap()
+        .fields
+        .insert("extra_col".into(), RawField { kind: RawFieldKind::String, optional: true, nullable: true });
+    engine.set_schema(&evolved).unwrap();
+
+    // Registering a new watch `w_c` sees the new epoch -> settles cleanly AND marks `w_a` & `w_b` dirty!
+    let (_w_c, _) = hub
+        .register_query_watch(&engine, &qe, &count_plan, ExecBudgets::default(), WatchPolicy::default(), 20, 1, |o| {
+            let QueryResult::Count(c) = o.result else { return None };
+            Some(hash_result_128(&c.to_le_bytes()))
+        })
+        .unwrap();
+    assert!(!hub.watches_settled(), "existing watches w_a and w_b must be marked dirty");
+
+    // Rerun w_a and w_b -> both settle cleanly (zero infinite spin)!
+    hub.rerun_query_watch(w_a, &engine, &qe, &count_plan, ExecBudgets::default(), 30, 1, |o| {
+        let QueryResult::Count(c) = o.result else { return None };
+        Some(hash_result_128(&c.to_le_bytes()))
+    })
+    .unwrap();
+    hub.rerun_query_watch_in_snapshot(w_b, &engine, &qe, ExecBudgets::default(), 30, 1, |_ro, _sc, exec, _| {
+        let out = exec(&count_plan)?;
+        let QueryResult::Count(c) = out.result else { panic!("count") };
+        Ok((c, Some(hash_result_128(&c.to_le_bytes()))))
+    })
+    .unwrap();
+    assert!(hub.watches_settled(), "all watches must settle after rerunning against the new schema epoch");
+}
+
+fn e2(s: &elmdb_engine::CompiledSchema) -> u64 {
+    s.epoch
+}

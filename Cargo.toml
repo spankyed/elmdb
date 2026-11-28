@@ -38,7 +38,7 @@ elmdb-query = { path = "crates/elmdb-query" }
 elmdb-invalidation = { path = "crates/elmdb-invalidation" }
 lmdb-master-sys = "0.2.6"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "float_roundtrip"] }
 sha2 = "0.11.1"
 getrandom = "0.4.3"
 # The collator, and every crate its code and data are, each required exactly: a sort key is the collator's output, and

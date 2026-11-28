@@ -146,6 +146,8 @@ struct DumpEntity {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     trashed_at_ms: Option<i64>,
     fields: BTreeMap<String, DumpValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    extra: BTreeMap<String, DumpValue>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -225,12 +227,12 @@ pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
     let full_schema = compiled_to_protocol_schema(&snap.schema, true);
     let archived_types: Vec<String> = snap.schema.types.iter().filter(|t| t.archived).map(|t| t.name.clone()).collect();
 
-    let key_to_ext: HashMap<EntityKey, String> = snap.rows.iter().map(|r| (r.key, r.id.clone())).collect();
+    let key_to_ext: HashMap<EntityKey, String> = snap.rows.iter().map(|(r, _)| (r.key, r.id.clone())).collect();
 
     let entities: Vec<DumpEntity> = snap
         .rows
         .iter()
-        .map(|r| DumpEntity {
+        .map(|(r, extra)| DumpEntity {
             id: r.id.clone(),
             type_name: r.type_name.clone(),
             trashed: r.trashed,
@@ -238,6 +240,7 @@ pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
             updated_at_ms: Some(r.updated_at_ms),
             trashed_at_ms: Some(r.trashed_at_ms),
             fields: r.fields.iter().map(|(k, v)| (k.clone(), DumpValue::from_canonical(v, &key_to_ext))).collect(),
+            extra: extra.iter().map(|(k, v)| (k.clone(), DumpValue::from_canonical(v, &key_to_ext))).collect(),
         })
         .collect();
 
@@ -465,6 +468,21 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
     if payload.schema != payload.full_schema || !payload.archived_types.is_empty() {
         db.set_schema(&payload.schema)?;
     }
+
+    // Pass 6b: Restore schemaless `additionalFields` (`packed.extra`) verbatim into the extra tier
+    // so extra entries shadowing archived declared fields or residing on trashed/archived rows
+    // round-trip losslessly without colliding with declared-field validation.
+    let mut entity_extras: Vec<(String, BTreeMap<String, CanonicalValue>)> = Vec::new();
+    for e in &payload.entities {
+        if !e.extra.is_empty() {
+            let mut map = BTreeMap::new();
+            for (k, v) in &e.extra {
+                map.insert(k.clone(), v.to_canonical()?);
+            }
+            entity_extras.push((e.id.clone(), map));
+        }
+    }
+    db.restore_loaded_extra_fields(&entity_extras)?;
 
     // Pass 7: Rebuild all derived projections cleanly and flush + fsync durability sidecar!
     db.rebuild(None)?;

@@ -1050,6 +1050,57 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         }
     }
 
+    /// Restores schemaless `additionalFields` (`packed.extra`) onto loaded entities inside a single
+    /// maintenance transaction (used by `dump::load` so extra fields — including those shadowing
+    /// archived declared fields or residing on trashed/archived rows — round-trip with exact storage tier).
+    pub fn restore_loaded_extra_fields(&self, extras: &[(String, BTreeMap<String, CanonicalValue>)]) -> Result<()> {
+        if extras.is_empty() {
+            return Ok(());
+        }
+        for (_, fields) in extras {
+            for (k, v) in fields {
+                if k == "__proto__" {
+                    return Err(ElmdbError::new(
+                        ErrorCode::ValidationFailed,
+                        "reserved field name '__proto__' is not permitted",
+                    ));
+                }
+                v.validate_canonical()?;
+                if v.contains_internal_ref() {
+                    return Err(ElmdbError::new(
+                        ErrorCode::ValidationFailed,
+                        format!("extra field '{k}' cannot contain internal EntityRef/DanglingRef"),
+                    ));
+                }
+            }
+        }
+        let (_, _) = self.run_maintenance_write(|txn, _schema, dbs| {
+            for (ext_id, extra_fields) in extras {
+                if extra_fields.is_empty() {
+                    continue;
+                }
+                let Some(key) = lookup_ext_id_in_txn(txn, dbs, ext_id)? else {
+                    continue;
+                };
+                let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
+                    continue;
+                };
+                let mut packed =
+                    decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
+                for (k, v) in extra_fields {
+                    packed.extra.insert(k.clone(), v.clone());
+                }
+                let enc = encode_row(&packed)?;
+                for (fid, blob_bytes) in enc.blobs {
+                    txn.put(dbs.blobs, &blob_key(key, fid), &blob_bytes)?;
+                }
+                txn.put(dbs.entities, &key.to_ne_bytes(), &enc.row_bytes)?;
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Restores persisted entity and relation timestamps during lossless `dump::load` without
     /// altering field payloads, edges, or derived projections.
     pub fn restore_loaded_timestamps(
@@ -1427,6 +1478,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
 
     /// Aborts (rolls back) the top-most explicit nested savepoint and restores delta/dirty state cleanly.
     pub fn abort_savepoint(&mut self, depth: u32) {
+        if depth == 0 {
+            return;
+        }
         while self.txn.savepoint_depth() >= depth {
             let d = self.txn.savepoint_depth();
             let _ = self.txn.abort_savepoint(d);
@@ -1496,13 +1550,16 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         Ok(Some((seq, receipt, summary)))
     }
 
-    /// Executes a batch of wire ops inside this active transaction, supporting intra-batch `BatchSlot` refs.
+    /// Executes a batch of wire ops inside an atomic nested savepoint, supporting intra-batch `BatchSlot` refs.
+    /// Any failing op rolls back the entire batch (LMDB writes and delta accumulators) atomically.
     pub fn exec_batch(&mut self, ops: &[WireOp]) -> Result<Vec<String>> {
-        let mut slots = Vec::new();
-        for op in ops {
-            self.apply_op(op, &mut slots)?;
-        }
-        Ok(slots.into_iter().map(|(_, ext_id)| ext_id).collect())
+        self.savepoint(|ctx| {
+            let mut slots = Vec::new();
+            for op in ops {
+                ctx.apply_op(op, &mut slots)?;
+            }
+            Ok(slots.into_iter().map(|(_, ext_id)| ext_id).collect())
+        })
     }
 
     pub fn get_row(&self, ext_id: &str) -> Result<Option<StoredRow>> {
@@ -1742,25 +1799,19 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     }
                 };
 
-                let key = self.alloc_entity_key()?;
-                let ext_id = match external_id {
-                    Some(id) => {
-                        if id.is_empty() || id.len() > MAX_EXT_ID_BYTES {
-                            return Err(ElmdbError::new(
-                                ErrorCode::InvalidArgument,
-                                format!("external ID length {} out of 1..={MAX_EXT_ID_BYTES}", id.len()),
-                            ));
-                        }
-                        id.clone()
+                if let Some(id) = external_id {
+                    if id.is_empty() || id.len() > MAX_EXT_ID_BYTES {
+                        return Err(ElmdbError::new(
+                            ErrorCode::InvalidArgument,
+                            format!("external ID length {} out of 1..={MAX_EXT_ID_BYTES}", id.len()),
+                        ));
                     }
-                    None => format!("{}-{}", tdef.name, key.0),
-                };
-
-                if !self.txn.put_no_overwrite(self.engine.dbs.ext_id, ext_id.as_bytes(), &key.0.to_le_bytes())? {
-                    return Err(ElmdbError::new(
-                        ErrorCode::EntityAlreadyExists,
-                        format!("entity '{ext_id}' already exists"),
-                    ));
+                    if self.txn.get(self.engine.dbs.ext_id, id.as_bytes())?.is_some() {
+                        return Err(ElmdbError::new(
+                            ErrorCode::EntityAlreadyExists,
+                            format!("entity '{id}' already exists"),
+                        ));
+                    }
                 }
 
                 let mut declared = BTreeMap::new();
@@ -1795,7 +1846,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     }
                 }
 
-                // Check all required declared fields are present.
+                // Check all required declared fields are present before allocating keys or mutating KV state.
                 for fdef in &tdef.fields {
                     if !fdef.archived && !fdef.optional && !declared.contains_key(&fdef.id) {
                         return Err(ElmdbError::new(
@@ -1803,6 +1854,19 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                             format!("missing required field '{}.{}'", tdef.name, fdef.name),
                         ));
                     }
+                }
+
+                let key = self.alloc_entity_key()?;
+                let ext_id = match external_id {
+                    Some(id) => id.clone(),
+                    None => format!("{}-{}", tdef.name, key.0),
+                };
+
+                if !self.txn.put_no_overwrite(self.engine.dbs.ext_id, ext_id.as_bytes(), &key.0.to_le_bytes())? {
+                    return Err(ElmdbError::new(
+                        ErrorCode::EntityAlreadyExists,
+                        format!("entity '{ext_id}' already exists"),
+                    ));
                 }
 
                 let row = PackedRow {
@@ -1864,6 +1928,12 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                                 format!("extra field '{fname}' cannot contain internal EntityRef/DanglingRef"),
                             ));
                         }
+                        // Scrub any archived declared field with the same name so a later Unset cannot resurrect it.
+                        for f in &tdef.fields {
+                            if f.archived && f.name == *fname && next.fields.remove(&f.id).is_some() {
+                                changed_fields.insert(f.id);
+                            }
+                        }
                         next.extra.insert(fname.clone(), raw_val.clone());
                     } else {
                         return Err(ElmdbError::new(
@@ -1907,13 +1977,24 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                         if next.fields.remove(&fdef.id).is_some() {
                             changed_fields.insert(fdef.id);
                         }
-                    } else if tdef.additional_fields {
-                        next.extra.remove(fname);
                     } else {
-                        return Err(ElmdbError::new(
-                            ErrorCode::UnknownField,
-                            format!("unknown field '{fname}' on type '{}'", tdef.name),
-                        ));
+                        let mut matched_archived = false;
+                        for f in &tdef.fields {
+                            if f.archived && f.name == *fname {
+                                matched_archived = true;
+                                if next.fields.remove(&f.id).is_some() {
+                                    changed_fields.insert(f.id);
+                                }
+                            }
+                        }
+                        if matched_archived || tdef.additional_fields {
+                            next.extra.remove(fname);
+                        } else {
+                            return Err(ElmdbError::new(
+                                ErrorCode::UnknownField,
+                                format!("unknown field '{fname}' on type '{}'", tdef.name),
+                            ));
+                        }
                     }
                 }
                 next.header.updated_seq = self.commit_seq;
@@ -2855,6 +2936,7 @@ fn read_single_field<R: KvRead>(
         .type_by_id(hdr.type_id)
         .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
     let mut ref_cache = FxHashMap::default();
+    // Tier 1: Active Declared exclusively owns its name.
     if let Some(fdef) = tdef.field_by_name(field_name) {
         let Some(val) = decode_single_field(raw, fdef.id, |fid| {
             Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
@@ -2864,11 +2946,22 @@ fn read_single_field<R: KvRead>(
         };
         return Ok(Some(resolve_refs_to_strings(txn, dbs, val, &mut ref_cache)?));
     }
-    if !hdr.has_extra() {
-        return Ok(None);
+    // Tier 2: Schemaless `extra` overrides archived declared fields.
+    if hdr.has_extra() {
+        let mut full = decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
+        if let Some(val) = full.extra.remove(field_name) {
+            return Ok(Some(val));
+        }
     }
-    let full = decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
-    Ok(full.extra.get(field_name).cloned())
+    // Tier 3: Archived Declared fallback (matching `merge_row_fields`).
+    if let Some(fdef) = tdef.fields.iter().find(|f| f.archived && f.name == field_name)
+        && let Some(val) = decode_single_field(raw, fdef.id, |fid| {
+            Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
+        })?
+    {
+        return Ok(Some(resolve_refs_to_strings(txn, dbs, val, &mut ref_cache)?));
+    }
+    Ok(None)
 }
 
 /// Looks up an entity's internal `EntityKey` by external ID within an active transaction.
@@ -3332,6 +3425,42 @@ pub fn read_raw_stored_row<R: KvRead>(
         trashed_at_ms: packed.header.trashed_at_ms,
         fields,
     }))
+}
+
+/// Reads an entity row for lossless `dump()`, strictly separating declared fields (`packed.fields`,
+/// both active and archived) from schemaless `additionalFields` (`packed.extra`, excluding any
+/// stale entry shadowed by an active declared field).
+pub fn read_raw_dump_row<R: KvRead>(
+    txn: &R,
+    schema: &CompiledSchema,
+    dbs: &SystemDbs,
+    key: EntityKey,
+) -> Result<Option<(StoredRow, BTreeMap<String, CanonicalValue>)>> {
+    let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
+        return Ok(None);
+    };
+    let packed = decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
+    let tdef = schema
+        .type_by_id(packed.header.type_id)
+        .ok_or_else(|| ElmdbError::new(ErrorCode::Corrupted, "row references unknown TypeId"))?;
+
+    let fields = merge_row_fields(tdef, packed.fields, BTreeMap::new(), Ok)?;
+    let extra: BTreeMap<String, CanonicalValue> =
+        packed.extra.into_iter().filter(|(k, _)| tdef.field_by_name(k).is_none()).collect();
+
+    let trashed = packed.header.is_trashed();
+    let row = StoredRow {
+        key,
+        id: packed.header.ext_id,
+        type_name: tdef.name.clone(),
+        type_id: tdef.id,
+        trashed,
+        created_at_ms: packed.header.created_at_ms,
+        updated_at_ms: packed.header.updated_at_ms,
+        trashed_at_ms: packed.header.trashed_at_ms,
+        fields,
+    };
+    Ok(Some((row, extra)))
 }
 
 pub fn read_stored_row<R: KvRead>(

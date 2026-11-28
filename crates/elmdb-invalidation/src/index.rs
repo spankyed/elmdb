@@ -454,6 +454,32 @@ impl InvalidationIndex {
         read_set: &ReadSet,
         current_schema: &CompiledSchema,
     ) -> bool {
+        self.register_after_read_with_maint_and_others(
+            watch_id,
+            read_at_seq,
+            read_at_maint_seq,
+            read_schema_epoch,
+            read_set,
+            current_schema,
+        )
+        .0
+    }
+
+    /// Registers (or atomically replaces) `watch_id`'s `ReadSet` and returns `(stale, other_dirty)`.
+    ///
+    /// If `current_schema.epoch` has advanced past `self.latest_schema_epoch` (e.g. due to a
+    /// cross-process `set_schema`), advances `self.latest_schema_epoch` via a full-invalidation barrier
+    /// and returns all *other* active watches in `other_dirty` so they rerun against the new epoch
+    /// while `watch_id` itself settles cleanly when `read_schema_epoch == current_schema.epoch`.
+    pub fn register_after_read_with_maint_and_others(
+        &mut self,
+        watch_id: WatchId,
+        read_at_seq: u64,
+        read_at_maint_seq: u64,
+        read_schema_epoch: u64,
+        read_set: &ReadSet,
+        current_schema: &CompiledSchema,
+    ) -> (bool, Vec<WatchId>) {
         // Reuse existing owner_idx on re-registration, or allocate a fresh one.
         let owner_idx = if let Some(prev) = self.watches.remove(&watch_id) {
             let oid = prev.owner_idx;
@@ -511,12 +537,20 @@ impl InvalidationIndex {
             ranges,
         };
 
+        // Self-advance on cross-process schema epoch bumps so watches settle cleanly instead of spinning
+        // forever, while returning all other currently registered watches to be marked dirty.
+        let mut other_dirty = Vec::new();
+        if current_schema.epoch > self.latest_schema_epoch {
+            other_dirty = self.all_watch_ids();
+            self.record_full_invalidation(read_at_seq, read_at_maint_seq, current_schema.epoch);
+        }
+
         // Check whether any commits or maintenance writes happened AFTER `(read_at_seq, read_at_maint_seq)`
         // (or schema epoch changed).
         let stale =
             self.check_ring_staleness(&entry, read_at_seq, read_at_maint_seq, read_schema_epoch, current_schema);
         self.watches.insert(watch_id, entry);
-        stale
+        (stale, other_dirty)
     }
 
     fn check_ring_staleness(
