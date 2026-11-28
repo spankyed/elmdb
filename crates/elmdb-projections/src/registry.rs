@@ -566,7 +566,15 @@ impl<S: KvStore, V: Vfs> ProjectionSink<S, V> for ProjectionRegistry<S, V> {
                 order::write_stamp(txn, db, &cached)?;
             }
             let max_key = max_type_key(txn, dbs, def.type_id)?;
-            match (max_key, self.build_policy) {
+            // Unique indexes enforce a write-time integrity constraint, not a read optimization:
+            // always build them eagerly inside `set_schema` so duplicates fail `set_schema` atomically
+            // and uniqueness is enforced immediately with zero DeferredWatermark bypass window.
+            let effective_policy = if matches!(&def.kind, IndexKind::Value { unique: true, .. }) {
+                BuildPolicy::EagerInSchemaChange
+            } else {
+                self.build_policy
+            };
+            match (max_key, effective_policy) {
                 (None, _) => {
                     write_build_state(txn, dbs, def.id, &BuildState::Ready)?;
                 }

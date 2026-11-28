@@ -903,3 +903,349 @@ fn batch_c_declared_over_extra_precedence_and_no_phantom_commit_seq() {
     let (ro, _) = engine.begin_read_pinned().unwrap();
     assert_eq!(ro.get(engine.dbs().sequences, b"raw_test_marker").unwrap(), Some(b"ok".as_slice()));
 }
+
+#[test]
+fn pr268_batch2_atomic_exec_batch_archived_fields_restore_extras_and_abort_savepoint_zero() {
+    use elmdb_storage::{KvCursor, KvRead};
+    let store = SimKvStore::default();
+    let vfs = SimVfs::default();
+    let clock = SimClock::new(10_000);
+    let (engine, _) = Engine::open(store, vfs, clock, "/sim/pr268_batch2", DurabilityMode::Strict).unwrap();
+
+    // Schema v1: Target + Item(title required, legacy_blob optional String, legacy_ref optional Ref(Target)).
+    let mut s1 = RawSchema::default();
+    let mut target_fields = BTreeMap::new();
+    target_fields.insert("label".into(), RawField { kind: RawFieldKind::String, optional: false, nullable: false });
+    s1.types.insert(
+        "Target".into(),
+        RawType {
+            fields: target_fields,
+            indexes: BTreeMap::new(),
+            additional_fields: false,
+            short_code: None,
+            change_order: false,
+            declared_by: None,
+        },
+    );
+    let mut item_fields = BTreeMap::new();
+    item_fields.insert("title".into(), RawField { kind: RawFieldKind::String, optional: false, nullable: false });
+    item_fields.insert("legacy_blob".into(), RawField { kind: RawFieldKind::String, optional: true, nullable: false });
+    item_fields.insert(
+        "legacy_ref".into(),
+        RawField {
+            kind: RawFieldKind::Ref { to: vec!["Target".into()], on_delete: OnDeletePolicy::Restrict },
+            optional: true,
+            nullable: true,
+        },
+    );
+    s1.types.insert(
+        "Item".into(),
+        RawType {
+            fields: item_fields,
+            indexes: BTreeMap::new(),
+            additional_fields: false,
+            short_code: None,
+            change_order: false,
+            declared_by: None,
+        },
+    );
+    engine.set_schema(&s1).unwrap();
+
+    // Item 2.2: `TxnCtx::exec_batch` is atomic AND `WireOp::Create` validates before writing `ext_id`.
+    engine
+        .transact(|tx| {
+            // 2.6: `abort_savepoint(0)` returns immediately at depth 0 and does not abort active depth 1!
+            tx.abort_savepoint(0);
+            let d1 = tx.push_savepoint()?;
+            assert_eq!(d1, 1);
+            tx.abort_savepoint(0);
+            tx.exec(&WireOp::Create {
+                type_name: "Target".into(),
+                external_id: Some("t-keep".into()),
+                fields: vec![("label".into(), CanonicalValue::String("kept".into()))],
+            })?;
+            tx.commit_savepoint(d1)?;
+            assert!(tx.get_row("t-keep")?.is_some());
+
+            // `exec_batch` with op 1 valid and op 2 missing required `title` rolls back BOTH ops cleanly!
+            let err = tx
+                .exec_batch(&[
+                    WireOp::Create {
+                        type_name: "Item".into(),
+                        external_id: Some("ok-1".into()),
+                        fields: vec![("title".into(), CanonicalValue::String("ok".into()))],
+                    },
+                    WireOp::Create { type_name: "Item".into(), external_id: Some("bad-2".into()), fields: vec![] },
+                ])
+                .unwrap_err();
+            assert_eq!(err.code, ErrorCode::ValidationFailed);
+            assert!(tx.get_row("ok-1")?.is_none());
+            assert!(tx.get_row("bad-2")?.is_none());
+            let dbs = tx.dbs();
+            assert!(
+                elmdb_engine::lookup_ext_id_in_txn(tx.txn_mut(), &dbs, "ok-1")?.is_none(),
+                "failed exec_batch must not leave op 1 ext_id"
+            );
+            assert!(
+                elmdb_engine::lookup_ext_id_in_txn(tx.txn_mut(), &dbs, "bad-2")?.is_none(),
+                "failed Create must not leave orphan ext_id"
+            );
+
+            // Direct `tx.exec(Create)` failing validation also leaves zero orphan `ext_id`!
+            let single_err = tx
+                .exec(&WireOp::Create {
+                    type_name: "Item".into(),
+                    external_id: Some("bad-single".into()),
+                    fields: vec![],
+                })
+                .unwrap_err();
+            assert_eq!(single_err.code, ErrorCode::ValidationFailed);
+            assert!(elmdb_engine::lookup_ext_id_in_txn(tx.txn_mut(), &dbs, "bad-single")?.is_none());
+
+            // Re-creating `"ok-1"`, `"bad-2"`, and `"bad-single"` cleanly in the SAME txn succeeds!
+            tx.exec_batch(&[
+                WireOp::Create {
+                    type_name: "Item".into(),
+                    external_id: Some("ok-1".into()),
+                    fields: vec![("title".into(), CanonicalValue::String("one".into()))],
+                },
+                WireOp::Create {
+                    type_name: "Item".into(),
+                    external_id: Some("bad-2".into()),
+                    fields: vec![("title".into(), CanonicalValue::String("two".into()))],
+                },
+                WireOp::Create {
+                    type_name: "Item".into(),
+                    external_id: Some("bad-single".into()),
+                    fields: vec![("title".into(), CanonicalValue::String("single".into()))],
+                },
+            ])?;
+
+            // Explicit `external_id` length boundaries (`0` rejected before field validation, `MAX_EXT_ID_BYTES` accepted, `+1` rejected before field validation).
+            let empty_id_err = tx
+                .exec(&WireOp::Create { type_name: "Item".into(), external_id: Some(String::new()), fields: vec![] })
+                .unwrap_err();
+            assert_eq!(empty_id_err.code, ErrorCode::InvalidArgument);
+            let over_id_err = tx
+                .exec(&WireOp::Create {
+                    type_name: "Item".into(),
+                    external_id: Some("x".repeat(elmdb_engine::MAX_EXT_ID_BYTES + 1)),
+                    fields: vec![],
+                })
+                .unwrap_err();
+            assert_eq!(over_id_err.code, ErrorCode::InvalidArgument);
+            let exact_max_id = "m".repeat(elmdb_engine::MAX_EXT_ID_BYTES);
+            tx.exec(&WireOp::Create {
+                type_name: "Item".into(),
+                external_id: Some(exact_max_id.clone()),
+                fields: vec![("title".into(), CanonicalValue::String("max-id".into()))],
+            })?;
+            assert!(tx.get_row(&exact_max_id)?.is_some());
+
+            // Explicit `external_id` collision still reports `EntityAlreadyExists` even with invalid fields.
+            let dup_err = tx
+                .exec(&WireOp::Create { type_name: "Item".into(), external_id: Some("ok-1".into()), fields: vec![] })
+                .unwrap_err();
+            assert_eq!(dup_err.code, ErrorCode::EntityAlreadyExists);
+            Ok(())
+        })
+        .unwrap();
+
+    // Auto-generated `Item-{next_key}` collision against a pre-existing explicit `ext_id` fails closed.
+    let next_auto_key = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        let dbs = engine.dbs();
+        let raw = ro.get(dbs.sequences, b"\x01entity").unwrap().unwrap();
+        u64::from_le_bytes(raw.try_into().unwrap()) + 1
+    };
+    let colliding_ext = format!("Item-{}", next_auto_key + 1);
+    engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Item".into(),
+            external_id: Some(colliding_ext),
+            fields: vec![("title".into(), CanonicalValue::String("pre-occupy".into()))],
+        }])
+        .unwrap();
+    let auto_err = engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Item".into(),
+            external_id: None,
+            fields: vec![("title".into(), CanonicalValue::String("auto-collide".into()))],
+        }])
+        .unwrap_err();
+    assert_eq!(auto_err.code, ErrorCode::EntityAlreadyExists);
+
+    // Item 2.3: Unified 3-tier archived field semantics (`read_single_field`, `Unset`, `Patch`+`Unset`, blob + ref_in).
+    let big_legacy = "L".repeat(6 * 1024);
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Item".into(),
+                external_id: Some("arch-strict".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("strict".into())),
+                    ("legacy_blob".into(), CanonicalValue::String(big_legacy.clone())),
+                    ("legacy_ref".into(), CanonicalValue::String("t-keep".into())),
+                ],
+            },
+            WireOp::Create {
+                type_name: "Item".into(),
+                external_id: Some("arch-extra".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("extra".into())),
+                    ("legacy_blob".into(), CanonicalValue::String("original-archived".into())),
+                ],
+            },
+        ])
+        .unwrap();
+
+    // Archive `legacy_blob` and `legacy_ref` while `additional_fields == false`.
+    let mut s2 = s1.clone();
+    s2.types.get_mut("Item").unwrap().fields.remove("legacy_blob");
+    s2.types.get_mut("Item").unwrap().fields.remove("legacy_ref");
+    engine.set_schema(&s2).unwrap();
+
+    // `get_field` (`read_single_field`) MUST agree with `get_row` on archived declared fields (including Ref & Blob).
+    assert_eq!(engine.get_field("arch-strict", "legacy_blob").unwrap(), Some(CanonicalValue::String(big_legacy)));
+    assert_eq!(engine.get_field("arch-strict", "legacy_ref").unwrap(), Some(CanonicalValue::String("t-keep".into())));
+    assert_eq!(engine.get_field("arch-strict", "nonexistent").unwrap(), None);
+
+    // Unset on truly unknown field when `additional_fields == false` still rejects with `UnknownField`.
+    let unk_err = engine
+        .execute_batch(&[WireOp::Unset {
+            target: EntityTarget::ExternalId("arch-strict".into()),
+            fields: vec!["never_existed".into()],
+        }])
+        .unwrap_err();
+    assert_eq!(unk_err.code, ErrorCode::UnknownField);
+
+    // Unset on archived declared fields MUST succeed even when `additional_fields == false`,
+    // cleaning up spilled blobs and `ref_in` and recording the archived FieldIds in `changed_fields`!
+    let archived_legacy_id =
+        engine.schema().type_by_name("Item").unwrap().fields.iter().find(|f| f.name == "legacy_blob").unwrap().id;
+    let strict_unset_sum = engine
+        .execute_batch(&[WireOp::Unset {
+            target: EntityTarget::ExternalId("arch-strict".into()),
+            fields: vec!["legacy_blob".into(), "legacy_ref".into()],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    assert!(strict_unset_sum.entity_deltas[0].changed_fields.contains(archived_legacy_id));
+    assert_eq!(engine.get_field("arch-strict", "legacy_blob").unwrap(), None);
+    assert_eq!(engine.get_field("arch-strict", "legacy_ref").unwrap(), None);
+    let strict_row = engine.get_row("arch-strict").unwrap().unwrap();
+    assert!(!strict_row.fields.contains_key("legacy_blob"));
+    assert!(!strict_row.fields.contains_key("legacy_ref"));
+    {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        let dbs = engine.dbs();
+        let mut cur = ro.cursor(dbs.blobs).unwrap();
+        assert!(cur.first().unwrap().is_none(), "unset of spilled archived blob must remove blob entry");
+    }
+
+    // Enable `additional_fields == true`: verify Tier 2 vs Tier 3 fallback AND `Patch` + `Unset` never resurrects!
+    let mut s3 = s2.clone();
+    s3.types.get_mut("Item").unwrap().additional_fields = true;
+    engine.set_schema(&s3).unwrap();
+
+    // Add unrelated extra field on `arch-extra` so `hdr.has_extra() == true`, then read archived `legacy_blob`!
+    engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("arch-extra".into()),
+            fields: vec![("other_extra".into(), CanonicalValue::Int(7))],
+        }])
+        .unwrap();
+    assert_eq!(
+        engine.get_field("arch-extra", "legacy_blob").unwrap(),
+        Some(CanonicalValue::String("original-archived".into())),
+        "Tier 3 archived fallback must still apply when row has unrelated extra fields"
+    );
+
+    // Patch `legacy_blob` (writes to extra AND scrubs archived FieldId), then Unset -> MUST NOT resurrect!
+    // Also verify `changed_fields` records both the scrubbed archived FieldId and `EXTRA_BLOB_FIELD_ID`!
+    let archived_legacy_id =
+        engine.schema().type_by_name("Item").unwrap().fields.iter().find(|f| f.name == "legacy_blob").unwrap().id;
+    let patch_sum = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("arch-extra".into()),
+            fields: vec![("legacy_blob".into(), CanonicalValue::String("patched-extra".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    assert!(patch_sum.entity_deltas[0].changed_fields.contains(archived_legacy_id));
+    assert!(patch_sum.entity_deltas[0].changed_fields.contains(elmdb_engine::row::EXTRA_BLOB_FIELD_ID));
+    assert_eq!(
+        engine.get_field("arch-extra", "legacy_blob").unwrap(),
+        Some(CanonicalValue::String("patched-extra".into()))
+    );
+    let unset_sum = engine
+        .execute_batch(&[WireOp::Unset {
+            target: EntityTarget::ExternalId("arch-extra".into()),
+            fields: vec!["legacy_blob".into()],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    assert!(unset_sum.entity_deltas[0].changed_fields.contains(elmdb_engine::row::EXTRA_BLOB_FIELD_ID));
+    assert_eq!(engine.get_field("arch-extra", "legacy_blob").unwrap(), None);
+    assert!(!engine.get_row("arch-extra").unwrap().unwrap().fields.contains_key("legacy_blob"));
+
+    // Exercise `restore_loaded_extra_fields` empty no-op (no maint_seq bump), validation guards,
+    // large spilled extra, and orphan blob cleanup when shrinking spilled extra inline (P2-1)!
+    let maint_before = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        elmdb_engine::read_maint_seq(&ro, &engine.dbs()).unwrap()
+    };
+    engine.restore_loaded_extra_fields(&[]).unwrap();
+    let maint_after = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        elmdb_engine::read_maint_seq(&ro, &engine.dbs()).unwrap()
+    };
+    assert_eq!(maint_after, maint_before, "empty restore_loaded_extra_fields must not bump maint_seq");
+
+    let mut bad_proto = BTreeMap::new();
+    bad_proto.insert("__proto__".into(), CanonicalValue::Int(1));
+    assert_eq!(
+        engine.restore_loaded_extra_fields(&[("arch-extra".into(), bad_proto)]).unwrap_err().code,
+        ErrorCode::ValidationFailed
+    );
+    let mut bad_nan = BTreeMap::new();
+    bad_nan.insert("bad_f".into(), CanonicalValue::Float(f64::NAN));
+    assert_eq!(
+        engine.restore_loaded_extra_fields(&[("arch-extra".into(), bad_nan)]).unwrap_err().code,
+        ErrorCode::ValidationFailed
+    );
+    let mut bad_ref = BTreeMap::new();
+    bad_ref.insert("dangling".into(), CanonicalValue::DanglingRef("x".into()));
+    assert_eq!(
+        engine.restore_loaded_extra_fields(&[("arch-extra".into(), bad_ref)]).unwrap_err().code,
+        ErrorCode::ValidationFailed
+    );
+    let big_extra = "E".repeat(6 * 1024);
+    let mut good_extra = BTreeMap::new();
+    good_extra.insert("big_extra".into(), CanonicalValue::String(big_extra.clone()));
+    engine.restore_loaded_extra_fields(&[("arch-extra".into(), good_extra)]).unwrap();
+    assert_eq!(engine.get_field("arch-extra", "big_extra").unwrap(), Some(CanonicalValue::String(big_extra.clone())));
+    {
+        let (ro, cur_schema) = engine.begin_read_pinned().unwrap();
+        let dbs = engine.dbs();
+        let k = elmdb_engine::lookup_ext_id_in_txn(&ro, &dbs, "arch-extra").unwrap().unwrap();
+        let (dump_row, dump_extra) = elmdb_engine::read_raw_dump_row(&ro, &cur_schema, &dbs, k).unwrap().unwrap();
+        assert_eq!(dump_row.fields.get("title"), Some(&CanonicalValue::String("extra".into())));
+        assert!(!dump_row.fields.contains_key("big_extra"));
+        assert_eq!(dump_extra.get("big_extra"), Some(&CanonicalValue::String(big_extra)));
+    }
+    // Overwriting spilled 6 KiB extra with a small 4-byte extra must delete the orphaned EXTRA_BLOB_FIELD_ID blob!
+    let mut small_extra = BTreeMap::new();
+    small_extra.insert("big_extra".into(), CanonicalValue::String("tiny".into()));
+    engine.restore_loaded_extra_fields(&[("arch-extra".into(), small_extra)]).unwrap();
+    assert_eq!(engine.get_field("arch-extra", "big_extra").unwrap(), Some(CanonicalValue::String("tiny".into())));
+    {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        let dbs = engine.dbs();
+        let mut cur = ro.cursor(dbs.blobs).unwrap();
+        assert!(cur.first().unwrap().is_none(), "shrinking spilled extra inline must delete orphaned blob");
+    }
+}

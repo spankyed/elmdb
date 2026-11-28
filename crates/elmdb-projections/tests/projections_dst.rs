@@ -437,11 +437,32 @@ fn watermark_deferred_build_with_interleaved_foreground_writes_matches_rebuild()
     }
     engine.execute_batch(&init_ops).unwrap();
 
-    // Now add ALL 5 indexes via set_schema -> all start in `BuildState::Building { 0, hw }`!
+    // Now add ALL 5 indexes via set_schema:
+    // - Unique index (`by_code_unique`) is ALWAYS built eagerly inside `set_schema` -> `Ready` immediately!
+    // - All 4 non-unique indexes start in `BuildState::Building { 0, hw }`!
     engine.set_schema(&full_schema()).unwrap();
     let statuses = reg.index_status(&engine).unwrap();
     assert_eq!(statuses.len(), 5);
-    assert!(statuses.iter().all(|s| matches!(s.state, BuildState::Building { .. })));
+    let unique_st = statuses.iter().find(|s| s.name == "by_code_unique").unwrap();
+    assert_eq!(unique_st.state, BuildState::Ready, "unique index must be Ready immediately after set_schema");
+    assert!(
+        statuses.iter().filter(|s| s.name != "by_code_unique").all(|s| matches!(s.state, BuildState::Building { .. }))
+    );
+
+    // Uniqueness is enforced IMMEDIATELY before any background `drive_build_chunk` runs!
+    let dup_err = engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("w-dup".into()),
+            fields: make_fields(&[
+                ("code", CanonicalValue::String("C-0".into())),
+                ("score", CanonicalValue::Int(1)),
+                ("title", CanonicalValue::String("Dup".into())),
+                ("body", CanonicalValue::String("Dup body".into())),
+            ]),
+        }])
+        .unwrap_err();
+    assert_eq!(dup_err.code, ErrorCode::UniqueViolation);
 
     // Interleave small build chunks (19 entities/chunk) with foreground mutations across ALL watermark zones:
     // - key <= built_up_to (already built)
@@ -501,10 +522,11 @@ fn watermark_deferred_build_with_interleaved_foreground_writes_matches_rebuild()
 }
 
 #[test]
-fn failed_unique_build_transitions_to_failed_and_recovers_on_rebuild() {
+fn eager_unique_index_rejects_preexisting_duplicates_atomically_and_autogrows_on_map_full() {
+    // 1. Even under `BuildPolicy::DeferredWatermark`, adding a `Unique` index over pre-existing
+    //    duplicate rows MUST fail `set_schema` atomically with `UniqueViolation`!
     let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
 
-    // Create duplicate codes BEFORE unique index exists.
     let mut base = full_schema();
     base.types.get_mut("Note").unwrap().indexes.clear();
     engine.set_schema(&base).unwrap();
@@ -523,23 +545,116 @@ fn failed_unique_build_transitions_to_failed_and_recovers_on_rebuild() {
         ])
         .unwrap();
 
-    // Add unique index and drain builds -> must transition cleanly to Failed(UniqueViolation).
-    engine.set_schema(&full_schema()).unwrap();
-    reg.drain_all_builds(&engine).unwrap();
-    let status = reg.index_status(&engine).unwrap().into_iter().find(|s| s.name == "by_code_unique").unwrap();
-    assert!(matches!(status.state, BuildState::Failed { code: ErrorCode::UniqueViolation, .. }));
+    let epoch_before = engine.schema().epoch;
+    let err = engine.set_schema(&full_schema()).unwrap_err();
+    assert_eq!(err.code, ErrorCode::UniqueViolation);
+    assert_eq!(engine.schema().epoch, epoch_before, "failed unique set_schema must roll back atomically");
+    assert!(reg.index_status(&engine).unwrap().is_empty());
 
-    // Fix duplicate and rebuild -> Ready and check() clean!
+    // Fix duplicate -> set_schema succeeds, unique index is immediately `Ready`, and duplicate writes fail at once!
     engine
         .execute_batch(&[WireOp::Patch {
             target: EntityTarget::ExternalId("d-2".into()),
             fields: make_fields(&[("code", CanonicalValue::String("UNIQUE-2".into()))]),
         }])
         .unwrap();
-    reg.rebuild(&engine, Some(status.index_id)).unwrap();
-    let after = reg.index_status(&engine).unwrap().into_iter().find(|s| s.name == "by_code_unique").unwrap();
-    assert_eq!(after.state, BuildState::Ready);
+    engine.set_schema(&full_schema()).unwrap();
+    let status = reg.index_status(&engine).unwrap().into_iter().find(|s| s.name == "by_code_unique").unwrap();
+    assert_eq!(status.state, BuildState::Ready);
+
+    let dup_write = engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("d-3".into()),
+            fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
+        }])
+        .unwrap_err();
+    assert_eq!(dup_write.code, ErrorCode::UniqueViolation);
+
+    // PR #270 P1-2: Sequential `TxnCtx::exec_batch` calls inside `transact()` swap unique keys cleanly
+    // (proving `exec_batch` is atomic via nested savepoint WITHOUT eagerly flushing projections!).
+    engine
+        .transact(|tx| {
+            tx.exec_batch(&[WireOp::Patch {
+                target: EntityTarget::ExternalId("d-1".into()),
+                fields: make_fields(&[("code", CanonicalValue::String("UNIQUE-2".into()))]),
+            }])?;
+            tx.exec_batch(&[WireOp::Patch {
+                target: EntityTarget::ExternalId("d-2".into()),
+                fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
+            }])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(engine.get_field("d-1", "code").unwrap(), Some(CanonicalValue::String("UNIQUE-2".into())));
+    assert_eq!(engine.get_field("d-2", "code").unwrap(), Some(CanonicalValue::String("DUP".into())));
+
+    reg.drain_all_builds(&engine).unwrap();
     assert!(reg.check(&engine, None).unwrap().is_ok());
+
+    // 2. Real LMDB: eager Unique build inside `set_schema` hitting `MDB_MAP_FULL` auto-grows cleanly!
+    let dir = tempfile::tempdir().unwrap();
+    let init_map = 256 * 1024;
+    let store = LmdbStore::open(dir.path(), LmdbConfig { map_size: init_map, ..LmdbConfig::default() }).unwrap();
+    let lmdb_reg = Arc::new(ProjectionRegistry::new(BuildPolicy::DeferredWatermark));
+    let (lmdb_eng, _) = Engine::open_with_projections(
+        store,
+        OsVfs::default(),
+        SystemClock::default(),
+        dir.path(),
+        DurabilityMode::Grouped,
+        Arc::clone(&lmdb_reg) as _,
+    )
+    .unwrap();
+
+    let mut plain = RawSchema::default();
+    let mut fields = BTreeMap::new();
+    fields.insert("code".into(), RawField { kind: RawFieldKind::String, optional: false, nullable: false });
+    plain.types.insert(
+        "Item".into(),
+        RawType {
+            fields,
+            indexes: BTreeMap::new(),
+            additional_fields: false,
+            short_code: None,
+            change_order: false,
+            declared_by: None,
+        },
+    );
+    lmdb_eng.set_schema(&plain).unwrap();
+
+    // Populate unique ~400-byte strings that stay under the initial map_size until the unique index is added.
+    let mut ops = Vec::new();
+    for i in 0..320u32 {
+        let mut s = format!("k-{i:04}-");
+        let mut x = (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15).wrapping_add(1);
+        for _ in 0..380 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s.push((b'a' + ((x >> 32) % 26) as u8) as char);
+        }
+        ops.push(WireOp::Create {
+            type_name: "Item".into(),
+            external_id: Some(format!("it-{i}")),
+            fields: make_fields(&[("code", CanonicalValue::String(s))]),
+        });
+    }
+    lmdb_eng.execute_batch(&ops).unwrap();
+    let map_before = lmdb_eng.gate().map_size();
+
+    let mut with_uniq = plain.clone();
+    with_uniq.types.get_mut("Item").unwrap().indexes.insert(
+        "uniq_code".into(),
+        RawIndex { kind: RawIndexKind::Value { fields: vec!["code".into()], unique: true } },
+    );
+    lmdb_eng.set_schema(&with_uniq).unwrap();
+    assert!(
+        lmdb_eng.gate().map_size() >= map_before,
+        "eager unique build must succeed and auto-grow map_size if needed"
+    );
+    let st = lmdb_reg.index_status(&lmdb_eng).unwrap();
+    assert_eq!(st.len(), 1);
+    assert_eq!(st[0].state, BuildState::Ready);
+    assert!(lmdb_reg.check(&lmdb_eng, None).unwrap().is_ok());
 }
 
 #[test]
@@ -876,55 +991,13 @@ fn batch_c_build_chunk_propagates_map_full_and_io_without_poisoning_build_state(
     use elmdb_storage::{DurabilityMode, GatedWriteTxn, StorageError, SubDbHandle};
     use elmdb_wire::{ElmdbError, ErrorCode, Result};
 
-    // 1. Deterministic `UniqueViolation` during deferred build MUST mark the index `BuildState::Failed`.
-    {
-        let (engine, reg) = open_sim_engine(BuildPolicy::DeferredWatermark);
-        let mut base = RawSchema::default();
-        let mut fields = BTreeMap::new();
-        fields.insert("code".into(), RawField { kind: RawFieldKind::String, optional: false, nullable: false });
-        base.types.insert(
-            "Item".into(),
-            RawType {
-                fields,
-                indexes: BTreeMap::new(),
-                additional_fields: false,
-                short_code: None,
-                change_order: false,
-                declared_by: None,
-            },
-        );
-        engine.set_schema(&base).unwrap();
-        engine
-            .execute_batch(&[
-                WireOp::Create {
-                    type_name: "Item".into(),
-                    external_id: Some("i1".into()),
-                    fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
-                },
-                WireOp::Create {
-                    type_name: "Item".into(),
-                    external_id: Some("i2".into()),
-                    fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
-                },
-            ])
-            .unwrap();
-
-        let mut with_uniq = base.clone();
-        with_uniq.types.get_mut("Item").unwrap().indexes.insert(
-            "uniq_code".into(),
-            RawIndex { kind: RawIndexKind::Value { fields: vec!["code".into()], unique: true } },
-        );
-        engine.set_schema(&with_uniq).unwrap();
-        assert!(reg.drive_build_chunk(&engine, 16).unwrap());
-        let statuses = reg.index_status(&engine).unwrap();
-        assert!(matches!(statuses[0].state, BuildState::Failed { code: ErrorCode::UniqueViolation, .. }));
-    }
-
-    // 2. Non-deterministic `StorageError::MapFull` (mode=1) MUST propagate to `retry_on_map_full()`,
+    // 1. Non-deterministic `StorageError::MapFull` (mode=1) MUST propagate to `retry_on_map_full()`,
     //    auto-growing `map_size` and completing cleanly as `BuildState::Ready` (NEVER `BuildState::Failed`),
-    //    and non-deterministic `ErrorCode::Io` (mode=2) MUST propagate out leaving `BuildState::Building`!
+    //    non-deterministic `ErrorCode::Io` (mode=2) MUST propagate out leaving `BuildState::Building`,
+    //    and deterministic `ErrorCode::ValidationFailed` (mode=3) MUST mark the index `BuildState::Failed`
+    //    and recover cleanly on `rebuild()`.
     struct FlakyExternal {
-        // 0 = ok, 1 = emit MapFull once then flip to 0, 2 = emit Io
+        // 0 = ok, 1 = emit MapFull once then flip to 0, 2 = emit Io, 3 = emit deterministic ValidationFailed
         mode: Arc<AtomicU8>,
     }
     impl ExternalProjection<SimKvStore, SimVfs> for FlakyExternal {
@@ -946,6 +1019,7 @@ fn batch_c_build_chunk_propagates_map_full_and_io_without_poisoning_build_state(
                     Err(ElmdbError::from(StorageError::MapFull { map_size: 4096 }))
                 }
                 2 => Err(ElmdbError::new(ErrorCode::Io, "transient disk read timeout")),
+                3 => Err(ElmdbError::new(ErrorCode::ValidationFailed, "deterministic index build failure")),
                 _ => Ok(()),
             }
         }
@@ -1067,6 +1141,25 @@ fn batch_c_build_chunk_propagates_map_full_and_io_without_poisoning_build_state(
         assert!(engine.gate().map_size() > doubled, "MapFull during build chunk must trigger map auto-growth");
         let statuses_after = reg.index_status(&engine).unwrap();
         assert_eq!(statuses_after[0].state, BuildState::Ready);
+
+        // Deterministic `ValidationFailed` (mode=3) during a fresh deferred build MUST mark `BuildState::Failed`
+        // and recover cleanly on `rebuild()`.
+        mode.store(3, Ordering::SeqCst);
+        let mut with_vec2 = with_vec.clone();
+        with_vec2.types.get_mut("Note").unwrap().indexes.insert(
+            "vec_idx_2".into(),
+            RawIndex {
+                kind: RawIndexKind::Vector { fields: vec!["body".into()], dims: 4, quantization: "sq8".into() },
+            },
+        );
+        engine.set_schema(&with_vec2).unwrap();
+        assert!(reg.drive_build_chunk(&engine, 16).unwrap());
+        let failed = reg.index_status(&engine).unwrap().into_iter().find(|s| s.name == "vec_idx_2").unwrap();
+        assert!(matches!(failed.state, BuildState::Failed { code: ErrorCode::ValidationFailed, .. }));
+        mode.store(0, Ordering::SeqCst);
+        reg.rebuild(&engine, Some(failed.index_id)).unwrap();
+        let recovered = reg.index_status(&engine).unwrap().into_iter().find(|s| s.name == "vec_idx_2").unwrap();
+        assert_eq!(recovered.state, BuildState::Ready);
     }
 }
 

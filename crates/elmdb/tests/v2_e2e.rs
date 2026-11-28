@@ -2864,3 +2864,226 @@ fn batch_c_dump_load_tightened_relations_unified_transact_purge_and_hook_flush()
     db_arc.unregister_before_commit(host_hook_id);
     db_arc.close().unwrap();
 }
+
+#[test]
+#[ignore = "child process helper invoked by pr268_batch2_dump_load_three_tier_extra_f64_roundtrip_and_xproc_watch_settle"]
+fn child_pr268_batch2_schema_bumper() {
+    let dir = std::env::var("ELMDB_TEST_PR268_B2_DIR").expect("ELMDB_TEST_PR268_B2_DIR");
+    let bumps: usize = std::env::var("ELMDB_TEST_PR268_B2_BUMPS").expect("ELMDB_TEST_PR268_B2_BUMPS").parse().unwrap();
+    let db = Database::open(&dir, OpenOptions::default()).unwrap();
+    let mut proto = elmdb::protocol::compiled_to_protocol_schema(&db.schema().unwrap(), false);
+    for i in 0..bumps {
+        let field_name = format!("xproc_tag_{}_{i}", std::process::id());
+        proto
+            .types
+            .get_mut("Node")
+            .unwrap()
+            .fields
+            .insert(field_name, FieldDefinition { kind: FieldSpec::String, optional: true, nullable: true });
+        db.set_schema(&proto).unwrap();
+    }
+    db.close().unwrap();
+}
+
+#[test]
+fn pr268_batch2_dump_load_three_tier_extra_f64_roundtrip_and_xproc_watch_settle() {
+    let tmp = tempdir().unwrap();
+
+    // 1. Items 2.3 & 2.5: Lossless dump/load of active + archived + shadowing extra + large spilled extra
+    //    + bit-exact f64 round-trip across entity fields and relation weights.
+    let db_dir = tmp.path().join("src_db");
+    let db = Database::open(
+        &db_dir,
+        OpenOptions {
+            durability: DurabilityMode::Grouped,
+            build_policy: BuildPolicy::DeferredWatermark,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    let mut types = BTreeMap::new();
+    let mut node_fields = BTreeMap::new();
+    node_fields.insert("name".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    node_fields.insert("legacy".into(), FieldDefinition { kind: FieldSpec::Integer, optional: true, nullable: false });
+    node_fields.insert("val".into(), FieldDefinition { kind: FieldSpec::Number, optional: true, nullable: false });
+    types.insert("Node".into(), TypeDefinition { fields: node_fields, additional_fields: true, ..Default::default() });
+    let mut rels = BTreeMap::new();
+    rels.insert(
+        "link".into(),
+        RelationDefinition {
+            weighted: true,
+            endpoints: vec![RelationEndpoint { source: "Node".into(), target: "Node".into() }],
+            ..Default::default()
+        },
+    );
+    let schema_v1 = Schema { dollar_schema: None, types, relations: rels };
+    db.set_schema(&schema_v1).unwrap();
+
+    let edge_floats: &[f64] = &[
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        f64::MAX,
+        0.1_f64 + 0.2_f64,
+        1.0_f64 / 3.0_f64,
+        f64::from_bits(0x3fe0_0000_0000_0001),
+        2.225_073_858_507_201e-308_f64,
+        -1.234_567_890_123_456_7e-200_f64,
+    ];
+    let mut create_ops = Vec::new();
+    for (i, &fv) in edge_floats.iter().enumerate() {
+        create_ops.push(WireOp::Create {
+            type_name: "Node".into(),
+            external_id: Some(format!("f-{i}")),
+            fields: vec![
+                ("name".into(), CanonicalValue::String(format!("node-{i}"))),
+                ("legacy".into(), CanonicalValue::Int(100 + i as i64)),
+                ("val".into(), CanonicalValue::float(fv).unwrap()),
+            ],
+        });
+    }
+    db.execute_batch(&create_ops).unwrap();
+
+    // Link edges with bit-exact float weights too.
+    let mut link_ops = Vec::new();
+    for (i, &w) in edge_floats.iter().enumerate() {
+        let next = (i + 1) % edge_floats.len();
+        link_ops.push(WireOp::Link {
+            source: EntityTarget::ExternalId(format!("f-{i}")),
+            rel_kind: "link".into(),
+            target: EntityTarget::ExternalId(format!("f-{next}")),
+            weight: Some(w.to_bits()),
+            info: None,
+        });
+    }
+    db.execute_batch(&link_ops).unwrap();
+
+    // Archive `legacy` while keeping `additional_fields: true`.
+    let mut schema_v2 = schema_v1.clone();
+    schema_v2.types.get_mut("Node").unwrap().fields.remove("legacy");
+    db.set_schema(&schema_v2).unwrap();
+
+    // Add large spilled extra field on f-0 while leaving archived declared `legacy = 100` intact!
+    let big_extra = "X".repeat(6 * 1024);
+    db.execute_batch(&[WireOp::Patch {
+        target: EntityTarget::ExternalId("f-0".into()),
+        fields: vec![("big_extra".into(), CanonicalValue::String(big_extra.clone()))],
+    }])
+    .unwrap();
+
+    // Dump -> inspect JSON separates `fields` and `extra`, AND inject a simultaneous shadowing `extra.legacy`
+    // alongside archived declared `fields.legacy = Int(100)` to prove both tiers round-trip cleanly!
+    let dump_path = tmp.path().join("batch2.json");
+    elmdb::dump::dump(&db, &dump_path).unwrap();
+    let mut dump_json: serde_json::Value = serde_json::from_slice(&std::fs::read(&dump_path).unwrap()).unwrap();
+    let entities = dump_json["entities"].as_array_mut().unwrap();
+    let f0 = entities.iter_mut().find(|e| e["id"] == "f-0").unwrap();
+    assert_eq!(f0["fields"]["legacy"]["v"], "100");
+    assert_eq!(f0["extra"]["big_extra"]["v"], big_extra);
+    f0["extra"]["legacy"] = serde_json::json!({ "t": "string", "v": "shadowing-extra" });
+    let dump_shadow_path = tmp.path().join("batch2_shadow.json");
+    std::fs::write(&dump_shadow_path, serde_json::to_vec_pretty(&dump_json).unwrap()).unwrap();
+
+    let loaded_dir = tmp.path().join("loaded_db");
+    elmdb::dump::load(&dump_shadow_path, &loaded_dir).unwrap();
+    let loaded = Database::open(&loaded_dir, OpenOptions::default()).unwrap();
+
+    // Verify shadowing extra beats archived declared on f-0, AND f-1 still reads archived declared 101!
+    let r0 = loaded.get_row("f-0").unwrap().unwrap();
+    assert_eq!(r0.fields.get("legacy"), Some(&CanonicalValue::String("shadowing-extra".into())));
+    assert_eq!(r0.fields.get("big_extra"), Some(&CanonicalValue::String(big_extra)));
+    let r1 = loaded.get_row("f-1").unwrap().unwrap();
+    assert_eq!(r1.fields.get("legacy"), Some(&CanonicalValue::Int(101)));
+
+    // Re-dump loaded DB -> verify BOTH archived declared `fields.legacy = 100` AND `extra.legacy = "shadowing-extra"`
+    // survived the round-trip intact!
+    let redump_path = tmp.path().join("batch2_redump.json");
+    elmdb::dump::dump(&loaded, &redump_path).unwrap();
+    let redump_json: serde_json::Value = serde_json::from_slice(&std::fs::read(&redump_path).unwrap()).unwrap();
+    let rf0 = redump_json["entities"].as_array().unwrap().iter().find(|e| e["id"] == "f-0").unwrap();
+    assert_eq!(rf0["fields"]["legacy"]["v"], "100");
+    assert_eq!(rf0["extra"]["legacy"]["v"], "shadowing-extra");
+
+    // Verify bit-exact f64 round-trip on every entity field and relation weight!
+    for (i, &expected) in edge_floats.iter().enumerate() {
+        let row = loaded.get_row(&format!("f-{i}")).unwrap().unwrap();
+        let Some(CanonicalValue::Float(got)) = row.fields.get("val") else {
+            panic!("expected Float for f-{i}, got {:?}", row.fields.get("val"));
+        };
+        assert_eq!(
+            got.to_bits(),
+            expected.to_bits(),
+            "entity f-{i} float bit mismatch: got {got:?} ({:#x}), expected {expected:?} ({:#x})",
+            got.to_bits(),
+            expected.to_bits()
+        );
+        let edges = loaded.get_edges(&format!("f-{i}"), Some("link"), elmdb::EdgeDir::Out).unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(
+            edges[0].weight.to_bits(),
+            expected.to_bits(),
+            "edge f-{i} weight bit mismatch: got {:?} ({:#x}), expected {expected:?} ({:#x})",
+            edges[0].weight,
+            edges[0].weight.to_bits(),
+            expected.to_bits()
+        );
+    }
+
+    // 2. Item 2.4: Real cross-process `set_schema` (single & back-to-back double bump) settles watches cleanly!
+    let xproc_dir = tmp.path().join("xproc_watch_db");
+    let db_a = Database::open(&xproc_dir, OpenOptions::default()).unwrap();
+    db_a.set_schema(&schema_v2).unwrap();
+
+    let count_q = QuerySpec {
+        source: QuerySource::Type { type_name: "Node".into(), include_trashed: false },
+        steps: vec![],
+        terminal: Some(QueryTerminal::Count),
+        explain: false,
+    };
+    let fast_policy = WatchPolicy { min_gap_ms: 0, adaptive_multiplier: 0, ..Default::default() };
+    let (w1, _) = db_a.register_query_watch(&count_q, fast_policy, 100).unwrap();
+    let (w2, _) = db_a.register_query_watch(&count_q, fast_policy, 100).unwrap();
+    assert!(db_a.watches_settled());
+
+    // Child process bumps schema ONCE (without parent calling catch_up_cross_process first).
+    let st1 = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_pr268_batch2_schema_bumper", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_PR268_B2_DIR", &xproc_dir)
+        .env("ELMDB_TEST_PR268_B2_BUMPS", "1")
+        .status()
+        .unwrap();
+    assert!(st1.success());
+
+    // Registering w3 on parent triggers read at new epoch -> settles w3 AND dirties w1 + w2!
+    let (w3, _) = db_a.register_query_watch(&count_q, fast_policy, 200).unwrap();
+    assert!(!db_a.watches_settled(), "existing watches w1/w2 must be dirtied after cross-proc set_schema");
+
+    // Rerun w1 and w2 -> MUST settle cleanly in 1 pass (zero infinite rerun loop)!
+    assert!(db_a.begin_watch_run(w1));
+    db_a.rerun_query_watch(w1, &count_q, 210, 1).unwrap();
+    assert!(db_a.begin_watch_run(w2));
+    db_a.rerun_query_watch(w2, &count_q, 210, 1).unwrap();
+    assert!(db_a.watches_settled(), "watches must settle cleanly after single cross-process set_schema");
+
+    // Child process bumps schema TWICE back-to-back!
+    let st2 = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_pr268_batch2_schema_bumper", "--ignored", "--nocapture"])
+        .env("ELMDB_TEST_PR268_B2_DIR", &xproc_dir)
+        .env("ELMDB_TEST_PR268_B2_BUMPS", "2")
+        .status()
+        .unwrap();
+    assert!(st2.success());
+
+    // Parent reruns w1 (even without calling catch_up_cross_process) -> advances directly to newest epoch & dirties w2/w3!
+    let _ = db_a.rerun_query_watch(w1, &count_q, 300, 1).unwrap();
+    assert!(!db_a.watches_settled(), "w2 and w3 must be dirtied after double cross-process set_schema");
+    assert!(db_a.begin_watch_run(w2));
+    let _ = db_a.rerun_query_watch(w2, &count_q, 300, 1).unwrap();
+    assert!(db_a.begin_watch_run(w3));
+    let _ = db_a.rerun_query_watch(w3, &count_q, 300, 1).unwrap();
+    assert!(db_a.watches_settled(), "watches must settle cleanly after back-to-back cross-process set_schema bumps");
+
+    db_a.close().unwrap();
+    loaded.close().unwrap();
+    db.close().unwrap();
+}
