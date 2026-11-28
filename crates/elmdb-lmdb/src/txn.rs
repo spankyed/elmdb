@@ -1161,6 +1161,7 @@ mod tests {
             assert!(matches!(small.adopt_resized_map_locked(&wg, false), Err(StorageError::InvalidState(_))));
             // Dropping an uninstalled staged pin decrements `staged_pin_count` so remap succeeds after drop.
             drop(tok);
+            assert!(small.grow_map_locked(&wg, Some(512 * 1024), false).unwrap() >= 512 * 1024);
             let tok2 = small.prepare_durable_pin_under_write(&wg).unwrap();
             small.install_durable_pin(tok2);
             assert!(small.has_durable_pin());
