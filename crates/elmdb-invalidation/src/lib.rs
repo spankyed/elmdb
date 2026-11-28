@@ -5,14 +5,14 @@
 //! and sans-I/O `WatchScheduler` (zero OS `Instant` calls, zero background timer threads).
 
 pub mod index;
+#[cfg(all(test, shuttle))]
+mod model;
 pub mod read_set;
 pub mod scheduler;
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use elmdb_engine::{CommitDeltaSummary, CompiledSchema, Engine, read_commit_seq, read_maint_seq};
 use elmdb_query::{ExecBudgets, LogicalPlan, QueryEngine, QueryOutput};
+use elmdb_storage::locks::sync::{AtomicU64, Mutex, Ordering};
 use elmdb_storage::{Clock, KvStore, Vfs};
 use elmdb_wire::Result;
 

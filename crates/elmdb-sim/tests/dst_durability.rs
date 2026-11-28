@@ -425,14 +425,14 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         let store = SimKvStore::new(SimKvConfig::default());
         // Before first sync (`durable.txnid == 0`), multiple commits + power loss must NOT mark txnid 0 corrupted.
         let db = {
-            let mut rw = store.begin_write(()).unwrap();
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
             let db = rw.open_subdb("data", DbFlags::DEFAULT).unwrap();
             rw.put(db, b"k", b"pre0").unwrap();
             let _ = rw.commit_raw().unwrap();
             db
         };
         for i in 1..=4 {
-            let mut rw = store.begin_write(()).unwrap();
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
             rw.put(db, b"k", format!("pre{i}").as_bytes()).unwrap();
             let _ = rw.commit_raw().unwrap();
         }
@@ -445,16 +445,17 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         );
         drop(ro_empty);
 
-        let mut rw = store.begin_write(()).unwrap();
+        let mut rw = store.begin_write(store.lock_map_read()).unwrap();
         let db = rw.open_subdb("data", DbFlags::DEFAULT).unwrap();
         rw.put(db, b"k", b"durable_v1").unwrap();
-        let (r1, ()) = rw.commit_raw().unwrap();
-        store.sync(&()).unwrap();
+        let (r1, g1) = rw.commit_raw().unwrap();
+        store.sync(&g1).unwrap();
+        drop(g1);
         assert_eq!(store.durable_txnid(), r1.txnid);
 
         // Clean (no-op) commits after sync must NOT trigger freelist reuse corruption on power loss!
         for _ in 0..4 {
-            let rw = store.begin_write(()).unwrap();
+            let rw = store.begin_write(store.lock_map_read()).unwrap();
             let _ = rw.commit_raw().unwrap();
         }
         store.crash_power_loss();
@@ -466,7 +467,7 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         let ro_guard2 = store.begin_read().unwrap();
         drop(ro_guard1);
         for i in 2..=4 {
-            let mut rw = store.begin_write(()).unwrap();
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
             rw.put(db, b"k", format!("v{i}").as_bytes()).unwrap();
             let _ = rw.commit_raw().unwrap();
         }
@@ -481,7 +482,7 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         // Only 2 unsynced commits (D+1, D+2) with NO reader do NOT recycle D's pages yet (LMDB has 2 meta slots);
         // kills `final_snap.txnid >= freed_at + 2` -> `<` mutant!
         for i in 1..=2 {
-            let mut rw = store.begin_write(()).unwrap();
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
             rw.put(db, b"k", format!("two_commits_{i}").as_bytes()).unwrap();
             let _ = rw.commit_raw().unwrap();
         }
@@ -500,13 +501,13 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         drop(r_b);
 
         // Now with ZERO readers at <= D (even with a newer reader at D+1!), D+1..D+3 recycles D's pages!
-        let mut rw = store.begin_write(()).unwrap();
+        let mut rw = store.begin_write(store.lock_map_read()).unwrap();
         rw.put(db, b"k", b"d_plus_1").unwrap();
         let _ = rw.commit_raw().unwrap();
         let newer_reader = store.begin_read().unwrap();
         assert!(newer_reader.txnid() > r1.txnid);
         for i in 2..=3 {
-            let mut rw = store.begin_write(()).unwrap();
+            let mut rw = store.begin_write(store.lock_map_read()).unwrap();
             rw.put(db, b"k", format!("recycled_{i}").as_bytes()).unwrap();
             let _ = rw.commit_raw().unwrap();
         }
@@ -520,8 +521,11 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         assert!(matches!(ro.cursor(db), Err(StorageError::Corrupted(_))));
         assert!(matches!(ro.entries(db), Err(StorageError::Corrupted(_))));
         assert!(matches!(ro.open_subdb_existing("data", DbFlags::DEFAULT), Err(StorageError::Corrupted(_))));
+        drop(ro);
         // Verify `adopt_resized_map_locked` returns real `map_size` (kills Ok(0)/Ok(1) mutants).
-        assert_eq!(store.adopt_resized_map_locked(&(), false).unwrap(), store.map_size());
+        let wg = store.lock_map_write();
+        assert_eq!(store.adopt_resized_map_locked(&wg, false).unwrap(), store.map_size());
+        drop(wg);
     }
 
     // Part B: `DurabilityGate` in `Grouped` mode pins D on `sync()` so D+1..D+10 NEVER corrupt D on power loss.
@@ -788,7 +792,8 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
             tx.commit().unwrap();
         }
         {
-            let tok = store_c.prepare_durable_pin(&()).unwrap();
+            let rg = store_c.lock_map_read();
+            let tok = store_c.prepare_durable_pin(&rg).unwrap();
             assert_eq!(SimKvStore::pin_txnid(&tok), 2);
         }
         // Peer commits between `prepare_durable_pin` (P = 2) and `active_receipt` (S = 3) during `sync()`!

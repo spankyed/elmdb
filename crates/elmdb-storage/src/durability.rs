@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use sha2::{Digest, Sha256};
 
 use crate::error::StorageError;
 use crate::kv::{CommitReceipt, DbFlags, KvCursor, KvEntry, KvRead, KvStore, KvWrite, SubDbHandle};
+use crate::locks::sync::{AtomicBool, Ordering};
 use crate::locks::{MetaLock, OrderedArcMutexGuard, OrderedMutexGuard, WriterLock};
 use crate::vfs::{BootId, Vfs};
 

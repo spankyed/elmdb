@@ -92,7 +92,7 @@ proptest! {
             (b, i)
         };
         let (s_bytes, s_ints) = {
-            let mut tx = sim.begin_write(()).unwrap();
+            let mut tx = sim.begin_write(sim.lock_map_read()).unwrap();
             let b = tx.open_subdb("bytes", DbFlags::DEFAULT).unwrap();
             let i = tx.open_subdb("ints", DbFlags::INTEGER_KEY).unwrap();
             let (_, _g) = tx.commit_raw().unwrap();
@@ -100,7 +100,7 @@ proptest! {
         };
 
         let mut l_tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
-        let mut s_tx = sim.begin_write(()).unwrap();
+        let mut s_tx = sim.begin_write(sim.lock_map_read()).unwrap();
 
         for op in ops {
             match op {
@@ -177,13 +177,13 @@ proptest! {
                     drop(s_ro);
 
                     l_tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
-                    s_tx = sim.begin_write(()).unwrap();
+                    s_tx = sim.begin_write(sim.lock_map_read()).unwrap();
                 }
                 Op::AbortTxn => {
                     l_tx.abort();
                     s_tx.abort();
                     l_tx = lmdb.begin_write(lmdb.lock_map_read()).unwrap();
-                    s_tx = sim.begin_write(()).unwrap();
+                    s_tx = sim.begin_write(sim.lock_map_read()).unwrap();
                 }
                 Op::CheckSeekBytes(k) => {
                     let key = [b'k', k];
@@ -258,7 +258,7 @@ fn lmdb_empty_values_and_fixed_8_byte_int_keys_parity() {
     let s_before = sim.last_txnid().unwrap();
     let (_, g_l) = lmdb.begin_write(lmdb.lock_map_read()).unwrap().commit_raw().unwrap();
     drop(g_l);
-    let _ = sim.begin_write(()).unwrap().commit_raw().unwrap();
+    let _ = sim.begin_write(sim.lock_map_read()).unwrap().commit_raw().unwrap();
     assert_eq!(lmdb.last_txnid().unwrap(), l_before);
     assert_eq!(sim.last_txnid().unwrap(), s_before);
 }

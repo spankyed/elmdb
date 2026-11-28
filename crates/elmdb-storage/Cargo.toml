@@ -17,3 +17,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(loom)'.dependencies]
+loom.workspace = true
+
+[target.'cfg(shuttle)'.dependencies]
+shuttle.workspace = true
