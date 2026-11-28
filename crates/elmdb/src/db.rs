@@ -90,11 +90,18 @@ struct RegisteredHostHook {
 
 type ScopedCommitMeta = (u64, elmdb_storage::CommitReceipt);
 
+#[derive(Debug, Clone, Copy)]
+struct MapFullGrowInfo {
+    map_size_before: usize,
+    hooks_invoked: bool,
+}
+
 struct ActiveTxnSlot {
     ctx: Option<TxnCtx<'static, LmdbStore, OsVfs, SystemClock>>,
     commit_seq: Option<u64>,
     depth: usize,
     map_full_count: u64,
+    hooks_invoked: bool,
 }
 
 impl ActiveTxnSlot {
@@ -511,12 +518,12 @@ impl Database {
     pub fn transact_scoped<R>(&self, opts: TransactOptions, f: impl FnOnce() -> Result<R>) -> Result<R> {
         let eng = self.enter_op()?;
         self.require_writable()?;
-        let (result, map_full_before) = self.transact_scoped_with_receipt(&eng, opts, f);
-        if let Some(before) = map_full_before {
-            // `OuterGuard` has dropped and released L2 + L3; grow idempotently so caller retry succeeds
-            // without silently re-executing the user's closure (even when a host callback mapped MapFull
-            // across an FFI boundary like N-API `Cancelled`).
-            let _ = eng.gate().grow_map(Some(before.saturating_mul(2)));
+        let (result, map_full) = self.transact_scoped_with_receipt(&eng, opts, f);
+        if let Some(info) = map_full {
+            // `OuterGuard` has dropped and released L2 + L3; grow idempotently and PROPAGATE any
+            // grow failure (e.g. DurabilityFailed/Poisoned/Corrupted) so callers never receive a
+            // misleadingly retryable STORAGE_FULL when growth cannot succeed.
+            eng.gate().grow_map(Some(info.map_size_before.saturating_mul(2)))?;
         }
         Ok(result?.0)
     }
@@ -526,7 +533,7 @@ impl Database {
         eng: &OpGuard<'_>,
         opts: TransactOptions,
         f: impl FnOnce() -> Result<R>,
-    ) -> (Result<(R, Option<ScopedCommitMeta>)>, Option<usize>) {
+    ) -> (Result<(R, Option<ScopedCommitMeta>)>, Option<MapFullGrowInfo>) {
         if self.has_active_txn() {
             let sp_depth = match ACTIVE_TXNS.with(|m| -> Result<u32> {
                 let mut map = m.try_borrow_mut().map_err(|_| {
@@ -618,6 +625,7 @@ impl Database {
         // drops and releases L2 + L3.
         let mut map_size_before = eng.gate().map_size();
         let mut saw_map_full = false;
+        let mut hooks_invoked = false;
         let result = (|| -> Result<(R, Option<(u64, elmdb_storage::CommitReceipt)>)> {
             let ctx = eng.arc().begin_owned_txn()?;
             map_size_before = eng.gate().map_size();
@@ -625,7 +633,13 @@ impl Database {
             ACTIVE_TXNS.with(|m| {
                 m.borrow_mut().insert(
                     self.id,
-                    ActiveTxnSlot { ctx: Some(ctx), commit_seq: Some(commit_seq), depth: 1, map_full_count: 0 },
+                    ActiveTxnSlot {
+                        ctx: Some(ctx),
+                        commit_seq: Some(commit_seq),
+                        depth: 1,
+                        map_full_count: 0,
+                        hooks_invoked: false,
+                    },
                 );
             });
 
@@ -633,6 +647,7 @@ impl Database {
                 db_id: u64,
                 armed: bool,
                 saw_map_full: &'a mut bool,
+                hooks_invoked: &'a mut bool,
             }
             impl Drop for OuterGuard<'_> {
                 fn drop(&mut self) {
@@ -643,13 +658,19 @@ impl Database {
                             {
                                 // Dropping `ActiveTxnSlot` aborts the root LMDB RwTxn and releases WriterLock.
                                 *self.saw_map_full = slot.map_full_count != 0;
+                                *self.hooks_invoked = slot.hooks_invoked;
                             }
                         });
                     }
                 }
             }
 
-            let mut guard = OuterGuard { db_id: self.id, armed: true, saw_map_full: &mut saw_map_full };
+            let mut guard = OuterGuard {
+                db_id: self.id,
+                armed: true,
+                saw_map_full: &mut saw_map_full,
+                hooks_invoked: &mut hooks_invoked,
+            };
             let value = f()?;
             if opts.run_before_commit {
                 self.run_combined_hook_cascade(eng)?;
@@ -659,6 +680,7 @@ impl Database {
             let slot = ACTIVE_TXNS
                 .with(|m| m.borrow_mut().remove(&self.id))
                 .ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn slot missing on commit"))?;
+            hooks_invoked = slot.hooks_invoked;
             let ctx =
                 slot.ctx.ok_or_else(|| ElmdbError::new(ErrorCode::Internal, "active txn ctx missing on commit"))?;
             let committed_schema = Arc::clone(ctx.schema());
@@ -674,11 +696,11 @@ impl Database {
             };
             Ok((value, out_meta))
         })();
-        let map_full_before = match &result {
-            Err(err) if err.is_map_full() || saw_map_full => Some(map_size_before),
+        let map_full = match &result {
+            Err(err) if err.is_map_full() || saw_map_full => Some(MapFullGrowInfo { map_size_before, hooks_invoked }),
             _ => None,
         };
-        (result, map_full_before)
+        (result, map_full)
     }
 
     fn run_combined_hook_cascade(&self, eng: &EngineHandle) -> Result<()> {
@@ -730,7 +752,17 @@ impl Database {
                     .expect("taken_ctx")
                     .run_rust_hooks_for_round(&snap.touched_types)
                     .and_then(|()| restore.ctx.as_mut().expect("taken_ctx").flush_projections());
+                let rust_invoked = restore.ctx.as_ref().expect("taken_ctx").hooks_invoked();
                 drop(restore);
+                if rust_invoked {
+                    ACTIVE_TXNS.with(|m| {
+                        if let Ok(mut map) = m.try_borrow_mut()
+                            && let Some(slot) = map.get_mut(&self.id)
+                        {
+                            slot.hooks_invoked = true;
+                        }
+                    });
+                }
                 if let Err(err) = rust_res {
                     let _ = self.with_active_ctx_mut(|ctx| {
                         ctx.abort_savepoint(sp);
@@ -741,6 +773,13 @@ impl Database {
             }
             if let Some(ref delta) = host_delta {
                 for cb in matching_host {
+                    ACTIVE_TXNS.with(|m| {
+                        if let Ok(mut map) = m.try_borrow_mut()
+                            && let Some(slot) = map.get_mut(&self.id)
+                        {
+                            slot.hooks_invoked = true;
+                        }
+                    });
                     // Snapshot `map_full_count` per callback so a caught MapFull earlier in the transaction
                     // cannot let a later hook spoof or forward a foreign database's `STORAGE_FULL`.
                     let map_full_before = self.active_map_full_count();
@@ -805,22 +844,24 @@ impl Database {
         // Retries automatically strictly on LMDB `MDB_MAP_FULL` by doubling `map_size` once per attempt under
         // L2 `MapGate::write()` (avoiding redundant Grouped fsync pairs).
         let (created_ids, committed) = 'retry: {
-            for _ in 0..8 {
+            for attempt in 0..=8 {
                 match self.transact_scoped_with_receipt(&eng, TransactOptions::default(), || {
                     self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(ops))
                 }) {
                     (Ok(res), _) => break 'retry res,
-                    (Err(err), Some(before)) if err.is_map_full() => {
-                        let target = before.saturating_mul(2);
-                        let _ = eng.gate().grow_map(Some(target))?;
+                    (Err(err), Some(info)) if err.is_map_full() => {
+                        let target = info.map_size_before.saturating_mul(2);
+                        eng.gate().grow_map(Some(target))?;
+                        if info.hooks_invoked || attempt == 8 {
+                            // Never silently re-run `beforeCommit` hooks (or loop past 8 retries):
+                            // the map has grown once; surface `STORAGE_FULL` so the caller explicitly retries.
+                            return Err(err);
+                        }
                     }
                     (Err(err), _) => return Err(err),
                 }
             }
-            let (res, _) = self.transact_scoped_with_receipt(&eng, TransactOptions::default(), || {
-                self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(ops))
-            });
-            res?
+            unreachable!("retry loop returns on final attempt")
         };
         let (commit_seq, receipt) = match committed {
             Some((seq, receipt)) => (seq, receipt),

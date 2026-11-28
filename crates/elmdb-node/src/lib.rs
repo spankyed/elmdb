@@ -748,11 +748,15 @@ impl Database {
             match outcome {
                 Ok(val) => Ok(val),
                 Err(elmdb_err) => {
-                    if let Some(raw_exc) = thrown_raw_exc {
+                    if elmdb_err.code == ErrorCode::Cancelled
+                        && let Some(raw_exc) = thrown_raw_exc
+                    {
                         // SAFETY: Rethrow the exact captured JS value (Error or primitive) verbatim.
                         let _ = unsafe { napi::sys::napi_throw(raw_env, raw_exc) };
                         Err(napi::Error::from_status(napi::Status::PendingException))
-                    } else if let Some(js_err) = thrown_js {
+                    } else if elmdb_err.code == ErrorCode::Cancelled
+                        && let Some(js_err) = thrown_js
+                    {
                         Err(js_err)
                     } else {
                         Err(napi::Error::from(JsError::from(to_js(elmdb_err)).into_unknown(env)))

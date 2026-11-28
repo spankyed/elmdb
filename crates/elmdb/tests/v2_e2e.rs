@@ -3272,7 +3272,8 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
     assert!(db_arc.unregister_before_commit(h_catch));
 
     // 6. Standalone `execute_batch` whose host `beforeCommit` hook writes directly and hits real MDB_MAP_FULL
-    //    auto-grows and retries cleanly!
+    //    MUST NOT silently re-run hooks: first call fails with StorageFull (hook_runs == 1), grows map_size,
+    //    and an explicit caller retry succeeds (hook_runs == 2)!
     let db_for_hook = Arc::clone(&db_arc);
     let size_before_real = db_arc.stats().unwrap().map_size_bytes;
     let real_hook_payload = incompressible(usize::try_from(size_before_real).unwrap() * 2 + 64 * 1024, 3);
@@ -3294,16 +3295,189 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
             }),
         )
         .unwrap();
+    let trigger_ops = vec![WireOp::Create {
+        type_name: "Blob".into(),
+        external_id: Some("hook-big-trigger".into()),
+        fields: vec![("body".into(), CanonicalValue::Bytes(b"small".to_vec()))],
+    }];
+    let first_hook_err = db_arc.execute_batch(&trigger_ops).unwrap_err();
+    assert!(first_hook_err.is_map_full(), "expected StorageFull/MapFull, got {first_hook_err:?}");
+    assert_eq!(hook_runs.load(Ordering::SeqCst), 1, "beforeCommit hook MUST NOT auto-rerun on MapFull");
+    let size_after_first = db_arc.stats().unwrap().map_size_bytes;
+    assert!(size_after_first > size_before_real, "map must have grown before returning StorageFull");
+    assert!(db_arc.get_row("hook-big-written").unwrap().is_none());
+
+    // Explicit caller retry now succeeds (may need one more doubling if 2x wasn't enough for 2x+64KiB).
+    let mut retries = 0usize;
+    loop {
+        match db_arc.execute_batch(&trigger_ops) {
+            Ok(_) => break,
+            Err(e) if e.is_map_full() && retries < 4 => retries += 1,
+            Err(e) => panic!("unexpected retry error: {e:?}"),
+        }
+    }
+    assert_eq!(hook_runs.load(Ordering::SeqCst), 2 + retries);
+    assert!(db_arc.get_row("hook-big-written").unwrap().is_some());
+    assert!(db_arc.unregister_before_commit(h_real));
+
+    // 7. Plain `execute_batch` with ZERO invoked hooks (even when a non-matching hook IS registered)
+    //    still auto-grows and retries automatically without returning StorageFull!
+    let mut s2 = s.clone();
+    let mut other_fields = BTreeMap::new();
+    other_fields.insert("label".into(), FieldDefinition { kind: FieldSpec::String, optional: false, nullable: false });
+    s2.types.insert(
+        "Other".into(),
+        TypeDefinition {
+            fields: other_fields,
+            indexes: BTreeMap::new(),
+            additional_fields: false,
+            short_code: None,
+            change_order: false,
+            declared_by: None,
+        },
+    );
+    db_arc.set_schema(&s2).unwrap();
+    let other_tid = db_arc.schema().unwrap().type_by_name("Other").unwrap().id;
+    let mut non_matching_mask = TypeMask::empty();
+    non_matching_mask.insert(other_tid);
+    let non_matching_runs = Arc::new(AtomicUsize::new(0));
+    let non_matching_runs_c = Arc::clone(&non_matching_runs);
+    let h_other = db_arc
+        .register_host_before_commit(
+            non_matching_mask,
+            Arc::new(move |_| {
+                non_matching_runs_c.fetch_add(1, Ordering::SeqCst);
+                Ok(None)
+            }),
+        )
+        .unwrap();
+    let size_before_plain = db_arc.stats().unwrap().map_size_bytes;
+    let plain_big = incompressible(usize::try_from(size_before_plain).unwrap() * 2 + 64 * 1024, 4);
     db_arc
         .execute_batch(&[WireOp::Create {
             type_name: "Blob".into(),
-            external_id: Some("hook-big-trigger".into()),
-            fields: vec![("body".into(), CanonicalValue::Bytes(b"small".to_vec()))],
+            external_id: Some("plain-autogrow".into()),
+            fields: vec![("body".into(), CanonicalValue::Bytes(plain_big))],
         }])
         .unwrap();
-    assert!(hook_runs.load(Ordering::SeqCst) >= 2, "expected MapFull retry");
-    assert!(db_arc.stats().unwrap().map_size_bytes > size_before_real);
-    assert!(db_arc.get_row("hook-big-written").unwrap().is_some());
-    assert!(db_arc.unregister_before_commit(h_real));
+    assert_eq!(non_matching_runs.load(Ordering::SeqCst), 0);
+    assert!(db_arc.stats().unwrap().map_size_bytes > size_before_plain);
+    assert!(db_arc.get_row("plain-autogrow").unwrap().is_some());
+    assert!(db_arc.unregister_before_commit(h_other));
+
+    // 7b. A host hook that hits real `MapFull` internally and swallows it into a non-`MapFull` error
+    //     MUST NOT grow `map_size_bytes` in `Database::execute_batch`!
+    let sw_dir = tmp.path().join("swallow_db");
+    let sw_db = Arc::new(
+        Database::open(
+            &sw_dir,
+            OpenOptions { durability: DurabilityMode::Strict, map_size: Some(512 * 1024), ..OpenOptions::default() },
+        )
+        .unwrap(),
+    );
+    sw_db.set_schema(&s).unwrap();
+    let size_before_swallow = sw_db.stats().unwrap().map_size_bytes;
+    let swallow_big = incompressible(usize::try_from(size_before_swallow).unwrap() + 16 * 1024, 9);
+    let db_swallow = Arc::clone(&sw_db);
+    let h_swallow = sw_db
+        .register_host_before_commit(
+            TypeMask::all(),
+            Arc::new(move |_| {
+                let err = db_swallow
+                    .execute_batch(&[WireOp::Create {
+                        type_name: "Blob".into(),
+                        external_id: Some("swallow-big".into()),
+                        fields: vec![("body".into(), CanonicalValue::Bytes(swallow_big.clone()))],
+                    }])
+                    .unwrap_err();
+                assert!(err.is_map_full(), "expected MapFull inside swallow hook, got {err:?}");
+                Err(ElmdbError::new(ErrorCode::HookAborted, "hook swallowed map_full"))
+            }),
+        )
+        .unwrap();
+    let swallow_err = sw_db
+        .execute_batch(&[WireOp::Create {
+            type_name: "Blob".into(),
+            external_id: Some("swallow-trigger".into()),
+            fields: vec![("body".into(), CanonicalValue::Bytes(vec![7]))],
+        }])
+        .unwrap_err();
+    assert_eq!(swallow_err.code, ErrorCode::HookAborted);
+    assert_eq!(
+        sw_db.stats().unwrap().map_size_bytes,
+        size_before_swallow,
+        "non-MapFull error returned by hook must not grow map_size"
+    );
+    assert!(sw_db.unregister_before_commit(h_swallow));
+    sw_db.close().unwrap();
     db_arc.close().unwrap();
+
+    // 8. Fresh Grouped DB bootstrap seals `synced.v2` immediately: same-boot reopen after an unsynced
+    //    commit reports `sameBootUnsyncedTail` (NOT `unsyncedAfterReboot`) so `grow_map` & `backup_into` work!
+    let grp_tmp = tempdir().unwrap();
+    let grp_dir = grp_tmp.path().join("grouped_bootstrap");
+    {
+        let g1 = Database::open(
+            &grp_dir,
+            OpenOptions { durability: DurabilityMode::Grouped, map_size: Some(512 * 1024), ..OpenOptions::default() },
+        )
+        .unwrap();
+        assert_eq!(g1.open_report().status, "fresh");
+        assert!(grp_dir.join("synced.v2").exists(), "fresh Grouped DB must seal synced.v2 at bootstrap");
+        g1.set_schema(&s).unwrap();
+        // Close gracefully -> persists clean. Now test an unsynced tail by backing up the pre-flush sidecar.
+        let sidecar_after_bootstrap = std::fs::read(grp_dir.join("synced.v2")).unwrap();
+        g1.execute_batch(&[WireOp::Create {
+            type_name: "Blob".into(),
+            external_id: Some("grp-1".into()),
+            fields: vec![("body".into(), CanonicalValue::Bytes(b"hello".to_vec()))],
+        }])
+        .unwrap();
+        g1.close().unwrap();
+        // Restore pre-write bootstrap sidecar to simulate same-boot crash before first user sync.
+        std::fs::write(grp_dir.join("synced.v2"), sidecar_after_bootstrap).unwrap();
+    }
+    let g2 = Database::open(
+        &grp_dir,
+        OpenOptions { durability: DurabilityMode::Grouped, map_size: Some(512 * 1024), ..OpenOptions::default() },
+    )
+    .unwrap();
+    assert_eq!(g2.open_report().status, "sameBootUnsyncedTail");
+    let bak = grp_tmp.path().join("bak");
+    g2.backup_into(&bak, BackupInto::New).unwrap();
+    g2.close().unwrap();
+
+    // 9. `transact_scoped` MUST propagate a `grow_map` failure (e.g. `DurabilityFailed` when Grouped DB
+    //    has an unacknowledged reboot) instead of swallowing it and returning a misleading `Cancelled`!
+    std::fs::remove_file(grp_dir.join("synced.v2")).unwrap();
+    let g3 = Database::open(
+        &grp_dir,
+        OpenOptions { durability: DurabilityMode::Grouped, map_size: Some(512 * 1024), ..OpenOptions::default() },
+    )
+    .unwrap();
+    assert_eq!(g3.open_report().status, "unsyncedAfterReboot");
+    let g3_big_len = usize::try_from(g3.stats().unwrap().map_size_bytes).unwrap() + 8 * 1024;
+    let g3_big_ops = vec![WireOp::Create {
+        type_name: "Blob".into(),
+        external_id: Some("unacked-big".into()),
+        fields: vec![("body".into(), CanonicalValue::Bytes(incompressible(g3_big_len, 5)))],
+    }];
+    let grow_err = g3
+        .transact_scoped(TransactOptions::default(), || -> Result<()> {
+            match g3.execute_batch(&g3_big_ops) {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    assert!(e.is_map_full(), "expected MapFull inside unacked transact, got {e:?}");
+                    Err(ElmdbError::new(ErrorCode::Cancelled, "host callback rethrew MapFull"))
+                }
+            }
+        })
+        .unwrap_err();
+    assert_eq!(
+        grow_err.code,
+        ErrorCode::DurabilityFailed,
+        "transact_scoped must propagate grow_map DurabilityFailed instead of swallowing it; got {grow_err:?}"
+    );
+    g3.acknowledge_restore().unwrap();
+    g3.close().unwrap();
 }
