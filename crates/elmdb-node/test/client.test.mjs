@@ -134,12 +134,31 @@ test('buildWireBatch rejects async/thenable callbacks, __proto__, non-plain obje
   const encodedCross = buildWireBatch((x) => { x.create('Item', { title: 'xrealm', ts: crossRealmDate, raw: crossRealmBytes }); });
   assert.ok(encodedCross.byteLength > 0);
 
-  // Lone UTF-16 surrogates rejected in field names and nested object keys (while valid emoji surrogate pairs succeed)
+  // Lone UTF-16 surrogates rejected in field names, nested object keys, type names, IDs, relKinds, and unset fields
   assert.throws(() => buildWireBatch((x) => { x.create('Item', { ['bad\uD800key']: 1 }); }), /surrogate/);
   assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'ok', meta: { ['\uD800']: 1, ['\uD801']: 2 } }); }), /surrogate/);
   assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'ok', meta: { ['\uDC00']: 1 } }); }), /surrogate/);
+  assert.throws(() => buildWireBatch((x) => { x.create('Bad\uD800Type', { title: 'ok' }); }), /surrogate/);
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'ok' }, 'bad\uD800id'); }), /surrogate/);
+  assert.throws(() => buildWireBatch((x) => { x.patch('bad\uDC00id', { title: 'ok' }); }), /surrogate/);
+  assert.throws(() => buildWireBatch((x) => { x.unset('item-1', ['bad\uD800field']); }), /surrogate/);
+  assert.throws(() => buildWireBatch((x) => { x.link('item-1', 'bad\uD800rel', 'item-2'); }), /surrogate/);
+  assert.throws(() => buildWireBatch((x) => { x.unlink('item-1', 'bad\uDC00rel', 'item-2'); }), /surrogate/);
   const validEmoji = buildWireBatch((x) => { x.create('Item', { title: 'ok', meta: { ['😀']: 1 } }); });
   assert.ok(validEmoji.byteLength > 0);
+
+  // BatchSlot ownership: cross-builder slot reuse and manually-constructed detached BatchSlots are rejected
+  const ownerA = new WireBatchBuilder();
+  const slotFromA = ownerA.create('Item', { title: 'a' });
+  const ownerB = new WireBatchBuilder();
+  ownerB.create('Item', { title: 'b' });
+  ownerB.patch(slotFromA, { title: 'hijack' });
+  assert.throws(() => ownerB.encode(), /does not belong to this WireBatchBuilder/);
+
+  const ownerC = new WireBatchBuilder();
+  ownerC.create('Item', { title: 'c' });
+  ownerC.link(new BatchSlot(0), 'links', 'other');
+  assert.throws(() => ownerC.encode(), /does not belong to this WireBatchBuilder/);
 
   // Invalid BatchSlot index and invalid returnFlags rejected
   assert.throws(() => new BatchSlot(-1), RangeError);

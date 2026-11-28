@@ -356,6 +356,8 @@ test('PR #268 Batch 3: unified JSON-to-JS numbers (> u32::MAX, no BigInt) and be
           bigPos: { type: 'integer' },
           bigNeg: { type: 'integer' },
           maxSafe: { type: 'integer' },
+          hugePos: { type: 'int64', optional: true },
+          hugeNeg: { type: 'int64', optional: true },
           ts: { type: 'timestamp' },
         },
         indexes: {},
@@ -471,6 +473,30 @@ test('PR #268 Batch 3: unified JSON-to-JS numbers (> u32::MAX, no BigInt) and be
     (err) => err.code === 'HOOK_ABORTED' && err.message.includes('keep-this-hook-message'),
   );
   db.unregisterBeforeCommit(hHostileCode);
+
+  // Phase 0B (0.7): int64 outside JS safe integer range (> 2^53 - 1) crosses cleanly as BigInt,
+  // distinct from safe <= 2^53 integers which stay JS `number`!
+  const hugePos = 9007199254740993n; // 2^53 + 1
+  const hugeNeg = -9007199254740993n;
+  db.executeWireBatch(buildWireBatch((b) => {
+    b.create('Metric', { bigPos: 5_000_000_000, bigNeg: -5_000_000_000, maxSafe: 0, hugePos, hugeNeg, ts: new Date(nowTs) }, 'm-bigint');
+  }));
+  const biRow = db.get('m-bigint');
+  assert.ok(biRow);
+  assert.equal(typeof biRow.fields.hugePos, 'bigint');
+  assert.equal(biRow.fields.hugePos, hugePos);
+  assert.equal(typeof biRow.fields.hugeNeg, 'bigint');
+  assert.equal(biRow.fields.hugeNeg, hugeNeg);
+  assert.equal(typeof biRow.fields.bigPos, 'number');
+  assert.equal(biRow.fields.bigPos, 5_000_000_000);
+
+  // Phase 0B (0.7): Lone UTF-16 surrogates rejected across N-API string arguments with INVALID_ARGUMENT.
+  assert.throws(() => db.get('bad\uD800id'), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => db.getEdges('bad\uDC00id'), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => db.nextCounter('bad\uD800ctr'), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => db.renameType('Metric', 'Bad\uD800Metric'), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => db.dump(join(tmp, 'bad\uD800.json')), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => Database.open(join(tmp, 'bad\uD800dir')), (err) => err.code === 'INVALID_ARGUMENT');
 });
 
 test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL across N-API boundary', (t) => {

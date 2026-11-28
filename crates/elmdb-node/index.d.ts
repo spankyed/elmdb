@@ -79,12 +79,12 @@ export declare class Database {
    * - Returning a `Uint8Array`/`Buffer` containing an `elmdb-wire` batch applies those derived writes
    *   in the same savepoint cascade (up to `MAX_HOOK_ROUNDS`).
    */
-  registerBeforeCommit(typeNames: Array<string> | undefined | null, callback: (delta: { commitSeq: number; entities: Array<{ id: string; typeName: string; op: 'create' | 'update' | 'trash' | 'restore' | 'destroy' }>; edges: Array<{ relKind: string; op: 'link' | 'unlink' | 'update'; sourceId: string; targetId: string }> }) => unknown): number
+  registerBeforeCommit(typeNames: Array<string> | null | undefined, callback: (delta: { commitSeq: number; entities: Array<{ id: string; typeName: string; op: 'create' | 'update' | 'trash' | 'restore' | 'destroy' }>; edges: Array<{ relKind: string; op: 'link' | 'unlink' | 'update'; sourceId: string; targetId: string }> }) => unknown): number
   unregisterBeforeCommit(hookId: number): boolean
   /** Reads one entity row by external ID with all `EntityRef`s resolved in a single pinned MVCC snapshot. */
   get(extId: string): Row | null
   /** Lists outgoing, incoming, or both-direction relations for `extId`. */
-  getEdges(extId: string, relKind?: string | undefined | null, dir?: string | undefined | null): Array<RelationRow>
+  getEdges(extId: string, relKind?: string | null | undefined, dir?: string | null | undefined): Array<RelationRow>
   /** Executes a `QuerySpec` synchronously on a pinned lock-free MVCC read snapshot. */
   query(spec: QuerySpec): QueryAnswer
   /** Executes a `QuerySpec` off-thread on Node's libuv worker pool. */
@@ -103,10 +103,10 @@ export declare class Database {
   driveBackgroundWork(maxEntities?: number | undefined | null): boolean
   flush(): void
   flushAsync(): Promise<void>
-  check(indexName?: string | undefined | null): CheckReport
-  checkAsync(indexName?: string | undefined | null): Promise<CheckReport>
-  rebuild(indexName?: string | undefined | null): void
-  rebuildAsync(indexName?: string | undefined | null): Promise<void>
+  check(indexName?: string | null | undefined): CheckReport
+  checkAsync(indexName?: string | null | undefined): Promise<CheckReport>
+  rebuild(indexName?: string | null | undefined): void
+  rebuildAsync(indexName?: string | null | undefined): Promise<void>
   stats(): DatabaseStats
   indexStatus(): Array<IndexStatus>
   backup(targetDir: string, overwriteBackup?: boolean | undefined | null): void

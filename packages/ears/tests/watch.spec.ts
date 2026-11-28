@@ -1090,4 +1090,114 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     eng7.create('Task', { title: 'no-leak-7', done: false });
     expect(eng7.watches.settled()).toBe(true);
   });
+
+  it('Phase 0B: clamps backward custom clock steps, rejects cross-engine flushSync in txn, and runs notifyMutation in finally', () => {
+    // 1. Custom clock stepping backward MUST clamp monotonically to previous high-water mark!
+    const handle1 = temps.open({ schema: watchSchema });
+    let currentTime = 50_000;
+    const timers = new Map<number, () => void>();
+    let nextTimer = 1;
+    const backwardClock = {
+      now: () => currentTime,
+      setTimeout: (cb: () => void, _delay: number) => {
+        const id = nextTimer++;
+        timers.set(id, cb);
+        return id;
+      },
+      clearTimeout: (id: unknown) => {
+        timers.delete(id as number);
+      },
+    };
+    const eng1 = createEarsEngine({ database: handle1.database, clock: backwardClock });
+    const counts: number[] = [];
+    eng1.query.of('Task').watchCount((c) => counts.push(c), { minGapMs: 100, adaptiveMultiplier: 0 });
+    expect(counts).toEqual([0]);
+    // Step clock BACKWARD by 40s, then mutate -> clamped nowMs stays 50_000 (not 10_000)!
+    currentTime = 10_000;
+    eng1.create('Task', { title: 'back-clock', done: false }, 'bc-1');
+    // Advancing clock to 50_100 satisfies minGapMs=100 from 50_000 cleanly!
+    currentTime = 50_100;
+    for (const cb of [...timers.values()]) {
+      timers.clear();
+      cb();
+    }
+    expect(counts).toEqual([0, 1]);
+
+    // 2. Cross-engine `watches.flushSync()` sharing the same `Database` handle MUST reject with
+    //    `INVALID_ARGUMENT` while the first engine is inside `transact()` (via Rust `pendingCommitSeq()`).
+    const eng2 = createEarsEngine({ database: handle1.database, clock: createFakeClock(60_000) });
+    eng2.query.of('Task').watchCount(() => {}, { minGapMs: 0 });
+    eng1.transact(() => {
+      expect(() => eng2.watches.flushSync()).toThrow(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+      );
+    });
+
+    // 3. Failing mutating operations (`batch`, `transact`, `setSchema`, `renameType`, `rebuild`, `setEmbeddings`)
+    //    still run `notifyMutation()` in `finally` without masking the thrown DB error!
+    let nowCalls = 0;
+    const probeClock = {
+      now: () => {
+        nowCalls++;
+        return 70_000 + nowCalls;
+      },
+      setTimeout: (_cb: () => void, _d: number) => 1,
+      clearTimeout: () => {},
+    };
+    const handle3 = temps.open({ schema: watchSchema });
+    const eng3 = createEarsEngine({ database: handle3.database, clock: probeClock });
+    eng3.query.of('Task').watchCount(() => {}, { minGapMs: 1000, adaptiveMultiplier: 0 });
+    const beforeCalls = nowCalls;
+    expect(() => eng3.create('NoSuchType', {})).toThrow(expect.objectContaining({ code: 'UNKNOWN_TYPE' }));
+    expect(nowCalls).toBeGreaterThan(beforeCalls);
+
+    const beforeTransact = nowCalls;
+    expect(() =>
+      eng3.transact(() => {
+        throw new Error('boom-transact');
+      }),
+    ).toThrow('boom-transact');
+    expect(nowCalls).toBeGreaterThan(beforeTransact);
+
+    const beforeRename = nowCalls;
+    expect(() => eng3.admin.renameType('NoSuchType', 'Other')).toThrow(
+      expect.objectContaining({ code: 'UNKNOWN_TYPE' }),
+    );
+    expect(nowCalls).toBeGreaterThan(beforeRename);
+
+    const beforeRebuild = nowCalls;
+    expect(() => eng3.admin.rebuild('noSuchIndex')).toThrow(
+      expect.objectContaining({ code: 'UNKNOWN_INDEX' }),
+    );
+    expect(nowCalls).toBeGreaterThan(beforeRebuild);
+
+    const beforeEmbed = nowCalls;
+    expect(() => eng3.setEmbeddings('noSuchVec', 'missing', [[1, 0]])).toThrow();
+    expect(nowCalls).toBeGreaterThan(beforeEmbed);
+
+    // 4. On `transact()` abort, observer `finish({ outcome: 'aborted' })` runs AFTER `txnDepth--`
+    //    so `watches.flushSync()` is permitted inside the abort finish callback.
+    let abortFinishCalled = false;
+    const handle4 = temps.open({ schema: watchSchema });
+    const eng4 = createEarsEngine({
+      database: handle4.database,
+      clock: createFakeClock(80_000),
+      observer: {
+        start(op) {
+          return (res) => {
+            if (op.kind === 'unit' && res.outcome === 'aborted') {
+              abortFinishCalled = true;
+              expect(() => eng4.watches.flushSync()).not.toThrow();
+            }
+          };
+        },
+      },
+    });
+    expect(() =>
+      eng4.transact(() => {
+        throw new Error('abort-for-observer');
+      }),
+    ).toThrow('abort-for-observer');
+    expect(abortFinishCalled).toBe(true);
+  });
 });

@@ -1416,9 +1416,17 @@ impl Database {
         let eng = self.enter_op()?;
         self.forbid_inside_txn("backup")?;
         let target = target.as_ref();
+        let (clean_target, existing) = crate::fs_publish::normalize_non_symlink_target_dir(target)?;
+        let target = clean_target.as_path();
         crate::fs_publish::ensure_not_self_or_descendant(&self.dir, target)?;
 
-        if target.exists() {
+        if let Some(meta) = existing {
+            if !meta.is_dir() {
+                return Err(ElmdbError::new(
+                    ErrorCode::AlreadyExists,
+                    format!("backup target '{}' is not a directory", target.display()),
+                ));
+            }
             let mut entries = fs::read_dir(target)
                 .map_err(|e| ElmdbError::new(ErrorCode::Io, format!("cannot read backup target: {e}")))?;
             let is_empty = entries.next().is_none();
@@ -2186,6 +2194,97 @@ mod tests {
         // `parent_dir` returns `.` for bare filenames and real parent for nested paths.
         assert_eq!(crate::fs_publish::parent_dir(Path::new("dump.json")), Path::new("."));
         assert_eq!(crate::fs_publish::parent_dir(&target), dir.path());
+
+        // Phase 0B: `ensure_paths_disjoint` & `publish_file_create_new_fallback` + `dump`/`load`/`backup` guards.
+        let dump_file = dir.path().join("export.json");
+        fs::write(&dump_file, b"{}").unwrap();
+        assert_eq!(
+            crate::fs_publish::ensure_paths_disjoint(&dump_file, &dump_file).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        assert_eq!(
+            crate::fs_publish::ensure_paths_disjoint(&dump_file, dir.path()).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        crate::fs_publish::ensure_paths_disjoint(&dump_file, &dir.path().join("other_dir")).unwrap();
+
+        let fb_tmp = dir.path().join("fb.tmp");
+        let fb_dst = dir.path().join("fb.dst");
+        fs::write(&fb_tmp, b"fallback-payload").unwrap();
+        crate::fs_publish::publish_file_create_new_fallback(&fb_tmp, &fb_dst).unwrap();
+        assert_eq!(fs::read(&fb_dst).unwrap(), b"fallback-payload");
+        assert!(!fb_tmp.exists());
+        let fb_tmp2 = dir.path().join("fb2.tmp");
+        fs::write(&fb_tmp2, b"second").unwrap();
+        assert_eq!(
+            crate::fs_publish::publish_file_create_new_fallback(&fb_tmp2, &fb_dst).unwrap_err().code,
+            ErrorCode::AlreadyExists
+        );
+        assert_eq!(fs::read(&fb_dst).unwrap(), b"fallback-payload");
+        // Missing source cleans up the newly created empty `target`!
+        let fb_clean = dir.path().join("fb_clean.dst");
+        assert_eq!(
+            crate::fs_publish::publish_file_create_new_fallback(&dir.path().join("missing.tmp"), &fb_clean)
+                .unwrap_err()
+                .code,
+            ErrorCode::Io
+        );
+        assert!(!fb_clean.exists(), "fallback must remove partial destination on copy failure");
+
+        // `atomic_publish_file_no_overwrite_with`: CrossesDevices falls back & succeeds (kills `false`),
+        // while non-fallback I/O errors fail without falling back (kills `true`).
+        let exdev_tmp = dir.path().join("exdev.tmp");
+        let exdev_dst = dir.path().join("exdev.dst");
+        fs::write(&exdev_tmp, b"exdev-ok").unwrap();
+        crate::fs_publish::atomic_publish_file_no_overwrite_with(&exdev_tmp, &exdev_dst, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
+        })
+        .unwrap();
+        assert_eq!(fs::read(&exdev_dst).unwrap(), b"exdev-ok");
+
+        let no_fb_tmp = dir.path().join("nofb.tmp");
+        let no_fb_dst = dir.path().join("nofb.dst");
+        fs::write(&no_fb_tmp, b"must-not-publish").unwrap();
+        assert_eq!(
+            crate::fs_publish::atomic_publish_file_no_overwrite_with(&no_fb_tmp, &no_fb_dst, |_, _| {
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            })
+            .unwrap_err()
+            .code,
+            ErrorCode::Io
+        );
+        assert!(!no_fb_dst.exists(), "non-EXDEV hard_link error must not silently fall back");
+
+        // Replacing an existing backup MUST clean up `.elmdb-backup-old-*` (kills `OldAsideCleanup::drop -> ()`).
+        let live_dir = dir.path().join("live_db_0b");
+        let live_db = Database::open(&live_dir, OpenOptions::default()).unwrap();
+        let bak_dir = dir.path().join("bak_replace_0b");
+        live_db.backup_into(&bak_dir, BackupInto::New).unwrap();
+        live_db.backup_into(&bak_dir, BackupInto::Backups).unwrap();
+        let stray_old = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with(".elmdb-backup-old-"));
+        assert!(!stray_old, "atomic_publish_dir_replace must clean up .elmdb-backup-old-*");
+
+        // `dump` refuses self/descendant target; `load` refuses overlapping or non-dir target; `backup_into` refuses regular file without leaking staging dir.
+        assert_eq!(
+            crate::dump::dump(&live_db, live_dir.join("inside.json")).unwrap_err().code,
+            ErrorCode::InvalidArgument
+        );
+        let good_dump = dir.path().join("good_0b.json");
+        crate::dump::dump(&live_db, &good_dump).unwrap();
+        assert_eq!(crate::dump::load(&good_dump, dir.path()).unwrap_err().code, ErrorCode::InvalidArgument);
+        let file_as_backup = dir.path().join("regular_file_target");
+        fs::write(&file_as_backup, b"not a dir").unwrap();
+        assert_eq!(crate::dump::load(&good_dump, &file_as_backup).unwrap_err().code, ErrorCode::AlreadyExists);
+        assert_eq!(live_db.backup_into(&file_as_backup, BackupInto::New).unwrap_err().code, ErrorCode::AlreadyExists);
+        let stray_tmp = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with(".elmdb-backup-tmp-"));
+        assert!(!stray_tmp, "backup_into must validate target before creating .elmdb-backup-tmp-*");
+        live_db.close().unwrap();
     }
 
     #[test]

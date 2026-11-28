@@ -104,10 +104,33 @@ pub(crate) fn ensure_not_self_or_descendant(source_dir: &Path, target: &Path) ->
     Ok(())
 }
 
+/// Rejects `path_b` when it equals, contains, or lies inside `path_a` (even when `path_b` does not exist yet).
+pub(crate) fn ensure_paths_disjoint(path_a: &Path, path_b: &Path) -> Result<()> {
+    let a_resolved = resolve_path_preserving_missing(path_a)?;
+    let b_resolved = resolve_path_preserving_missing(path_b)?;
+    if b_resolved.starts_with(&a_resolved) || a_resolved.starts_with(&b_resolved) {
+        return Err(ElmdbError::new(
+            ErrorCode::InvalidArgument,
+            format!("paths '{}' and '{}' must not overlap", path_a.display(), path_b.display()),
+        ));
+    }
+    Ok(())
+}
+
 /// Atomically publishes a pre-fsynced sibling temporary file `tmp_path` to `target` without
 /// overwriting an existing file, and fsyncs the parent directory.
+///
+/// Uses `hard_link` on supporting filesystems and falls back to atomic `create_new` copy + fsync
+/// when the filesystem rejects hard links (`Unsupported`, `CrossesDevices`, `PermissionDenied`).
 pub(crate) fn atomic_publish_file_no_overwrite(tmp_path: &Path, target: &Path) -> Result<()> {
-    match fs::hard_link(tmp_path, target) {
+    atomic_publish_file_no_overwrite_with(tmp_path, target, |src, dst| fs::hard_link(src, dst))
+}
+
+pub(crate) fn atomic_publish_file_no_overwrite_with<F>(tmp_path: &Path, target: &Path, link_fn: F) -> Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    match link_fn(tmp_path, target) {
         Ok(()) => {
             let _ = fs::remove_file(tmp_path);
             OsVfs::new().sync_dir(parent_dir(target))?;
@@ -116,15 +139,43 @@ pub(crate) fn atomic_publish_file_no_overwrite(tmp_path: &Path, target: &Path) -
         Err(e) if e.kind() == ErrorKind::AlreadyExists => {
             Err(ElmdbError::new(ErrorCode::AlreadyExists, format!("target '{}' already exists", target.display())))
         }
+        Err(e)
+            if matches!(e.kind(), ErrorKind::Unsupported | ErrorKind::CrossesDevices | ErrorKind::PermissionDenied) =>
+        {
+            publish_file_create_new_fallback(tmp_path, target)
+        }
         Err(e) => Err(ElmdbError::new(ErrorCode::Io, format!("cannot publish file '{}': {e}", target.display()))),
     }
+}
+
+pub(crate) fn publish_file_create_new_fallback(tmp_path: &Path, target: &Path) -> Result<()> {
+    let mut dst = fs::OpenOptions::new().write(true).create_new(true).open(target).map_err(|e| {
+        if e.kind() == ErrorKind::AlreadyExists {
+            ElmdbError::new(ErrorCode::AlreadyExists, format!("target '{}' already exists", target.display()))
+        } else {
+            ElmdbError::new(ErrorCode::Io, format!("cannot create target file '{}': {e}", target.display()))
+        }
+    })?;
+    let copy_res = (|| -> std::io::Result<()> {
+        let mut src = fs::File::open(tmp_path)?;
+        std::io::copy(&mut src, &mut dst)?;
+        dst.sync_all()
+    })();
+    drop(dst);
+    if let Err(e) = copy_res {
+        let _ = fs::remove_file(target);
+        return Err(ElmdbError::new(ErrorCode::Io, format!("cannot publish file '{}': {e}", target.display())));
+    }
+    let _ = fs::remove_file(tmp_path);
+    OsVfs::new().sync_dir(parent_dir(target))?;
+    Ok(())
 }
 
 /// Strips trailing path separators and rejects targets ending in `.`, `..`, root, or a symlink.
 ///
 /// Checking `symlink_metadata` on the trailing-separator-stripped path ensures `lstat(2)` / Win32
 /// inspects the symlink itself instead of following `link/` to its target directory.
-fn normalize_non_symlink_target_dir(target_dir: &Path) -> Result<(PathBuf, Option<fs::Metadata>)> {
+pub(crate) fn normalize_non_symlink_target_dir(target_dir: &Path) -> Result<(PathBuf, Option<fs::Metadata>)> {
     // Reject trailing `/.` / `\.` explicitly because `Path::components()` silently drops non-leading `CurDir`
     // (empty paths, bare `.`, `..`, and root are caught by `components().next_back()` below).
     let raw = target_dir.to_string_lossy();
@@ -281,7 +332,13 @@ pub(crate) fn atomic_publish_dir_replace(
         let _ = fs::rename(&old_aside, target_dir);
         return Err(ElmdbError::new(ErrorCode::Io, format!("cannot move backup into place: {e}")));
     }
+    struct OldAsideCleanup(PathBuf);
+    impl Drop for OldAsideCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let _old_cleanup = OldAsideCleanup(old_aside);
     vfs.sync_dir(parent)?;
-    let _ = fs::remove_dir_all(&old_aside);
     Ok(())
 }

@@ -1798,11 +1798,103 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
     });
     assert_eq!(qe.execute(&engine, &bad_re, ExecBudgets::default()).unwrap_err().code, ErrorCode::InvalidArgument);
 
-    // P2-3: ExactSum overflow leaves previous value intact (no NaN poisoning)
+    // P2-3 + Phase 0B: ExactSum is order-independent even across intermediate f64 overflow!
+    // `[f64::MAX, f64::MAX, -f64::MAX]` and `[f64::MAX, -f64::MAX, f64::MAX]` both equal `f64::MAX`,
+    // while `[f64::MAX, f64::MAX]` overflows cleanly at `try_total()` without poisoning non-finite `add`.
     let mut es = ExactSum::default();
+    assert!(!es.add(f64::NAN));
+    assert!(!es.add(f64::INFINITY));
     assert!(es.add(f64::MAX));
-    assert!(!es.add(f64::MAX));
+    assert!(es.add(f64::MAX));
+    assert_eq!(es.try_total(), None, "unbalanced 2 * f64::MAX must report overflow");
+    assert!(es.add(-f64::MAX));
+    assert_eq!(es.try_total(), Some(f64::MAX), "intermediate overflow must cancel order-independently");
     assert_eq!(es.total(), f64::MAX);
+
+    let mut es_tiny = ExactSum::default();
+    assert!(es_tiny.add(f64::MAX));
+    assert!(es_tiny.add(1e-300));
+    assert!(es_tiny.add(-f64::MAX));
+    assert_eq!(es_tiny.try_total(), Some(1e-300), "exact cancellation preserves sub-ULP low-band value");
+
+    // Low-band cancellation + quantitative tiny fold + signed overflow + exact tie-break counterexamples!
+    let mut es_neg_ov = ExactSum::default();
+    assert!(es_neg_ov.add(-f64::MAX));
+    assert!(es_neg_ov.add(-f64::MAX));
+    assert_eq!(es_neg_ov.try_total(), None);
+    assert_eq!(es_neg_ov.total(), f64::NEG_INFINITY);
+
+    // High band cancels with low band to exact zero -> preserves tiny sub-2^-450 value bit-exactly!
+    let two_512 = f64::from_bits((1023u64 + 512) << 52);
+    let two_511 = f64::from_bits((1023u64 + 511) << 52);
+    let mut es_cancel_tiny = ExactSum::default();
+    assert!(es_cancel_tiny.add(two_512));
+    assert!(es_cancel_tiny.add(-two_511));
+    assert!(es_cancel_tiny.add(-two_511));
+    assert!(es_cancel_tiny.add(1e-300));
+    assert_eq!(es_cancel_tiny.try_total(), Some(1e-300));
+
+    // High + low cancels to a small non-zero residual (`2^-449`) while `low` also keeps a separate
+    // sub-`2^-450` part (`2^-502 + 2^-503`) in `tiny` -> MUST enter the unscaled fold branch so the
+    // `tiny` part rounds `2^-449` up by 1 ULP (`2^-501`), killing inner `* -> +` on line 140!
+    let two_neg_449 = f64::from_bits((1023u64 - 449) << 52);
+    let two_neg_501 = f64::from_bits((1023u64 - 501) << 52);
+    let two_neg_502 = f64::from_bits((1023u64 - 502) << 52);
+    let two_neg_503 = f64::from_bits((1023u64 - 503) << 52);
+    let mut es_fold = ExactSum::default();
+    assert!(es_fold.add(two_512));
+    assert!(es_fold.add(-two_511));
+    assert!(es_fold.add(-two_511));
+    assert!(es_fold.add(two_neg_449));
+    assert!(es_fold.add(two_neg_502));
+    assert!(es_fold.add(two_neg_503));
+    assert_eq!(es_fold.try_total(), Some(two_neg_449 + two_neg_501));
+
+    // `[f64::MAX, 2^970 (half-ULP), 1e-200]`: genuine positive overflow MUST stay in the scaled
+    // branch and return `+inf` (never `NaN` from unscaled `f64::MAX + 2^970` inside `tiny`),
+    // killing outer `* -> +` and `* -> /` on line 140!
+    let half_ulp_max = f64::from_bits((1023u64 + 970) << 52);
+    let mut es_pos_ov_tiny = ExactSum::default();
+    assert!(es_pos_ov_tiny.add(f64::MAX));
+    assert!(es_pos_ov_tiny.add(half_ulp_max));
+    assert!(es_pos_ov_tiny.add(1e-200));
+    assert_eq!(es_pos_ov_tiny.try_total(), None);
+    assert_eq!(es_pos_ov_tiny.total(), f64::INFINITY);
+
+    // Exact midpoint tie-breaks above 2^1000:
+    // 1. `[2^1000, 2^947 (half-ULP), -1.0, 1e-200]`: true sum < midpoint -> rounds DOWN to `2^1000`!
+    let two_1000 = f64::from_bits((1023u64 + 1000) << 52);
+    let half_ulp_1000 = f64::from_bits((1023u64 + 947) << 52);
+    let mut es_tie_down = ExactSum::default();
+    assert!(es_tie_down.add(two_1000));
+    assert!(es_tie_down.add(half_ulp_1000));
+    assert!(es_tie_down.add(-1.0));
+    assert!(es_tie_down.add(1e-200));
+    assert_eq!(es_tie_down.try_total(), Some(two_1000));
+
+    // 2. `[f64::MAX, 2^970 (half-ULP), -1.0, 1e-200]`: true sum < midpoint -> MUST NOT overflow (`Some(f64::MAX)`)!
+    let mut es_no_spurious_ov = ExactSum::default();
+    assert!(es_no_spurious_ov.add(f64::MAX));
+    assert!(es_no_spurious_ov.add(half_ulp_max));
+    assert!(es_no_spurious_ov.add(-1.0));
+    assert!(es_no_spurious_ov.add(1e-200));
+    assert_eq!(es_no_spurious_ov.try_total(), Some(f64::MAX));
+
+    // 2b. `[f64::MAX, 2^970 (exact half-ULP), -1e-200]`: true sum is 1e-200 below exact midpoint ->
+    //     MUST break the tie DOWNWARD to `Some(f64::MAX)` via `tiny_total != 0.0` (kills `!= -> ==`)!
+    let mut es_tiny_tie_down = ExactSum::default();
+    assert!(es_tiny_tie_down.add(f64::MAX));
+    assert!(es_tiny_tie_down.add(half_ulp_max));
+    assert!(es_tiny_tie_down.add(-1e-200));
+    assert_eq!(es_tiny_tie_down.try_total(), Some(f64::MAX));
+
+    // 3. `[2^1001, 2^948 (half-ULP), 1e-300]`: true sum > midpoint -> breaks tie UPWARD!
+    let mut es_high_plus_tiny = ExactSum::default();
+    let two_1001 = f64::from_bits((1023u64 + 1001) << 52);
+    assert!(es_high_plus_tiny.add(two_1001));
+    assert!(es_high_plus_tiny.add(f64::from_bits((1023u64 + 1001 - 53) << 52)));
+    assert!(es_high_plus_tiny.add(1e-300));
+    assert!(es_high_plus_tiny.try_total().unwrap() > two_1001);
 }
 
 #[test]
@@ -2397,4 +2489,75 @@ fn batch_d_order_index_checks_collator_stamp_when_limit_within_missing_keys() {
     });
     let err = qe.execute(&engine, &plan, ExecBudgets::default()).unwrap_err();
     assert_eq!(err.code, ErrorCode::IndexNotReady);
+}
+
+#[test]
+fn phase0b_sum_order_independent_overflow_and_long_phrase_word() {
+    let (engine, _reg, ids) = open_sim(BuildPolicy::EagerInSchemaChange);
+    let qe = QueryEngine::default();
+
+    // 1. `TerminalSpec::Sum` with `[f64::MAX, f64::MAX, -f64::MAX]` succeeds with `f64::MAX` regardless of order!
+    engine
+        .execute_batch(&[
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n1".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("hello world".into())),
+                    ("score".into(), CanonicalValue::Float(f64::MAX)),
+                ],
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n2".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("hello".into())),
+                    ("score".into(), CanonicalValue::Float(f64::MAX)),
+                ],
+            },
+            WireOp::Create {
+                type_name: "Note".into(),
+                external_id: Some("n3".into()),
+                fields: vec![
+                    ("title".into(), CanonicalValue::String("cancel".into())),
+                    ("score".into(), CanonicalValue::Float(-f64::MAX)),
+                ],
+            },
+        ])
+        .unwrap();
+
+    let sum_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+        terminal: TerminalSpec::Sum(ids.score),
+    });
+    match qe.execute(&engine, &sum_plan, ExecBudgets::default()).unwrap().result {
+        QueryResult::Sum(v) => assert_eq!(v, f64::MAX),
+        other => panic!("expected Sum(f64::MAX), got {other:?}"),
+    }
+
+    // Trashing `n3` leaves `[f64::MAX, f64::MAX]` -> genuine overflow -> `ResourceLimit`!
+    engine.execute_batch(&[WireOp::Trash { target: EntityTarget::ExternalId("n3".into()) }]).unwrap();
+    let ov_err = qe.execute(&engine, &sum_plan, ExecBudgets::default()).unwrap_err();
+    assert_eq!(ov_err.code, ErrorCode::ResourceLimit);
+
+    // 2. Phrase query ending on a word > 128 bytes MUST NOT falsely match `"hello"`!
+    let long_word = "z".repeat(140);
+    let phrase_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Score {
+            input: Box::new(LogicalNode::Source(SourceSpec::Type { type_id: ids.note_type, include_trashed: false })),
+            spec: ScoreSpec::Bm25f {
+                index_id: ids.idx_text,
+                query: "hello".into(),
+                require_all: false,
+                prefix: false,
+                phrase: Some(vec![format!("hello {long_word}")]),
+                top_k: Some(10),
+            },
+        }),
+        terminal: TerminalSpec::Ids,
+    });
+    match qe.execute(&engine, &phrase_plan, ExecBudgets::default()).unwrap().result {
+        QueryResult::Ids(ids_out) => assert!(ids_out.is_empty(), "phrase ending on >128B word must not match 'hello'"),
+        other => panic!("expected empty Ids, got {other:?}"),
+    }
 }

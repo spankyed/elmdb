@@ -216,6 +216,7 @@ impl Drop for DirCleanupGuard {
 /// Atomically dumps `db`'s schema and primary state (entities, relations, embeddings) to a new file `target`.
 pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
     let target = target.as_ref();
+    crate::fs_publish::ensure_not_self_or_descendant(db.dir(), target)?;
     if target.symlink_metadata().is_ok() {
         return Err(ElmdbError::new(
             ErrorCode::AlreadyExists,
@@ -299,8 +300,18 @@ pub fn dump(db: &Database, target: impl AsRef<Path>) -> Result<DumpReport> {
 /// Atomically loads a v2 dump file into a brand-new database at `target_dir` (staged beside `target_dir`
 /// so failures never leave a half-populated DB), rebuilding every derived index and verifying cleanliness.
 pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result<DumpReport> {
+    let dump_file = dump_file.as_ref();
     let target_dir = target_dir.as_ref();
-    if target_dir.exists() {
+    let (clean_target, existing) = crate::fs_publish::normalize_non_symlink_target_dir(target_dir)?;
+    let target_dir = clean_target.as_path();
+    crate::fs_publish::ensure_paths_disjoint(dump_file, target_dir)?;
+    if let Some(meta) = existing {
+        if !meta.is_dir() {
+            return Err(ElmdbError::new(
+                ErrorCode::AlreadyExists,
+                format!("load target '{}' is not a directory", target_dir.display()),
+            ));
+        }
         let mut it = fs::read_dir(target_dir).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
         if it.next().is_some() {
             return Err(ElmdbError::new(
@@ -310,7 +321,7 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
         }
     }
 
-    let raw = fs::read(dump_file.as_ref()).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
+    let raw = fs::read(dump_file).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
     let payload: DumpPayload = serde_json::from_slice(&raw)
         .map_err(|e| ElmdbError::new(ErrorCode::InvalidArgument, format!("invalid dump file: {e}")))?;
     if payload.format_version != 2 {

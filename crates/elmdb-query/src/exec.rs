@@ -917,8 +917,11 @@ fn eval_terminal<R: KvRead>(
                     }
                 }
             }
+            let total = acc
+                .try_total()
+                .ok_or_else(|| ElmdbError::new(ErrorCode::ResourceLimit, "sum overflowed finite f64"))?;
             ctx.explain.rows_returned = 1;
-            Ok(QueryResult::Sum(acc.total()))
+            Ok(QueryResult::Sum(total))
         }
         TerminalSpec::MinMax(field) => {
             let mut stream = eval_stream(ctx, input, None)?;
