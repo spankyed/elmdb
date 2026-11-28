@@ -10,6 +10,61 @@ import { EarsError, toEarsError } from './errors.ts';
 import type { EarsOperationObserver } from './observer.ts';
 import type { WatchHandle, WatchOptions, WatchPump } from './watch.ts';
 
+const TYPED_ARRAY_PROTO = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const TYPED_ARRAY_TAG_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, Symbol.toStringTag)?.get;
+const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'buffer')?.get;
+const TYPED_ARRAY_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'byteOffset')?.get;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'byteLength')?.get;
+const DATE_GET_TIME = Date.prototype.getTime;
+
+function asRealDateMs(value: unknown): number | null {
+  if (value === null || typeof value !== 'object') return null;
+  try {
+    return DATE_GET_TIME.call(value);
+  } catch {
+    return null;
+  }
+}
+
+function asRealUint8Array(value: unknown): Uint8Array | null {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || !TYPED_ARRAY_TAG_GETTER
+    || !TYPED_ARRAY_BUFFER_GETTER
+    || !TYPED_ARRAY_BYTE_OFFSET_GETTER
+    || !TYPED_ARRAY_BYTE_LENGTH_GETTER
+  ) {
+    return null;
+  }
+  try {
+    if (TYPED_ARRAY_TAG_GETTER.call(value) !== 'Uint8Array') return null;
+    const buffer = TYPED_ARRAY_BUFFER_GETTER.call(value) as ArrayBufferLike;
+    const byteOffset = TYPED_ARRAY_BYTE_OFFSET_GETTER.call(value) as number;
+    const byteLength = TYPED_ARRAY_BYTE_LENGTH_GETTER.call(value) as number;
+    return new Uint8Array(buffer, byteOffset, byteLength);
+  } catch {
+    return null;
+  }
+}
+
+function hasLoneSurrogate(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        i++;
+      } else {
+        return true;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /** Canonical entity row returned by `get` and row-returning queries. */
 export type EntityRow<
   TName extends string = string,
@@ -200,8 +255,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
     typeof value !== 'object'
     || value === null
     || Array.isArray(value)
-    || value instanceof Uint8Array
-    || value instanceof Date
+    || asRealUint8Array(value) !== null
+    || asRealDateMs(value) !== null
   ) {
     return false;
   }
@@ -234,22 +289,18 @@ function normalizeQueryValue(
   if (typeof value === 'symbol' || typeof value === 'function') {
     throw new EarsError('INVALID_ARGUMENT', `Unsupported query value type '${typeof value}'`);
   }
-  if (value instanceof Uint8Array && ArrayBuffer.isView(value)) {
+  const realBytes = asRealUint8Array(value);
+  if (realBytes !== null) {
     // Rust protocol `coerce_json_for_field` decodes `Bytes` fields from JSON `number[]` (0..=255).
-    return Array.from(value);
+    return Array.from(realBytes);
   }
-  if (value instanceof Date) {
-    let ms: number;
-    try {
-      ms = Date.prototype.getTime.call(value);
-    } catch {
-      throw new EarsError('INVALID_ARGUMENT', 'Invalid Date passed to query filter or cursor');
-    }
-    if (!Number.isFinite(ms)) {
+  const dateMs = asRealDateMs(value);
+  if (dateMs !== null) {
+    if (!Number.isFinite(dateMs)) {
       throw new EarsError('INVALID_ARGUMENT', 'Invalid Date passed to query filter or cursor');
     }
     // Rust protocol `coerce_json_for_field` accepts epoch milliseconds for `Timestamp` fields.
-    return ms;
+    return dateMs;
   }
   if (Array.isArray(value)) {
     if (depth >= MAX_QUERY_VALUE_DEPTH) {
@@ -288,6 +339,9 @@ function normalizeQueryValue(
       for (const key of Object.keys(value)) {
         if (key === '__proto__') {
           throw new EarsError('INVALID_ARGUMENT', "Reserved key '__proto__' is not allowed in query values");
+        }
+        if (hasLoneSurrogate(key)) {
+          throw new EarsError('INVALID_ARGUMENT', 'Query object key contains an unpaired UTF-16 surrogate');
         }
         const v = value[key];
         if (v !== undefined) out[key] = normalizeQueryValue(v, seen, depth + 1);

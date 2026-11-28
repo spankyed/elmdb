@@ -128,19 +128,48 @@ export interface EarsEngine {
   beforeCommit(typeNames: readonly string[] | null, callback: BeforeCommitHook): () => void;
 }
 
+const TYPED_ARRAY_PROTO = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const TYPED_ARRAY_TAG_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, Symbol.toStringTag)?.get;
+const TYPED_ARRAY_BUFFER_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'buffer')?.get;
+const TYPED_ARRAY_BYTE_OFFSET_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'byteOffset')?.get;
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, 'byteLength')?.get;
+
+function asRealUint8Array(value: unknown): Uint8Array | null {
+  if (
+    value === null
+    || typeof value !== 'object'
+    || !TYPED_ARRAY_TAG_GETTER
+    || !TYPED_ARRAY_BUFFER_GETTER
+    || !TYPED_ARRAY_BYTE_OFFSET_GETTER
+    || !TYPED_ARRAY_BYTE_LENGTH_GETTER
+  ) {
+    return null;
+  }
+  try {
+    if (TYPED_ARRAY_TAG_GETTER.call(value) !== 'Uint8Array') return null;
+    const buffer = TYPED_ARRAY_BUFFER_GETTER.call(value) as ArrayBufferLike;
+    const byteOffset = TYPED_ARRAY_BYTE_OFFSET_GETTER.call(value) as number;
+    const byteLength = TYPED_ARRAY_BYTE_LENGTH_GETTER.call(value) as number;
+    return new Uint8Array(buffer, byteOffset, byteLength);
+  } catch {
+    return null;
+  }
+}
+
 /** Reads the `u32 LE` op count at byte offset `5..9` of an `EWB2` binary wire batch frame. */
 function wireBatchOpCount(payload: Uint8Array): number {
+  const real = asRealUint8Array(payload);
   if (
-    !(payload instanceof Uint8Array)
-    || payload.byteLength < 9
-    || payload[0] !== 0x45
-    || payload[1] !== 0x57
-    || payload[2] !== 0x42
-    || payload[3] !== 0x32
+    real === null
+    || real.byteLength < 9
+    || real[0] !== 0x45
+    || real[1] !== 0x57
+    || real[2] !== 0x42
+    || real[3] !== 0x32
   ) {
     return 0;
   }
-  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const view = new DataView(real.buffer, real.byteOffset, real.byteLength);
   return view.getUint32(5, true);
 }
 
@@ -153,11 +182,12 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
   let hookDepth = 0;
   let outerTxnMutated = false;
   const isInWriteTxn = (): boolean => txnDepth > 0 || hookDepth > 0;
-  const pump = new WatchPump(db, clock, options.onWatchError, observer, options.watchTurnSliceMs);
+  const pump = new WatchPump(db, clock, options.onWatchError, observer, options.watchTurnSliceMs, isInWriteTxn);
   const query = createQueryRoot(db, pump, observer, isInWriteTxn);
 
   const runBatchPayload = (payload: Uint8Array, ops = 1): BatchResult => {
-    const requestBytes = payload instanceof Uint8Array ? payload.byteLength : 0;
+    const realPayload = asRealUint8Array(payload);
+    const requestBytes = realPayload !== null ? realPayload.byteLength : 0;
     const finish = observer?.start({ kind: 'write', ops, watch: false, inUnit: isInWriteTxn() });
     let result: BatchResult;
     try {
@@ -281,8 +311,9 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         more = db.driveBackgroundWork(maxEntities);
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
       return more;
     },
     flush(): void {
@@ -290,16 +321,18 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         db.flush();
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
     },
     async flushAsync(): Promise<void> {
       try {
         await db.flushAsync();
       } catch (error) {
         throw toEarsError(error);
+      } finally {
+        pump.notifyMutation();
       }
-      pump.notifyMutation();
     },
     check(indexName?: string): CheckReport {
       try {
@@ -574,10 +607,16 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
             hookDepth++;
             try {
               const ret: unknown = callback(delta);
+              if (isThenable(ret)) {
+                throw new EarsError(
+                  'ASYNC_CALLBACK_FORBIDDEN',
+                  'beforeCommit hooks must be synchronous (Promises and async callbacks are forbidden)',
+                );
+              }
               if (typeof ret === 'function') {
                 return encodeBatch(ret as (b: BatchWriter) => void);
               }
-              // Pass thenables and invalid return types straight to the native binding so it raises
+              // Pass invalid return types straight to the native binding so it raises
               // exact `ASYNC_CALLBACK_FORBIDDEN` / `INVALID_ARGUMENT` error codes cleanly.
               return ret;
             } finally {

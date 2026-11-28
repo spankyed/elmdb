@@ -69,9 +69,9 @@ impl<T: Send + 'static, V: ToNapiValue + TypeName> Task for Job<T, V> {
     }
 }
 
-/// A job's answer of JSON, made JavaScript's value by serde
+/// A job's answer of JSON, made JavaScript's value via the unified JSON-to-JS converter
 pub fn value(env: &Env, answer: serde_json::Value) -> napi::Result<Unknown<'static>> {
-    env.to_js_value(&answer)
+    crate::json_value_to_js(env, answer)
 }
 
 /// A job that answers nothing

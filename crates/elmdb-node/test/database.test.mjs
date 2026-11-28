@@ -345,3 +345,130 @@ test('transact nested savepoints, RYOW, counters, runBeforeCommit: false, and Pr
   assert.equal(loaded.getCounter('IMPORT'), 99);
   loaded.close();
 });
+
+test('PR #268 Batch 3: unified JSON-to-JS numbers (> u32::MAX, no BigInt) and beforeCommit ASYNC_CALLBACK_FORBIDDEN', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'elmdb-v2-b3-'));
+  const dir = join(tmp, 'main');
+  const numSchema = {
+    types: {
+      Metric: {
+        fields: {
+          bigPos: { type: 'integer' },
+          bigNeg: { type: 'integer' },
+          maxSafe: { type: 'integer' },
+          ts: { type: 'timestamp' },
+        },
+        indexes: {},
+      },
+    },
+    relations: {
+      link: { endpoints: [{ source: 'Metric', target: 'Metric' }], weighted: true },
+    },
+  };
+  const db = Database.open(dir, { schema: numSchema, durability: 'strict', buildPolicy: 'eager' });
+  t.after(() => {
+    try { db.close(); } catch { /* already closed */ }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const nowTs = Date.now();
+  const bigPos = 5_000_000_000;
+  const bigNeg = -5_000_000_000;
+  const maxSafe = Number.MAX_SAFE_INTEGER;
+  let hookDelta = null;
+  const hid = db.registerBeforeCommit(['Metric'], (delta) => {
+    hookDelta = delta;
+    return null;
+  });
+
+  const batchRes = db.executeWireBatch(buildWireBatch((b) => {
+    const a = b.create('Metric', { bigPos, bigNeg, maxSafe, ts: new Date(nowTs) }, 'm-1');
+    const c = b.create('Metric', { bigPos, bigNeg, maxSafe, ts: new Date(nowTs) }, 'm-2');
+    b.link(a, 'link', c, { weight: 1.5, info: { big: bigPos, ts: new Date(nowTs) } });
+  }));
+  db.unregisterBeforeCommit(hid);
+
+  // Every single N-API surface emits JS `number` (NEVER `BigInt`) and passes `JSON.stringify` cleanly!
+  const row = db.get('m-1');
+  assert.equal(typeof row.fields.bigPos, 'number');
+  assert.equal(typeof row.fields.bigNeg, 'number');
+  assert.equal(typeof row.fields.maxSafe, 'number');
+  assert.equal(typeof row.fields.ts, 'number');
+  assert.equal(row.fields.bigPos, bigPos);
+  assert.equal(row.fields.bigNeg, bigNeg);
+  assert.equal(row.fields.maxSafe, maxSafe);
+  assert.equal(row.fields.ts, nowTs);
+  assert.doesNotThrow(() => JSON.stringify(row));
+
+  const edges = db.getEdges('m-1', 'link', 'out');
+  assert.equal(edges.length, 1);
+  assert.equal(typeof edges[0].info.big, 'number');
+  assert.equal(typeof edges[0].info.ts, 'number');
+  assert.equal(edges[0].info.big, bigPos);
+  assert.doesNotThrow(() => JSON.stringify(edges));
+
+  const qSpec = { source: { kind: 'type', typeName: 'Metric' }, steps: [], terminal: { kind: 'rows' } };
+  const qSync = db.query(qSpec);
+  assert.equal(typeof qSync.rows[0].fields.bigPos, 'number');
+  assert.equal(typeof qSync.rows[0].fields.ts, 'number');
+  assert.doesNotThrow(() => JSON.stringify(qSync));
+
+  const qAsync = await db.queryAsync(qSpec);
+  assert.equal(typeof qAsync.rows[0].fields.bigPos, 'number');
+  assert.equal(typeof qAsync.rows[0].fields.ts, 'number');
+  assert.doesNotThrow(() => JSON.stringify(qAsync));
+
+  const st = db.stats();
+  assert.equal(typeof st.mapSizeBytes, 'number');
+  assert.equal(typeof st.pageSizeBytes, 'number');
+  assert.doesNotThrow(() => JSON.stringify(st));
+
+  const rep = db.openReport();
+  assert.equal(typeof rep.observedTxnid, 'number');
+  assert.doesNotThrow(() => JSON.stringify(rep));
+
+  assert.equal(typeof batchRes.commitSeq, 'number');
+  assert.doesNotThrow(() => JSON.stringify(batchRes));
+
+  assert.equal(typeof hookDelta.commitSeq, 'number');
+  assert.doesNotThrow(() => JSON.stringify(hookDelta));
+
+  const dumpFile = join(tmp, 'metrics.json');
+  const dumpRep = db.dump(dumpFile);
+  assert.equal(typeof dumpRep.entities, 'number');
+  assert.doesNotThrow(() => JSON.stringify(dumpRep));
+
+  const reg = db.registerWatch(qSpec, { minGapMs: 0 }, nowTs);
+  assert.equal(typeof reg.answer.rows[0].fields.bigPos, 'number');
+  assert.doesNotThrow(() => JSON.stringify(reg));
+  db.executeWireBatch(buildWireBatch((b) => { b.patch('m-1', { bigPos: 6_000_000_000 }); }));
+  const rerun = db.rerunWatch(reg.watchId, qSpec, nowTs + 10, 1);
+  assert.equal(typeof rerun.answer.rows[0].fields.bigPos, 'number');
+  assert.doesNotThrow(() => JSON.stringify(rerun));
+  db.unregisterWatch(reg.watchId);
+
+  // Item 3.6: beforeCommit preserves `ASYNC_CALLBACK_FORBIDDEN` when nested sync API throws it or callback is async.
+  const hAsyncNested = db.registerBeforeCommit(['Metric'], () => {
+    db.transact(async () => {});
+    return null;
+  });
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.patch('m-1', { bigPos: 7_000_000_000 }); })),
+    (err) => err.code === 'ASYNC_CALLBACK_FORBIDDEN',
+  );
+  db.unregisterBeforeCommit(hAsyncNested);
+
+  // Hostile `.code` getter on a thrown hook error clears pending exception and still extracts `.message`.
+  const hHostileCode = db.registerBeforeCommit(['Metric'], () => {
+    const errObj = {
+      get code() { throw new Error('hostile code getter'); },
+      message: 'keep-this-hook-message',
+    };
+    throw errObj;
+  });
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.patch('m-1', { bigPos: 8_000_000_000 }); })),
+    (err) => err.code === 'HOOK_ABORTED' && err.message.includes('keep-this-hook-message'),
+  );
+  db.unregisterBeforeCommit(hHostileCode);
+});

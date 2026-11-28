@@ -31,6 +31,42 @@ const call = async (db) => {
     case 'Database.backup': return db.backup(join(dir, 'bak'));
     case 'Database.backupAsync': return await db.backupAsync(join(dir, 'bak-async'));
     case 'Database.close': return db.close();
+    case 'transact.swallowed-panic':
+      return db.transact(() => {
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'must-not-commit' }, 'Note-leaked'); }));
+        try { db.get('Note-kept'); } catch { /* swallow PANICKED */ }
+        return 'swallowed';
+      });
+    case 'beforeCommit.swallowed-panic': {
+      db.registerBeforeCommit(['Note'], () => {
+        try { db.get('Note-kept'); } catch { /* swallow PANICKED */ }
+        return null;
+      });
+      return db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'must-not-commit' }, 'Note-leaked'); }));
+    }
+    case 'transact.swallowed-panic-in-then':
+      return db.transact(() => {
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'must-not-commit' }, 'Note-leaked'); }));
+        return {
+          get then() {
+            try { db.get('Note-kept'); } catch { /* swallow PANICKED */ }
+            return undefined;
+          },
+        };
+      });
+    case 'beforeCommit.swallowed-panic-in-then': {
+      db.registerBeforeCommit(['Note'], () => {
+        const derived = buildWireBatch((b) => { b.create('Note', { title: 'derived-leaked' }, 'Note-derived'); });
+        Object.defineProperty(derived, 'then', {
+          get() {
+            try { db.get('Note-kept'); } catch { /* swallow PANICKED */ }
+            return undefined;
+          },
+        });
+        return derived;
+      });
+      return db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'must-not-commit' }, 'Note-leaked'); }));
+    }
     default: throw new Error(`unknown test export ${name}`);
   }
 };
@@ -56,6 +92,7 @@ if (db && name !== 'Database.close') {
   db.close();
   const reopened = Database.open(dir, { readOnly: true });
   assert.equal(reopened.get('Note-kept').fields.title, 'kept');
+  assert.equal(reopened.get('Note-leaked'), null);
   reopened.close();
 }
 

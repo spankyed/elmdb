@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
+import vm from 'node:vm';
 
 const require = createRequire(import.meta.url);
 /** @type {typeof import('../index.js')} */
@@ -111,9 +112,34 @@ test('buildWireBatch rejects async/thenable callbacks, __proto__, non-plain obje
     x.create('Item', { title: 'b', meta: s });
   }), /BatchSlot/);
 
-  // Non-plain objects (Map, Float32Array) rejected
+  // Non-plain objects (Map, Float32Array) and prototype-spoofed Uint8Array/Date rejected
   assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'm', meta: new Map() }); }), /Unsupported/);
   assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'f', raw: /** @type {any} */ (new Float32Array(2)) }); }), /Unsupported/);
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 's1', raw: Object.create(Uint8Array.prototype) }); }), TypeError);
+  assert.throws(() => buildWireBatch((x) => {
+    const spoofedView = Object.setPrototypeOf(new Int32Array([1, 2]), Uint8Array.prototype);
+    x.create('Item', { title: 's2', raw: spoofedView });
+  }), TypeError);
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 's3', ts: Object.create(Date.prototype) }); }), TypeError);
+
+  // Own spoofed `byteLength` on a real Uint8Array is ignored via intrinsic TypedArray getters
+  const realWithFakeLen = new Uint8Array([0xaa, 0xbb]);
+  Object.defineProperty(realWithFakeLen, 'byteLength', { value: 99999 });
+  const encodedReal = buildWireBatch((x) => { x.create('Item', { title: 'ok', raw: realWithFakeLen }); });
+  assert.ok(encodedReal.byteLength < 100);
+
+  // Cross-realm Date and Uint8Array encode cleanly via intrinsic brand checks
+  const crossRealmDate = vm.runInNewContext('new Date(1700000000000)');
+  const crossRealmBytes = vm.runInNewContext('new Uint8Array([1, 2, 3])');
+  const encodedCross = buildWireBatch((x) => { x.create('Item', { title: 'xrealm', ts: crossRealmDate, raw: crossRealmBytes }); });
+  assert.ok(encodedCross.byteLength > 0);
+
+  // Lone UTF-16 surrogates rejected in field names and nested object keys (while valid emoji surrogate pairs succeed)
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { ['bad\uD800key']: 1 }); }), /surrogate/);
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'ok', meta: { ['\uD800']: 1, ['\uD801']: 2 } }); }), /surrogate/);
+  assert.throws(() => buildWireBatch((x) => { x.create('Item', { title: 'ok', meta: { ['\uDC00']: 1 } }); }), /surrogate/);
+  const validEmoji = buildWireBatch((x) => { x.create('Item', { title: 'ok', meta: { ['😀']: 1 } }); });
+  assert.ok(validEmoji.byteLength > 0);
 
   // Invalid BatchSlot index and invalid returnFlags rejected
   assert.throws(() => new BatchSlot(-1), RangeError);

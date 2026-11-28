@@ -66,10 +66,26 @@ export interface WatchController {
   stopAll(): void;
 }
 
-/** Creates the default system clock backed by `Date.now` and global timers (zero Node-specific APIs). */
+/**
+ * Creates the default monotonic system clock backed by `performance.now()` (when available, falling
+ * back to monotonic `Date.now()`) and global timers, with zero Node-specific type dependencies.
+ */
 export function createSystemClock(): EarsClock & AfterClock {
+  const perf = (globalThis as { readonly performance?: { readonly now?: () => number } }).performance;
+  const hasPerf = typeof perf?.now === 'function';
+  const startWallMs = Math.max(0, Math.trunc(Date.now()));
+  const startPerfMs = hasPerf ? (perf!.now as () => number)() : 0;
+  let lastMs = startWallMs;
+  const now = (): number => {
+    const raw = hasPerf ? startWallMs + ((perf!.now as () => number)() - startPerfMs) : Date.now();
+    const normalized = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.trunc(raw)) : lastMs;
+    if (normalized > lastMs) {
+      lastMs = normalized;
+    }
+    return lastMs;
+  };
   return {
-    now: () => Date.now(),
+    now,
     after: (ms, run) => {
       const handle = globalThis.setTimeout(run, ms);
       return () => {
@@ -167,12 +183,14 @@ export class WatchPump implements WatchController {
   readonly #onWatchError: ((error: EarsError) => void) | undefined;
   readonly #observer: EarsOperationObserver | undefined;
   readonly #turnSliceMs: number;
+  readonly #isInWriteTxn: (() => boolean) | undefined;
   readonly #entries = new Map<number, WatchEntry>();
   readonly #settledListeners = new Set<{ readonly run: () => void }>();
   #cancelTimer: (() => void) | undefined = undefined;
   #pumping = false;
   #rescheduleAfterPump = false;
   #stopped = false;
+  #lastNowMs = 0;
 
   constructor(
     db: EarsDatabase,
@@ -180,6 +198,7 @@ export class WatchPump implements WatchController {
     onWatchError?: (error: EarsError) => void,
     observer?: EarsOperationObserver,
     turnSliceMs = DEFAULT_TURN_SLICE_MS,
+    isInWriteTxn?: () => boolean,
   ) {
     if (!Number.isSafeInteger(turnSliceMs) || turnSliceMs < 1) {
       throw new EarsError(
@@ -192,6 +211,19 @@ export class WatchPump implements WatchController {
     this.#onWatchError = onWatchError;
     this.#observer = observer;
     this.#turnSliceMs = turnSliceMs;
+    this.#isInWriteTxn = isInWriteTxn;
+  }
+
+  #nowMs(): number {
+    const raw = this.#clock.now();
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+      return this.#lastNowMs;
+    }
+    const clamped = Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(raw)));
+    if (clamped > this.#lastNowMs) {
+      this.#lastNowMs = clamped;
+    }
+    return clamped;
   }
 
   get activeCount(): number {
@@ -212,7 +244,7 @@ export class WatchPump implements WatchController {
     if (options?.minGapMs !== undefined) policy.minGapMs = options.minGapMs;
     if (options?.adaptiveMultiplier !== undefined) policy.adaptiveMultiplier = options.adaptiveMultiplier;
 
-    const nowMs = this.#clock.now();
+    const nowMs = this.#nowMs();
     const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
     let reg;
     try {
@@ -222,7 +254,17 @@ export class WatchPump implements WatchController {
       finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
       throw earsErr;
     }
-    finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    try {
+      finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+    } catch (observerErr) {
+      // Never leak an unregistered Rust watch (or wedge settled() to false) if observer.finish throws.
+      try {
+        this.#db.unregisterWatch(reg.watchId);
+      } catch {
+        // Best-effort if DB closed.
+      }
+      throw observerErr;
+    }
 
     const entry: WatchEntry = {
       id: reg.watchId,
@@ -266,10 +308,10 @@ export class WatchPump implements WatchController {
     if (entry.active && !this.#stopped) {
       try {
         if (!this.#db.watchesSettled()) {
-          this.#scheduleNext(this.#clock.now());
+          this.#scheduleNext(this.#nowMs());
         }
-      } catch {
-        // Ignore if database closed inside callback.
+      } catch (err) {
+        this.#handlePumpReadError(err);
       }
     }
 
@@ -293,14 +335,26 @@ export class WatchPump implements WatchController {
       this.#rescheduleAfterPump = true;
       return;
     }
-    this.#scheduleNext(this.#clock.now());
+    try {
+      this.#scheduleNext(this.#nowMs());
+    } catch (err) {
+      // Isolate clock/timer errors so callers invoking notifyMutation() in `finally` never mask DB errors.
+      const earsErr = toEarsError(err);
+      if (this.#onWatchError) {
+        try {
+          this.#onWatchError(earsErr);
+        } catch {
+          // Isolate throwing error handler.
+        }
+      }
+    }
   }
 
   catchUpCrossProcess(): number[] {
     if (this.#stopped) return [];
     let dirtied: number[];
     try {
-      dirtied = this.#db.catchUpCrossProcess(this.#clock.now());
+      dirtied = this.#db.catchUpCrossProcess(this.#nowMs());
     } catch (error) {
       throw toEarsError(error);
     }
@@ -309,8 +363,30 @@ export class WatchPump implements WatchController {
   }
 
   flushSync(nowMs?: number): number {
+    if (this.#isInWriteTxn?.()) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        'watches.flushSync() cannot be called inside an active write transaction or beforeCommit hook',
+      );
+    }
     if (this.#stopped || this.#entries.size === 0) return 0;
-    const startMs = nowMs ?? this.#clock.now();
+    let startMs: number;
+    if (nowMs === undefined) {
+      startMs = this.#nowMs();
+    } else {
+      if (
+        typeof nowMs !== 'number'
+        || !Number.isFinite(nowMs)
+        || nowMs < 0
+        || Math.trunc(nowMs) > Number.MAX_SAFE_INTEGER
+      ) {
+        throw new EarsError(
+          'INVALID_ARGUMENT',
+          `nowMs must be a non-negative safe integer timestamp, got ${String(nowMs)}`,
+        );
+      }
+      startMs = Math.trunc(nowMs);
+    }
     return this.#drain(startMs, false);
   }
 
@@ -326,7 +402,7 @@ export class WatchPump implements WatchController {
   caughtUp(soon?: boolean): boolean {
     if (this.#stopped) return true;
     try {
-      return this.#db.caughtUp(this.#clock.now(), soon ?? false);
+      return this.#db.caughtUp(this.#nowMs(), soon ?? false);
     } catch (error) {
       throw toEarsError(error);
     }
@@ -412,7 +488,19 @@ export class WatchPump implements WatchController {
     const run = (): void => {
       this.#cancelTimer = undefined;
       if (this.#stopped) return;
-      this.#drain(this.#clock.now(), true);
+      let fireNow = this.#lastNowMs;
+      try {
+        fireNow = this.#nowMs();
+      } catch (clockErr) {
+        if (this.#onWatchError) {
+          try {
+            this.#onWatchError(toEarsError(clockErr));
+          } catch {
+            // Isolate throwing error handler.
+          }
+        }
+      }
+      this.#drain(fireNow, true);
     };
     if ('after' in this.#clock && typeof this.#clock.after === 'function') {
       this.#cancelTimer = this.#clock.after(delay, run);
@@ -429,7 +517,8 @@ export class WatchPump implements WatchController {
     let tick;
     try {
       tick = this.#db.tickWatches(nowMs);
-    } catch {
+    } catch (err) {
+      this.#handlePumpReadError(err);
       return undefined;
     }
     if (tick.dueIds.length === 0 && tick.nextWakeDelayMs === null) {
@@ -495,7 +584,27 @@ export class WatchPump implements WatchController {
     const earsErr = toEarsError(err);
     if (WATCH_ERROR_POLICY[earsErr.code] === 'fatal_handle' || earsErr.code === 'CLOSED') {
       this.#failStopHandle(earsErr);
+      if (!this.#pumping) {
+        this.#notifySettledIfReady();
+      }
     }
+  }
+
+  #safeAbortWatchRun(watchId: number, nowMs: number): void {
+    try {
+      this.#db.abortWatchRun(watchId, true, nowMs);
+    } catch {
+      // Best-effort if DB closed.
+    }
+  }
+
+  #applyTransientBackoff(entry: WatchEntry, nowMs: number, failedThisTurn: Set<number>): void {
+    failedThisTurn.add(entry.id);
+    entry.backoffMs =
+      entry.backoffMs === 0
+        ? INITIAL_TRANSIENT_BACKOFF_MS
+        : Math.min(MAX_TRANSIENT_BACKOFF_MS, entry.backoffMs * 2);
+    entry.backoffUntilMs = nowMs + entry.backoffMs;
   }
 
   #drain(startNowMs: number, scheduleTail: boolean): number {
@@ -512,7 +621,20 @@ export class WatchPump implements WatchController {
       const maxIterations = Math.max(64, this.#entries.size * 8);
       for (let i = 0; i < maxIterations; i++) {
         if (this.#stopped || this.#entries.size === 0) break;
-        const nowMs = scheduleTail ? this.#clock.now() : startNowMs;
+        let nowMs = startNowMs;
+        if (scheduleTail) {
+          try {
+            nowMs = this.#nowMs();
+          } catch (clockErr) {
+            if (this.#onWatchError) {
+              try {
+                this.#onWatchError(toEarsError(clockErr));
+              } catch {
+                // Isolate throwing error handler.
+              }
+            }
+          }
+        }
         const elapsedTurnMs = Math.max(0, nowMs - turnStart);
         let watchId: number | undefined;
 
@@ -592,54 +714,88 @@ export class WatchPump implements WatchController {
           continue;
         }
 
-        const runStart = this.#clock.now();
-        const finishRerun = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
-        if (!entry.active) {
-          finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
-          continue;
-        }
+        let needsAbort = true;
+        let runStart = nowMs;
+        let finishRerun: ReturnType<EarsOperationObserver['start']> | undefined;
         let rerun;
         try {
-          rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
-        } catch (rerunErr) {
-          const earsErr = toEarsError(rerunErr);
-          finishRerun?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
-          failedThisTurn.add(entry.id);
-          const policy = WATCH_ERROR_POLICY[earsErr.code];
-          if (policy === 'fatal_handle') {
-            this.#failStopHandle(earsErr, entry);
-            break;
-          }
-          if (policy === 'permanent_watch') {
-            // Permanent schema/compile/closed error: stop this broken watch so it cannot livelock or starve others.
-            this.#unregister(entry.id);
-          } else {
-            // Ensure Rust WatchScheduler clears `running = false` and requeues `dirty = true` even if
-            // rerunWatch threw before entering Rust's snapshot executor (preventing permanent wedges).
-            try {
-              this.#db.abortWatchRun(entry.id, true, nowMs);
-            } catch {
-              // Best-effort if DB closed.
-            }
-            // Transient error: exponential backoff instead of 0ms spin.
-            entry.backoffMs =
-              entry.backoffMs === 0
-                ? INITIAL_TRANSIENT_BACKOFF_MS
-                : Math.min(MAX_TRANSIENT_BACKOFF_MS, entry.backoffMs * 2);
-            entry.backoffUntilMs = nowMs + entry.backoffMs;
+          try {
+            runStart = this.#nowMs();
+          } catch (clockErr) {
+            this.#safeAbortWatchRun(entry.id, nowMs);
+            needsAbort = false;
+            this.#applyTransientBackoff(entry, nowMs, failedThisTurn);
             sawBackoff = true;
+            this.#reportError(entry, toEarsError(clockErr), true);
+            if (this.#allDueBlocked(nowMs, failedThisTurn)) break;
+            continue;
           }
-          this.#reportError(entry, earsErr, true);
-          // Break if all remaining due watches are backed off so we don't pop the same watch again in this turn.
-          if (this.#allDueBlocked(nowMs, failedThisTurn)) break;
-          continue;
+          try {
+            finishRerun = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
+          } catch (observerErr) {
+            this.#reportError(entry, toEarsError(observerErr), true);
+          }
+          if (!entry.active) {
+            needsAbort = false;
+            try {
+              finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+            } catch (observerErr) {
+              this.#reportError(entry, toEarsError(observerErr), true);
+            }
+            continue;
+          }
+          try {
+            rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
+            needsAbort = false;
+          } catch (rerunErr) {
+            const earsErr = toEarsError(rerunErr);
+            try {
+              finishRerun?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+            } catch (observerErr) {
+              this.#reportError(entry, toEarsError(observerErr), true);
+            }
+            failedThisTurn.add(entry.id);
+            const policy = WATCH_ERROR_POLICY[earsErr.code];
+            if (policy === 'fatal_handle' || earsErr.code === 'CLOSED') {
+              needsAbort = false;
+              this.#failStopHandle(earsErr, entry);
+              break;
+            }
+            if (policy === 'permanent_watch') {
+              needsAbort = false;
+              // Permanent schema/compile/closed error: stop this broken watch so it cannot livelock or starve others.
+              this.#unregister(entry.id);
+            } else {
+              // Ensure Rust WatchScheduler clears `running = false` and requeues `dirty = true` even if
+              // rerunWatch threw before entering Rust's snapshot executor (preventing permanent wedges).
+              this.#safeAbortWatchRun(entry.id, nowMs);
+              needsAbort = false;
+              // Transient error: exponential backoff instead of 0ms spin.
+              this.#applyTransientBackoff(entry, nowMs, failedThisTurn);
+              sawBackoff = true;
+            }
+            this.#reportError(entry, earsErr, true);
+            // Break if all remaining due watches are backed off so we don't pop the same watch again in this turn.
+            if (this.#allDueBlocked(nowMs, failedThisTurn)) break;
+            continue;
+          }
+        } finally {
+          if (needsAbort && entry.active && !this.#stopped) {
+            this.#safeAbortWatchRun(entry.id, nowMs);
+          }
         }
         try {
           finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
         } catch (observerErr) {
           this.#reportError(entry, toEarsError(observerErr), true);
         }
-        entry.lastCostMs = Math.max(1, this.#clock.now() - runStart);
+        let runEnd = runStart;
+        try {
+          runEnd = this.#nowMs();
+        } catch (clockErr) {
+          this.#reportError(entry, toEarsError(clockErr), true);
+        }
+        entry.lastCostMs = Math.max(1, runEnd - runStart);
         entry.backoffMs = 0;
         entry.backoffUntilMs = 0;
         ran++;
@@ -668,10 +824,21 @@ export class WatchPump implements WatchController {
       candidates.push(Math.max(0, nextWakeDelayMs));
     }
     if (this.#rescheduleAfterPump || !scheduleTail || sawBackoff || candidates.length === 0) {
-      const scheduledDelay = this.#computeNextDelay(this.#clock.now());
+      let tailNow = startNowMs;
+      try {
+        tailNow = this.#nowMs();
+      } catch {
+        // Fallback to startNowMs if clock throws during tail scheduling.
+      }
+      const scheduledDelay = this.#computeNextDelay(tailNow);
       if (scheduledDelay !== undefined) {
         candidates.push(scheduledDelay);
       }
+    }
+    if (this.#stopped || this.#entries.size === 0) {
+      this.#clearTimer();
+      this.#notifySettledIfReady();
+      return ran;
     }
     if (candidates.length === 0) {
       this.#clearTimer();
@@ -699,7 +866,8 @@ export class WatchPump implements WatchController {
         const entry = this.#entries.get(id);
         return entry !== undefined && entry.backoffUntilMs > nowMs;
       });
-    } catch {
+    } catch (err) {
+      this.#handlePumpReadError(err);
       return true;
     }
   }

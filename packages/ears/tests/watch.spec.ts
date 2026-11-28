@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
-import { EarsError, createEarsEngine, type EarsClock, type Schema } from '../src/index.ts';
+import { EarsError, createEarsEngine, createSystemClock, type EarsClock, type Schema } from '../src/index.ts';
 import { createTemporaryDatabases } from '../src/lmdb/index.ts';
 
 const require = createRequire(import.meta.url);
@@ -655,5 +655,300 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
 
     wDecl.stop();
     wImp.stop();
+  });
+
+  it('PR #268 Batch 3: #computeNextDelay & register watchesSettled route fatal/CLOSED errors and settle onSettled (3.3)', () => {
+    for (const code of ['PANICKED', 'CLOSED'] as const) {
+      // (a) tickWatches throwing inside #computeNextDelay (via notifyMutation)
+      const clock = createFakeClock(50_000);
+      const handle = temps.open({ schema: watchSchema });
+      const rawDb = handle.database;
+      let failTick = false;
+      const wrappedDb = new Proxy(rawDb, {
+        get(target, prop, receiver) {
+          if (prop === 'tickWatches') {
+            return (nowMs: number) => {
+              if (failTick) throw new EarsError(code, `injected ${code} in tickWatches`);
+              return target.tickWatches(nowMs);
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+      const seenErrors: string[] = [];
+      const engine = createEarsEngine({
+        database: wrappedDb,
+        clock,
+        onWatchError: (e) => seenErrors.push(e.code),
+      });
+      const w = engine.query.of('Task').watchCount(() => {}, { minGapMs: 0 });
+      // Arm an onSettled listener while a mutation is pending, then inject fatal tickWatches!
+      let settledCount = 0;
+      rawDb.executeWireBatch(
+        (require(clientElmdbPath) as { buildWireBatch: (fn: (b: { create: (t: string, f: Record<string, unknown>) => void }) => void) => Uint8Array }).buildWireBatch(
+          (b) => { b.create('Task', { title: 'dirty', done: false }); },
+        ),
+      );
+      engine.watches.onSettled(() => {
+        settledCount++;
+      });
+      expect(settledCount).toBe(0);
+      failTick = true;
+      // Creating via engine triggers notifyMutation -> #scheduleNext -> #computeNextDelay -> tickWatches throws!
+      engine.create('Other', { name: 'trigger-notify' });
+      expect(seenErrors).toEqual([code]);
+      expect(w.active).toBe(false);
+      expect(engine.watches.activeCount).toBe(0);
+      expect(settledCount).toBe(1);
+      expect(clock.pendingTimers).toBe(0);
+
+      // (b) watchesSettled throwing inside register() post-callback check
+      const handle2 = temps.open({ schema: watchSchema });
+      const rawDb2 = handle2.database;
+      let failSettled = false;
+      const wrappedDb2 = new Proxy(rawDb2, {
+        get(target, prop, receiver) {
+          if (prop === 'watchesSettled') {
+            return () => {
+              if (failSettled) throw new EarsError(code, `injected ${code} in watchesSettled`);
+              return target.watchesSettled();
+            };
+          }
+          const value = Reflect.get(target, prop, receiver);
+          return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+      const seenErrors2: string[] = [];
+      const engine2 = createEarsEngine({
+        database: wrappedDb2,
+        clock: createFakeClock(60_000),
+        onWatchError: (e) => seenErrors2.push(e.code),
+      });
+      const w2 = engine2.query.of('Task').watchCount(
+        () => {
+          failSettled = true;
+        },
+        { minGapMs: 0 },
+      );
+      expect(seenErrors2).toEqual([code]);
+      expect(w2.active).toBe(false);
+      expect(engine2.watches.activeCount).toBe(0);
+      expect(engine2.watches.settled()).toBe(true);
+    }
+  });
+
+  it('PR #268 Batch 3: throwing observer.start, finishRerun, and clock.now never wedge watch in running=true (3.4)', () => {
+    // 1. Throwing observer.start & finishRerun (both ok and error paths) isolate errors and never wedge watch!
+    const clock = createFakeClock(70_000);
+    const handle = temps.open({ schema: watchSchema });
+    const rawDb = handle.database;
+    let throwObsStart = false;
+    let throwObsFinish = false;
+    let failRerunOnce = false;
+    const wrappedDb = new Proxy(rawDb, {
+      get(target, prop, receiver) {
+        if (prop === 'rerunWatch') {
+          return (id: number, spec: Parameters<typeof target.rerunWatch>[1], nowMs?: number, costMs?: number) => {
+            if (failRerunOnce) {
+              failRerunOnce = false;
+              throw new EarsError('IO', 'transient rerun failure');
+            }
+            return target.rerunWatch(id, spec, nowMs, costMs);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const errors: string[] = [];
+    const counts: number[] = [];
+    const engine = createEarsEngine({
+      database: wrappedDb,
+      clock,
+      onWatchError: (e) => errors.push(e.message),
+      observer: {
+        start(op) {
+          if (op.watch && throwObsStart) {
+            throw new Error('observer.start boom');
+          }
+          return () => {
+            if (op.watch && throwObsFinish) {
+              throw new Error('observer.finish boom');
+            }
+          };
+        },
+      },
+    });
+    const w = engine.query.of('Task').watchCount((c) => counts.push(c), { minGapMs: 0 });
+    expect(counts).toEqual([0]);
+
+    // Throw inside observer.start -> watch still reruns and delivers!
+    throwObsStart = true;
+    engine.create('Task', { title: 'after-start-throw', done: false });
+    clock.advance(20);
+    expect(counts).toEqual([0, 1]);
+    expect(errors.some((m) => m.includes('observer.start boom'))).toBe(true);
+    throwObsStart = false;
+
+    // Throw inside observer.finish on transient rerunWatch error -> abortWatchRun MUST still run so watch recovers!
+    failRerunOnce = true;
+    throwObsFinish = true;
+    engine.create('Task', { title: 'after-finish-throw', done: false });
+    clock.advance(20);
+    expect(counts).toEqual([0, 1]);
+    expect(errors.some((m) => m.includes('observer.finish boom'))).toBe(true);
+    throwObsFinish = false;
+    clock.advance(100);
+    expect(counts).toEqual([0, 1, 2]);
+    expect(engine.watches.settled()).toBe(true);
+    w.stop();
+
+    // 2. Throwing clock.now() right after nextDueWatch() calls abortWatchRun so watch never wedges!
+    const baseClock = createFakeClock(80_000);
+    let armClockThrowOnce = true;
+    let throwOnNextNow = false;
+    const flakyClock: EarsClock = {
+      now() {
+        if (throwOnNextNow) {
+          throwOnNextNow = false;
+          throw new Error('clock.now boom');
+        }
+        return baseClock.now();
+      },
+      setTimeout: (cb, ms) => baseClock.setTimeout(cb, ms),
+      clearTimeout: (h) => baseClock.clearTimeout(h),
+    };
+    const handle2 = temps.open({ schema: watchSchema });
+    const rawDb2 = handle2.database;
+    let abortCalls = 0;
+    const wrappedDb2 = new Proxy(rawDb2, {
+      get(target, prop, receiver) {
+        if (prop === 'nextDueWatch') {
+          return (nowMs: number, elapsedMs: number) => {
+            const res = target.nextDueWatch(nowMs, elapsedMs);
+            if (armClockThrowOnce && res.watchId !== undefined) {
+              armClockThrowOnce = false;
+              throwOnNextNow = true;
+            }
+            return res;
+          };
+        }
+        if (prop === 'abortWatchRun') {
+          return (watchId: number, requeueDirty: boolean, nowMs?: number) => {
+            abortCalls++;
+            return target.abortWatchRun(watchId, requeueDirty, nowMs);
+          };
+        }
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+      },
+    });
+    const clockErrors: string[] = [];
+    const counts2: number[] = [];
+    const engine2 = createEarsEngine({
+      database: wrappedDb2,
+      clock: flakyClock,
+      onWatchError: (e) => clockErrors.push(e.message),
+    });
+    const w2 = engine2.query.of('Task').watchCount((c) => counts2.push(c), { minGapMs: 0, adaptiveMultiplier: 0 });
+    expect(counts2).toEqual([0]);
+    engine2.create('Task', { title: 'after-clock-throw', done: false });
+    // Run flushSync once: nextDueWatch succeeds, then clock.now() at runStart throws -> abortWatchRun runs!
+    baseClock.advance(10);
+    engine2.watches.flushSync(baseClock.now());
+    expect(abortCalls).toBe(1);
+    expect(clockErrors.some((m) => m.includes('clock.now boom'))).toBe(true);
+    // Advance past backoff and flush again -> watch is NOT wedged and delivers count = 1!
+    baseClock.advance(200);
+    engine2.watches.flushSync(baseClock.now());
+    expect(counts2).toEqual([0, 1]);
+    expect(engine2.watches.settled()).toBe(true);
+    w2.stop();
+  });
+
+  it('PR #268 Batch 3: createSystemClock is monotonic integer ms and fractional clocks never kill watches (3.6)', () => {
+    const sys = createSystemClock();
+    const t1 = sys.now();
+    const t2 = sys.now();
+    expect(Number.isSafeInteger(t1)).toBe(true);
+    expect(Number.isSafeInteger(t2)).toBe(true);
+    expect(t2).toBeGreaterThanOrEqual(t1);
+
+    // Fractional clock (like raw `performance.now()`) MUST NOT cause INVALID_ARGUMENT or kill watches!
+    const handle = temps.open({ schema: watchSchema });
+    const base = createFakeClock(1000);
+    const fractionalClock: EarsClock = {
+      now: () => base.now() + 0.75,
+      setTimeout: (cb, ms) => base.setTimeout(cb, ms),
+      clearTimeout: (h) => base.clearTimeout(h),
+    };
+    const errors: EarsError[] = [];
+    const counts: number[] = [];
+    const engine = createEarsEngine({
+      database: handle.database,
+      clock: fractionalClock,
+      onWatchError: (e) => errors.push(e),
+    });
+    const w = engine.query.of('Task').watchCount((c) => counts.push(c), { minGapMs: 0 });
+    expect(counts).toEqual([0]);
+    engine.create('Task', { title: 'frac', done: false });
+    base.advance(20);
+    expect(counts).toEqual([0, 1]);
+    expect(errors).toEqual([]);
+    expect(w.active).toBe(true);
+    expect(engine.watches.settled()).toBe(true);
+    // Out-of-safe-integer `flushSync(1e20)` rejects cleanly with INVALID_ARGUMENT instead of silently swallowing.
+    expect(() => engine.watches.flushSync(1e20)).toThrowError(expect.objectContaining({ code: 'INVALID_ARGUMENT' }));
+    w.stop();
+
+    // Throwing `observer.finish` during `register()` unregisters the Rust watch so `settled()` never wedges false!
+    const handle3 = temps.open({ schema: watchSchema });
+    const eng3 = createEarsEngine({
+      database: handle3.database,
+      clock: createFakeClock(90_000),
+      observer: {
+        start(op) {
+          return () => {
+            if (op.watch) throw new Error('register finish boom');
+          };
+        },
+      },
+    });
+    expect(() => eng3.query.of('Task').watchCount(() => {}, { minGapMs: 0 })).toThrow('register finish boom');
+    expect(eng3.watches.activeCount).toBe(0);
+    eng3.create('Task', { title: 'after-failed-register', done: false });
+    expect(eng3.watches.settled()).toBe(true);
+
+    // Throwing `clock.now()` when a scheduled timer fires does NOT crash or strand dirty watches!
+    const base4 = createFakeClock(95_000);
+    let failTimerNowOnce = false;
+    const timerClock: EarsClock = {
+      now() {
+        if (failTimerNowOnce) {
+          failTimerNowOnce = false;
+          throw new Error('timer fire clock boom');
+        }
+        return base4.now();
+      },
+      setTimeout: (cb, ms) => base4.setTimeout(cb, ms),
+      clearTimeout: (h) => base4.clearTimeout(h),
+    };
+    const handle4 = temps.open({ schema: watchSchema });
+    const timerErrors: string[] = [];
+    const timerCounts: number[] = [];
+    const eng4 = createEarsEngine({
+      database: handle4.database,
+      clock: timerClock,
+      onWatchError: (e) => timerErrors.push(e.message),
+    });
+    const w4 = eng4.query.of('Task').watchCount((c) => timerCounts.push(c), { minGapMs: 0, adaptiveMultiplier: 0 });
+    eng4.create('Task', { title: 'timer-resilient', done: false });
+    failTimerNowOnce = true;
+    base4.advance(10);
+    expect(timerErrors.some((m) => m.includes('timer fire clock boom'))).toBe(true);
+    expect(timerCounts).toEqual([0, 1]);
+    expect(eng4.watches.settled()).toBe(true);
+    w4.stop();
   });
 });
