@@ -1021,20 +1021,16 @@ fn pr268_batch2_atomic_exec_batch_archived_fields_restore_extras_and_abort_savep
                 },
             ])?;
 
-            // Explicit `external_id` length boundaries (`0` rejected, `MAX_EXT_ID_BYTES` accepted, `+1` rejected).
+            // Explicit `external_id` length boundaries (`0` rejected before field validation, `MAX_EXT_ID_BYTES` accepted, `+1` rejected before field validation).
             let empty_id_err = tx
-                .exec(&WireOp::Create {
-                    type_name: "Item".into(),
-                    external_id: Some(String::new()),
-                    fields: vec![("title".into(), CanonicalValue::String("empty-id".into()))],
-                })
+                .exec(&WireOp::Create { type_name: "Item".into(), external_id: Some(String::new()), fields: vec![] })
                 .unwrap_err();
             assert_eq!(empty_id_err.code, ErrorCode::InvalidArgument);
             let over_id_err = tx
                 .exec(&WireOp::Create {
                     type_name: "Item".into(),
                     external_id: Some("x".repeat(elmdb_engine::MAX_EXT_ID_BYTES + 1)),
-                    fields: vec![("title".into(), CanonicalValue::String("over-id".into()))],
+                    fields: vec![],
                 })
                 .unwrap_err();
             assert_eq!(over_id_err.code, ErrorCode::InvalidArgument);
