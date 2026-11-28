@@ -1076,23 +1076,27 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
         }
         let (_, _) = self.run_maintenance_write(|txn, _schema, dbs| {
             for (ext_id, extra_fields) in extras {
-                if extra_fields.is_empty() {
-                    continue;
-                }
                 let Some(key) = lookup_ext_id_in_txn(txn, dbs, ext_id)? else {
                     continue;
                 };
                 let Some(raw) = txn.get(dbs.entities, &key.to_ne_bytes())? else {
                     continue;
                 };
+                let prev_blobs: FxHashSet<FieldId> = blob_field_ids_of(raw)?.into_iter().collect();
                 let mut packed =
                     decode_row(raw, |fid| Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned)))?;
                 for (k, v) in extra_fields {
                     packed.extra.insert(k.clone(), v.clone());
                 }
                 let enc = encode_row(&packed)?;
+                let new_blob_set: FxHashSet<FieldId> = enc.blob_field_ids.iter().copied().collect();
                 for (fid, blob_bytes) in enc.blobs {
                     txn.put(dbs.blobs, &blob_key(key, fid), &blob_bytes)?;
+                }
+                for old_fid in prev_blobs {
+                    if !new_blob_set.contains(&old_fid) {
+                        txn.del(dbs.blobs, &blob_key(key, old_fid))?;
+                    }
                 }
                 txn.put(dbs.entities, &key.to_ne_bytes(), &enc.row_bytes)?;
             }
@@ -1459,13 +1463,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         Ok(depth)
     }
 
-    /// Commits (merges into parent) the top-most explicit nested savepoint without firing `beforeCommit`.
-    /// On any error, aborts the savepoint and restores delta/dirty state so no orphan savepoint leaks.
-    pub fn commit_savepoint(&mut self, depth: u32) -> Result<()> {
-        if let Err(err) = self.flush_projections() {
-            self.abort_savepoint(depth);
-            return Err(err);
-        }
+    fn commit_savepoint_no_flush(&mut self, depth: u32) -> Result<()> {
         if let Err(err) = self.txn.commit_savepoint(depth) {
             self.abort_savepoint(depth);
             return Err(err.into());
@@ -1474,6 +1472,16 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
             self.saved_frames.truncate(pos);
         }
         Ok(())
+    }
+
+    /// Commits (merges into parent) the top-most explicit nested savepoint without firing `beforeCommit`.
+    /// On any error, aborts the savepoint and restores delta/dirty state so no orphan savepoint leaks.
+    pub fn commit_savepoint(&mut self, depth: u32) -> Result<()> {
+        if let Err(err) = self.flush_projections() {
+            self.abort_savepoint(depth);
+            return Err(err);
+        }
+        self.commit_savepoint_no_flush(depth)
     }
 
     /// Aborts (rolls back) the top-most explicit nested savepoint and restores delta/dirty state cleanly.
@@ -1550,16 +1558,20 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         Ok(Some((seq, receipt, summary)))
     }
 
-    /// Executes a batch of wire ops inside an atomic nested savepoint, supporting intra-batch `BatchSlot` refs.
-    /// Any failing op rolls back the entire batch (LMDB writes and delta accumulators) atomically.
+    /// Executes a batch of wire ops inside an atomic nested savepoint (without eagerly flushing
+    /// projections), supporting intra-batch `BatchSlot` refs. Any failing op rolls back the entire
+    /// batch (LMDB writes and delta accumulators) atomically.
     pub fn exec_batch(&mut self, ops: &[WireOp]) -> Result<Vec<String>> {
-        self.savepoint(|ctx| {
-            let mut slots = Vec::new();
-            for op in ops {
-                ctx.apply_op(op, &mut slots)?;
+        let depth = self.push_savepoint()?;
+        let mut slots = Vec::new();
+        for op in ops {
+            if let Err(err) = self.apply_op(op, &mut slots) {
+                self.abort_savepoint(depth);
+                return Err(err);
             }
-            Ok(slots.into_iter().map(|(_, ext_id)| ext_id).collect())
-        })
+        }
+        self.commit_savepoint_no_flush(depth)?;
+        Ok(slots.into_iter().map(|(_, ext_id)| ext_id).collect())
     }
 
     pub fn get_row(&self, ext_id: &str) -> Result<Option<StoredRow>> {
@@ -1930,11 +1942,14 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                         }
                         // Scrub any archived declared field with the same name so a later Unset cannot resurrect it.
                         for f in &tdef.fields {
-                            if f.archived && f.name == *fname && next.fields.remove(&f.id).is_some() {
+                            if f.name == *fname && next.fields.remove(&f.id).is_some() {
                                 changed_fields.insert(f.id);
                             }
                         }
-                        next.extra.insert(fname.clone(), raw_val.clone());
+                        if next.extra.get(fname) != Some(raw_val) {
+                            changed_fields.insert(crate::row::EXTRA_BLOB_FIELD_ID);
+                            next.extra.insert(fname.clone(), raw_val.clone());
+                        }
                     } else {
                         return Err(ElmdbError::new(
                             ErrorCode::UnknownField,
@@ -1980,7 +1995,7 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                     } else {
                         let mut matched_archived = false;
                         for f in &tdef.fields {
-                            if f.archived && f.name == *fname {
+                            if f.name == *fname {
                                 matched_archived = true;
                                 if next.fields.remove(&f.id).is_some() {
                                     changed_fields.insert(f.id);
@@ -1988,7 +2003,9 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
                             }
                         }
                         if matched_archived || tdef.additional_fields {
-                            next.extra.remove(fname);
+                            if next.extra.remove(fname).is_some() {
+                                changed_fields.insert(crate::row::EXTRA_BLOB_FIELD_ID);
+                            }
                         } else {
                             return Err(ElmdbError::new(
                                 ErrorCode::UnknownField,
@@ -2954,7 +2971,7 @@ fn read_single_field<R: KvRead>(
         }
     }
     // Tier 3: Archived Declared fallback (matching `merge_row_fields`).
-    if let Some(fdef) = tdef.fields.iter().find(|f| f.archived && f.name == field_name)
+    if let Some(fdef) = tdef.fields.iter().find(|f| f.name == field_name)
         && let Some(val) = decode_single_field(raw, fdef.id, |fid| {
             Ok(txn.get(dbs.blobs, &blob_key(key, fid))?.map(ToOwned::to_owned))
         })?

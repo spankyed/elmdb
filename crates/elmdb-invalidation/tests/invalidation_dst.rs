@@ -631,7 +631,7 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
     let mut idx = InvalidationIndex::new(0, engine.schema().epoch);
     for i in 1..=100u64 {
         let wid = WatchId(i);
-        idx.register_after_read(wid, 0, engine.schema().epoch, &rs, &engine.schema());
+        let _ = idx.register_after_read(wid, 0, engine.schema().epoch, &rs, &engine.schema());
         idx.unregister_watch(wid);
     }
     assert_eq!(idx.stats().active_watches, 0);
@@ -673,7 +673,7 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
         .summary
         .unwrap();
     idx2.notify_commit(&engine.schema(), &unrelated);
-    let stale_unrelated = idx2.register_after_read(WatchId(1), read_seq, read_epoch, &read_set, &engine.schema());
+    let (stale_unrelated, _) = idx2.register_after_read(WatchId(1), read_seq, read_epoch, &read_set, &engine.schema());
     assert!(!stale_unrelated, "unrelated concurrent commit must NOT falsely stale reader");
 
     // Writer commits mutation to `r1` at S + 2 -> another reader from S registers -> MUST be stale!
@@ -686,7 +686,7 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
         .summary
         .unwrap();
     idx2.notify_commit(&engine.schema(), &related);
-    let stale_related = idx2.register_after_read(WatchId(2), read_seq, read_epoch, &read_set, &engine.schema());
+    let (stale_related, _) = idx2.register_after_read(WatchId(2), read_seq, read_epoch, &read_set, &engine.schema());
     assert!(stale_related, "concurrent commit touching watched entity MUST stale reader via CommitRing");
 
     // CommitRing overflow (> COMMIT_RING_CAP commits of unrelated Author) -> MUST fail strictly safe!
@@ -704,7 +704,7 @@ fn tier2_range_coalescing_compaction_and_commit_ring_catchup_plus_overflow() {
             .unwrap();
         idx3.notify_commit(&engine.schema(), &sum);
     }
-    let stale_overflow = idx3.register_after_read(WatchId(3), snap_seq, snap_epoch, &snap_rs, &engine.schema());
+    let (stale_overflow, _) = idx3.register_after_read(WatchId(3), snap_seq, snap_epoch, &snap_rs, &engine.schema());
     assert!(stale_overflow, "CommitRing overflow (> 1024 commits) MUST fail strictly safe (stale = true)");
     let _ = ids.author_type;
 }
@@ -971,7 +971,7 @@ fn review_regression_subdb_same_seq_seq_gap_resurrection_abort_and_imperative_se
     set_entity_embeddings(&engine, ids.idx_vec, kv1, &[vec![1.0, 0.0, 0.0, 0.0]]).unwrap();
     // Maintenance write shares exact same `commit_seq == snap_seq`!
     idx.notify_subdb_write(snap_seq, snap_epoch, ids.idx_vec_slot, &[0x01]);
-    let stale = idx.register_after_read(WatchId(99), snap_seq, snap_epoch, &vec_rs, &engine.schema());
+    let (stale, _) = idx.register_after_read(WatchId(99), snap_seq, snap_epoch, &vec_rs, &engine.schema());
     assert!(stale, "SubDbWrite at same commit_seq MUST mark concurrent reader stale!");
 
     // P0-2: Sequence gap (`seq = prev + 2`, simulating missed cross-process or `transact()` commit) MUST fail safe!
@@ -1160,7 +1160,7 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
         terminal: TerminalSpec::Ids,
     });
     let (s0, m0, e0, _o, rs0) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
-    assert!(!idx.register_after_read_with_maint(WatchId(1), s0, m0, e0, &rs0, &engine.schema()));
+    assert!(!idx.register_after_read_with_maint(WatchId(1), s0, m0, e0, &rs0, &engine.schema()).0);
 
     // Produce two commits: seq S+1 (touches Note) and seq S+2 (touches Author).
     let sum1 = engine
@@ -1188,7 +1188,7 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
 
     // A fresh reader at S+2 MUST register cleanly as NOT stale!
     let (s2, m2, e2, _o2, rs2) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
-    assert!(!idx.register_after_read_with_maint(WatchId(1), s2, m2, e2, &rs2, &engine.schema()));
+    assert!(!idx.register_after_read_with_maint(WatchId(1), s2, m2, e2, &rs2, &engine.schema()).0);
 
     // Standalone counter writes advance LMDB txnid without bumping commit_seq or maint_seq:
     // neither catch_up_cross_process nor a subsequent unrelated Author commit may falsely invalidate WatchId(1)!
@@ -1234,21 +1234,21 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
     let mut idx_rb = InvalidationIndex::new_with_maint_seq(s3, e3, m3);
     idx_rb.notify_full_rebuild(s3, e3);
     assert!(
-        idx_rb.register_after_read_with_maint(WatchId(42), s3, m3, e3, &rs3, &engine.schema()),
+        idx_rb.register_after_read_with_maint(WatchId(42), s3, m3, e3, &rs3, &engine.schema()).0,
         "same-seq notify_full_rebuild MUST mark concurrent reader stale"
     );
 
     // Orthogonal `maint_seq` single-commit, stale-receipt, and gap regression tests (PR #261 P0-1):
     let (s4, m4, e4, _o4, rs4) = run_tracked_snapshot(&engine, &qe, &note_plan, ExecBudgets::default()).unwrap();
     let mut idx_mg = InvalidationIndex::new_with_maint_seq(s4, e4, m4);
-    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4, e4, &rs4, &engine.schema()));
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4, e4, &rs4, &engine.schema()).0);
     // Per-commit local maintenance notifications (`m4 -> m4+1 -> m4+2`) on an unrelated vector slot stay selective!
     assert!(idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 1, ids.idx_vec_slot, &[0x01]).is_empty());
     assert!(idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 2, ids.idx_vec_slot, &[0x01]).is_empty());
     // Readers opened before or between chunks on Note are still NOT stale (slot doesn't match), and at m4+2 settle!
-    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4, e4, &rs4, &engine.schema()));
-    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 1, e4, &rs4, &engine.schema()));
-    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 2, e4, &rs4, &engine.schema()));
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4, e4, &rs4, &engine.schema()).0);
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 1, e4, &rs4, &engine.schema()).0);
+    assert!(!idx_mg.register_after_read_with_maint(WatchId(77), s4, m4 + 2, e4, &rs4, &engine.schema()).0);
     // Delayed stale receipt (`maint_seq <= latest_maint_seq`, even with an older schema_epoch) is safely ignored
     // and never advances `latest_maint_seq` or corrupts the ring!
     assert!(idx_mg.notify_subdb_write_at_maint(s4, e4, m4 + 1, ids.idx_vec_slot, &[0x01]).is_empty());
@@ -1285,11 +1285,11 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
     assert_eq!(st.latest_maint_seq, 5);
     // Older `read_at_seq < ring_dropped_seq_up_to` (with current maint) AND older `read_at_maint_seq < ring_dropped_maint_up_to`
     // (with current seq) must BOTH independently report stale!
-    assert!(idx_clk.register_after_read_with_maint(WatchId(200), 9, 5, e_now, &rs4, &schema_now));
-    assert!(idx_clk.register_after_read_with_maint(WatchId(200), 10, 4, e_now, &rs4, &schema_now));
+    assert!(idx_clk.register_after_read_with_maint(WatchId(200), 9, 5, e_now, &rs4, &schema_now).0);
+    assert!(idx_clk.register_after_read_with_maint(WatchId(200), 10, 4, e_now, &rs4, &schema_now).0);
     // Reader whose `read_schema_epoch == latest_schema_epoch` while `schema.epoch` differs must report stale!
     let mut idx_ep = InvalidationIndex::new_with_maint_seq(10, e_now + 1, 5);
-    assert!(idx_ep.register_after_read_with_maint(WatchId(201), 10, 5, e_now + 1, &rs4, &schema_now));
+    assert!(idx_ep.register_after_read_with_maint(WatchId(201), 10, 5, e_now + 1, &rs4, &schema_now).0);
     // Reader at `read_at_seq > ring_dropped_seq_up_to` (after 1 unrelated commit + 1 unrelated maint write in ring)
     // must NOT be falsely marked stale!
     let cp_author = elmdb_engine::CrossProcCommitSummary {
@@ -1301,7 +1301,7 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
     };
     assert!(idx_clk.apply_cross_proc_summary(&schema_now, &cp_author).is_empty());
     assert!(idx_clk.notify_subdb_write_at_maint(11, e_now, 6, ids.idx_vec_slot, &[0x01]).is_empty());
-    assert!(!idx_clk.register_after_read_with_maint(WatchId(200), 11, 5, e_now, &rs4, &schema_now));
+    assert!(!idx_clk.register_after_read_with_maint(WatchId(200), 11, 5, e_now, &rs4, &schema_now).0);
     // Direct `apply_cross_proc_summary` touching Note invalidates WatchId(200).
     let cp_note = elmdb_engine::CrossProcCommitSummary {
         seq: 12,
@@ -1323,7 +1323,7 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
     };
     assert!(idx_clk.apply_cross_proc_summary(&schema_now, &cp_author2).is_empty());
     assert!(
-        !idx_clk.register_after_read_with_maint(WatchId(200), 12, 6, e_now, &rs4, &schema_now),
+        !idx_clk.register_after_read_with_maint(WatchId(200), 12, 6, e_now, &rs4, &schema_now).0,
         "reader at seq 12 after Note@12 and Author@13 must NOT be stale"
     );
     let cp_note2 = elmdb_engine::CrossProcCommitSummary {
@@ -1335,7 +1335,7 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
     };
     assert_eq!(idx_clk.apply_cross_proc_summary(&schema_now, &cp_note2), vec![WatchId(200)]);
     assert!(
-        idx_clk.register_after_read_with_maint(WatchId(200), 12, 6, e_now, &rs4, &schema_now),
+        idx_clk.register_after_read_with_maint(WatchId(200), 12, 6, e_now, &rs4, &schema_now).0,
         "reader at seq 12 with Note@14 in ring MUST be stale"
     );
     // (b) Local: commit S+1 touches Note, commit S+2 touches Author -> reader at S+1 is NOT stale!
@@ -1359,7 +1359,9 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
     idx_loc.notify_commit(&engine.schema(), &loc_note);
     idx_loc.notify_commit(&engine.schema(), &loc_auth);
     assert!(
-        !idx_loc.register_after_read_with_maint(WatchId(202), loc_note.seq, loc_note.maint_seq, e4, &rs4, &schema_now),
+        !idx_loc
+            .register_after_read_with_maint(WatchId(202), loc_note.seq, loc_note.maint_seq, e4, &rs4, &schema_now)
+            .0,
         "reader at loc_note.seq with only unrelated Author commit after it must NOT be stale"
     );
     // (c) SubDbWrite: maint m+1 touches Vector slot, maint m+2 touches unrelated slot -> Vector reader at m+1 is NOT stale!
@@ -1375,7 +1377,7 @@ fn batch3_out_of_order_notify_commit_and_subdb_seq_gap_monotonicity() {
     idx_sub.notify_subdb_write_at_maint(vs, ve, vm + 1, ids.idx_vec_slot, &[0x01]);
     idx_sub.notify_subdb_write_at_maint(vs, ve, vm + 2, ids.idx_vec_slot.wrapping_add(1), &[0x01]);
     assert!(
-        !idx_sub.register_after_read_with_maint(WatchId(203), vs, vm + 1, ve, &vrs, &schema_now),
+        !idx_sub.register_after_read_with_maint(WatchId(203), vs, vm + 1, ve, &vrs, &schema_now).0,
         "Vector reader at vm+1 with only unrelated slot write at vm+2 must NOT be stale"
     );
 
@@ -1796,13 +1798,12 @@ fn pr268_batch2_cross_proc_schema_epoch_self_advances_and_dirties_sibling_watche
 
     // Register W1 and W2 at epoch e1.
     let mut idx = InvalidationIndex::new_with_maint_seq(1, e1, 0);
-    assert!(!idx.register_after_read_with_maint(WatchId(1), 1, 0, e1, &rs, &schema_e1));
-    assert!(!idx.register_after_read_with_maint(WatchId(2), 1, 0, e1, &rs, &schema_e1));
+    assert_eq!(idx.register_after_read_with_maint(WatchId(1), 1, 0, e1, &rs, &schema_e1), (false, vec![]));
+    assert_eq!(idx.register_after_read_with_maint(WatchId(2), 1, 0, e1, &rs, &schema_e1), (false, vec![]));
 
     // Single cross-proc bump (e1 -> e2): W1 reruns at e2 and sees current_schema at e2.
     // W1 settles cleanly (`stale = false`), latest_schema_epoch advances to e2, and sibling W2 is returned dirty!
-    let (stale_w1, others_w1) =
-        idx.register_after_read_with_maint_and_others(WatchId(1), 1, 1, e2(&schema_e2), &rs, &schema_e2);
+    let (stale_w1, others_w1) = idx.register_after_read_with_maint(WatchId(1), 1, 1, schema_e2.epoch, &rs, &schema_e2);
     assert!(!stale_w1, "watch read at current cross-proc epoch must settle cleanly");
     assert_eq!(others_w1, vec![WatchId(2)], "sibling watch must be dirtied on cross-proc schema bump");
     assert_eq!(idx.stats().latest_schema_epoch, schema_e2.epoch);
@@ -1811,15 +1812,14 @@ fn pr268_batch2_cross_proc_schema_epoch_self_advances_and_dirties_sibling_watche
     // W2 must stay stale for one final rerun at e4, latest_schema_epoch advances to e4, and W1 is dirtied!
     let mut schema_e4 = schema_e1.clone();
     schema_e4.epoch = e1 + 3;
-    let (stale_w2, others_w2) =
-        idx.register_after_read_with_maint_and_others(WatchId(2), 1, 2, schema_e3.epoch, &rs, &schema_e4);
+    let (stale_w2, others_w2) = idx.register_after_read_with_maint(WatchId(2), 1, 2, schema_e3.epoch, &rs, &schema_e4);
     assert!(stale_w2, "watch read at e3 while current schema is e4 must rerun once more");
     assert_eq!(others_w2, vec![WatchId(1)]);
     assert_eq!(idx.stats().latest_schema_epoch, schema_e4.epoch);
 
     // Final rerun of W2 at e4 settles immediately with zero extra dirty siblings!
     let (stale_w2_final, others_w2_final) =
-        idx.register_after_read_with_maint_and_others(WatchId(2), 1, 3, schema_e4.epoch, &rs, &schema_e4);
+        idx.register_after_read_with_maint(WatchId(2), 1, 3, schema_e4.epoch, &rs, &schema_e4);
     assert!(!stale_w2_final);
     assert!(others_w2_final.is_empty());
 
@@ -1886,8 +1886,92 @@ fn pr268_batch2_cross_proc_schema_epoch_self_advances_and_dirties_sibling_watche
     })
     .unwrap();
     assert!(hub.watches_settled(), "all watches must settle after rerunning against the new schema epoch");
-}
 
-fn e2(s: &elmdb_engine::CompiledSchema) -> u64 {
-    s.epoch
+    // PR #270 P1-3: Extra-field-only Patch/Unset and archived-field Unset MUST invalidate `PointWatch { all_fields: true }`
+    // while NOT falsely invalidating a field-specific `PointWatch { fields: {title} }`!
+    let mut with_extra = evolved.clone();
+    with_extra.types.get_mut("Note").unwrap().additional_fields = true;
+    engine.set_schema(&with_extra).unwrap();
+    engine
+        .execute_batch(&[WireOp::Create {
+            type_name: "Note".into(),
+            external_id: Some("pw-note".into()),
+            fields: vec![
+                ("title".into(), CanonicalValue::String("hello".into())),
+                ("extra_col".into(), CanonicalValue::String("to-archive".into())),
+            ],
+        }])
+        .unwrap();
+    let pw_key = engine.get_row("pw-note").unwrap().unwrap().key;
+    // Archive `extra_col` so `pw-note` carries an archived declared field.
+    let mut archived_schema = with_extra.clone();
+    archived_schema.types.get_mut("Note").unwrap().fields.remove("extra_col");
+    engine.set_schema(&archived_schema).unwrap();
+
+    let all_fields_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![pw_key]))),
+        terminal: TerminalSpec::Rows { fields: None },
+    });
+    let mut title_mask = elmdb_engine::FieldMask::empty();
+    title_mask.insert(ids.title);
+    let title_only_plan = LogicalPlan::new(LogicalNode::Terminal {
+        input: Box::new(LogicalNode::Source(SourceSpec::LiteralKeys(vec![pw_key]))),
+        terminal: TerminalSpec::Rows { fields: Some(title_mask) },
+    });
+    let (s_pw, m_pw, e_pw, _, rs_all) =
+        run_tracked_snapshot(&engine, &qe, &all_fields_plan, ExecBudgets::default()).unwrap();
+    let (_, _, _, _, rs_title) = run_tracked_snapshot(&engine, &qe, &title_only_plan, ExecBudgets::default()).unwrap();
+    let mut pw_idx = InvalidationIndex::new_with_maint_seq(s_pw, e_pw, m_pw);
+    assert_eq!(
+        pw_idx.register_after_read_with_maint(WatchId(501), s_pw, m_pw, e_pw, &rs_all, &engine.schema()),
+        (false, vec![])
+    );
+    assert_eq!(
+        pw_idx.register_after_read_with_maint(WatchId(502), s_pw, m_pw, e_pw, &rs_title, &engine.schema()),
+        (false, vec![])
+    );
+
+    // Extra-field-only Patch invalidates all_fields watch (501) ONLY, NOT title-only watch (502)!
+    let sum_extra_patch = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("pw-note".into()),
+            fields: vec![("dyn_k".into(), CanonicalValue::String("v1".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    assert_eq!(pw_idx.notify_commit(&engine.schema(), &sum_extra_patch), vec![WatchId(501)]);
+
+    // No-op extra-field Patch with identical value does NOT invalidate either watch!
+    let sum_extra_noop = engine
+        .execute_batch(&[WireOp::Patch {
+            target: EntityTarget::ExternalId("pw-note".into()),
+            fields: vec![("dyn_k".into(), CanonicalValue::String("v1".into()))],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    assert!(pw_idx.notify_commit(&engine.schema(), &sum_extra_noop).is_empty());
+
+    // Extra-field-only Unset invalidates all_fields watch (501) ONLY!
+    let sum_extra_unset = engine
+        .execute_batch(&[WireOp::Unset {
+            target: EntityTarget::ExternalId("pw-note".into()),
+            fields: vec!["dyn_k".into()],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    assert_eq!(pw_idx.notify_commit(&engine.schema(), &sum_extra_unset), vec![WatchId(501)]);
+
+    // Archived-field-only Unset invalidates all_fields watch (501) ONLY!
+    let sum_arch_unset = engine
+        .execute_batch(&[WireOp::Unset {
+            target: EntityTarget::ExternalId("pw-note".into()),
+            fields: vec!["extra_col".into()],
+        }])
+        .unwrap()
+        .summary
+        .unwrap();
+    assert_eq!(pw_idx.notify_commit(&engine.schema(), &sum_arch_unset), vec![WatchId(501)]);
 }

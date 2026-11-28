@@ -1099,13 +1099,18 @@ fn pr268_batch2_atomic_exec_batch_archived_fields_restore_extras_and_abort_savep
     assert_eq!(unk_err.code, ErrorCode::UnknownField);
 
     // Unset on archived declared fields MUST succeed even when `additional_fields == false`,
-    // cleaning up spilled blobs and `ref_in`!
-    engine
+    // cleaning up spilled blobs and `ref_in` and recording the archived FieldIds in `changed_fields`!
+    let archived_legacy_id =
+        engine.schema().type_by_name("Item").unwrap().fields.iter().find(|f| f.name == "legacy_blob").unwrap().id;
+    let strict_unset_sum = engine
         .execute_batch(&[WireOp::Unset {
             target: EntityTarget::ExternalId("arch-strict".into()),
             fields: vec!["legacy_blob".into(), "legacy_ref".into()],
         }])
+        .unwrap()
+        .summary
         .unwrap();
+    assert!(strict_unset_sum.entity_deltas[0].changed_fields.contains(archived_legacy_id));
     assert_eq!(engine.get_field("arch-strict", "legacy_blob").unwrap(), None);
     assert_eq!(engine.get_field("arch-strict", "legacy_ref").unwrap(), None);
     let strict_row = engine.get_row("arch-strict").unwrap().unwrap();
@@ -1137,30 +1142,58 @@ fn pr268_batch2_atomic_exec_batch_archived_fields_restore_extras_and_abort_savep
     );
 
     // Patch `legacy_blob` (writes to extra AND scrubs archived FieldId), then Unset -> MUST NOT resurrect!
-    engine
+    // Also verify `changed_fields` records both the scrubbed archived FieldId and `EXTRA_BLOB_FIELD_ID`!
+    let archived_legacy_id =
+        engine.schema().type_by_name("Item").unwrap().fields.iter().find(|f| f.name == "legacy_blob").unwrap().id;
+    let patch_sum = engine
         .execute_batch(&[WireOp::Patch {
             target: EntityTarget::ExternalId("arch-extra".into()),
             fields: vec![("legacy_blob".into(), CanonicalValue::String("patched-extra".into()))],
         }])
+        .unwrap()
+        .summary
         .unwrap();
+    assert!(patch_sum.entity_deltas[0].changed_fields.contains(archived_legacy_id));
+    assert!(patch_sum.entity_deltas[0].changed_fields.contains(elmdb_engine::row::EXTRA_BLOB_FIELD_ID));
     assert_eq!(
         engine.get_field("arch-extra", "legacy_blob").unwrap(),
         Some(CanonicalValue::String("patched-extra".into()))
     );
-    engine
+    let unset_sum = engine
         .execute_batch(&[WireOp::Unset {
             target: EntityTarget::ExternalId("arch-extra".into()),
             fields: vec!["legacy_blob".into()],
         }])
+        .unwrap()
+        .summary
         .unwrap();
+    assert!(unset_sum.entity_deltas[0].changed_fields.contains(elmdb_engine::row::EXTRA_BLOB_FIELD_ID));
     assert_eq!(engine.get_field("arch-extra", "legacy_blob").unwrap(), None);
     assert!(!engine.get_row("arch-extra").unwrap().unwrap().fields.contains_key("legacy_blob"));
 
-    // Exercise `restore_loaded_extra_fields` validation guards & large spilled extra + `read_raw_dump_row`.
+    // Exercise `restore_loaded_extra_fields` empty no-op (no maint_seq bump), validation guards,
+    // large spilled extra, and orphan blob cleanup when shrinking spilled extra inline (P2-1)!
+    let maint_before = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        elmdb_engine::read_maint_seq(&ro, &engine.dbs()).unwrap()
+    };
+    engine.restore_loaded_extra_fields(&[]).unwrap();
+    let maint_after = {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        elmdb_engine::read_maint_seq(&ro, &engine.dbs()).unwrap()
+    };
+    assert_eq!(maint_after, maint_before, "empty restore_loaded_extra_fields must not bump maint_seq");
+
     let mut bad_proto = BTreeMap::new();
     bad_proto.insert("__proto__".into(), CanonicalValue::Int(1));
     assert_eq!(
         engine.restore_loaded_extra_fields(&[("arch-extra".into(), bad_proto)]).unwrap_err().code,
+        ErrorCode::ValidationFailed
+    );
+    let mut bad_nan = BTreeMap::new();
+    bad_nan.insert("bad_f".into(), CanonicalValue::Float(f64::NAN));
+    assert_eq!(
+        engine.restore_loaded_extra_fields(&[("arch-extra".into(), bad_nan)]).unwrap_err().code,
         ErrorCode::ValidationFailed
     );
     let mut bad_ref = BTreeMap::new();
@@ -1182,5 +1215,16 @@ fn pr268_batch2_atomic_exec_batch_archived_fields_restore_extras_and_abort_savep
         assert_eq!(dump_row.fields.get("title"), Some(&CanonicalValue::String("extra".into())));
         assert!(!dump_row.fields.contains_key("big_extra"));
         assert_eq!(dump_extra.get("big_extra"), Some(&CanonicalValue::String(big_extra)));
+    }
+    // Overwriting spilled 6 KiB extra with a small 4-byte extra must delete the orphaned EXTRA_BLOB_FIELD_ID blob!
+    let mut small_extra = BTreeMap::new();
+    small_extra.insert("big_extra".into(), CanonicalValue::String("tiny".into()));
+    engine.restore_loaded_extra_fields(&[("arch-extra".into(), small_extra)]).unwrap();
+    assert_eq!(engine.get_field("arch-extra", "big_extra").unwrap(), Some(CanonicalValue::String("tiny".into())));
+    {
+        let (ro, _) = engine.begin_read_pinned().unwrap();
+        let dbs = engine.dbs();
+        let mut cur = ro.cursor(dbs.blobs).unwrap();
+        assert!(cur.first().unwrap().is_none(), "shrinking spilled extra inline must delete orphaned blob");
     }
 }

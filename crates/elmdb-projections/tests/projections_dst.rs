@@ -570,6 +570,25 @@ fn eager_unique_index_rejects_preexisting_duplicates_atomically_and_autogrows_on
         }])
         .unwrap_err();
     assert_eq!(dup_write.code, ErrorCode::UniqueViolation);
+
+    // PR #270 P1-2: Sequential `TxnCtx::exec_batch` calls inside `transact()` swap unique keys cleanly
+    // (proving `exec_batch` is atomic via nested savepoint WITHOUT eagerly flushing projections!).
+    engine
+        .transact(|tx| {
+            tx.exec_batch(&[WireOp::Patch {
+                target: EntityTarget::ExternalId("d-1".into()),
+                fields: make_fields(&[("code", CanonicalValue::String("UNIQUE-2".into()))]),
+            }])?;
+            tx.exec_batch(&[WireOp::Patch {
+                target: EntityTarget::ExternalId("d-2".into()),
+                fields: make_fields(&[("code", CanonicalValue::String("DUP".into()))]),
+            }])?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(engine.get_field("d-1", "code").unwrap(), Some(CanonicalValue::String("UNIQUE-2".into())));
+    assert_eq!(engine.get_field("d-2", "code").unwrap(), Some(CanonicalValue::String("DUP".into())));
+
     reg.drain_all_builds(&engine).unwrap();
     assert!(reg.check(&engine, None).unwrap().is_ok());
 

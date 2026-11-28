@@ -427,8 +427,10 @@ impl InvalidationIndex {
     /// Registers (or atomically replaces) `watch_id`'s `ReadSet` collected during an MVCC snapshot read
     /// at `(read_at_seq, read_schema_epoch)` and immediately checks `CommitRing(read_at_seq + 1 ..= latest_seq)`!
     ///
-    /// Returns `true` if `watch_id` is ALREADY stale due to concurrent commits or `CommitRing` overflow
-    /// (guaranteeing **zero** lost invalidations under lock-free concurrent MVCC reads!).
+    /// Returns `(stale, other_dirty)`: `stale` is `true` if `watch_id` is already stale due to
+    /// concurrent commits or `CommitRing` overflow; `other_dirty` lists sibling active watches that
+    /// MUST be marked dirty when `current_schema.epoch` advanced past `self.latest_schema_epoch`.
+    #[must_use]
     pub fn register_after_read(
         &mut self,
         watch_id: WatchId,
@@ -436,42 +438,21 @@ impl InvalidationIndex {
         read_schema_epoch: u64,
         read_set: &ReadSet,
         current_schema: &CompiledSchema,
-    ) -> bool {
+    ) -> (bool, Vec<WatchId>) {
         self.register_after_read_with_maint(watch_id, read_at_seq, 0, read_schema_epoch, read_set, current_schema)
     }
 
     /// Registers (or atomically replaces) `watch_id`'s `ReadSet` collected during an MVCC snapshot read
-    /// at `(read_at_seq, read_at_maint_seq, read_schema_epoch)` and immediately checks `CommitRing`.
+    /// at `(read_at_seq, read_at_maint_seq, read_schema_epoch)` and returns `(stale, other_dirty)`.
     ///
     /// Comparing maintenance writes strictly against `read_at_maint_seq` (`rec.maint_seq > read_at_maint_seq`)
-    /// prevents post-maintenance watch livelock while catching every concurrent maintenance write!
-    pub fn register_after_read_with_maint(
-        &mut self,
-        watch_id: WatchId,
-        read_at_seq: u64,
-        read_at_maint_seq: u64,
-        read_schema_epoch: u64,
-        read_set: &ReadSet,
-        current_schema: &CompiledSchema,
-    ) -> bool {
-        self.register_after_read_with_maint_and_others(
-            watch_id,
-            read_at_seq,
-            read_at_maint_seq,
-            read_schema_epoch,
-            read_set,
-            current_schema,
-        )
-        .0
-    }
-
-    /// Registers (or atomically replaces) `watch_id`'s `ReadSet` and returns `(stale, other_dirty)`.
-    ///
+    /// prevents post-maintenance watch livelock while catching every concurrent maintenance write.
     /// If `current_schema.epoch` has advanced past `self.latest_schema_epoch` (e.g. due to a
     /// cross-process `set_schema`), advances `self.latest_schema_epoch` via a full-invalidation barrier
-    /// and returns all *other* active watches in `other_dirty` so they rerun against the new epoch
-    /// while `watch_id` itself settles cleanly when `read_schema_epoch == current_schema.epoch`.
-    pub fn register_after_read_with_maint_and_others(
+    /// and returns all *other* active watches in `other_dirty` so callers mark them dirty while
+    /// `watch_id` itself settles cleanly when `read_schema_epoch == current_schema.epoch`.
+    #[must_use]
+    pub fn register_after_read_with_maint(
         &mut self,
         watch_id: WatchId,
         read_at_seq: u64,
