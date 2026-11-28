@@ -244,10 +244,9 @@ pub(crate) struct DbiCache {
 /// so `grow_map` / `adopt_resized_map` never deadlock; instead, both remap paths drop any active pin
 /// and `assert!(slot.is_none())` under L2 `MapGate::write()` strictly before `mdb_env_set_mapsize`,
 /// and immediately re-acquire a fresh pin before releasing `MapGate::write()`.
-pub struct DurablePinTxn {
+pub(crate) struct DurablePinTxn {
     raw: NonNull<ffi::MDB_txn>,
     txnid: u64,
-    env_ptr: usize,
 }
 
 // SAFETY: `LmdbStore` opens with `MDB_NOTLS`, so an `MDB_RDONLY` transaction's reader slot is
@@ -257,9 +256,27 @@ unsafe impl Send for DurablePinTxn {}
 impl Drop for DurablePinTxn {
     fn drop(&mut self) {
         // SAFETY: `self.raw` is a live `MDB_RDONLY` `MDB_txn` owned exclusively by this wrapper;
-        // `LmdbEnvInner::drop` and both `mdb_env_set_mapsize` paths drop all pins before unmapping/closing `MDB_env`.
+        // `LmdbEnvInner::drop` and both `mdb_env_set_mapsize` paths drop installed pins and forbid
+        // active staged pins (`staged_pin_count == 0`) before unmapping/closing `MDB_env`.
         unsafe {
             ffi::mdb_txn_abort(self.raw.as_ptr());
+        }
+    }
+}
+
+/// Lifetime-bound staged `MDB_RDONLY` durable pin returned by `KvStore::prepare_durable_pin*`.
+/// Borrows both `&'a LmdbEnvInner` and the caller's L2 map guard, and tracks `staged_pin_count`
+/// so neither `mdb_env_close` nor `mdb_env_set_mapsize` can ever run while a staged pin is alive.
+pub struct StagedDurablePin<'a> {
+    inner: Option<DurablePinTxn>,
+    env: &'a LmdbEnvInner,
+}
+
+impl Drop for StagedDurablePin<'_> {
+    fn drop(&mut self) {
+        if let Some(pin) = self.inner.take() {
+            drop(pin);
+            self.env.staged_pin_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
@@ -292,6 +309,8 @@ pub(crate) struct LmdbEnvInner {
     pub(crate) dbis: MetaRwLock<DbiCache>,
     /// L5 mutex holding the active `Grouped`-mode durable snapshot pin (`MDB_RDONLY` txn in `lock.mdb`).
     pub(crate) durable_pin: MetaLock<Option<DurablePinTxn>>,
+    /// Count of live uninstalled `StagedDurablePin` tokens; asserted `== 0` before any `mdb_env_set_mapsize`.
+    pub(crate) staged_pin_count: AtomicUsize,
     /// Held until strictly AFTER `mdb_env_close` completes so duplicate opens are blocked cleanly.
     env_identity: EnvIdentity,
 }
@@ -366,6 +385,14 @@ impl LmdbEnvInner {
         NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null read MDB_txn".into()))
     }
 
+    /// Opens a fresh staged `MDB_RDONLY` durable-pin transaction while the caller holds L2 `MapGate`
+    /// (read or write), serializing against DBI publication via L4 `dbi_publish_gate.read_txn()`.
+    pub(crate) fn open_staged_durable_pin(&self) -> Result<StagedDurablePin<'_>, StorageError> {
+        let pin = self.open_durable_pin_txn()?;
+        self.staged_pin_count.fetch_add(1, Ordering::AcqRel);
+        Ok(StagedDurablePin { inner: Some(pin), env: self })
+    }
+
     /// Opens a fresh `MDB_RDONLY` durable-pin transaction while the caller holds L2 `MapGate`
     /// (read or write), serializing against DBI publication via L4 `dbi_publish_gate.read_txn()`.
     pub(crate) fn open_durable_pin_txn(&self) -> Result<DurablePinTxn, StorageError> {
@@ -374,15 +401,18 @@ impl LmdbEnvInner {
         let raw = self.begin_raw_ro_txn_locked()?;
         // SAFETY: `raw` is a live `MDB_RDONLY` transaction opened above while L2+L4 are held.
         let txnid = unsafe { ffi::mdb_txn_id(raw.as_ptr()) } as u64;
-        Ok(DurablePinTxn { raw, txnid, env_ptr: self.env.as_ptr() as usize })
+        Ok(DurablePinTxn { raw, txnid })
     }
 
     /// Installs a previously prepared durable pin (dropping any prior pin after `synced.v2` is durable).
-    pub(crate) fn install_durable_pin_token(&self, new_pin: DurablePinTxn) {
-        assert_eq!(new_pin.env_ptr, self.env.as_ptr() as usize, "DurablePinTxn must belong to the same LmdbStore");
+    pub(crate) fn install_durable_pin_token(&self, mut staged: StagedDurablePin<'_>) {
+        assert!(std::ptr::eq(staged.env, self), "StagedDurablePin must belong to the same LmdbStore");
+        let new_pin = staged.inner.take().expect("staged pin present");
         let old_pin = {
             let mut slot = self.durable_pin.lock();
-            slot.replace(new_pin)
+            let old = slot.replace(new_pin);
+            self.staged_pin_count.fetch_sub(1, Ordering::AcqRel);
+            old
         };
         drop(old_pin);
     }
@@ -390,14 +420,29 @@ impl LmdbEnvInner {
     /// Opens a new durable pin at the current tip *before* aborting the previous pin (zero unpinned window).
     /// Caller MUST hold L2 `MapGate` (read or write).
     pub(crate) fn refresh_durable_pin_under_map_lock(&self) -> Result<(), StorageError> {
-        let new_pin = self.open_durable_pin_txn()?;
-        self.install_durable_pin_token(new_pin);
+        let staged = self.open_staged_durable_pin()?;
+        self.install_durable_pin_token(staged);
+        Ok(())
+    }
+
+    /// Rejects `mdb_env_set_mapsize` if any caller still holds a live `StagedDurablePin` token.
+    pub(crate) fn check_no_staged_pins(&self) -> Result<(), StorageError> {
+        if self.staged_pin_count.load(Ordering::Acquire) != 0 {
+            return Err(StorageError::InvalidState(
+                "cannot remap LMDB environment while a staged durable pin is still alive".into(),
+            ));
+        }
         Ok(())
     }
 
     /// Drops any active durable pin and asserts the slot is empty before `mdb_env_set_mapsize`.
     /// Caller MUST hold exclusive L2 `MapGate::write()`.
     pub(crate) fn clear_durable_pin_before_remap(&self) {
+        assert_eq!(
+            self.staged_pin_count.load(Ordering::Acquire),
+            0,
+            "staged durable pins must be dropped before mdb_env_set_mapsize"
+        );
         let old = {
             let mut slot = self.durable_pin.lock();
             let old = slot.take();
@@ -631,6 +676,7 @@ impl LmdbStore {
                 dbi_publish_gate: DbiPublishGate::new_in_scope(lock_scope),
                 dbis: MetaRwLock::new_in_scope(lock_scope, cache),
                 durable_pin: MetaLock::new_in_scope(lock_scope, None),
+                staged_pin_count: AtomicUsize::new(0),
                 env_identity,
             }),
         })
@@ -820,7 +866,7 @@ impl KvStore for LmdbStore {
     type OwnedRwTxn = LmdbRwTxn<'static>;
     type MapReadGuard = LmdbMapReadGuard;
     type MapWriteGuard<'a> = LmdbMapWriteGuard<'a>;
-    type DurablePinToken = DurablePinTxn;
+    type DurablePinToken<'a> = StagedDurablePin<'a>;
 
     fn lock_map_read(&self) -> Self::MapReadGuard {
         LmdbMapReadGuard { _guard: self.inner.map_gate.read_arc(), env_ptr: self.inner.env.as_ptr() as usize }
@@ -981,6 +1027,7 @@ impl KvStore for LmdbStore {
         pin_after: bool,
     ) -> Result<usize, StorageError> {
         self.inner.assert_map_write_guard(map_guard)?;
+        self.inner.check_no_staged_pins()?;
         self.inner.check_map_ok()?;
         let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
         // SAFETY: `self.inner.env` is open and protected by exclusive L2 `map_guard`.
@@ -1045,6 +1092,7 @@ impl KvStore for LmdbStore {
         pin_after: bool,
     ) -> Result<usize, StorageError> {
         self.inner.assert_map_write_guard(map_guard)?;
+        self.inner.check_no_staged_pins()?;
         let actual = self.inner.adopt_map_size_raw_under_write()?;
         if pin_after {
             self.inner.acquire_pin_retrying_resize_under_write()?;
@@ -1074,24 +1122,27 @@ impl KvStore for LmdbStore {
         Ok(())
     }
 
-    fn prepare_durable_pin(&self, map_guard: &Self::MapReadGuard) -> Result<Self::DurablePinToken, StorageError> {
+    fn prepare_durable_pin<'a>(
+        &'a self,
+        map_guard: &'a Self::MapReadGuard,
+    ) -> Result<Self::DurablePinToken<'a>, StorageError> {
         self.inner.assert_map_guard(map_guard)?;
-        self.inner.open_durable_pin_txn()
+        self.inner.open_staged_durable_pin()
     }
 
-    fn prepare_durable_pin_under_write(
-        &self,
-        map_guard: &Self::MapWriteGuard<'_>,
-    ) -> Result<Self::DurablePinToken, StorageError> {
+    fn prepare_durable_pin_under_write<'a>(
+        &'a self,
+        map_guard: &'a Self::MapWriteGuard<'_>,
+    ) -> Result<Self::DurablePinToken<'a>, StorageError> {
         self.inner.assert_map_write_guard(map_guard)?;
-        self.inner.open_durable_pin_txn()
+        self.inner.open_staged_durable_pin()
     }
 
-    fn pin_txnid(token: &Self::DurablePinToken) -> u64 {
-        token.txnid
+    fn pin_txnid(token: &Self::DurablePinToken<'_>) -> u64 {
+        token.inner.as_ref().expect("staged pin present").txnid
     }
 
-    fn install_durable_pin(&self, token: Self::DurablePinToken) {
+    fn install_durable_pin<'a>(&'a self, token: Self::DurablePinToken<'a>) {
         self.inner.install_durable_pin_token(token);
     }
 

@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::ops::Bound;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
@@ -165,6 +166,16 @@ pub struct SimKvStore {
     fail_next_pin_map_resized: Arc<AtomicU32>,
     fail_next_grow_io: Arc<AtomicU32>,
     peer_commit_on_next_adopt: Arc<AtomicU32>,
+    peer_commit_on_next_pin: Arc<AtomicU32>,
+    peer_commit_on_next_receipt: Arc<AtomicU32>,
+    sync_calls: Arc<AtomicU32>,
+}
+
+/// Lifetime-bound staged durable pin token for `SimKvStore`.
+#[derive(Debug)]
+pub struct SimStagedPin<'a> {
+    txnid: u64,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl SimKvStore {
@@ -189,6 +200,9 @@ impl SimKvStore {
             fail_next_pin_map_resized: Arc::new(AtomicU32::new(0)),
             fail_next_grow_io: Arc::new(AtomicU32::new(0)),
             peer_commit_on_next_adopt: Arc::new(AtomicU32::new(0)),
+            peer_commit_on_next_pin: Arc::new(AtomicU32::new(0)),
+            peer_commit_on_next_receipt: Arc::new(AtomicU32::new(0)),
+            sync_calls: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -220,6 +234,21 @@ impl SimKvStore {
     /// Simulates a cross-process peer commit landing during the next `adopt_resized_map_locked`.
     pub fn inject_peer_commit_on_adopt(&self, count: u32) {
         self.peer_commit_on_next_adopt.store(count, AtomicOrdering::Release);
+    }
+
+    /// Simulates a cross-process peer commit landing just before the next `prepare_durable_pin`.
+    pub fn inject_peer_commit_on_pin(&self, count: u32) {
+        self.peer_commit_on_next_pin.store(count, AtomicOrdering::Release);
+    }
+
+    /// Simulates a cross-process peer commit landing just before the next `active_receipt`.
+    pub fn inject_peer_commit_on_receipt(&self, count: u32) {
+        self.peer_commit_on_next_receipt.store(count, AtomicOrdering::Release);
+    }
+
+    /// Number of successful `sync` / `sync_under_write` flushes executed on this store.
+    pub fn sync_count(&self) -> u32 {
+        self.sync_calls.load(AtomicOrdering::Acquire)
     }
 
     /// Simulates power loss: drops all uncommitted and unsynced commits, reverting the store
@@ -715,7 +744,7 @@ impl KvStore for SimKvStore {
     type OwnedRwTxn = SimRwTxn;
     type MapReadGuard = ();
     type MapWriteGuard<'a> = ();
-    type DurablePinToken = u64;
+    type DurablePinToken<'a> = SimStagedPin<'a>;
 
     fn lock_map_read(&self) -> Self::MapReadGuard {}
 
@@ -773,17 +802,21 @@ impl KvStore for SimKvStore {
         inner.durable = Arc::clone(&inner.committed);
         inner.durable_freed_at = None;
         inner.durable_tree_corrupted = false;
+        self.sync_calls.fetch_add(1, AtomicOrdering::AcqRel);
         Ok(())
     }
 
-    fn prepare_durable_pin(&self, _map_guard: &Self::MapReadGuard) -> Result<Self::DurablePinToken, StorageError> {
-        self.prepare_durable_pin_under_write(&())
+    fn prepare_durable_pin<'a>(
+        &'a self,
+        map_guard: &'a Self::MapReadGuard,
+    ) -> Result<Self::DurablePinToken<'a>, StorageError> {
+        self.prepare_durable_pin_under_write(map_guard)
     }
 
-    fn prepare_durable_pin_under_write(
-        &self,
-        _map_guard: &Self::MapWriteGuard<'_>,
-    ) -> Result<Self::DurablePinToken, StorageError> {
+    fn prepare_durable_pin_under_write<'a>(
+        &'a self,
+        _map_guard: &'a Self::MapWriteGuard<'_>,
+    ) -> Result<Self::DurablePinToken<'a>, StorageError> {
         if self
             .fail_next_pin_map_resized
             .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
@@ -795,15 +828,25 @@ impl KvStore for SimKvStore {
         {
             return Err(StorageError::ReadersFull);
         }
-        Ok(self.inner.lock().committed.txnid)
+        let mut inner = self.inner.lock();
+        if self
+            .peer_commit_on_next_pin
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            let mut next = (*inner.committed).clone();
+            next.txnid = next.txnid.saturating_add(1);
+            inner.committed = Arc::new(next);
+        }
+        Ok(SimStagedPin { txnid: inner.committed.txnid, _marker: PhantomData })
     }
 
-    fn pin_txnid(token: &Self::DurablePinToken) -> u64 {
-        *token
+    fn pin_txnid(token: &Self::DurablePinToken<'_>) -> u64 {
+        token.txnid
     }
 
-    fn install_durable_pin(&self, token: Self::DurablePinToken) {
-        self.inner.lock().pinned_txnid = Some(token);
+    fn install_durable_pin<'a>(&'a self, token: Self::DurablePinToken<'a>) {
+        self.inner.lock().pinned_txnid = Some(token.txnid);
     }
 
     fn lock_scope_id(&self) -> LockScopeId {
@@ -818,13 +861,27 @@ impl KvStore for SimKvStore {
         Ok(self.inner.lock().committed.roots_sha256())
     }
 
+    fn active_receipt(&self) -> Result<CommitReceipt, StorageError> {
+        let mut inner = self.inner.lock();
+        if self
+            .peer_commit_on_next_receipt
+            .try_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            let mut next = (*inner.committed).clone();
+            next.txnid = next.txnid.saturating_add(1);
+            inner.committed = Arc::new(next);
+        }
+        Ok(CommitReceipt { txnid: inner.committed.txnid, roots_sha256: inner.committed.roots_sha256() })
+    }
+
     fn map_size(&self) -> usize {
         self.inner.lock().config.map_size
     }
 
     fn grow_map_locked(
         &self,
-        _map_guard: &Self::MapWriteGuard<'_>,
+        map_guard: &Self::MapWriteGuard<'_>,
         min_size: Option<usize>,
         pin_after: bool,
     ) -> Result<usize, StorageError> {
@@ -843,7 +900,7 @@ impl KvStore for SimKvStore {
             inner.config.map_size
         };
         if pin_after {
-            let tok = self.prepare_durable_pin_under_write(&())?;
+            let tok = self.prepare_durable_pin_under_write(map_guard)?;
             self.install_durable_pin(tok);
         }
         Ok(new_size)
@@ -851,7 +908,7 @@ impl KvStore for SimKvStore {
 
     fn adopt_resized_map_locked(
         &self,
-        _map_guard: &Self::MapWriteGuard<'_>,
+        map_guard: &Self::MapWriteGuard<'_>,
         pin_after: bool,
     ) -> Result<usize, StorageError> {
         if self
@@ -876,7 +933,7 @@ impl KvStore for SimKvStore {
             inner.config.map_size
         };
         if pin_after {
-            let tok = self.prepare_durable_pin_under_write(&())?;
+            let tok = self.prepare_durable_pin_under_write(map_guard)?;
             self.install_durable_pin(tok);
         }
         Ok(size)

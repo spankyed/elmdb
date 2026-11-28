@@ -555,7 +555,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// external cross-process map resizes (`MDB_MAP_RESIZED`).
     /// Fails closed if the durability gate is poisoned.
     pub fn begin_read(&self) -> Result<S::RoTxn<'_>, StorageError> {
-        loop {
+        for _ in 0..8 {
             self.check_poisoned()?;
             match self.store.begin_read() {
                 Ok(ro) => return Ok(ro),
@@ -566,6 +566,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
                 Err(err) => return Err(err),
             }
         }
+        Err(StorageError::MapResized)
     }
 
     /// Begins a write transaction guarded by L2 `MapGate` (acquired before L3 `WriterLock`),
@@ -574,7 +575,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if self.read_only {
             return Err(StorageError::ReadOnly);
         }
-        loop {
+        for _ in 0..8 {
             self.check_poisoned()?;
             if let Some(target) = self.store.needs_map_growth()? {
                 self.grow_map(Some(target))?;
@@ -603,6 +604,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
                 Err(err) => return Err(err),
             }
         }
+        Err(StorageError::MapResized)
     }
 
     /// Begins an owned `'static` (but `!Send`) write transaction guarded by L2 `MapGate` + L3 `WriterLock`,
@@ -615,7 +617,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if self.read_only {
             return Err(StorageError::ReadOnly);
         }
-        loop {
+        for _ in 0..8 {
             self.check_poisoned()?;
             if let Some(target) = self.store.needs_map_growth()? {
                 self.grow_map(Some(target))?;
@@ -644,6 +646,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
                 Err(err) => return Err(err),
             }
         }
+        Err(StorageError::MapResized)
     }
 
     /// Flushes LMDB to disk and writes + fsyncs the next alternating 4 KiB durability slot.
@@ -896,7 +899,10 @@ impl<'a, 'b, S: KvStore + 'b> MapWitness<'a, 'b, S> {
         }
     }
 
-    fn prepare_durable_pin(&self, store: &S) -> Result<S::DurablePinToken, StorageError> {
+    fn prepare_durable_pin<'c>(&'c self, store: &'c S) -> Result<S::DurablePinToken<'c>, StorageError>
+    where
+        'a: 'c,
+    {
         match self {
             Self::Read(g) => store.prepare_durable_pin(g),
             Self::Write(g) => store.prepare_durable_pin_under_write(g),
@@ -1096,8 +1102,8 @@ impl<'a, S: KvStore + 'a, V: Vfs> GatedWriteTxn<'a, S, V> {
         let mut guard = Guard { txn: self, depth, armed: true };
         match f(guard.txn) {
             Ok(value) => {
-                guard.armed = false;
                 guard.txn.commit_savepoint(depth).map_err(E::from)?;
+                guard.armed = false;
                 Ok(value)
             }
             Err(err) => {

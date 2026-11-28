@@ -772,6 +772,68 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         assert!(grp_p.sync().is_err());
         assert_eq!(store_p.pinned_txnid(), Some(first_pin), "failed sync must keep prior durable pin intact");
 
+        // 5b. Direct `SimKvStore::pin_txnid` (txnid >= 2), cross-process peer commit between
+        //     `prepare_durable_pin` and `active_receipt` (`P < S`), cross-process peer commit
+        //     between `active_receipt` and `prepare_durable_pin` during `recover()` (`pin > observed`
+        //     vs `pin == observed` with zero extra sync), AND `GatedWriteTxn::with_savepoint` panic unwind!
+        let vfs_c = SimVfs::new(BootId([0x43; 16]));
+        let dir_c = PathBuf::from("/phase0a_pin_and_savepoint");
+        let store_c = SimKvStore::new(SimKvConfig::default());
+        let (grp_c, _) = DurabilityGate::open(store_c.clone(), vfs_c.clone(), &dir_c, DurabilityMode::Grouped).unwrap();
+        // Commit 2 txns so txnid >= 2, then verify `SimKvStore::pin_txnid` returns exact txnid (not 0 or 1).
+        for k in [b"a", b"b"] {
+            let mut tx = grp_c.begin_write().unwrap();
+            let db = tx.open_subdb("d", DbFlags::DEFAULT).unwrap();
+            tx.put(db, k, b"v").unwrap();
+            tx.commit().unwrap();
+        }
+        {
+            let tok = store_c.prepare_durable_pin(&()).unwrap();
+            assert_eq!(SimKvStore::pin_txnid(&tok), 2);
+        }
+        // Peer commits between `prepare_durable_pin` (P = 2) and `active_receipt` (S = 3) during `sync()`!
+        // `P < S` MUST succeed, seal S = 3, and install pin at P = 2.
+        store_c.inject_peer_commit_on_receipt(1);
+        let slot_ps = grp_c.sync().unwrap().unwrap();
+        assert_eq!(slot_ps.txnid, 3);
+        assert_eq!(store_c.pinned_txnid(), Some(2));
+        // Clean reopen with NO peer commit (`pin == observed`): MUST NOT perform an extra sync!
+        let syncs_before_clean = store_c.sync_count();
+        let (_grp_c2, rep_clean) =
+            DurabilityGate::open(store_c.clone(), vfs_c.clone(), &dir_c, DurabilityMode::Grouped).unwrap();
+        assert_eq!(rep_clean.status, RecoveryStatus::Clean);
+        assert_eq!(store_c.sync_count(), syncs_before_clean, "Clean recover with pin == observed must not sync");
+        // Clean reopen WITH peer commit between `active_receipt` (3) and `prepare_durable_pin` (4):
+        // MUST seal the newer tip (4) so `synced.v2 >= pin_txnid`!
+        store_c.inject_peer_commit_on_pin(1);
+        let (grp_c3, rep_peer) =
+            DurabilityGate::open(store_c.clone(), vfs_c.clone(), &dir_c, DurabilityMode::Grouped).unwrap();
+        assert_eq!(rep_peer.status, RecoveryStatus::Clean);
+        assert_eq!(store_c.durable_txnid(), 4);
+        assert_eq!(store_c.pinned_txnid(), Some(4));
+        assert_eq!(store_c.sync_count(), syncs_before_clean + 1);
+
+        // `GatedWriteTxn::with_savepoint` panic-safety RAII guard unwinds nested savepoints `>= depth`!
+        let mut tx = grp_c3.begin_write().unwrap();
+        let db = tx.open_subdb("d", DbFlags::DEFAULT).unwrap();
+        tx.put(db, b"outer", b"keep").unwrap();
+        let d_outer = tx.begin_savepoint().unwrap();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = tx.with_savepoint(|t| -> Result<(), StorageError> {
+                t.put(db, b"inner1", b"drop").unwrap();
+                let _leaked_nested = t.begin_savepoint().unwrap();
+                t.put(db, b"inner2", b"drop").unwrap();
+                panic!("simulated panic inside GatedWriteTxn::with_savepoint");
+            });
+        }));
+        assert!(panicked.is_err());
+        assert_eq!(tx.savepoint_depth(), d_outer, "Guard::drop must unwind all savepoints >= depth");
+        tx.commit_savepoint(d_outer).unwrap();
+        assert_eq!(tx.get(db, b"outer").unwrap(), Some(b"keep".as_slice()));
+        assert_eq!(tx.get(db, b"inner1").unwrap(), None);
+        assert_eq!(tx.get(db, b"inner2").unwrap(), None);
+        tx.commit().unwrap();
+
         let vfs_st = SimVfs::new(BootId([0x42; 16]));
         let dir_st = PathBuf::from("/strict_post_commit_msg");
         let store_st = SimKvStore::new(SimKvConfig::default());

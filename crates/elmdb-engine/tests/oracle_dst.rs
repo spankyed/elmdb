@@ -1266,6 +1266,20 @@ fn phase0a_rust_hook_no_rerun_on_map_full_savepoint_panic_guard_and_archived_tie
     assert_eq!(rep.status, RecoveryStatus::Fresh);
     assert!(vfs.exists(&dir.join("synced.v2")), "fresh Grouped Engine must seal synced.v2 at bootstrap");
 
+    // Fresh Strict Engine must NOT call a redundant second `gate.sync()` at bootstrap (kills `&& -> ||`).
+    let vfs_strict = SimVfs::new(BootId([0x69; 16]));
+    let store_strict = SimKvStore::new(SimKvConfig::default());
+    let (_strict_eng, strict_rep) = Engine::open(
+        store_strict.clone(),
+        vfs_strict,
+        SimClock::new(1000),
+        Path::new("/phase0a_strict_bootstrap"),
+        DurabilityMode::Strict,
+    )
+    .unwrap();
+    assert_eq!(strict_rep.status, RecoveryStatus::Fresh);
+    assert_eq!(store_strict.sync_count(), 1, "Strict fresh bootstrap must sync once, not twice");
+
     let mut schema = RawSchema::default();
     let mut blob_fields = BTreeMap::new();
     blob_fields.insert("body".into(), RawField { kind: RawFieldKind::Bytes, optional: false, nullable: false });
@@ -1356,8 +1370,39 @@ fn phase0a_rust_hook_no_rerun_on_map_full_savepoint_panic_guard_and_archived_tie
     assert!(engine3.get_row("rust-hook-big").unwrap().is_some());
     assert!(engine3.unregister_before_commit(hid));
 
-    // 2. `TxnCtx::savepoint` panic-safety RAII guard rolls back panicked savepoint & leaves outer txn intact!
-    let mut owned = Arc::new(engine3).begin_owned_txn().unwrap();
+    // Non-MapFull error on `Engine::execute_batch` MUST NOT grow `map_size` (kills `err.is_map_full() -> true`).
+    let map_before_non_full = store.map_size();
+    let bad_err = engine3
+        .execute_batch(&[WireOp::Create { type_name: "NoSuchType".into(), external_id: None, fields: vec![] }])
+        .unwrap_err();
+    assert_eq!(bad_err.code, ErrorCode::UnknownType);
+    assert_eq!(store.map_size(), map_before_non_full, "non-MapFull error must not grow map");
+
+    // Plain `Engine::execute_batch` (zero hooks invoked) auto-grows on `MapFull` and succeeds cleanly!
+    let map_before_plain = store.map_size();
+    let mut plain_big = Vec::with_capacity(map_before_plain + 32 * 1024);
+    for _ in 0..(map_before_plain + 32 * 1024) {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        plain_big.push((x >> 24) as u8);
+    }
+    engine3
+        .execute_batch(&[WireOp::Create {
+            type_name: "Blob".into(),
+            external_id: Some("rust-plain-autogrow".into()),
+            fields: vec![("body".into(), CanonicalValue::Bytes(plain_big))],
+        }])
+        .unwrap();
+    assert!(store.map_size() > map_before_plain, "plain batch must auto-grow map on MapFull");
+    assert!(engine3.get_row("rust-plain-autogrow").unwrap().is_some());
+
+    // Direct `TxnCtx::hooks_invoked()` transitions from `false` -> `true` ONLY when a hook runs.
+    let eng_arc = Arc::new(engine3);
+    let h_flag =
+        eng_arc.register_before_commit(BeforeCommitHook { wants: TypeMask::all(), callback: Arc::new(|_ctx| Ok(())) });
+    let mut owned = eng_arc.begin_owned_txn().unwrap();
+    assert!(!owned.hooks_invoked(), "fresh TxnCtx must report hooks_invoked == false");
     owned
         .exec_batch_and_flush(&[WireOp::Create {
             type_name: "Blob".into(),
@@ -1365,6 +1410,11 @@ fn phase0a_rust_hook_no_rerun_on_map_full_savepoint_panic_guard_and_archived_tie
             fields: vec![("body".into(), CanonicalValue::Bytes(vec![1]))],
         }])
         .unwrap();
+    owned.run_rust_hooks_for_round(&TypeMask::all()).unwrap();
+    assert!(owned.hooks_invoked(), "TxnCtx must report hooks_invoked == true after hook ran");
+    assert!(eng_arc.unregister_before_commit(h_flag));
+
+    // 2. `TxnCtx::savepoint` panic-safety RAII guard rolls back panicked savepoint & leaves outer txn intact!
     let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let _ = owned.savepoint(|ctx| -> elmdb_wire::Result<()> {
             ctx.exec_batch_and_flush(&[WireOp::Create {

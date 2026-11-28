@@ -1009,22 +1009,14 @@ impl<S: KvStore, V: Vfs, C: Clock> Engine<S, V, C> {
             match res {
                 Ok(v) => return Ok(v),
                 Err(err) if err.is_map_full() => {
-                    if hooks_invoked {
-                        // Never silently re-run `beforeCommit` hooks: grow the map once after releasing
-                        // L2+L3, propagate any grow failure, and surface `StorageFull` for caller retry.
-                        let target = before.saturating_mul(2);
-                        self.gate.grow_map(Some(target))?;
+                    let target = before.saturating_mul(2);
+                    self.gate.grow_map(Some(target))?;
+                    if hooks_invoked || attempt == MAX_GROWTH_RETRIES {
+                        // Never silently re-run `beforeCommit` hooks (or loop past MAX_GROWTH_RETRIES):
+                        // the map has grown once; surface `StorageFull` for explicit caller retry.
                         return Err(err);
                     }
-                    if attempt < MAX_GROWTH_RETRIES {
-                        let target = before.saturating_mul(2);
-                        let after = self.gate.grow_map(Some(target))?;
-                        if after <= before {
-                            return Err(err);
-                        }
-                        continue;
-                    }
-                    return Err(err);
+                    continue;
                 }
                 Err(err) => return Err(err),
             }
@@ -1695,8 +1687,8 @@ impl<'a, S: KvStore, V: Vfs, C: Clock> TxnCtx<'a, S, V, C> {
         let mut guard = SavepointGuard { ctx: self, depth, armed: true };
         match f(guard.ctx) {
             Ok(v) => {
-                guard.armed = false;
                 guard.ctx.commit_savepoint(depth)?;
+                guard.armed = false;
                 Ok(v)
             }
             Err(err) => {

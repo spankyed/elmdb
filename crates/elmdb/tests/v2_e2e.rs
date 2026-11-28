@@ -3364,6 +3364,52 @@ fn pr268_cross_batch_transact_scoped_and_host_hook_map_full_autogrow() {
     assert!(db_arc.stats().unwrap().map_size_bytes > size_before_plain);
     assert!(db_arc.get_row("plain-autogrow").unwrap().is_some());
     assert!(db_arc.unregister_before_commit(h_other));
+
+    // 7b. A host hook that hits real `MapFull` internally and swallows it into a non-`MapFull` error
+    //     MUST NOT grow `map_size_bytes` in `Database::execute_batch`!
+    let sw_dir = tmp.path().join("swallow_db");
+    let sw_db = Arc::new(
+        Database::open(
+            &sw_dir,
+            OpenOptions { durability: DurabilityMode::Strict, map_size: Some(512 * 1024), ..OpenOptions::default() },
+        )
+        .unwrap(),
+    );
+    sw_db.set_schema(&s).unwrap();
+    let size_before_swallow = sw_db.stats().unwrap().map_size_bytes;
+    let swallow_big = incompressible(usize::try_from(size_before_swallow).unwrap() + 16 * 1024, 9);
+    let db_swallow = Arc::clone(&sw_db);
+    let h_swallow = sw_db
+        .register_host_before_commit(
+            TypeMask::all(),
+            Arc::new(move |_| {
+                let err = db_swallow
+                    .execute_batch(&[WireOp::Create {
+                        type_name: "Blob".into(),
+                        external_id: Some("swallow-big".into()),
+                        fields: vec![("body".into(), CanonicalValue::Bytes(swallow_big.clone()))],
+                    }])
+                    .unwrap_err();
+                assert!(err.is_map_full(), "expected MapFull inside swallow hook, got {err:?}");
+                Err(ElmdbError::new(ErrorCode::HookAborted, "hook swallowed map_full"))
+            }),
+        )
+        .unwrap();
+    let swallow_err = sw_db
+        .execute_batch(&[WireOp::Create {
+            type_name: "Blob".into(),
+            external_id: Some("swallow-trigger".into()),
+            fields: vec![("body".into(), CanonicalValue::Bytes(vec![7]))],
+        }])
+        .unwrap_err();
+    assert_eq!(swallow_err.code, ErrorCode::HookAborted);
+    assert_eq!(
+        sw_db.stats().unwrap().map_size_bytes,
+        size_before_swallow,
+        "non-MapFull error returned by hook must not grow map_size"
+    );
+    assert!(sw_db.unregister_before_commit(h_swallow));
+    sw_db.close().unwrap();
     db_arc.close().unwrap();
 
     // 8. Fresh Grouped DB bootstrap seals `synced.v2` immediately: same-boot reopen after an unsynced

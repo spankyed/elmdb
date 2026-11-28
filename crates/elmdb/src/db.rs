@@ -844,7 +844,7 @@ impl Database {
         // Retries automatically strictly on LMDB `MDB_MAP_FULL` by doubling `map_size` once per attempt under
         // L2 `MapGate::write()` (avoiding redundant Grouped fsync pairs).
         let (created_ids, committed) = 'retry: {
-            for _ in 0..8 {
+            for attempt in 0..=8 {
                 match self.transact_scoped_with_receipt(&eng, TransactOptions::default(), || {
                     self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(ops))
                 }) {
@@ -852,19 +852,16 @@ impl Database {
                     (Err(err), Some(info)) if err.is_map_full() => {
                         let target = info.map_size_before.saturating_mul(2);
                         eng.gate().grow_map(Some(target))?;
-                        if info.hooks_invoked {
-                            // Never silently re-run `beforeCommit` hooks: the map has grown once;
-                            // surface `STORAGE_FULL` so the caller explicitly retries.
+                        if info.hooks_invoked || attempt == 8 {
+                            // Never silently re-run `beforeCommit` hooks (or loop past 8 retries):
+                            // the map has grown once; surface `STORAGE_FULL` so the caller explicitly retries.
                             return Err(err);
                         }
                     }
                     (Err(err), _) => return Err(err),
                 }
             }
-            let (res, _) = self.transact_scoped_with_receipt(&eng, TransactOptions::default(), || {
-                self.with_active_ctx_mut(|ctx| ctx.exec_batch_and_flush(ops))
-            });
-            res?
+            unreachable!("retry loop returns on final attempt")
         };
         let (commit_seq, receipt) = match committed {
             Some((seq, receipt)) => (seq, receipt),

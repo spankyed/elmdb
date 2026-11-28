@@ -109,7 +109,11 @@ pub trait KvStore: Send + Sync {
         Self: 'a;
     /// Opaque handle representing a staged durable-snapshot pin opened *before* reading the
     /// active meta receipt and syncing, then installed only after `synced.v2` is persisted.
-    type DurablePinToken: Send;
+    /// Lifetime-bound to `&'a self` and the caller's L2 map guard so safe Rust cannot drop
+    /// the environment or release L2 while an uninstalled pin is live.
+    type DurablePinToken<'a>: Send
+    where
+        Self: 'a;
 
     fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError>;
     fn begin_write(&self, map_guard: Self::MapReadGuard) -> Result<Self::RwTxn<'_>, StorageError>;
@@ -168,16 +172,19 @@ pub trait KvStore: Send + Sync {
     /// Opens a fresh read-only durable-snapshot pin at the current tip *before* syncing and
     /// *without* dropping any prior pin (zero unpinned window, and guarantees `pin_txnid <= receipt.txnid`
     /// even if a concurrent cross-process writer commits during `sync()`).
-    fn prepare_durable_pin(&self, map_guard: &Self::MapReadGuard) -> Result<Self::DurablePinToken, StorageError>;
+    fn prepare_durable_pin<'a>(
+        &'a self,
+        map_guard: &'a Self::MapReadGuard,
+    ) -> Result<Self::DurablePinToken<'a>, StorageError>;
     /// Opens a fresh staged durable pin while holding exclusive L2 `MapWriteGuard`.
-    fn prepare_durable_pin_under_write(
-        &self,
-        map_guard: &Self::MapWriteGuard<'_>,
-    ) -> Result<Self::DurablePinToken, StorageError>;
+    fn prepare_durable_pin_under_write<'a>(
+        &'a self,
+        map_guard: &'a Self::MapWriteGuard<'_>,
+    ) -> Result<Self::DurablePinToken<'a>, StorageError>;
     /// Returns the MVCC transaction ID pinned by `token`.
-    fn pin_txnid(token: &Self::DurablePinToken) -> u64;
+    fn pin_txnid(token: &Self::DurablePinToken<'_>) -> u64;
     /// Installs a previously prepared durable pin (dropping any prior pin after `synced.v2` is durable).
-    fn install_durable_pin(&self, token: Self::DurablePinToken);
+    fn install_durable_pin<'a>(&'a self, token: Self::DurablePinToken<'a>);
     /// Returns the debug lock-hierarchy scope ID for this store instance so higher layers
     /// (`DurabilityGate`, `Engine`) bind their L1–L5 locks to the same per-database scope.
     fn lock_scope_id(&self) -> LockScopeId;

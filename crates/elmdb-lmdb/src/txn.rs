@@ -1132,9 +1132,20 @@ mod tests {
             LmdbConfig { map_size: 256 * 1024, max_dbs: 32, max_readers: 2, no_sync: true, ..LmdbConfig::default() },
         )
         .unwrap();
-        // Direct `prepare_durable_pin` & `prepare_durable_pin_under_write` acquire & install the pin.
+        // Commit 2 writes so `expected_txnid >= 2`, killing both `pin_txnid -> 0` and `-> 1` mutants.
+        let (small_gate, _) =
+            DurabilityGate::open(small.clone(), OsVfs::new(), tmp_small.path(), DurabilityMode::Grouped).unwrap();
+        for k in [b"a", b"b"] {
+            let mut tx = small_gate.begin_write().unwrap();
+            let sdb = tx.open_subdb("s", DbFlags::DEFAULT).unwrap();
+            tx.put(sdb, k, b"v").unwrap();
+            tx.commit().unwrap();
+        }
+        // Direct `prepare_durable_pin` & `prepare_durable_pin_under_write` acquire & install the pin,
+        // and remapping while an uninstalled `StagedDurablePin` is live is rejected cleanly.
         {
             let expected_txnid = small.last_txnid().unwrap();
+            assert!(expected_txnid >= 2);
             let rg = small.lock_map_read();
             let tok = small.prepare_durable_pin(&rg).unwrap();
             assert_eq!(LmdbStore::pin_txnid(&tok), expected_txnid);
@@ -1145,7 +1156,13 @@ mod tests {
             assert!(!small.has_durable_pin());
             let wg = small.lock_map_write();
             let tok = small.prepare_durable_pin_under_write(&wg).unwrap();
-            small.install_durable_pin(tok);
+            assert_eq!(LmdbStore::pin_txnid(&tok), expected_txnid);
+            assert!(matches!(small.grow_map_locked(&wg, None, false), Err(StorageError::InvalidState(_))));
+            assert!(matches!(small.adopt_resized_map_locked(&wg, false), Err(StorageError::InvalidState(_))));
+            // Dropping an uninstalled staged pin decrements `staged_pin_count` so remap succeeds after drop.
+            drop(tok);
+            let tok2 = small.prepare_durable_pin_under_write(&wg).unwrap();
+            small.install_durable_pin(tok2);
             assert!(small.has_durable_pin());
             drop(wg);
         }
@@ -1157,8 +1174,6 @@ mod tests {
             assert!(matches!(small.grow_map_locked(&foreign_wg, None, false), Err(StorageError::InvalidState(_))));
         }
         // 6 consecutive `sync()` refreshes on `max_readers = 2` prove `DurablePinTxn::drop` frees old reader slots!
-        let (small_gate, _) =
-            DurabilityGate::open(small.clone(), OsVfs::new(), tmp_small.path(), DurabilityMode::Grouped).unwrap();
         for _ in 0..6 {
             small_gate.sync().unwrap();
         }
