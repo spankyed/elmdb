@@ -470,11 +470,11 @@ fn a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_
     let heal = std::env::var("ELMDB_TORN_HEAL").expect("ELMDB_TORN_HEAL");
     let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
 
-    // Persist writes 1..2 and 2..3 of D+3's ~12 FUSE data-page writes (~1.5 MiB total): write 1 is
-    // LMDB's low-pgno metadata/branch flush, while writes 2..3 are the first 128-256 KiB of overflow
-    // data pages (which smash D's pages when unpinned, or land safely past D when pinned), and LazyFS
-    // crashes many writes before LMDB's final meta-page write.
-    for (round, persist) in ["1,2", "2,3"].into_iter().enumerate() {
+    // Persist writes 1..2 and write 2 of D+3's flush: write 1 is LMDB's low-pgno internal/branch
+    // flush, write 2 is the large contiguous run of overflow data pages (~1.5 MiB, which smashes D's
+    // pages when unpinned or lands safely past D when pinned), and LazyFS crashes immediately after
+    // write 2 — strictly before write 3 (LMDB's meta-page write).
+    for (round, persist) in ["1,2", "2"].into_iter().enumerate() {
         let path = dir.join(format!("round-{round}"));
         let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.args(["--ignored", "--exact", "child_writes_torn_seq", "--nocapture"])
