@@ -319,7 +319,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if pin_after {
             let _ = self.persist_durable_locked(&mut guard, MapWitness::Write(&map_write), None, false)?;
         }
-        let size = match self.store.grow_map_locked(&map_write, min_size, pin_after) {
+        let size = match self.store.grow_map_locked(&map_write, min_size, pin_after && !self.skip_grouped_pin()) {
             Ok(size) => size,
             Err(StorageError::Corrupted(msg)) => return Err(self.poison_corrupted(msg)),
             Err(err) if pin_after => return Err(self.poison(format!("Grouped map grow/re-pin failed: {err}"))),
@@ -354,7 +354,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         if pin_after {
             let _ = self.persist_durable_locked(&mut guard, MapWitness::Write(&map_write), None, false)?;
         }
-        let size = match self.store.adopt_resized_map_locked(&map_write, pin_after) {
+        let size = match self.store.adopt_resized_map_locked(&map_write, pin_after && !self.skip_grouped_pin()) {
             Ok(size) => size,
             Err(StorageError::Corrupted(msg)) => return Err(self.poison_corrupted(msg)),
             Err(err) if pin_after => return Err(self.poison(format!("Grouped adopt_resized_map/re-pin failed: {err}"))),
@@ -434,10 +434,11 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             match lock_res {
                 Ok(guard) => guard,
                 Err(StorageError::Io(ref e))
-                    if matches!(
-                        e.kind(),
-                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
-                    ) =>
+                    if self.read_only
+                        && matches!(
+                            e.kind(),
+                            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+                        ) =>
                 {
                     None
                 }
@@ -520,7 +521,9 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
                     match self.store.prepare_durable_pin(&map_guard) {
                         Ok(tok) => {
                             let pin_txnid = S::pin_txnid(&tok);
-                            self.store.install_durable_pin(tok);
+                            if !self.skip_grouped_pin() {
+                                self.store.install_durable_pin(tok);
+                            }
                             if pin_txnid > observed_txnid {
                                 // A peer process committed between `active_receipt()` and `prepare_durable_pin()`;
                                 // `tok` (at `pin_txnid`) already protects every snapshot >= `pin_txnid`, so seal
@@ -555,7 +558,7 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
     /// external cross-process map resizes (`MDB_MAP_RESIZED`).
     /// Fails closed if the durability gate is poisoned.
     pub fn begin_read(&self) -> Result<S::RoTxn<'_>, StorageError> {
-        for _ in 0..8 {
+        for _ in 0..32 {
             self.check_poisoned()?;
             match self.store.begin_read() {
                 Ok(ro) => return Ok(ro),
@@ -844,13 +847,31 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
             let mut full = vec![0u8; SYNC_FILE_BYTES];
             let start = ((seq % 2) as usize) * SYNC_SLOT_BYTES;
             full[start..start + SYNC_SLOT_BYTES].copy_from_slice(&encoded);
+            crate::failure_point!(
+                SIDECAR_WRITE at &self.dir,
+                self.poison("injected initial sidecar write failure".into())
+            );
             if let Err(err) = self.vfs.write_all(&tmp_path, &full) {
                 return Err(self.poison(format!("initial sidecar write failed: {err}")));
             }
+            crate::failure_point!(
+                SIDECAR_FSYNC at &self.dir,
+                {
+                    let _ = self.vfs.remove_file(&tmp_path);
+                    self.poison("injected initial sidecar sync failure".into())
+                }
+            );
             if let Err(err) = self.vfs.sync_file(&tmp_path) {
                 let _ = self.vfs.remove_file(&tmp_path);
                 return Err(self.poison(format!("initial sidecar sync failed: {err}")));
             }
+            crate::failure_point!(
+                SIDECAR_RENAME at &self.dir,
+                {
+                    let _ = self.vfs.remove_file(&tmp_path);
+                    self.poison("injected initial sidecar rename failure".into())
+                }
+            );
             if let Err(err) = self.vfs.rename(&tmp_path, &self.sidecar_path) {
                 let _ = self.vfs.remove_file(&tmp_path);
                 return Err(self.poison(format!("initial sidecar rename failed: {err}")));
@@ -862,9 +883,17 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         } else {
             let need_dir_sync = !state.dir_synced;
             let offset = (seq % 2) * (SYNC_SLOT_BYTES as u64);
+            crate::failure_point!(
+                SIDECAR_WRITE at &self.dir,
+                self.poison("injected sidecar write failure".into())
+            );
             if let Err(err) = self.vfs.write_at(&self.sidecar_path, offset, &encoded) {
                 return Err(self.poison(format!("sidecar write failed: {err}")));
             }
+            crate::failure_point!(
+                SIDECAR_FSYNC at &self.dir,
+                self.poison("injected sidecar sync failure".into())
+            );
             if let Err(err) = self.vfs.sync_file(&self.sidecar_path) {
                 return Err(self.poison(format!("sidecar sync failed: {err}")));
             }
@@ -879,10 +908,24 @@ impl<S: KvStore, V: Vfs> DurabilityGate<S, V> {
         state.next_seq = seq.saturating_add(1);
         state.last_durable = Some(slot);
         // 6. Install the staged durable pin (at `P <= receipt.txnid`) and drop any prior pin.
-        if let Some(tok) = staged_pin {
+        if let Some(tok) = staged_pin
+            && !self.skip_grouped_pin()
+        {
             self.store.install_durable_pin(tok);
         }
         Ok((Some(slot), false))
+    }
+
+    #[inline(always)]
+    fn skip_grouped_pin(&self) -> bool {
+        #[cfg(feature = "failpoints")]
+        {
+            crate::failpoints::fails_at(crate::failpoints::points::SKIP_GROUPED_DURABLE_PIN, &self.dir)
+        }
+        #[cfg(not(feature = "failpoints"))]
+        {
+            false
+        }
     }
 }
 

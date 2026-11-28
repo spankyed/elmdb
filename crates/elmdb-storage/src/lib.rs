@@ -9,6 +9,7 @@
 pub mod clock;
 pub mod durability;
 pub mod error;
+pub mod failpoints;
 pub mod kv;
 pub mod locks;
 pub mod slot;

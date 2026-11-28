@@ -11,6 +11,7 @@ repository.workspace = true
 default = []
 codegen = ["dep:ts-rs", "dep:schemars"]
 diagnostics = ["dep:tracing"]
+failpoints = ["elmdb-storage/failpoints", "elmdb-lmdb/failpoints"]
 
 [dependencies]
 elmdb-storage.workspace = true
@@ -48,6 +49,8 @@ icu_provider.workspace = true
 
 [dev-dependencies]
 elmdb-sim.workspace = true
+proptest.workspace = true
+proptest-state-machine.workspace = true
 tempfile.workspace = true
 
 [lints]

@@ -856,3 +856,88 @@ fn dst_pr268_grouped_durable_pin_prevents_freelist_reuse_corruption_and_guards_u
         );
     }
 }
+
+#[test]
+fn recover_sidecar_lock_io_error_policy_is_readonly_only_for_permission_and_erofs() {
+    use std::io::ErrorKind;
+
+    struct LockErrorVfs {
+        inner: SimVfs,
+        err_kind: ErrorKind,
+    }
+
+    impl elmdb_storage::Vfs for LockErrorVfs {
+        fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, StorageError> {
+            self.inner.read_file(path)
+        }
+        fn read_at(&self, path: &std::path::Path, offset: u64, len: usize) -> Result<Vec<u8>, StorageError> {
+            self.inner.read_at(path, offset, len)
+        }
+        fn file_len(&self, path: &std::path::Path) -> Result<u64, StorageError> {
+            self.inner.file_len(path)
+        }
+        fn write_all(&self, path: &std::path::Path, data: &[u8]) -> Result<(), StorageError> {
+            self.inner.write_all(path, data)
+        }
+        fn write_at(&self, path: &std::path::Path, offset: u64, data: &[u8]) -> Result<(), StorageError> {
+            self.inner.write_at(path, offset, data)
+        }
+        fn sync_file(&self, path: &std::path::Path) -> Result<(), StorageError> {
+            self.inner.sync_file(path)
+        }
+        fn sync_dir(&self, dir: &std::path::Path) -> Result<(), StorageError> {
+            self.inner.sync_dir(dir)
+        }
+        fn rename(&self, from: &std::path::Path, to: &std::path::Path) -> Result<(), StorageError> {
+            self.inner.rename(from, to)
+        }
+        fn remove_file(&self, path: &std::path::Path) -> Result<(), StorageError> {
+            self.inner.remove_file(path)
+        }
+        fn exists(&self, path: &std::path::Path) -> bool {
+            self.inner.exists(path)
+        }
+        fn boot_id(&self) -> BootId {
+            self.inner.boot_id()
+        }
+        fn lock_file(&self, _path: &std::path::Path) -> Result<elmdb_storage::VfsLockGuard, StorageError> {
+            Err(StorageError::Io(std::io::Error::new(self.err_kind, "injected lock error")))
+        }
+        fn lock_file_shared_if_exists(
+            &self,
+            _path: &std::path::Path,
+        ) -> Result<Option<elmdb_storage::VfsLockGuard>, StorageError> {
+            Err(StorageError::Io(std::io::Error::new(self.err_kind, "injected shared lock error")))
+        }
+    }
+
+    let base_vfs = SimVfs::new(BootId([0x55; 16]));
+    let dir = std::path::PathBuf::from("/lock-err-policy");
+    let store = SimKvStore::new(SimKvConfig::default());
+    {
+        let (gate, _) = DurabilityGate::open(store.clone(), base_vfs.clone(), &dir, DurabilityMode::Strict).unwrap();
+        let mut tx = gate.begin_write().unwrap();
+        let db = tx.open_subdb("d", DbFlags::DEFAULT).unwrap();
+        tx.put(db, b"k", b"v").unwrap();
+        tx.commit().unwrap();
+    }
+
+    for (read_only, err_kind, should_succeed) in [
+        (true, ErrorKind::PermissionDenied, true),
+        (true, ErrorKind::ReadOnlyFilesystem, true),
+        (true, ErrorKind::Other, false),
+        (false, ErrorKind::PermissionDenied, false),
+        (false, ErrorKind::ReadOnlyFilesystem, false),
+        (false, ErrorKind::Other, false),
+    ] {
+        let vfs = LockErrorVfs { inner: base_vfs.clone(), err_kind };
+        let gate =
+            DurabilityGate::new_unrecovered_with_options(store.clone(), vfs, &dir, DurabilityMode::Grouped, read_only);
+        let res = gate.recover();
+        assert_eq!(
+            res.is_ok(),
+            should_succeed,
+            "unexpected recover result for read_only={read_only}, err_kind={err_kind:?}"
+        );
+    }
+}

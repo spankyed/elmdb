@@ -420,6 +420,8 @@ dependencies = [
  "icu_properties",
  "icu_properties_data",
  "icu_provider",
+ "proptest",
+ "proptest-state-machine",
  "rust-stemmers",
  "rustc-hash",
  "schemars",
@@ -1374,6 +1376,15 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "proptest-state-machine"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "76fe42bc434fdb72020f41a6e9dbc6d29fdcc3ac43fb3470dba5147039cf5220"
+dependencies = [
+ "proptest",
 ]
 
 [[package]]

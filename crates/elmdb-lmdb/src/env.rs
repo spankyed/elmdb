@@ -285,6 +285,14 @@ pub(crate) struct LmdbEnvInner {
     pub(crate) env: NonNull<ffi::MDB_env>,
     pub(crate) data_mdb: PathBuf,
     pub(crate) map_size: AtomicUsize,
+    #[cfg(windows)]
+    pub(crate) read_only: bool,
+    /// On Windows, LMDB maps `MDB_RDONLY` environments with `NtMapViewOfSection(msize = 0)` —
+    /// strictly the file size at map time rather than `me_mapsize`. Track the pre-map file length
+    /// (guaranteed lower bound on mapped bytes) so `begin_raw_ro_txn_locked` forces a safe
+    /// `MapResized` remap before dereferencing pages written past the stale view.
+    #[cfg(windows)]
+    pub(crate) ro_mapped_len: std::sync::atomic::AtomicU64,
     pub(crate) max_dbs: u32,
     pub(crate) page_size: usize,
     /// Per-environment debug lock-hierarchy scope ID shared with `DurabilityGate` and `Engine`.
@@ -382,6 +390,22 @@ impl LmdbEnvInner {
         if rc != ffi::MDB_SUCCESS {
             return Err(map_mdb_err(rc, self.current_map_size(), self.max_dbs));
         }
+        #[cfg(windows)]
+        if self.read_only {
+            let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
+            // SAFETY: `self.env` is open and L2 `MapGate` is held.
+            let info_rc = unsafe { ffi::mdb_env_info(self.env.as_ptr(), info.as_mut_ptr()) };
+            if info_rc == ffi::MDB_SUCCESS {
+                // SAFETY: `mdb_env_info` succeeded.
+                let last_pgno = unsafe { info.assume_init() }.me_last_pgno as u64;
+                let needed = last_pgno.saturating_add(1).saturating_mul(self.page_size as u64);
+                if needed > self.ro_mapped_len.load(Ordering::Acquire) {
+                    // SAFETY: `raw` is a valid live `MDB_RDONLY` txn opened above; abort before forcing remap.
+                    unsafe { ffi::mdb_txn_abort(raw) };
+                    return Err(StorageError::MapResized);
+                }
+            }
+        }
         NonNull::new(raw).ok_or_else(|| StorageError::InvalidState("null read MDB_txn".into()))
     }
 
@@ -458,6 +482,9 @@ impl LmdbEnvInner {
         self.check_map_ok()?;
         let cur = self.current_map_size();
         self.clear_durable_pin_before_remap();
+        #[cfg(windows)]
+        let mapped_len_before =
+            if self.read_only { fs::metadata(&self.data_mdb).map(|m| m.len()).unwrap_or(0) } else { 0 };
         // SAFETY: `size = 0` adopts the external cross-process map size cleanly;
         // exclusive L2 `MapGate::write()` and `durable_pin.is_none()` guarantee zero live transactions.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.env.as_ptr(), 0) };
@@ -466,6 +493,10 @@ impl LmdbEnvInner {
             return Err(StorageError::Corrupted(format!(
                 "mdb_env_set_mapsize(0) failed (rc={rc}); environment is unusable"
             )));
+        }
+        #[cfg(windows)]
+        if self.read_only {
+            self.ro_mapped_len.store(mapped_len_before, Ordering::Release);
         }
         let mut info = std::mem::MaybeUninit::<ffi::MDB_envinfo>::uninit();
         // SAFETY: `self.env` is open and remapped.
@@ -571,6 +602,9 @@ impl LmdbStore {
 
         let data_mdb = dir.join("data.mdb");
         let existing_meta = verify_data_file_headers(&data_mdb)?;
+        #[cfg(windows)]
+        let initial_ro_mapped_len =
+            if config.read_only { fs::metadata(&data_mdb).map(|m| m.len()).unwrap_or(0) } else { 0 };
         // Never shrink an already-grown on-disk `mm_mapsize` when opening with a smaller default `map_size`.
         let effective_map_size = existing_meta
             .map_or(config.map_size, |m| config.map_size.max(usize::try_from(m.map_size).unwrap_or(config.map_size)));
@@ -666,6 +700,10 @@ impl LmdbStore {
                 env,
                 data_mdb,
                 map_size: AtomicUsize::new(actual_map_size),
+                #[cfg(windows)]
+                read_only: config.read_only,
+                #[cfg(windows)]
+                ro_mapped_len: std::sync::atomic::AtomicU64::new(initial_ro_mapped_len),
                 max_dbs: config.max_dbs,
                 page_size,
                 lock_scope,
@@ -1057,6 +1095,15 @@ impl KvStore for LmdbStore {
         // Release any Grouped durable pin strictly BEFORE `mdb_env_set_mapsize` unmaps `me_map`
         // so its `MDB_txn` never holds dangling `me_metas` pointers.
         self.inner.clear_durable_pin_before_remap();
+        elmdb_storage::failure_point!(
+            LMDB_ENV_SET_MAPSIZE at self.inner.data_mdb.parent().unwrap_or(self.inner.data_mdb.as_path()),
+            {
+                self.inner.map_broken.store(true, Ordering::SeqCst);
+                StorageError::Corrupted(format!(
+                    "injected mdb_env_set_mapsize({aligned}) failure; environment is unusable"
+                ))
+            }
+        );
         // SAFETY: Exclusive L2 `map_guard` guarantees zero active transactions (`env->me_txn == NULL`),
         // zero `me_metas` readers, and `durable_pin` has been cleared above.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), aligned) };
@@ -1103,6 +1150,10 @@ impl KvStore for LmdbStore {
     fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
         self.inner.assert_map_guard(map_guard)?;
         self.inner.check_map_ok()?;
+        elmdb_storage::failure_point!(
+            LMDB_ENV_SYNC at self.inner.data_mdb.parent().unwrap_or(self.inner.data_mdb.as_path()),
+            StorageError::Io(std::io::Error::other("injected mdb_env_sync failure"))
+        );
         // SAFETY: `self.inner.env` is open and protected by L2 `map_guard`; `force = 1` flushes even under `MDB_NOSYNC`.
         let rc = unsafe { ffi::mdb_env_sync(self.inner.env.as_ptr(), 1) };
         if rc != ffi::MDB_SUCCESS {
@@ -1114,6 +1165,10 @@ impl KvStore for LmdbStore {
     fn sync_under_write(&self, map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
         self.inner.assert_map_write_guard(map_guard)?;
         self.inner.check_map_ok()?;
+        elmdb_storage::failure_point!(
+            LMDB_ENV_SYNC at self.inner.data_mdb.parent().unwrap_or(self.inner.data_mdb.as_path()),
+            StorageError::Io(std::io::Error::other("injected mdb_env_sync failure"))
+        );
         // SAFETY: `self.inner.env` is open and protected by exclusive L2 `map_guard`; `force = 1` flushes even under `MDB_NOSYNC`.
         let rc = unsafe { ffi::mdb_env_sync(self.inner.env.as_ptr(), 1) };
         if rc != ffi::MDB_SUCCESS {

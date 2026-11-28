@@ -831,8 +831,14 @@ def main(argv=None):
         files = crate_files[name]
         if not files:
             continue
-        # A crate's diagnostics are compiled only with its feature, so a mutant of them builds and is tested with it
-        with_features = ["--features", "diagnostics"] if "diagnostics" in features else []
+        # A crate's optional diagnostics/failpoints code is compiled only with its feature enabled, so
+        # mutants of those crates build and test with the feature(s) turned on.
+        feat_args = []
+        if "diagnostics" in features:
+            feat_args.append(f"{name}/diagnostics")
+        if "failpoints" in features:
+            feat_args.append("failpoints")
+        with_features = ["--features", ",".join(feat_args)] if feat_args else []
         results = out / name / "mutants.out"
         # Every mutant a run of this diff caught, the last run's among them, which a run that was stopped never added
         kept = out / name / "caught.txt"

@@ -202,6 +202,7 @@ impl<T> DbLifecycle<T> {
         // Take the handle out under `handle.write()`, which acts as a full barrier against
         // any concurrent `enter_op` acquiring `handle.read()` + incrementing `active_ops`.
         let taken = self.handle.write().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        elmdb_storage::run_point!(CLOSE_INNER_BEFORE_DRAIN);
 
         // Wait for already-entered operations to drain cleanly via `drain_cv` (unless this very
         // thread is tearing down inside its own aborted active transaction).
