@@ -1880,6 +1880,14 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
     assert!(es_no_spurious_ov.add(1e-200));
     assert_eq!(es_no_spurious_ov.try_total(), Some(f64::MAX));
 
+    // 2b. `[f64::MAX, 2^970 (exact half-ULP), -1e-200]`: true sum is 1e-200 below exact midpoint ->
+    //     MUST break the tie DOWNWARD to `Some(f64::MAX)` via `tiny_total != 0.0` (kills `!= -> ==`)!
+    let mut es_tiny_tie_down = ExactSum::default();
+    assert!(es_tiny_tie_down.add(f64::MAX));
+    assert!(es_tiny_tie_down.add(half_ulp_max));
+    assert!(es_tiny_tie_down.add(-1e-200));
+    assert_eq!(es_tiny_tie_down.try_total(), Some(f64::MAX));
+
     // 3. `[2^1001, 2^948 (half-ULP), 1e-300]`: true sum > midpoint -> breaks tie UPWARD!
     let mut es_high_plus_tiny = ExactSum::default();
     let two_1001 = f64::from_bits((1023u64 + 1001) << 52);
