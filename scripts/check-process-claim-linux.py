@@ -34,8 +34,8 @@ def isolated(binary, node):
           assert.equal(fs.existsSync('/proc/self'), false);
           const first = require({json.dumps(str(first))});
           const second = require({json.dumps(str(copy))});
-          first.Database.open({json.dumps(str(root / 'first'))}, {{syncs: false}}).close();
-          assert.throws(() => second.Database.open({json.dumps(str(root / 'second'))}, {{syncs: false}}),
+          first.Database.open({json.dumps(str(root / 'first'))}, {{durability: 'unsafe'}}).close();
+          assert.throws(() => second.Database.open({json.dumps(str(root / 'second'))}, {{durability: 'unsafe'}}),
             {{code: 'ALREADY_LOADED'}});
           assert.equal(fs.existsSync({json.dumps(str(root / 'second'))}), false);
           console.log('ELMDB_NO_ACCOUNT_HOME_OR_PROC_CLAIMED');

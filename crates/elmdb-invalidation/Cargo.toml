@@ -1,0 +1,25 @@
+[package]
+name = "elmdb-invalidation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+elmdb-engine = { workspace = true }
+elmdb-projections = { workspace = true }
+elmdb-query = { workspace = true }
+elmdb-storage = { workspace = true }
+elmdb-wire = { workspace = true }
+rustc-hash = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+elmdb-lmdb = { workspace = true }
+elmdb-sim = { workspace = true }
+elmdb-vec = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

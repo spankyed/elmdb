@@ -17,11 +17,12 @@ diagnostics = ["elmdb/diagnostics", "dep:tracing"]
 
 [dependencies]
 elmdb.workspace = true
+elmdb-wire.workspace = true
 napi.workspace = true
 napi-derive.workspace = true
 process_path.workspace = true
+serde.workspace = true
 serde_json.workspace = true
-rmp-serde.workspace = true
 tracing = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]

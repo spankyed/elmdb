@@ -1,8 +1,7 @@
-"""Prove Linux kernel-claim exclusion and unsupported-rename fallback assertions fire on disposable regressions.
+"""Prove Linux kernel-claim exclusion assertions fire on a disposable regression.
 
-Not cargo-mutants: both mutations are Linux-only code, run on Linux CI, and each swaps one expression for another (an
-unbound claim, the fallback's link for its error) where cargo-mutants replaces a function's whole answer or an operator
-(`docs/evidence/mutation-baseline.md`, its Linux reading).
+Not cargo-mutants: the mutation is Linux-only code, run on Linux CI, and swaps one expression for another (an
+unbound claim) where cargo-mutants replaces a function's whole answer or an operator.
 """
 import io
 import os
@@ -21,10 +20,6 @@ with tempfile.TemporaryDirectory(prefix="elmdb-claim-publish-mutations-") as tem
         ("crates/elmdb-node/src/process.rs", "elmdb-node",
          "process::tests::independent_kernel_claims_conflict_and_are_reclaimed_on_close",
          "Claim::bind_addr(&claim_address()?)", "Claim::unbound()", "unwrap_err"),
-        ("crates/elmdb/src/store/backup.rs", "elmdb",
-         "store::backup::publication_tests::unsupported_exclusive_rename_falls_back_without_overwriting",
-         "std::fs::hard_link(source, target)\n        }\n        result => result,",
-         "Err(error)\n        }\n        result => result,", "unwrap"),
     ]
     for path, package, test, before, after, marker in cases:
         source = copy / path

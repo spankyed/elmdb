@@ -1,0 +1,231 @@
+use crate::error::StorageError;
+use crate::locks::LockScopeId;
+
+/// Flags controlling key ordering of a named sub-database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DbFlags {
+    pub integer_key: bool,
+}
+
+impl DbFlags {
+    pub const DEFAULT: Self = Self { integer_key: false };
+    pub const INTEGER_KEY: Self = Self { integer_key: true };
+}
+
+/// Opaque handle to an open sub-database within a `KvStore`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SubDbHandle(u32);
+
+impl SubDbHandle {
+    pub const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    pub const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// Metadata returned when a write transaction commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitReceipt {
+    pub txnid: u64,
+    pub roots_sha256: [u8; 32],
+}
+
+/// Zero-copy borrowed `(key, value)` pair returned by a cursor.
+pub type KvEntry<'txn> = (&'txn [u8], &'txn [u8]);
+
+/// Zero-copy ordered cursor over a sub-database within a transaction.
+pub trait KvCursor<'txn> {
+    fn first(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError>;
+    fn last(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError>;
+    fn seek_ge(&mut self, key: &[u8]) -> Result<Option<KvEntry<'txn>>, StorageError>;
+    fn seek_exact(&mut self, key: &[u8]) -> Result<Option<&'txn [u8]>, StorageError>;
+    fn next(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError>;
+    fn prev(&mut self) -> Result<Option<KvEntry<'txn>>, StorageError>;
+}
+
+/// Zero-copy read interface shared by read-only and read-write transactions.
+pub trait KvRead {
+    type Cursor<'a>: KvCursor<'a>
+    where
+        Self: 'a;
+
+    fn get(&self, db: SubDbHandle, key: &[u8]) -> Result<Option<&[u8]>, StorageError>;
+    fn cursor(&self, db: SubDbHandle) -> Result<Self::Cursor<'_>, StorageError>;
+    fn entries(&self, db: SubDbHandle) -> Result<u64, StorageError>;
+    /// Returns the MVCC snapshot transaction ID of this transaction (`mdb_txn_id` on LMDB).
+    fn txnid(&self) -> u64;
+    /// Opens an already-existing named sub-DB visible in this transaction (`Ok(None)` if absent).
+    fn open_subdb_existing(&self, name: &str, flags: DbFlags) -> Result<Option<SubDbHandle>, StorageError>;
+}
+
+/// Write transaction interface with native LIFO nested savepoints and O(1) sub-DB truncate.
+///
+/// Higher layers should commit exclusively through `DurabilityGate::commit` rather than
+/// invoking `commit_raw` directly.
+pub trait KvWrite: KvRead + Sized {
+    /// L2 `MapGate` read guard owned by this write transaction and returned back on commit.
+    type MapReadGuard: 'static;
+
+    fn open_subdb(&mut self, name: &str, flags: DbFlags) -> Result<SubDbHandle, StorageError>;
+    fn put(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<(), StorageError>;
+    /// Inserts `(key, val)` only if `key` does not already exist. Returns `true` if inserted.
+    fn put_no_overwrite(&mut self, db: SubDbHandle, key: &[u8], val: &[u8]) -> Result<bool, StorageError>;
+    /// Deletes `key`. Returns `true` if the key existed.
+    fn del(&mut self, db: SubDbHandle, key: &[u8]) -> Result<bool, StorageError>;
+    /// Empties all entries from `db` without closing its `MDB_dbi` handle (`mdb_drop(..., 0)`).
+    fn truncate(&mut self, db: SubDbHandle) -> Result<(), StorageError>;
+
+    /// Opens a native nested savepoint and returns its 1-based depth.
+    fn begin_savepoint(&mut self) -> Result<u32, StorageError>;
+    /// Commits (merges into parent) the top-most savepoint at `depth`.
+    fn commit_savepoint(&mut self, depth: u32) -> Result<(), StorageError>;
+    /// Aborts (rolls back) the top-most savepoint at `depth`.
+    fn abort_savepoint(&mut self, depth: u32) -> Result<(), StorageError>;
+    fn savepoint_depth(&self) -> u32;
+
+    /// Commits the root transaction, returning the commit receipt and the held L2 `MapReadGuard`.
+    /// Must fail if any nested savepoint is still open.
+    fn commit_raw(self) -> Result<(CommitReceipt, Self::MapReadGuard), StorageError>;
+    fn abort(self);
+}
+
+/// Storage kernel abstraction implemented by `elmdb-lmdb` (production) and `elmdb-sim` (DST).
+pub trait KvStore: Send + Sync {
+    type RoTxn<'a>: KvRead
+    where
+        Self: 'a;
+    type RwTxn<'a>: KvWrite<MapReadGuard = Self::MapReadGuard>
+    where
+        Self: 'a;
+    type OwnedRwTxn: KvWrite<MapReadGuard = Self::MapReadGuard> + 'static;
+    /// Guard token proving the caller holds L2 `MapGate::read()` for this environment.
+    type MapReadGuard: 'static;
+    /// Guard token proving the caller holds exclusive L2 `MapGate::write()` for this environment.
+    type MapWriteGuard<'a>
+    where
+        Self: 'a;
+    /// Opaque handle representing a staged durable-snapshot pin opened *before* reading the
+    /// active meta receipt and syncing, then installed only after `synced.v2` is persisted.
+    /// Lifetime-bound to `&'a self` and the caller's L2 map guard so safe Rust cannot drop
+    /// the environment or release L2 while an uninstalled pin is live.
+    type DurablePinToken<'a>: Send
+    where
+        Self: 'a;
+
+    fn begin_read(&self) -> Result<Self::RoTxn<'_>, StorageError>;
+    fn begin_write(&self, map_guard: Self::MapReadGuard) -> Result<Self::RwTxn<'_>, StorageError>;
+    fn begin_write_owned(&self, map_guard: Self::MapReadGuard) -> Result<Self::OwnedRwTxn, StorageError>;
+    fn lock_map_read(&self) -> Self::MapReadGuard;
+    fn lock_map_write(&self) -> Self::MapWriteGuard<'_>;
+    fn open_subdb_ro(
+        &self,
+        txn: &Self::RoTxn<'_>,
+        name: &str,
+        flags: DbFlags,
+    ) -> Result<Option<SubDbHandle>, StorageError>;
+    /// Pre-opens any committed named sub-DBs into the environment handle cache in an isolated RO txn.
+    /// Callers MUST pass an active `MapReadGuard` (L2) and hold `WriterLock` (L3).
+    fn ensure_subdbs_open(
+        &self,
+        _map_guard: &Self::MapReadGuard,
+        _names: &[(&str, DbFlags)],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+    /// Returns `Some(target_map_size)` when free headroom is below the proactive growth threshold.
+    fn needs_map_growth(&self) -> Result<Option<usize>, StorageError> {
+        Ok(None)
+    }
+    /// Grows the underlying mmap to at least `min_size` (or doubles current size) under L2 `MapGate::write()`.
+    /// Caller MUST NOT hold any active transaction (`L2` or `L3`).
+    fn grow_map(&self, min_size: Option<usize>) -> Result<usize, StorageError> {
+        let map_guard = self.lock_map_write();
+        self.grow_map_locked(&map_guard, min_size, false)
+    }
+    /// Grows the underlying mmap while the caller ALREADY holds exclusive L2 `MapWriteGuard`,
+    /// releasing any active durable pin before `mdb_env_set_mapsize` and acquiring a fresh pin
+    /// before returning whenever `pin_after == true`.
+    fn grow_map_locked(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+        _min_size: Option<usize>,
+        _pin_after: bool,
+    ) -> Result<usize, StorageError> {
+        Ok(self.map_size())
+    }
+    /// Adopts an external cross-process map resize while the caller ALREADY holds exclusive L2
+    /// `MapWriteGuard`, releasing any active durable pin before `mdb_env_set_mapsize(0)` and
+    /// acquiring a fresh pin before returning whenever `pin_after == true`.
+    fn adopt_resized_map_locked(
+        &self,
+        _map_guard: &Self::MapWriteGuard<'_>,
+        _pin_after: bool,
+    ) -> Result<usize, StorageError> {
+        Ok(self.map_size())
+    }
+    fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError>;
+    /// Flushes the store to stable storage while the caller holds exclusive L2 `MapWriteGuard`.
+    fn sync_under_write(&self, _map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError>;
+    /// Opens a fresh read-only durable-snapshot pin at the current tip *before* syncing and
+    /// *without* dropping any prior pin (zero unpinned window, and guarantees `pin_txnid <= receipt.txnid`
+    /// even if a concurrent cross-process writer commits during `sync()`).
+    fn prepare_durable_pin<'a>(
+        &'a self,
+        map_guard: &'a Self::MapReadGuard,
+    ) -> Result<Self::DurablePinToken<'a>, StorageError>;
+    /// Opens a fresh staged durable pin while holding exclusive L2 `MapWriteGuard`.
+    fn prepare_durable_pin_under_write<'a>(
+        &'a self,
+        map_guard: &'a Self::MapWriteGuard<'_>,
+    ) -> Result<Self::DurablePinToken<'a>, StorageError>;
+    /// Returns the MVCC transaction ID pinned by `token`.
+    fn pin_txnid(token: &Self::DurablePinToken<'_>) -> u64;
+    /// Installs a previously prepared durable pin (dropping any prior pin after `synced.v2` is durable).
+    fn install_durable_pin<'a>(&'a self, token: Self::DurablePinToken<'a>);
+    /// Returns the debug lock-hierarchy scope ID for this store instance so higher layers
+    /// (`DurabilityGate`, `Engine`) bind their L1–L5 locks to the same per-database scope.
+    fn lock_scope_id(&self) -> LockScopeId;
+    fn last_txnid(&self) -> Result<u64, StorageError>;
+    fn roots_sha256(&self) -> Result<[u8; 32], StorageError>;
+    /// Atomically reads `(txnid, roots_sha256)` from a single active meta-page snapshot (no TOCTOU).
+    fn active_receipt(&self) -> Result<CommitReceipt, StorageError> {
+        Ok(CommitReceipt { txnid: self.last_txnid()?, roots_sha256: self.roots_sha256()? })
+    }
+    fn map_size(&self) -> usize;
+    fn page_size(&self) -> usize;
+    /// Writes a consistent compacted copy of the store into `target_dir` and returns the copied file's receipt.
+    fn copy_compacted(&self, _target_dir: &std::path::Path) -> Result<CommitReceipt, StorageError> {
+        Err(StorageError::Io(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "copy_compacted is not supported by this storage backend",
+        )))
+    }
+}
+
+/// Executes `f` inside a native nested savepoint, committing on `Ok` and aborting on `Err`.
+///
+/// If `f` panics, the enclosing `RwTxn`'s `Drop` unwinds and aborts all open savepoints safely.
+pub fn with_savepoint<W, T, E, F>(txn: &mut W, f: F) -> Result<T, E>
+where
+    W: KvWrite,
+    E: From<StorageError>,
+    F: FnOnce(&mut W) -> Result<T, E>,
+{
+    let depth = txn.begin_savepoint().map_err(E::from)?;
+    match f(txn) {
+        Ok(value) => {
+            txn.commit_savepoint(depth).map_err(E::from)?;
+            Ok(value)
+        }
+        Err(err) => {
+            while txn.savepoint_depth() >= depth {
+                let d = txn.savepoint_depth();
+                let _ = txn.abort_savepoint(d);
+            }
+            Err(err)
+        }
+    }
+}

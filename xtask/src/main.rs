@@ -12,6 +12,8 @@
 //!   version, EARS' peer `elmdb` names exactly it, so the pair a release packs installs only together, the binding's
 //!   `optionalDependencies` name each of its `napi.targets`' platform package at exactly it, and `napi.targets` matches
 //!   the targets declared in `deny.toml` and `.github/workflows/release.yml`.
+//! - `check-workspace-deps`: fails when root `Cargo.toml`'s `[workspace.dependencies]` declares a dependency that no
+//!   workspace member crate references via `workspace = true`.
 //! - `check-one-lmdb`: fails unless the dependency tree holds exactly one LMDB `-sys` crate (one version of one).
 //! - `check-exact`: fails unless every ICU crate the lockfile holds, and each crate whose output an index stores
 //!   (`INDEXED`), is a dependency of `elmdb` required at exactly the locked version, so whoever builds elmdb builds the
@@ -20,11 +22,11 @@
 //!   which only its `diagnostics` feature may make it do.
 //! - `check-leiden-serial`: fails when the workspace builds `leiden-rs` with any feature, `rayon` among them, whose
 //!   parallel moves would make a partition depend on the threads' timing rather than on its seed alone.
-//! - `check-sync`: fails when engine code outside `src/sync/` locks, waits or keeps per-thread state through `std` or
-//!   parking_lot directly, rather than through `crate::sync`, which the concurrency models swap for Loom's and
-//!   Shuttle's, unless the file is listed in `UNMODELLED` with its reason; a listed file that no longer does is stale.
-//! - `check-commits`: fails when engine code outside `src/store/commits.rs` commits a write transaction, so every
-//!   commit passes the one module that holds what must be true of each.
+//! - `check-sync`: fails when v2 engine crate code outside `elmdb-storage/src/locks.rs` locks, waits or keeps per-thread
+//!   state through `std` or `parking_lot` directly rather than through `elmdb-storage::locks`, unless the file is listed
+//!   in `UNMODELLED` with its reason; a listed file that no longer does is stale.
+//! - `check-commits`: fails when engine code outside `elmdb-storage` / `elmdb-lmdb` commits a write transaction directly,
+//!   so every commit passes through the `DurabilityGate`.
 //! - `mutant-exclusions`: writes `target/mutants.toml`, the configuration a mutation run reads with `--config`, and
 //!   prints its path: `.cargo/mutants.toml` with an `exclude_re` for each `// mutant-skip:` comment in the source, which
 //!   sits above the line it excuses and holds the reason. Nothing it writes is committed, so the comment is the one
@@ -61,6 +63,7 @@ fn main() -> ExitCode {
         Some("notices") => write_notices(&workspace_root()),
         Some("check-notices") => check_notices(&workspace_root()),
         Some("check-versions") => check_versions(&workspace_root()),
+        Some("check-workspace-deps") => check_workspace_deps(&workspace_root()),
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
         Some("check-exact") => check_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
@@ -79,11 +82,12 @@ fn main() -> ExitCode {
                 &[
                     ("generated protocol", &check_generated),
                     ("one version", &|| check_versions(&root)),
+                    ("workspace dependencies used", &|| check_workspace_deps(&root)),
                     ("one LMDB", &|| check_one_lmdb(&root)),
                     ("exact crates", &|| check_exact(&root)),
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
                     ("serial Leiden", &|| check_leiden_serial(&root)),
-                    ("crate::sync", &|| check_sync(&root)),
+                    ("elmdb-storage::locks", &|| check_sync(&root)),
                     ("one place commits", &|| check_commits(&root)),
                     ("third-party notices", &|| check_notices(&root)),
                     ("bans, sources and advisories", &|| check_deny(env!("CARGO"), &root)),
@@ -92,7 +96,7 @@ fn main() -> ExitCode {
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-versions | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
+            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-versions | check-workspace-deps | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
                 .to_owned(),
         ),
     };
@@ -105,70 +109,367 @@ fn main() -> ExitCode {
     }
 }
 
-/// The engine's files that lock, wait or keep per-thread state outside `crate::sync`, each with why: what isn't
-/// listed here goes through it, so the models can run it on their own threads. A model of one of these is how it
-/// leaves the list
+/// v2 engine crates scanned by `check-sync` to keep direct locking outside `elmdb-storage::locks` explicit and audited.
+const SYNC_CHECKED_CRATES: &[&str] = &[
+    "elmdb",
+    "elmdb-engine",
+    "elmdb-invalidation",
+    "elmdb-lmdb",
+    "elmdb-projections",
+    "elmdb-query",
+    "elmdb-storage",
+    "elmdb-vec",
+    "elmdb-wire",
+];
+
+/// The engine's files (prefixed `<crate>/src/<rel>`) that lock, wait or keep per-thread state outside
+/// `elmdb-storage::locks`, each with why. A listed file that no longer locks is flagged as stale.
 const UNMODELLED: &[(&str, &str)] = &[
     (
-        "database.rs",
-        "the open store, the schema and the index builder behind the handle, and the rebuild turn, a parking_lot \
-         ReentrantMutex no model provides: no model of opening yet",
-    ),
-    ("diagnostics/collector.rs", "a collector an embedding program installs, outside the engine's own concurrency"),
-    ("engine/derive/sorted.rs", "a test-only scratch budget per thread, no shared state"),
-    ("engine/mod.rs", "the schema read lock, a parking_lot RwLock no model provides"),
-    ("engine/order.rs", "a per-thread cache of each collation's collator and its stamp, no shared state"),
-    ("engine/values.rs", "a per-thread decompression buffer, no shared state"),
-    ("engine/watch.rs", "the schema read lock; the tracks and their delivery go through crate::sync"),
-    ("failpoints.rs", "test-only failure points, armed per thread"),
-    ("store/idle_reads.rs", "idle read snapshot release and its waiters: no model yet"),
-    (
-        "store/kept.rs",
-        "the writer gate, a parking_lot RecursiveRwLock no model provides, held as the pin is moved and ended; the \
-         order of its steps between processes is modelled in store/synced_model.rs, and killed processes test it",
+        "elmdb/src/db.rs",
+        "handle lifecycle RwLock/Condvar dropping LmdbStore deterministically on close/atexit + ACTIVE_TXNS TLS",
     ),
     (
-        "store/mod.rs",
-        "the writer gate, a parking_lot RecursiveRwLock no model provides, and the paths open in the process",
+        "elmdb/src/diagnostics.rs",
+        "optional tracing span collector installed by host program, outside engine concurrency",
     ),
-    ("store/sync.rs", "the group commit sync worker, tested by its own deterministic harness (store/sync/tests.rs)"),
     (
-        "store/writers.rs",
-        "a writer's turn, a mutex across this process's threads, tested with real threads \
-         (engine/tests/lifecycle.rs), and on macOS a file lock across processes, tested with real killed processes",
+        "elmdb-invalidation/src/lib.rs",
+        "LiveQueryHub Mutex protecting in-memory InvalidationIndex and sans-I/O WatchScheduler",
+    ),
+    (
+        "elmdb-lmdb/src/env.rs",
+        "process-wide OPEN_ENVS Mutex preventing same-process duplicate LMDB opens (POSIX fcntl lock hazard)",
     ),
 ];
 
-/// Fails on an engine file that locks outside `crate::sync` and isn't in `UNMODELLED`, on a listed file that no
-/// longer does, or on a Shuttle/Loom-modelled file whose production code reaches `std::sync::atomic` (other than
-/// `Ordering`), `std::sync::OnceLock`/`Once`, or `std::thread::spawn` directly
+/// Fails on a v2 engine file that locks outside `elmdb-storage::locks` and isn't in `UNMODELLED`, or on a listed file
+/// that no longer locks outside `elmdb-storage::locks`.
 fn check_sync(root: &Path) -> Result<(), String> {
-    let source = root.join("crates/elmdb/src");
-    let found = unmodelled_files(&source)?;
+    let mut found = std::collections::BTreeSet::new();
+    for crate_name in SYNC_CHECKED_CRATES {
+        let source = root.join("crates").join(crate_name).join("src");
+        if !source.is_dir() {
+            continue;
+        }
+        for rel in unmodelled_files(&source)? {
+            let full = format!("{crate_name}/src/{rel}");
+            if full == "elmdb-storage/src/locks.rs" {
+                continue;
+            }
+            found.insert(full);
+        }
+    }
     let listed: std::collections::BTreeSet<String> = UNMODELLED.iter().map(|(file, _)| (*file).to_owned()).collect();
     let unlisted: Vec<_> = found.difference(&listed).collect();
     let stale: Vec<_> = listed.difference(&found).collect();
-    let modelled = unmodelled_in_modelled_files(&source)?;
-    if unlisted.is_empty() && stale.is_empty() && modelled.is_empty() {
+    if unlisted.is_empty() && stale.is_empty() {
         return Ok(());
     }
     let mut message = String::new();
     if !unlisted.is_empty() {
         message += &format!(
-            "these lock, wait or keep per-thread state outside crate::sync, which the concurrency models can't run: \
-             {unlisted:?}; use crate::sync's primitives, or list the file in xtask's UNMODELLED with why\n"
+            "these lock, wait or keep per-thread state outside elmdb-storage::locks: \
+             {unlisted:?}; use elmdb-storage::locks primitives, or list the file in xtask's UNMODELLED with why\n"
         );
     }
     if !stale.is_empty() {
-        message += &format!("UNMODELLED lists files that no longer lock outside crate::sync: {stale:?}; remove them\n");
-    }
-    if !modelled.is_empty() {
         message += &format!(
-            "these Shuttle/Loom-modelled files use unmodelled concurrency primitives directly: {modelled:?}; route \
-             them through crate::sync so the concurrency models explore every interleaving\n"
+            "UNMODELLED lists files that no longer lock outside elmdb-storage::locks: {stale:?}; remove them\n"
         );
     }
     Err(message.trim_end().to_owned())
+}
+
+/// Fails when root `Cargo.toml`'s `[workspace.dependencies]` declares a dependency that no workspace member
+/// references via `workspace = true`.
+fn check_workspace_deps(root: &Path) -> Result<(), String> {
+    let root_manifest_path = root.join("Cargo.toml");
+    let root_text =
+        std::fs::read_to_string(&root_manifest_path).map_err(|e| format!("{}: {e}", root_manifest_path.display()))?;
+    let declared = parse_workspace_dependency_keys(&root_text);
+    let members = parse_workspace_members(&root_text);
+    if members.is_empty() {
+        return Err("root Cargo.toml lists no [workspace] members".to_owned());
+    }
+    let mut used = std::collections::BTreeSet::new();
+    for member in &members {
+        let member_manifest = root.join(member).join("Cargo.toml");
+        let text =
+            std::fs::read_to_string(&member_manifest).map_err(|e| format!("{}: {e}", member_manifest.display()))?;
+        collect_used_workspace_deps(&text, &mut used);
+    }
+    let unused: Vec<&String> = declared.difference(&used).collect();
+    if unused.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "unused [workspace.dependencies] in Cargo.toml: {unused:?}; remove dead entries or reference them from a member crate"
+    ))
+}
+
+fn strip_toml_comment(line: &str) -> &str {
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_double => escaped = true,
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            '#' if !in_single && !in_double => return &line[..idx],
+            _ => {}
+        }
+    }
+    line
+}
+
+/// Joins multiline TOML arrays (`[...]`) and inline tables (`{...}`) into single logical statements,
+/// stripping `#` comments while respecting `'...'` and `"..."` string literals.
+fn toml_logical_lines(manifest: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut depth = 0usize;
+    for raw_line in manifest.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if depth == 0 && line.starts_with('[') && line.ends_with(']') {
+            if !buf.is_empty() {
+                out.push(std::mem::take(&mut buf));
+            }
+            out.push(line.to_owned());
+            continue;
+        }
+        if !buf.is_empty() {
+            buf.push(' ');
+        }
+        buf.push_str(line);
+
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+        for ch in line.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' if in_double => escaped = true,
+                '"' if !in_single => in_double = !in_double,
+                '\'' if !in_double => in_single = !in_single,
+                '{' | '[' if !in_single && !in_double => depth += 1,
+                '}' | ']' if !in_single && !in_double => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+        if depth == 0 && !buf.is_empty() {
+            out.push(std::mem::take(&mut buf));
+        }
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+/// Splits a dotted TOML key or table header body (without outer `[` / `]`) into unquoted segments,
+/// respecting `'...'` and `"..."` quoted segments that contain dots (e.g. `target.'cfg(unix)'.dependencies`).
+fn split_toml_key_segments(raw: &str) -> Vec<String> {
+    let mut segs = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    for ch in raw.chars() {
+        if escaped {
+            cur.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_double => escaped = true,
+            '"' if !in_single => in_double = !in_double,
+            '\'' if !in_double => in_single = !in_single,
+            '.' if !in_single && !in_double => {
+                let s = cur.trim().to_owned();
+                if !s.is_empty() {
+                    segs.push(s);
+                }
+                cur.clear();
+            }
+            _ => cur.push(ch),
+        }
+    }
+    let s = cur.trim().to_owned();
+    if !s.is_empty() {
+        segs.push(s);
+    }
+    segs
+}
+
+/// Extracts all single- or double-quoted TOML string literals from `text`.
+fn extract_toml_strings(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            let mut s = String::new();
+            let mut escaped = false;
+            for c in chars.by_ref() {
+                if escaped {
+                    s.push(c);
+                    escaped = false;
+                    continue;
+                }
+                if quote == '"' && c == '\\' {
+                    escaped = true;
+                    continue;
+                }
+                if c == quote {
+                    break;
+                }
+                s.push(c);
+            }
+            out.push(s);
+        }
+    }
+    out
+}
+
+fn parse_workspace_dependency_keys(manifest: &str) -> std::collections::BTreeSet<String> {
+    let mut keys = std::collections::BTreeSet::new();
+    let mut in_ws_deps = false;
+    for line in toml_logical_lines(manifest) {
+        if line.starts_with('[') && line.ends_with(']') {
+            let segs = split_toml_key_segments(&line[1..line.len() - 1]);
+            if segs.len() == 2 && segs[0] == "workspace" && segs[1] == "dependencies" {
+                in_ws_deps = true;
+            } else if segs.len() >= 3 && segs[0] == "workspace" && segs[1] == "dependencies" {
+                keys.insert(segs[2].clone());
+                in_ws_deps = false;
+            } else {
+                in_ws_deps = false;
+            }
+            continue;
+        }
+        if !in_ws_deps {
+            continue;
+        }
+        if let Some((lhs, _)) = line.split_once('=')
+            && let Some(first) = split_toml_key_segments(lhs).into_iter().next()
+        {
+            keys.insert(first);
+        }
+    }
+    keys
+}
+
+fn parse_workspace_members(manifest: &str) -> Vec<String> {
+    let mut in_ws = false;
+    for line in toml_logical_lines(manifest) {
+        if line.starts_with('[') && line.ends_with(']') {
+            let segs = split_toml_key_segments(&line[1..line.len() - 1]);
+            in_ws = segs.len() == 1 && segs[0] == "workspace";
+            continue;
+        }
+        if !in_ws {
+            continue;
+        }
+        if let Some((lhs, rhs)) = line.split_once('=')
+            && lhs.trim() == "members"
+        {
+            return extract_toml_strings(rhs);
+        }
+    }
+    Vec::new()
+}
+
+enum DepSection {
+    Other,
+    Table,
+    Subtable(String),
+}
+
+fn classify_dep_section(header: &str) -> DepSection {
+    let segs = split_toml_key_segments(&header[1..header.len() - 1]);
+    let is_dep_kind = |s: &str| matches!(s, "dependencies" | "dev-dependencies" | "build-dependencies");
+    match segs.as_slice() {
+        [kind] if is_dep_kind(kind) => DepSection::Table,
+        [kind, dep] if is_dep_kind(kind) => DepSection::Subtable(dep.clone()),
+        [target, _, kind] if target == "target" && is_dep_kind(kind) => DepSection::Table,
+        [target, _, kind, dep] if target == "target" && is_dep_kind(kind) => DepSection::Subtable(dep.clone()),
+        _ => DepSection::Other,
+    }
+}
+
+fn collect_used_workspace_deps(manifest: &str, used: &mut std::collections::BTreeSet<String>) {
+    let ws_true_re = regex::Regex::new(r"\bworkspace\s*=\s*true\b").expect("valid regex");
+    let pkg_re = regex::Regex::new(r#"\bpackage\s*=\s*(?:"([^"]+)"|'([^']+)')"#).expect("valid regex");
+    let mut section = DepSection::Other;
+    let mut sub_ws_true = false;
+    let mut sub_pkg: Option<String> = None;
+
+    let flush_subtable = |sec: &DepSection,
+                          ws_true: &mut bool,
+                          pkg: &mut Option<String>,
+                          used: &mut std::collections::BTreeSet<String>| {
+        if let DepSection::Subtable(dep_name) = sec
+            && *ws_true
+        {
+            used.insert(dep_name.clone());
+            if let Some(p) = pkg.take() {
+                used.insert(p);
+            }
+        }
+        *ws_true = false;
+        *pkg = None;
+    };
+
+    for line in toml_logical_lines(manifest) {
+        if line.starts_with('[') && line.ends_with(']') {
+            flush_subtable(&section, &mut sub_ws_true, &mut sub_pkg, used);
+            section = classify_dep_section(&line);
+            continue;
+        }
+        let Some((lhs, rhs)) = line.split_once('=') else {
+            continue;
+        };
+        let rhs = rhs.trim();
+        match &section {
+            DepSection::Other => {}
+            DepSection::Table => {
+                let segs = split_toml_key_segments(lhs);
+                if segs.len() == 2 && segs[1] == "workspace" {
+                    if rhs == "true" {
+                        used.insert(segs[0].clone());
+                    }
+                } else if segs.len() == 1 && ws_true_re.is_match(rhs) {
+                    used.insert(segs[0].clone());
+                    if let Some(cap) = pkg_re.captures(rhs)
+                        && let Some(m) = cap.get(1).or_else(|| cap.get(2))
+                    {
+                        used.insert(m.as_str().to_owned());
+                    }
+                }
+            }
+            DepSection::Subtable(_) => {
+                let segs = split_toml_key_segments(lhs);
+                if segs.len() == 1 && segs[0] == "workspace" && rhs == "true" {
+                    sub_ws_true = true;
+                } else if segs.len() == 1 && segs[0] == "package" {
+                    sub_pkg = extract_toml_strings(rhs).into_iter().next();
+                }
+            }
+        }
+    }
+    flush_subtable(&section, &mut sub_ws_true, &mut sub_pkg, used);
 }
 
 /// A `// mutant-skip: PATTERN` comment, ` (as above)` for a reason given by the one before it. Its reason follows it, as a comment
@@ -412,25 +713,6 @@ fn unmodelled_files(source: &Path) -> Result<std::collections::BTreeSet<String>,
     Ok(found)
 }
 
-/// Shuttle/Loom-modelled engine files whose production code uses `std::sync::atomic` (other than `Ordering`),
-/// `std::sync::OnceLock`/`Once`, or `std::thread::spawn` directly rather than through `crate::sync`. Non-modelled
-/// files (such as `engine/text/search.rs`'s constant `OnceLock` caches or `store/wake.rs`'s OS mailbox flag) are
-/// outside this scope.
-fn unmodelled_in_modelled_files(source: &Path) -> Result<Vec<(String, Vec<&'static str>)>, String> {
-    let mut found = Vec::new();
-    for (relative, text) in engine_sync_files(source)? {
-        if !is_modelled_file(&text) {
-            continue;
-        }
-        let violations = modelled_sync_violations(&text);
-        if !violations.is_empty() {
-            found.push((relative, violations));
-        }
-    }
-    found.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(found)
-}
-
 /// Engine source files scanned by `check-sync`: `sync/`, `tests/` directories, `*tests.rs` and `*model.rs` excepted
 fn engine_sync_files(source: &Path) -> Result<Vec<(String, String)>, String> {
     let mut files = Vec::new();
@@ -601,38 +883,6 @@ fn char_literal_end(source: &str, start: usize) -> Option<usize> {
     }
 }
 
-/// Removes inline `#[cfg(test)] mod ... { ... }` and `#[cfg(all(..., test, ...))] mod ... { ... }` blocks from
-/// comment- and string-stripped Rust code so real-thread unit tests inside a modelled file are not scanned as
-/// production code
-fn strip_cfg_test_modules(code: &str) -> String {
-    let attr_re = regex::Regex::new(
-        r"#\[cfg\(\s*(?:test|all\([^]]*\btest\b[^]]*)\)\s*\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+[A-Za-z_][A-Za-z0-9_]*\s*\{",
-    )
-    .expect("valid regex");
-    let mut result = code.to_owned();
-    while let Some(found) = attr_re.find(&result) {
-        let open = found.end() - 1;
-        let bytes = result.as_bytes();
-        let mut depth = 0usize;
-        let mut end = bytes.len();
-        for (offset, &b) in bytes[open..].iter().enumerate() {
-            if b == b'{' {
-                depth += 1;
-            } else if b == b'}' {
-                depth -= 1;
-                if depth == 0 {
-                    end = open + offset + 1;
-                    break;
-                }
-            }
-        }
-        let replacement: String =
-            result[found.start()..end].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect();
-        result.replace_range(found.start()..end, &replacement);
-    }
-    result
-}
-
 /// Expands every `use ...;` statement in comment- and string-stripped Rust code into normalized full paths (such as
 /// `std::sync::Mutex`, `std::sync::atomic::AtomicBool`, `std::thread::spawn`), handling multiline braced groups
 fn expand_use_trees(code: &str) -> Vec<String> {
@@ -703,83 +953,42 @@ fn expand_use_trees(code: &str) -> Vec<String> {
     paths
 }
 
-/// Whether `source` declares a Shuttle or Loom concurrency model (`#[cfg(...shuttle/loom...)] mod model`)
-fn is_modelled_file(source: &str) -> bool {
-    let code = strip_comments_and_strings(source);
-    let re = regex::Regex::new(r"#\[cfg\([^]]*\b(?:shuttle|loom)\b[^]]*\)\]\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+model\b")
-        .expect("valid regex");
-    re.is_match(&code)
-}
+/// The sole module allowed to call `commit_raw()`, relative to `crates/`.
+const COMMITS: &str = "elmdb-storage/src/durability.rs";
 
-/// Concurrency primitives in a Shuttle/Loom-modelled file's production code that bypass `crate::sync`
-fn modelled_sync_violations(source: &str) -> Vec<&'static str> {
-    let code = strip_cfg_test_modules(&strip_comments_and_strings(source));
-    let uses = expand_use_trees(&code);
-    let mut found = Vec::new();
+/// Files implementing or declaring `KvWrite::commit_raw` itself (not call sites).
+const COMMIT_RAW_DECLS: &[&str] =
+    &["elmdb-storage/src/durability.rs", "elmdb-storage/src/kv.rs", "elmdb-lmdb/src/txn.rs", "elmdb-sim/src/store.rs"];
 
-    // std::sync::atomic (other than `Ordering`, which is a pure enum identical across std, Loom and Shuttle)
-    let atomic_use = uses.iter().any(|p| {
-        p == "std::sync::atomic" || (p.starts_with("std::sync::atomic::") && p != "std::sync::atomic::Ordering")
-    });
-    let atomic_direct = regex::Regex::new(r"\bstd\s*::\s*sync\s*::\s*atomic\s*::\s*([A-Za-z_*][A-Za-z0-9_]*)")
-        .expect("valid regex")
-        .captures_iter(&code)
-        .any(|c| &c[1] != "Ordering");
-    if atomic_use || atomic_direct {
-        found.push("std::sync::atomic");
-    }
-
-    // std::sync::OnceLock / Once persist state across Shuttle schedules and can deadlock or leak between runs
-    let once_use = uses.iter().any(|p| p == "std::sync::OnceLock" || p == "std::sync::Once");
-    let once_direct =
-        regex::Regex::new(r"\bstd\s*::\s*sync\s*::\s*(?:OnceLock|Once)\b").expect("valid regex").is_match(&code);
-    if once_use || once_direct {
-        found.push("std::sync::OnceLock/Once");
-    }
-
-    // Direct `std::thread::spawn` bypasses Shuttle/Loom's scheduler (named worker threads using `thread::Builder` in
-    // outer wrappers such as `engine/builder.rs::Builder::start` are outside the modelled `Core` state machine)
-    let spawn_use = uses.iter().any(|p| p == "std::thread::spawn");
-    let spawn_direct = regex::Regex::new(r"\bstd\s*::\s*thread\s*::\s*spawn\b").expect("valid regex").is_match(&code);
-    if spawn_use || spawn_direct {
-        found.push("std::thread::spawn");
-    }
-
-    found
-}
-
-/// The engine's one module that commits a write transaction, relative to its source
-const COMMITS: &str = "store/commits.rs";
-
-/// Fails on engine code outside `COMMITS` that commits a write transaction, naming each line: a commit made
-/// elsewhere is one the store's rule for every commit never sees
+/// Fails on engine code outside `COMMITS` that calls `.commit_raw()`, naming each line:
+/// every write transaction in elmdb v2 must commit exclusively through `DurabilityGate::commit`.
 fn check_commits(root: &Path) -> Result<(), String> {
-    let found = commits_outside(&root.join("crates/elmdb/src"))?;
+    let crates_dir = root.join("crates");
+    let found = commits_outside(&crates_dir)?;
     if found.is_empty() {
         return Ok(());
     }
-    Err(format!(
-        "these commit a write transaction outside crates/elmdb/src/{COMMITS}: {found:?}; commit through that \
-         module's functions, which are where every commit is held to the store's rule"
-    ))
+    Err(format!("these call commit_raw() outside crates/{COMMITS}: {found:?}; commit through DurabilityGate::commit"))
 }
 
-/// The lines of the engine's source, tests aside, that commit a write transaction outside `COMMITS`, as
-/// `file:line`
-fn commits_outside(source: &Path) -> Result<Vec<String>, String> {
+/// Lines across `crates/` (tests aside) that invoke `.commit_raw()` outside `COMMIT_RAW_DECLS`.
+fn commits_outside(crates_dir: &Path) -> Result<Vec<String>, String> {
     let mut found = Vec::new();
-    let mut pending = vec![source.to_path_buf()];
+    let mut pending = vec![crates_dir.to_path_buf()];
     while let Some(dir) = pending.pop() {
         for entry in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
             let path = entry.map_err(|e| e.to_string())?.path();
-            let relative = path.strip_prefix(source).expect("under source").to_string_lossy().replace('\\', "/");
+            let relative = path.strip_prefix(crates_dir).expect("under crates").to_string_lossy().replace('\\', "/");
             if path.is_dir() {
-                if !relative.ends_with("tests") {
+                if !relative.ends_with("/tests") && relative != "tests" {
                     pending.push(path);
                 }
                 continue;
             }
-            if !relative.ends_with(".rs") || relative.ends_with("tests.rs") || relative == COMMITS {
+            if !relative.ends_with(".rs")
+                || relative.ends_with("tests.rs")
+                || COMMIT_RAW_DECLS.contains(&relative.as_str())
+            {
                 continue;
             }
             let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -792,13 +1001,12 @@ fn commits_outside(source: &Path) -> Result<Vec<String>, String> {
     Ok(found)
 }
 
-/// 1-based line numbers in `source` that commit a write transaction: heed's own `.commit()` (taking no arguments,
-/// whether on one line or split across lines) or `create_databases_and_commit(...)`
+/// 1-based line numbers in `source` that invoke `.commit_raw()`.
 fn commit_lines(source: &str) -> Vec<usize> {
     let code = strip_comments_and_strings(source);
-    let re = regex::Regex::new(r"\.\s*(commit)\s*\(\s*\)|\b(create_databases_and_commit)\s*\(").expect("valid regex");
+    let re = regex::Regex::new(r"\.\s*(commit_raw)\s*\(\s*\)").expect("valid regex");
     re.captures_iter(&code)
-        .filter_map(|cap| cap.get(1).or_else(|| cap.get(2)))
+        .filter_map(|cap| cap.get(1))
         .map(|m| 1 + code[..m.start()].bytes().filter(|&b| b == b'\n').count())
         .collect()
 }
@@ -1392,10 +1600,9 @@ fn check_one_lmdb(root: &Path) -> Result<(), String> {
 }
 
 /// The crates besides ICU's whose output an index stores: charabia's tokens and rust-stemmers' stems in a text index's
-/// terms, with what charabia normalizes, detects a language and segments by, which it requires only as ranges, and
-/// hannoy's graph in a vector index's databases. A version that splits, stems or lays out differently would leave a
-/// stored index that a query no longer matches and `check()` reports as differing, or a graph read as another layout
-const INDEXED: [&str; 6] = ["charabia", "finl_unicode", "hannoy", "rust-stemmers", "unicode-normalization", "whatlang"];
+/// terms, with what charabia normalizes, detects a language and segments by, which it requires only as ranges.
+/// A version that splits or stems differently would leave a stored index that a query no longer matches.
+const INDEXED: [&str; 5] = ["charabia", "finl_unicode", "rust-stemmers", "unicode-normalization", "whatlang"];
 
 /// Every ICU crate the lockfile holds, and each of `INDEXED`, required by the workspace at exactly its locked version
 /// and named among `elmdb`'s dependencies. A sort key is the collator's output: one stored under the stamp of these
@@ -1549,8 +1756,7 @@ fn lmdb_sys_crates(tree: &str) -> Vec<String> {
 mod tests {
     use super::{Skip, exclude_res, skips_in, stale_exclusions, with_skips};
     use super::{
-        UNMODELLED, commit_lines, direct_dependencies, is_modelled_file, lmdb_sys_crates, locks_outside_sync,
-        modelled_sync_violations, unmodelled_files, unmodelled_in_modelled_files,
+        UNMODELLED, check_workspace_deps, direct_dependencies, lmdb_sys_crates, locks_outside_sync, unmodelled_files,
     };
     use super::{
         check_deny, platform_package_mismatches, target_parity_mismatches, version_mismatches, workspace_root,
@@ -1776,100 +1982,119 @@ fn a() {
     }
 
     #[test]
-    fn modelled_files_refuse_unmodelled_atomics_oncelock_and_spawn_outside_inline_tests() {
+    fn check_workspace_deps_passes_when_all_used_and_flags_dead_entries() {
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path();
-        std::fs::create_dir_all(src.join("store")).unwrap();
-        std::fs::create_dir_all(src.join("engine")).unwrap();
-        // Clean Shuttle-modelled file: Ordering alone + inline #[cfg(test)] mod tests using std atomics/spawn is fine
-        let clean = "\
-use std::sync::atomic::Ordering;
-use crate::sync::PlainMutex;
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("crates/a")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[workspace]
+members = [
+    'crates/a',
+]
 
-pub fn work(_: Ordering) {}
-
-#[cfg(all(test, shuttle))]
-mod model;
-
-#[cfg(all(test, not(shuttle), not(loom)))]
-mod tests {
-    use std::sync::atomic::AtomicBool;
-    #[test]
-    fn real_threads() {
-        let _ = AtomicBool::new(false);
-        std::thread::spawn(|| {});
-    }
+[workspace.dependencies]
+alpha = "1.0"
+beta = {
+    version = "2.0",
+    features = ["std"],
 }
-";
-        assert!(is_modelled_file(clean));
-        assert_eq!(modelled_sync_violations(clean), Vec::<&str>::new());
-        std::fs::write(src.join("engine/clean.rs"), clean).unwrap();
+gamma.version = "3.0"
+libc = "0.2"
 
-        // Modelled file using multiline std::sync::atomic import in production code
-        let bad_atomic = "\
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-#[cfg(all(test, shuttle))]
-mod model;
-";
-        std::fs::write(src.join("store/bad_atomic.rs"), bad_atomic).unwrap();
+[workspace.dependencies.delta]
+version = "4.0"
 
-        // Modelled file using OnceLock and std::thread::spawn in production code
-        let bad_once_spawn = "\
-use std::sync::OnceLock;
-pub fn go() { std::thread::spawn(|| {}); }
-#[cfg(all(test, any(loom, shuttle)))]
-mod model { fn m() {} }
-";
-        std::fs::write(src.join("store/bad_once_spawn.rs"), bad_once_spawn).unwrap();
+[workspace.dependencies.epsilon]
+version = "5.0"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("crates/a/Cargo.toml"),
+            r#"
+[package]
+name = "a"
 
-        // Non-modelled file using OnceLock and AtomicBool: outside the modelled-file scope
-        let non_modelled = "use std::sync::OnceLock;\nuse std::sync::atomic::AtomicBool;\n";
-        assert!(!is_modelled_file(non_modelled));
-        std::fs::write(src.join("engine/search.rs"), non_modelled).unwrap();
+[dependencies]
+alpha.workspace = true
+beta = {
+    optional = true,
+    workspace = true,
+}
 
-        let found = unmodelled_in_modelled_files(src).unwrap();
-        assert_eq!(
-            found,
-            vec![
-                ("store/bad_atomic.rs".to_owned(), vec!["std::sync::atomic"]),
-                ("store/bad_once_spawn.rs".to_owned(), vec!["std::sync::OnceLock/Once", "std::thread::spawn"]),
-            ]
-        );
+[dependencies.gamma]
+workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = {
+    features = ["extra_traits"],
+    workspace = true,
+}
+
+[target.'cfg(windows)'.dev-dependencies.delta]
+features = ["Win32"]
+workspace = true
+
+[build-dependencies.epsilon]
+workspace = true
+"#,
+        )
+        .unwrap();
+        check_workspace_deps(root).unwrap();
+
+        // Adding an unused workspace dependency (inline or subtable) fails cleanly and names it.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"
+[workspace]
+members = ["crates/a"]
+
+[workspace.dependencies]
+alpha = "1.0"
+beta = "2.0"
+gamma = "3.0"
+libc = "0.2"
+delta = "4.0"
+epsilon = "5.0"
+dead-crate = "0.1"
+
+[workspace.dependencies.dead-subtable]
+version = "0.2"
+"#,
+        )
+        .unwrap();
+        let err = check_workspace_deps(root).unwrap_err();
+        assert!(err.contains("dead-crate"), "{err}");
+        assert!(err.contains("dead-subtable"), "{err}");
     }
 
     #[test]
     fn a_commit_outside_the_one_module_is_found_and_one_in_it_or_in_a_test_is_not() {
         let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("crates/elmdb/src");
-        std::fs::create_dir_all(src.join("store")).unwrap();
-        std::fs::create_dir_all(src.join("engine/tests")).unwrap();
-        std::fs::write(src.join("store/commits.rs"), "fn commit(txn: RwTxn) { txn.commit() }\n").unwrap();
-        std::fs::write(src.join("store/tests.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
-        std::fs::write(src.join("engine/tests/uses.rs"), "fn t(txn: RwTxn) { txn.commit().unwrap(); }\n").unwrap();
-        // A unit's commit takes whether it is durable, the mirror's its sequences, and comments/strings commit nothing
-        let unit = "fn f(unit: Unit) {\n    // txn.commit() is the store's\n    /* txn\n        .commit() */\n    let _ = \"txn.commit()\";\n    unit.commit(false);\n    mirror.commit(1, 2, None);\n}\n";
-        std::fs::write(src.join("engine/unit.rs"), unit).unwrap();
+        let storage_src = dir.path().join("crates/elmdb-storage/src");
+        let engine_src = dir.path().join("crates/elmdb-engine/src");
+        std::fs::create_dir_all(&storage_src).unwrap();
+        std::fs::create_dir_all(engine_src.join("tests")).unwrap();
+        std::fs::write(storage_src.join("durability.rs"), "fn commit(txn: RwTxn) { txn.commit_raw() }\n").unwrap();
+        std::fs::write(engine_src.join("tests.rs"), "fn t(txn: RwTxn) { txn.commit_raw().unwrap(); }\n").unwrap();
+        std::fs::write(engine_src.join("tests/uses.rs"), "fn t(txn: RwTxn) { txn.commit_raw().unwrap(); }\n").unwrap();
+        let ok = "fn f(txn: GatedWriteTxn) {\n    // txn.commit_raw() is gated\n    let _ = \"txn.commit_raw()\";\n    txn.commit();\n}\n";
+        std::fs::write(engine_src.join("commit.rs"), ok).unwrap();
         assert_eq!(super::check_commits(dir.path()), Ok(()));
-        std::fs::write(src.join("store/mod.rs"), "fn f(txn: RwTxn) {\n\n    txn.commit()?;\n}\n").unwrap();
-        let made = "fn f(env: &Env, wtxn: RwTxn) {\n    env.create_databases_and_commit(wtxn, |_, _| todo!());\n}\n";
-        std::fs::write(src.join("engine/made.rs"), made).unwrap();
-        let multi = "fn f(txn: RwTxn) {\n    txn\n        .commit()?;\n    txn\n        .\n        commit(\n            /* none */\n        )?;\n}\n";
-        std::fs::write(src.join("engine/multi.rs"), multi).unwrap();
+
+        std::fs::write(engine_src.join("bad.rs"), "fn f(txn: RwTxn) {\n\n    txn.commit_raw()?;\n}\n").unwrap();
+        let multi = "fn f(txn: RwTxn) {\n    txn\n        .commit_raw()?;\n    txn\n        .\n        commit_raw(\n            /* none */\n        )?;\n}\n";
+        std::fs::write(engine_src.join("multi.rs"), multi).unwrap();
         let refused = super::check_commits(dir.path()).unwrap_err();
         assert!(
-            refused.contains(r#"["engine/made.rs:2", "engine/multi.rs:3", "engine/multi.rs:6", "store/mod.rs:3"]"#),
+            refused.contains(
+                r#"["elmdb-engine/src/bad.rs:3", "elmdb-engine/src/multi.rs:3", "elmdb-engine/src/multi.rs:6"]"#
+            ),
             "{refused}"
         );
-        assert!(refused.contains("crates/elmdb/src/store/commits.rs"), "{refused}");
-        assert_eq!(
-            commit_lines(
-                "fn f(env: &Env, w: RwTxn) {\n    env.create_databases_and_commit\n        (w, |_, _| {});\n}"
-            ),
-            [2]
-        );
+        assert!(refused.contains("crates/elmdb-storage/src/durability.rs"), "{refused}");
     }
 
     #[test]
@@ -1951,7 +2176,7 @@ jobs:
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("crates/elmdb/src")).unwrap();
         let refused = super::check_sync(dir.path()).unwrap_err();
-        assert!(refused.contains("no longer lock") && refused.contains("store/sync.rs"), "{refused}");
+        assert!(refused.contains("no longer lock") && refused.contains("db.rs"), "{refused}");
     }
 
     #[test]

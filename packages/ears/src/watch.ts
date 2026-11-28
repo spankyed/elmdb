@@ -1,871 +1,905 @@
-import { WatchCauses } from './observation.ts';
-// Live reads: `watch` runs a read with every database read it makes tracked under a token of its own, which elmdb files
-// in its interval index (`elmdb/docs/architecture/engine.md`, Change sets and watch), and runs it again after each
-// commit that names the token, handing the listener the result when it changed. A result equal to the last delivered is
-// not delivered. A read that consults anything but the database isn't tracked, and goes stale when that changes: a
-// watched read is a pure read of the engine.
-//
-// How often a watch runs again is this scheduler's, whatever writes, and no view or writer opts in (G14 of elmdb's
-// goal-elmdb-next.md). Re-runs wait until the writing code has returned (a microtask), so a burst of commits in one
-// turn costs one. A watch has at most one run pending: commits arriving meanwhile only mark it dirty, so the run that
-// follows reads the latest state and the states between are skipped. A watch that ran recently waits a gap
-// proportional to what that run cost, and at least a frame, before it runs again; one idle when a commit lands runs at
-// once. A flush spends at most a slice of time on runs, and the watches left over run first in the next one; a watch
-// whose last run would overrun what is left waits for that, so an expensive watch never holds a cheap one back.
-import type { Commit, Connection } from './database.ts';
-import type { EarsClock, EARSRuntimeDeps } from './runtime.ts';
+import type { QueryAnswer, QuerySpec, WatchPolicyOptions } from 'elmdb';
+import type { EarsDatabase } from './database.ts';
+import { EarsError, toEarsError, type EarsErrorCode } from './errors.ts';
+import type { EarsOperationObserver } from './observer.ts';
 
-export type { EarsClock };
-
-/** What a watch delivers to: each changed result, and what a read threw, with the commit it reflects */
-export interface WatchObserver<T> {
-  /** A result that differs from the last one delivered (the first, always) */
-  next(value: T, commit: number): void;
-  /** What the read threw; it stays watched, and runs again after a commit that touches what it read before throwing */
-  error?(error: unknown, commit: number): void;
-}
-
-/** Payload-free origin of a commit that invalidated a watch */
-export type WatchCauseSource = 'local' | 'builder' | 'elsewhere';
-
-/** Diagnostic causes of a scheduled read, bounded independently of the number of coalesced commits. */
-export interface WatchReadContext {
-  readonly sequences: readonly number[];
-  /** Commit causes omitted because the bound or the diagnostic policy failed. */
-  readonly dropped: number;
-  /** Distinct payload-free sources of commits that invalidated this read. */
-  readonly sources: readonly WatchCauseSource[];
-  /** Whether any invalidation came from a commit whose touched keys were not known individually (`touched: 'all'`). */
-  readonly wildcard: boolean;
-}
-
-/** Payload-free snapshot of the watch scheduler's internal queues and timers */
-export interface WatchSchedulerDiagnostics {
-  /** Whether a flush loop is currently executing */
-  readonly flushing: boolean;
-  /** Which flush turn is queued, if any */
-  readonly queued: 'none' | 'microtask' | 'later';
-  /** Clock timestamp when the gap timer is scheduled to fire, or null when no timer is armed */
-  readonly timerAt: number | null;
-  /** Whether the armed gap timer keeps the process event loop alive for a waiter */
-  readonly timerHeld: boolean;
-  /** Number of watches currently queued to run */
-  readonly dirtyCount: number;
-  /** Total pending `caughtUp()` promises across all open watches */
-  readonly caughtUpWaiting: number;
-  /** Pending `watchesSettled()` promises */
-  readonly settledWaiting: number;
-  /** Highest commit sequence observed by the watch scheduler */
-  readonly lastSeenCommit: number;
-  /** Current commit sequence reported by the database handle */
-  readonly databaseCommit: number;
-}
-
-/** Payload-free snapshot of one open watch's scheduling state */
-export interface WatchEntryDiagnostics {
-  /** Label identifying the watch in diagnostics and warnings */
-  readonly label: string;
-  /** Whether the watch is owed a run for commits since its last read began */
-  readonly owed: boolean;
-  /** Whether a `caughtUp({ soon: true })` waiter lifted the frame floor for the owed run */
-  readonly soon: boolean;
-  /** Whether the watch's read or observer is currently executing on the stack */
-  readonly running: boolean;
-  /** Duration in milliseconds of the watch's most recent run */
-  readonly costMs: number;
-  /** Clock timestamp when an owed run becomes eligible after its gap, or null when idle or due immediately */
-  readonly dueAt: number | null;
-  /** Number of pending `caughtUp()` promises waiting on this watch */
-  readonly waiters: number;
-  /** Commit sequence of the last delivery accepted by the observer, or null before any delivery */
-  readonly lastDeliveredCommit: number | null;
-}
-
-/** Payload-free snapshot of the watch scheduler and its open watches, for diagnosing stalls */
-export interface WatchDiagnostics {
-  /** Scheduler-wide queue, timer, waiter, and commit-watermark state */
-  readonly scheduler: WatchSchedulerDiagnostics;
-  /** Scheduling state for each currently open watch */
-  readonly watches: readonly WatchEntryDiagnostics[];
-}
-
-/** How a watch is named where its cost is reported */
-export interface WatchOptions {
-  /** Opt-in diagnostic metadata only; never changes when a watch runs. Evaluated at invalidation. */
-  recordCauses?: () => boolean;
-  /** What the watch is, in the call count and in a warning about its cost; where it was opened when not given */
-  label?: string;
-}
-
-/** An open watch */
-export interface Watching {
-  /** Ends the watch: nothing is delivered after it */
-  stop(): void;
-  /**
-   * Resolves once the watch has been handed everything this engine committed before the call: at once when it has, and
-   * otherwise when the run that is owed has ended, whatever that run delivered. It waits for this watch and no
-   * other, so it resolves under a stream of commits that keeps other watches behind, where `watchesSettled` waits
-   * for a moment with none behind, which may not come. It resolves too when the watch is stopped or its database
-   * closed, with nothing more to be delivered. A commit another process made is one the engine hears of later, so
-   * a wait may resolve before it is handed over.
-   *
-   * `soon` says something is blocked on the answer. The run that is owed is then held to the gap its own cost
-   * sets and not to the floor of a frame, and goes first in its flush, brought forward if it was put off to a later turn:
-   * a read that costs a tenth of a millisecond is due four tenths after its last run, where it would have waited
-   * sixteen, though the process's timers fire no sooner than a millisecond. The floor is for a watch nobody is
-   * waiting on, where a frame is as soon as anyone looks. The factor is what bounds a watch's share of the thread,
-   * and it stays. Without `soon` a wait changes nothing about when the watch runs.
-   */
-  caughtUp(options?: { soon?: boolean }): Promise<void>;
-}
-
-/** The clock a scheduler reads and the timers it sets: the process's, or a test's */
-export interface WatchClock {
+/**
+ * Clock interface matching `@apackdev/clock` / `@apackdev/state` (`now()` + `after(ms, run) => cancel`).
+ */
+export interface AfterClock {
   now(): number;
-  /** `held` says something is waiting on what the timer is for: the process's clock then keeps the process alive for it */
-  setTimeout(fn: () => void, ms: number, held?: boolean): unknown;
-  clearTimeout(handle: unknown): void;
-  /** Defers `fn` to a later turn, returning an optional cancel function; defaults to `setImmediate` / `setTimeout(fn, 0)` */
-  later?(fn: () => void): (() => void) | void;
+  after(ms: number, run: () => void): () => void;
 }
 
 /**
- * The scheduler's constants. A watch's gap after a run is `delayFactor` times that run's time, and at least
- * `minimumGapMs`; a flush starts no run past `flushSliceMs` of runs. Set by the stress reading
- * (`bench/watch-stress.ts`; elmdb's docs/evidence/next-phase-3.md)
+ * Injectable clock and timer interface for deterministic sans-I/O watch scheduling.
+ * Works identically in Node.js, Electron renderers, browsers, and deterministic unit tests.
  */
-export interface WatchSchedule {
-  readonly delayFactor: number;
-  readonly minimumGapMs: number;
-  readonly flushSliceMs: number;
+export interface EarsClock {
+  now(): number;
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
 }
 
-/** The constants the engine's watches run under: a gap of four times a run and at least a frame, an 8 ms slice */
-export const WATCH_SCHEDULE: WatchSchedule = Object.freeze({ delayFactor: 4, minimumGapMs: 16, flushSliceMs: 8 });
+/** Delivery mode for live query watches. */
+export type WatchMode = 'declarative' | 'imperative';
 
-/** How many flushes in a row a watch's run may exceed the slice before a warning names it */
-const OVER_BUDGET_WARNING = 3;
-
-/** A watch as the registry holds it */
-interface Watch {
-  token: number;
-  label: string;
-  read: (context: WatchReadContext | undefined) => unknown;
-  causes?: WatchCauses;
-  observer: WatchObserver<unknown>;
-  /** What was last delivered: a value, an error, or nothing yet */
-  last: { ok: true; value: unknown } | { ok: false; error: unknown } | undefined;
-  stopped: boolean;
-  /** When its last run ended and what it cost, so when it may run again */
-  ranAt: number;
-  costMs: number;
-  /** Flushes in a row whose run of it took more than the slice, and whether that has been warned about */
-  overBudget: number;
-  warned: boolean;
-  /** Whether a run is owed: a commit wrote into what it read since its last run began, or it has never run */
-  owed: boolean;
-  /** Whether `runOnce` is currently executing on the stack for this watch */
-  running: boolean;
-  /** What `caughtUp` is waiting to resolve, once the run that is owed has ended, with any pending sequence-ahead defer cancel */
-  waiters: Array<{ resolve: () => void; cancel?: () => void }>;
-  /** Whether something blocked is waiting on the run that is owed, which is then not held to the floor */
-  soon: boolean;
-  /** Commit sequence captured before the watch's last read began, or -1 before its first run */
-  lastRunCommit: number;
-  /** Commit sequence of the last delivery accepted by the observer, or null before any delivery */
-  lastDeliveredCommit: number | null;
+/** Options configuring a live query watch. */
+export interface WatchOptions {
+  /** `'declarative'` (default, 128-bit answer dedup) or `'imperative'` (always deliver on invalidation). */
+  readonly mode?: WatchMode;
+  /** Minimum delay between consecutive reruns of this watch in milliseconds. */
+  readonly minGapMs?: number;
+  /** Adaptive backoff multiplier applied to rerun duration (default `4`). */
+  readonly adaptiveMultiplier?: number;
+  /** Deliver the initial query snapshot immediately upon registration (default `true`). */
+  readonly immediate?: boolean;
+  /** Optional error sink invoked if a watch rerun or callback throws. */
+  readonly onError?: (error: EarsError) => void;
 }
 
-export interface Watches {
-  watch<T>(read: (context: WatchReadContext | undefined) => T, observer: WatchObserver<T> | ((value: T, commit: number) => void), options?: WatchOptions): Watching;
-  /** Resolves once no watch is waiting to run again: every commit before the call has been delivered */
-  settled(): Promise<void>;
-  /** How many watches are open, and what their read sets file */
-  stats(): { watches: number; keys: number; ranges: number };
-  /** Payload-free snapshot of the scheduler and open watches, for diagnosing stalls */
-  diagnostics(): WatchDiagnostics;
-  /** Advances watches when background index builds committed ahead of async builder notifications */
-  syncBuilder(): void;
-  /** Stops every open watch, cancels any queued flush or timer, and settles pending waiters synchronously */
+/** Handle returned when subscribing to a live query watch. */
+export interface WatchHandle {
+  readonly id: number;
+  readonly active: boolean;
+  stop(): void;
+}
+
+/** Engine-level controller for driving and inspecting sans-I/O live watches. */
+export interface WatchController {
+  /** Number of currently active watches registered through this engine. */
+  readonly activeCount: number;
+  /** Polls persisted cross-process commits, dirties affected watches, and schedules a pump pass. */
+  catchUpCrossProcess(): number[];
+  /** Synchronously drains all watches currently due at `nowMs` (defaults to `clock.now()`). */
+  flushSync(nowMs?: number): number;
+  /** True when no watches are dirty or currently running. */
+  settled(): boolean;
+  /** True when all watches are caught up (or, with `soon: true`, have no immediately due work). */
+  caughtUp(soon?: boolean): boolean;
+  /**
+   * Registers a one-shot listener invoked as soon as all watches are settled (`settled() === true`).
+   * If already settled, invokes `listener` immediately and returns a no-op unsubscribe function.
+   */
+  onSettled(listener: () => void): () => void;
+  /** Unregisters and stops every active watch on this engine. */
   stopAll(): void;
 }
 
-export interface WatchScope {
-  clock?: WatchClock;
-  schedule?: WatchSchedule;
-  /** Hears a watch that keeps costing more than a flush's slice, once per watch */
-  warn?: EARSRuntimeDeps['warn'];
-}
-
-/** Runs `fn` on a later turn of the event loop, after other work: what a flush that ran out of time waits for */
-const processLater = (fn: () => void): (() => void) => {
-  if (typeof setImmediate === 'function') {
-    const handle = setImmediate(fn);
-    return () => clearImmediate(handle);
-  }
-  const handle = setTimeout(fn, 0);
-  return () => clearTimeout(handle);
-};
-
-/** Adapts a structural `EarsClock` to the watch scheduler's clock, routing both gaps and `later` yields through `clock.after` */
-export function watchClockOf(clock: EarsClock): WatchClock {
-  const monotonicNow = clock.monotonic ? () => clock.monotonic!() : () => clock.now();
+/**
+ * Creates the default monotonic system clock backed by `performance.now()` (when available, falling
+ * back to monotonic `Date.now()`) and global timers, with zero Node-specific type dependencies.
+ */
+export function createSystemClock(): EarsClock & AfterClock {
+  const perf = (globalThis as { readonly performance?: { readonly now?: () => number } }).performance;
+  const hasPerf = typeof perf?.now === 'function';
+  const startWallMs = Math.max(0, Math.trunc(Date.now()));
+  const startPerfMs = hasPerf ? (perf!.now as () => number)() : 0;
+  let lastMs = startWallMs;
+  const now = (): number => {
+    const raw = hasPerf ? startWallMs + ((perf!.now as () => number)() - startPerfMs) : Date.now();
+    const normalized = typeof raw === 'number' && Number.isFinite(raw) ? Math.max(0, Math.trunc(raw)) : lastMs;
+    if (normalized > lastMs) {
+      lastMs = normalized;
+    }
+    return lastMs;
+  };
   return {
-    now: monotonicNow,
-    setTimeout: (fn, ms) => clock.after(ms, fn),
-    clearTimeout: (handle) => (handle as () => void)(),
-    later: (fn) => clock.after(0, fn),
+    now,
+    after: (ms, run) => {
+      const handle = globalThis.setTimeout(run, ms);
+      return () => {
+        globalThis.clearTimeout(handle);
+      };
+    },
+    setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+    clearTimeout: (handle) => {
+      globalThis.clearTimeout(handle as ReturnType<typeof globalThis.setTimeout>);
+    },
   };
 }
 
-const PROCESS_CLOCK: WatchClock = {
-  now: () => performance.now(),
-  // A re-run waiting out its gap is no reason for a process to stay alive, unless something waits on the run
-  setTimeout: (fn, ms, held) => {
-    const handle = setTimeout(fn, ms);
-    if (!held) (handle as { unref?: () => void }).unref?.();
-    return handle;
-  },
-  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-};
+/**
+ * Compile-time exhaustive retry policy for every canonical `EarsErrorCode`.
+ * - `'fatal_handle'`: the database handle itself is permanently unusable (`PANICKED`, `POISONED`, `CORRUPTED`,
+ *   `DURABILITY_FAILED`); fail-stop the entire watch pump, deactivate all watches, notify all error handlers,
+ *   and settle cleanly without calling dead native methods.
+ * - `'permanent_watch'`: this watch's query can no longer succeed on the current schema/handle; unregister it.
+ * - `'transient'`: apply bounded exponential backoff so failing watches never livelock at 0ms.
+ */
+type WatchErrorPolicy = 'transient' | 'permanent_watch' | 'fatal_handle';
 
-export function createWatches(connection: Connection, { clock = PROCESS_CLOCK, schedule = WATCH_SCHEDULE, warn }: WatchScope = {}): Watches {
-  const defer = clock.later ?? processLater;
-  const open = new Map<number, Watch>();
-  /** Tokens name watches to elmdb; one is never reused, so a commit naming a stopped watch's names nothing */
-  let nextToken = 1;
-  /** Watches waiting to run, in the order they run: those a flush left over first, then by when they were marked */
-  let dirty = new Set<Watch>();
-  /** Earliest `dueAt` among `dirty` watches, or `undefined` when invalidated by removing a minimum watch */
-  let earliestDue: number | undefined = Infinity;
-  /**
-   * A flush queued, for a microtask or for a later turn of the event loop, and the timer set for the earliest watch
-   * still in its gap. A flush a sooner one replaced is cancelled where its scheduler supports it, and otherwise finds
-   * nothing of its own to do
-   */
-  let queued: { later: boolean; cancel?: () => void } | undefined;
-  let timer: { handle: unknown; at: number; held: boolean } | undefined;
-  /** How many `caughtUp` calls wait, over every watch: while any does, or `settled` is waited on, the timer for a gap is one to stay alive for */
-  let caughtUpWaiting = 0;
-  let flushing = false;
-  /** Set when `caughtUp({ soon: true })` runs mid-flush so remaining batch items are re-prioritized */
-  let soonLifted = false;
-  let waiting: Array<{ resolve: () => void; cancel?: () => void }> = [];
-  let unlisten: (() => void) | undefined;
-  /** Highest commit sequence reported to this scheduler via `onCommit` or when first subscribing */
-  let lastSeenCommit = 0;
-  /** Highest sequence broadcast by `syncBuilder()`, so delayed TSFN builder notifications for it are ignored */
-  let builderSyncedThrough = 0;
+const WATCH_ERROR_POLICY: Readonly<Record<EarsErrorCode, WatchErrorPolicy>> = Object.freeze({
+  INVALID_ARGUMENT: 'permanent_watch',
+  INVALID_WIRE_FRAME: 'permanent_watch',
+  INVALID_SCHEMA: 'permanent_watch',
+  SCHEMA_CHANGED: 'transient',
+  UNKNOWN_TYPE: 'permanent_watch',
+  TYPE_ARCHIVED: 'permanent_watch',
+  UNKNOWN_FIELD: 'permanent_watch',
+  UNKNOWN_RELATION: 'permanent_watch',
+  UNKNOWN_INDEX: 'permanent_watch',
+  ENTITY_NOT_FOUND: 'transient',
+  ENTITY_ALREADY_EXISTS: 'transient',
+  ENTITY_TRASHED: 'transient',
+  ENTITY_NOT_TRASHED: 'transient',
+  RELATION_NOT_FOUND: 'transient',
+  RELATION_ALREADY_EXISTS: 'transient',
+  VALIDATION_FAILED: 'permanent_watch',
+  UNIQUE_VIOLATION: 'transient',
+  CARDINALITY_VIOLATION: 'transient',
+  CYCLE_DETECTED: 'transient',
+  REFERENCED: 'transient',
+  ENDPOINT_MISMATCH: 'permanent_watch',
+  HOOK_ABORTED: 'transient',
+  HOOK_CYCLE_LIMIT: 'transient',
+  ASYNC_CALLBACK_FORBIDDEN: 'permanent_watch',
+  INDEX_BUILD_FAILED: 'transient',
+  INDEX_NOT_READY: 'transient',
+  RESOURCE_LIMIT: 'transient',
+  CANCELLED: 'transient',
+  STORAGE_FULL: 'transient',
+  CORRUPTED: 'fatal_handle',
+  DURABILITY_FAILED: 'fatal_handle',
+  POISONED: 'fatal_handle',
+  IO: 'transient',
+  INTERNAL: 'transient',
+  CLOSED: 'permanent_watch',
+  READ_ONLY: 'permanent_watch',
+  NO_DATABASE: 'permanent_watch',
+  DATABASE_LOCKED: 'transient',
+  ALREADY_EXISTS: 'permanent_watch',
+  PANICKED: 'fatal_handle',
+  ALREADY_LOADED: 'permanent_watch',
+});
 
-  const databaseCommit = (closeOnClosed = true): number | undefined => {
-    if (!connection.database.isOpen) {
-      if (closeOnClosed) closed();
+const INITIAL_TRANSIENT_BACKOFF_MS = 50;
+const MAX_TRANSIENT_BACKOFF_MS = 30_000;
+const DEFAULT_TURN_SLICE_MS = 8;
+
+interface WatchEntry {
+  readonly id: number;
+  readonly spec: QuerySpec;
+  readonly deliver: (answer: QueryAnswer) => void;
+  readonly onError: ((error: EarsError) => void) | undefined;
+  active: boolean;
+  /** Measured wall-clock duration (ms) of the previous rerun, fed into Rust's adaptive backoff. */
+  lastCostMs: number;
+  /** Backoff state for transient rerun failures so a broken watch never spins at 0ms. */
+  backoffMs: number;
+  backoffUntilMs: number;
+}
+
+/**
+ * Instance-scoped sans-I/O watch pump.
+ *
+ * All invalidation tracking, coalescing, adaptive throttling, and turn-slicing state lives inside
+ * Rust's `LiveQueryHub` on `EarsDatabase`; this pump drives `nextDueWatch` / `rerunWatch` using
+ * a single injectable `EarsClock` timer (zero hidden Rust background timer threads).
+ */
+export class WatchPump implements WatchController {
+  readonly #db: EarsDatabase;
+  readonly #clock: EarsClock | AfterClock;
+  readonly #onWatchError: ((error: EarsError) => void) | undefined;
+  readonly #observer: EarsOperationObserver | undefined;
+  readonly #turnSliceMs: number;
+  readonly #isInWriteTxn: (() => boolean) | undefined;
+  readonly #entries = new Map<number, WatchEntry>();
+  readonly #settledListeners = new Set<{ readonly run: () => void }>();
+  #cancelTimer: (() => void) | undefined = undefined;
+  #pumping = false;
+  #rescheduleAfterPump = false;
+  #stopped = false;
+  #lastNowMs = 0;
+
+  constructor(
+    db: EarsDatabase,
+    clock: EarsClock | AfterClock,
+    onWatchError?: (error: EarsError) => void,
+    observer?: EarsOperationObserver,
+    turnSliceMs = DEFAULT_TURN_SLICE_MS,
+    isInWriteTxn?: () => boolean,
+  ) {
+    if (!Number.isSafeInteger(turnSliceMs) || turnSliceMs < 1) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        `watchTurnSliceMs must be a positive safe integer, got ${String(turnSliceMs)}`,
+      );
+    }
+    this.#db = db;
+    this.#clock = clock;
+    this.#onWatchError = onWatchError;
+    this.#observer = observer;
+    this.#turnSliceMs = turnSliceMs;
+    this.#isInWriteTxn = isInWriteTxn;
+  }
+
+  #nowMs(): number {
+    const raw = this.#clock.now();
+    if (typeof raw !== 'number' || !Number.isFinite(raw)) {
+      return this.#lastNowMs;
+    }
+    const clamped = Math.min(Number.MAX_SAFE_INTEGER, Math.max(0, Math.trunc(raw)));
+    if (clamped > this.#lastNowMs) {
+      this.#lastNowMs = clamped;
+    }
+    return this.#lastNowMs;
+  }
+
+  get activeCount(): number {
+    return this.#entries.size;
+  }
+
+  register(
+    spec: QuerySpec,
+    deliver: (answer: QueryAnswer) => void,
+    options?: WatchOptions,
+    onSuppressImmediate?: (answer: QueryAnswer) => void,
+  ): WatchHandle {
+    if (this.#stopped) {
+      throw new EarsError('CLOSED', 'Cannot register a watch after the engine has stopped');
+    }
+    const policy: WatchPolicyOptions = {};
+    if (options?.mode !== undefined) policy.mode = options.mode;
+    if (options?.minGapMs !== undefined) policy.minGapMs = options.minGapMs;
+    if (options?.adaptiveMultiplier !== undefined) policy.adaptiveMultiplier = options.adaptiveMultiplier;
+    // Read remaining option getters BEFORE registering in Rust so a hostile getter never leaks `reg.watchId`.
+    const onError = options?.onError;
+    const immediate = options?.immediate !== false;
+
+    const nowMs = this.#nowMs();
+    const finish = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
+    let reg;
+    try {
+      reg = this.#db.registerWatch(spec, policy, nowMs);
+    } catch (error) {
+      const earsErr = toEarsError(error);
+      finish?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+      throw earsErr;
+    }
+
+    try {
+      try {
+        finish?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+      } catch (observerErr) {
+        // Never leak an unregistered Rust watch (or wedge settled() to false) if observer.finish throws.
+        try {
+          this.#db.unregisterWatch(reg.watchId);
+        } catch {
+          // Best-effort if DB closed.
+        }
+        throw observerErr;
+      }
+
+      const entry: WatchEntry = {
+        id: reg.watchId,
+        spec,
+        deliver,
+        onError,
+        active: true,
+        lastCostMs: 1,
+        backoffMs: 0,
+        backoffUntilMs: 0,
+      };
+      this.#entries.set(reg.watchId, entry);
+
+      if (immediate) {
+        try {
+          deliver(reg.answer);
+        } catch (error) {
+          try {
+            this.#reportError(entry, toEarsError(error), false);
+          } catch (handlerError) {
+            // Never leak the registered watch if the caller's error handler rethrows before we return WatchHandle.
+            this.#unregister(entry.id);
+            throw handlerError;
+          }
+        }
+      } else if (onSuppressImmediate !== undefined) {
+        try {
+          onSuppressImmediate(reg.answer);
+        } catch (error) {
+          try {
+            this.#reportError(entry, toEarsError(error), false);
+          } catch (handlerError) {
+            // Never leak the registered watch if seeding/error handler throws before we return WatchHandle.
+            this.#unregister(entry.id);
+            throw handlerError;
+          }
+        }
+      }
+
+      const self = this;
+      return {
+        get id(): number {
+          return entry.id;
+        },
+        get active(): boolean {
+          return entry.active;
+        },
+        stop(): void {
+          self.#unregister(entry.id);
+        },
+      };
+    } finally {
+      // If a cross-process schema bump during registration or a concurrent write inside the
+      // immediate callback dirtied this or any sibling watch, schedule a wake even on error cleanup.
+      if (!this.#stopped && this.#entries.size > 0) {
+        try {
+          if (!this.#db.watchesSettled()) {
+            this.#scheduleNext(this.#nowMs());
+          }
+        } catch (err) {
+          this.#handlePumpReadError(err);
+        }
+      }
+    }
+  }
+
+  notifyMutation(): void {
+    if (this.#stopped || this.#entries.size === 0) return;
+    if (this.#pumping) {
+      this.#rescheduleAfterPump = true;
+      return;
+    }
+    try {
+      this.#scheduleNext(this.#nowMs());
+    } catch (err) {
+      // Isolate clock/timer errors so callers invoking notifyMutation() in `finally` never mask DB errors.
+      const earsErr = toEarsError(err);
+      if (this.#onWatchError) {
+        try {
+          this.#onWatchError(earsErr);
+        } catch {
+          // Isolate throwing error handler.
+        }
+      }
+    }
+  }
+
+  catchUpCrossProcess(): number[] {
+    if (this.#stopped) return [];
+    let dirtied: number[];
+    try {
+      dirtied = this.#db.catchUpCrossProcess(this.#nowMs());
+    } catch (error) {
+      throw toEarsError(error);
+    }
+    if (dirtied.length > 0) this.notifyMutation();
+    return dirtied;
+  }
+
+  flushSync(nowMs?: number): number {
+    let dbInWriteTxn = false;
+    try {
+      dbInWriteTxn = this.#db.pendingCommitSeq() !== null;
+    } catch {
+      // If the handle is closed/poisoned, fall through so `#stopped` / `#drain` handles it cleanly.
+    }
+    if (this.#isInWriteTxn?.() || dbInWriteTxn) {
+      throw new EarsError(
+        'INVALID_ARGUMENT',
+        'watches.flushSync() cannot be called inside an active write transaction or beforeCommit hook',
+      );
+    }
+    if (this.#stopped || this.#entries.size === 0) return 0;
+    let startMs: number;
+    if (nowMs === undefined) {
+      startMs = this.#nowMs();
+    } else {
+      if (
+        typeof nowMs !== 'number'
+        || !Number.isFinite(nowMs)
+        || nowMs < 0
+        || Math.trunc(nowMs) > Number.MAX_SAFE_INTEGER
+      ) {
+        throw new EarsError(
+          'INVALID_ARGUMENT',
+          `nowMs must be a non-negative safe integer timestamp, got ${String(nowMs)}`,
+        );
+      }
+      startMs = Math.trunc(nowMs);
+    }
+    return this.#drain(startMs, false);
+  }
+
+  settled(): boolean {
+    if (this.#stopped) return true;
+    try {
+      return this.#db.watchesSettled();
+    } catch (error) {
+      throw toEarsError(error);
+    }
+  }
+
+  caughtUp(soon?: boolean): boolean {
+    if (this.#stopped) return true;
+    try {
+      return this.#db.caughtUp(this.#nowMs(), soon ?? false);
+    } catch (error) {
+      throw toEarsError(error);
+    }
+  }
+
+  onSettled(listener: () => void): () => void {
+    if (!this.#pumping && this.settled()) {
+      listener();
+      return () => {};
+    }
+    const token = { run: listener };
+    this.#settledListeners.add(token);
+    return () => {
+      this.#settledListeners.delete(token);
+    };
+  }
+
+  stopAll(): void {
+    this.#clearTimer();
+    const watchIds = [...this.#entries.keys()];
+    for (const watchId of watchIds) {
+      this.#unregister(watchId);
+    }
+    if (!this.#pumping) this.#notifySettledIfReady();
+  }
+
+  markClosed(): void {
+    this.#stopped = true;
+    this.stopAll();
+    try {
+      this.#db.stopWatches();
+    } catch {
+      // Best-effort if the underlying database is already closed.
+    }
+    if (!this.#pumping) this.#notifySettledIfReady();
+  }
+
+  #notifySettledIfReady(): void {
+    if (this.#settledListeners.size === 0) return;
+    let isSettled: boolean;
+    try {
+      isSettled = this.settled();
+    } catch {
+      return;
+    }
+    if (!isSettled) return;
+    const listeners = [...this.#settledListeners];
+    this.#settledListeners.clear();
+    for (const token of listeners) {
+      try {
+        token.run();
+      } catch {
+        // Isolate listener exceptions so remaining settled listeners still run.
+      }
+    }
+  }
+
+  #unregister(watchId: number): void {
+    const entry = this.#entries.get(watchId);
+    if (!entry) return;
+    entry.active = false;
+    this.#entries.delete(watchId);
+    try {
+      this.#db.unregisterWatch(watchId);
+    } catch {
+      // Ignore if DB was already closed.
+    }
+    if (this.#entries.size === 0) this.#clearTimer();
+    if (!this.#pumping) this.#notifySettledIfReady();
+  }
+
+  #clearTimer(): void {
+    if (this.#cancelTimer !== undefined) {
+      const cancel = this.#cancelTimer;
+      this.#cancelTimer = undefined;
+      try {
+        cancel();
+      } catch {
+        // Never let a throwing custom clock cancel function mask errors or wedge cleanup/settlement.
+      }
+    }
+  }
+
+  #armTimer(delayMs: number): void {
+    this.#clearTimer();
+    const delay = Math.max(0, delayMs);
+    const run = (): void => {
+      this.#cancelTimer = undefined;
+      if (this.#stopped) return;
+      let fireNow = this.#lastNowMs;
+      try {
+        fireNow = this.#nowMs();
+      } catch (clockErr) {
+        if (this.#onWatchError) {
+          try {
+            this.#onWatchError(toEarsError(clockErr));
+          } catch {
+            // Isolate throwing error handler.
+          }
+        }
+      }
+      this.#drain(fireNow, true);
+    };
+    if ('after' in this.#clock && typeof this.#clock.after === 'function') {
+      this.#cancelTimer = this.#clock.after(delay, run);
+    } else {
+      const clock = this.#clock as EarsClock;
+      const handle = clock.setTimeout(run, delay);
+      this.#cancelTimer = () => {
+        clock.clearTimeout(handle);
+      };
+    }
+  }
+
+  #computeNextDelay(nowMs: number): number | undefined {
+    let tick;
+    try {
+      tick = this.#db.tickWatches(nowMs);
+    } catch (err) {
+      this.#handlePumpReadError(err);
       return undefined;
     }
-    try {
-      return connection.lastCommit();
-    } catch (error) {
-      if ((error as { code?: unknown })?.code === 'CLOSED') {
-        if (closeOnClosed) closed();
-        return undefined;
+    if (tick.dueIds.length === 0 && tick.nextWakeDelayMs === null) {
+      return undefined;
+    }
+    let delayMs: number | undefined;
+    if (tick.dueIds.length > 0) {
+      // Respect per-watch transient failure backoff so failing watches never spin at 0ms.
+      let earliestReadyDelay = Infinity;
+      for (const id of tick.dueIds) {
+        const entry = this.#entries.get(id);
+        const wait = entry && entry.backoffUntilMs > nowMs ? entry.backoffUntilMs - nowMs : 0;
+        if (wait < earliestReadyDelay) earliestReadyDelay = wait;
       }
-      throw error;
-    }
-  };
-
-  lastSeenCommit = databaseCommit(false) ?? 0;
-  builderSyncedThrough = lastSeenCommit;
-
-  const dueAt = (watch: Watch) => (watch.ranAt < 0 ? -Infinity
-    : watch.ranAt + Math.max(watch.soon ? 0 : schedule.minimumGapMs, schedule.delayFactor * watch.costMs));
-
-  const addDirty = (watch: Watch) => {
-    dirty.add(watch);
-    if (earliestDue !== undefined) {
-      const due = dueAt(watch);
-      if (due < earliestDue) earliestDue = due;
-    }
-  };
-
-  const removeDirty = (watch: Watch): boolean => {
-    if (!dirty.delete(watch)) return false;
-    if (dirty.size === 0) earliestDue = Infinity;
-    else if (earliestDue !== undefined && dueAt(watch) <= earliestDue) earliestDue = undefined;
-    return true;
-  };
-
-  const earliestDirty = (): number => {
-    if (earliestDue !== undefined) return earliestDue;
-    let min = Infinity;
-    for (const watch of dirty) {
-      const due = dueAt(watch);
-      if (due < min) min = due;
-    }
-    return earliestDue = min;
-  };
-
-  /** Queues what the dirty watches need: a flush for those due now, a timer for the first of the rest */
-  const plan = (soon: boolean, blocked = false) => {
-    if (closed()) return;
-    const earliest = earliestDirty();
-    if (earliest === Infinity) return;
-    const now = clock.now();
-    if (earliest <= now) {
-      // A flush runs everything due, so a timer standing for one of them would fire on nothing
-      if (timer) {
-        clock.clearTimeout(timer.handle);
-        timer = undefined;
-      }
-      // A flush put off to a later turn was put off for other work's sake. Something blocked on a watch that is due
-      // is not other work: its flush comes now, cancelling the put-off turn where possible and ignoring it otherwise
-      if (queued && !(blocked && queued.later)) return;
-      queued?.cancel?.();
-      const entry: { later: boolean; cancel?: () => void } = { later: !soon };
-      queued = entry;
-      const runFlush = () => {
-        if (queued !== entry) return;
-        entry.cancel = undefined;
-        flush();
-      };
-      if (soon) queueMicrotask(runFlush);
-      else entry.cancel = defer(runFlush) ?? undefined;
-      return;
-    }
-    const held = caughtUpWaiting > 0 || waiting.length > 0;
-    if (timer && timer.at <= earliest && timer.held === held) return;
-    if (timer) clock.clearTimeout(timer.handle);
-    timer = {
-      at: earliest,
-      held,
-      handle: clock.setTimeout(() => {
-        timer = undefined;
-        if (closed()) return;
-        plan(true);
-        settleWaiting();
-      }, earliest - now, held),
-    };
-  };
-
-  /** Replaces an armed timer whose `held` flag no longer matches whether any caller is waiting */
-  const syncTimerHeld = () => {
-    if (!timer || flushing) return;
-    if (dirty.size === 0) {
-      clock.clearTimeout(timer.handle);
-      timer = undefined;
-      return;
-    }
-    const held = caughtUpWaiting > 0 || waiting.length > 0;
-    if (timer.held !== held) {
-      clock.clearTimeout(timer.handle);
-      timer = undefined;
-      plan(true);
-    }
-  };
-
-  const onCommit = (commit: Commit) => {
-    if (closed()) return;
-    const source: WatchCauseSource = commit.source ?? 'local';
-    const wildcard = commit.touched === 'all';
-    if (source === 'builder' && !wildcard && commit.sequence <= builderSyncedThrough) return;
-    if (commit.sequence > lastSeenCommit) lastSeenCommit = commit.sequence;
-    let any = false;
-    const mark = (watch: Watch) => {
-      if (source === 'builder' && !wildcard && commit.sequence <= watch.lastRunCommit) return;
-      any = true;
-      watch.owed = true;
-      watch.causes?.add(commit.sequence, source, wildcard);
-      // A commit landing on a watch already waiting is one whose state the coming run skips
-      if (dirty.has(watch)) connection.tally()?.watchSkipped(watch.label);
-      else addDirty(watch);
-    };
-    if (wildcard) {
-      for (const watch of open.values()) mark(watch);
-    } else {
-      for (const token of commit.touched) {
-        const watch = open.get(token);
-        if (watch) mark(watch);
+      if (Number.isFinite(earliestReadyDelay)) {
+        delayMs = earliestReadyDelay;
       }
     }
-    // While a flush is running, its epilogue plans any watches that remain dirty once the batch finishes
-    if (any && !flushing) plan(true);
-  };
-
-  /** Resolves `caughtUp` calls: each is answered once, by the run it waited for or by the watch ending */
-  const answer = (waiters: Array<{ resolve: () => void; cancel?: () => void }>) => {
-    caughtUpWaiting -= waiters.length;
-    for (const waiter of waiters) {
-      waiter.cancel?.();
-      waiter.cancel = undefined;
-      waiter.resolve();
+    // Always consider cooldown watches (`nextWakeDelayMs`) alongside backed-off due watches
+    // so a failing watch in exponential backoff can never stall healthy watches up to 30s!
+    if (tick.nextWakeDelayMs !== null) {
+      const cooldown = Math.max(0, tick.nextWakeDelayMs);
+      delayMs = delayMs === undefined ? cooldown : Math.min(delayMs, cooldown);
     }
-  };
-
-  const run = (watch: Watch) => {
-    // What waited before this run began is answered by it, however it ends. A commit landing while it runs is
-    // owed a run of its own, and what waits from then on waits for that one; a re-entrant `caughtUp` made during
-    // `runOnce` waits for this delivery and any run owed because of a commit during it
-    watch.owed = false;
-    // What was blocked is answered by this run: the next one has its whole gap unless something waits again
-    watch.soon = false;
-    watch.running = true;
-    const waited = watch.waiters;
-    watch.waiters = [];
-    try {
-      runOnce(watch);
-    } finally {
-      watch.running = false;
-      answer(waited);
-      if (!watch.owed) {
-        watch.soon = false;
-        if (watch.waiters.length > 0) answer(watch.waiters.splice(0));
-      }
-    }
-  };
-
-  const runOnce = (watch: Watch) => {
-    // What the token held was the last run's: this run's reads replace it
-    connection.untrack(watch.token);
-    // Capture the commit watermark before reading so a concurrent commit cannot tag earlier data with a later sequence
-    const commitBefore = databaseCommit();
-    if (commitBefore === undefined) return;
-    watch.lastRunCommit = commitBefore;
-    const started = clock.now();
-    const context = watch.causes?.take();
-    let outcome: { ok: true; value: unknown } | { ok: false; error: unknown };
-    try {
-      outcome = { ok: true, value: connection.track(watch.token, () => watch.read(context)) };
-    } catch (error) {
-      outcome = { ok: false, error };
-    }
-    watch.ranAt = clock.now();
-    watch.costMs = Math.max(0, watch.ranAt - started);
-    connection.tally()?.watchRun(watch.label, watch.costMs);
-    if (closed()) return;
-    if (watch.stopped) {
-      connection.untrack(watch.token);
-      return;
-    }
-    const last = watch.last;
-    if (outcome.ok) {
-      if (last?.ok && sameValue(last.value, outcome.value)) return;
-      watch.observer.next(outcome.value, commitBefore);
-      watch.last = outcome;
-      watch.lastDeliveredCommit = commitBefore;
-    } else {
-      watch.observer.error?.(outcome.error, commitBefore);
-      watch.last = outcome;
-      if (watch.observer.error) watch.lastDeliveredCommit = commitBefore;
-    }
-  };
-
-  /** Notes a run that took more than the slice, warning once about a watch that keeps doing it */
-  const charge = (watch: Watch) => {
-    if (watch.costMs <= schedule.flushSliceMs) {
-      watch.overBudget = 0;
-      return;
-    }
-    watch.overBudget++;
-    if (warn && !watch.warned && watch.overBudget >= OVER_BUDGET_WARNING) {
-      watch.warned = true;
-      warn(`A watch takes ${watch.costMs.toFixed(1)} ms a run, more than a flush's ${schedule.flushSliceMs} ms, `
-        + `${watch.overBudget} runs in a row: ${watch.label}. It runs at most every `
-        + `${(schedule.delayFactor * watch.costMs).toFixed(0)} ms; a narrower read costs less`,
-      { kind: 'slowWatch', label: watch.label, ms: watch.costMs, runs: watch.overBudget });
-    }
-  };
-
-  /** Stops every open watch, cancels any queued flush or timer, and settles waiters synchronously */
-  function stopAll() {
-    const stillOpen = connection.database.isOpen;
-    for (const watch of open.values()) {
-      watch.stopped = true;
-      if (stillOpen) connection.untrack(watch.token);
-      answer(watch.waiters.splice(0));
-    }
-    open.clear();
-    dirty.clear();
-    earliestDue = Infinity;
-    unlisten?.();
-    unlisten = undefined;
-    if (timer) {
-      clock.clearTimeout(timer.handle);
-      timer = undefined;
-    }
-    queued?.cancel?.();
-    queued = undefined;
-    settleWaiting();
+    return delayMs;
   }
 
-  /**
-   * Whether the database was closed under the watches: its owner closes it, never the engine, so the scheduler learns
-   * of it the next time it would run one unless `stopAll()` was called first. It then stops them all, delivering nothing
-   */
-  function closed(): boolean {
-    if (connection.database.isOpen) return false;
-    stopAll();
-    return true;
+  #scheduleNext(nowMs: number): void {
+    if (this.#stopped || this.#entries.size === 0) {
+      this.#clearTimer();
+      return;
+    }
+    const delayMs = this.#computeNextDelay(nowMs);
+    if (delayMs === undefined) {
+      this.#clearTimer();
+      return;
+    }
+    this.#armTimer(delayMs);
   }
 
-  function flush() {
-    queued?.cancel?.();
-    queued = undefined;
-    if (closed()) return;
-    flushing = true;
-    soonLifted = false;
-    const started = clock.now();
-    // Commits the runs make mark the next set, so nothing marked here runs twice in this flush
-    // Those something blocked is waiting on go first, so the slice is spent on them before any other
-    const batch = [...dirty].sort((a, b) => Number(b.soon) - Number(a.soon));
-    dirty = new Set();
-    earliestDue = Infinity;
-    const left: Watch[] = [];
-    let ranOne = false;
-    let anySoon = false;
+  #failStopHandle(error: EarsError, firstEntry?: WatchEntry): void {
+    this.#stopped = true;
+    this.#clearTimer();
+    const remaining = [...this.#entries.values()];
+    this.#entries.clear();
+    if (firstEntry !== undefined) {
+      firstEntry.active = false;
+    }
+    for (const entry of remaining) {
+      entry.active = false;
+    }
+    if (firstEntry !== undefined) {
+      this.#reportError(firstEntry, error, true);
+    }
+    for (const entry of remaining) {
+      if (firstEntry === undefined || entry.id !== firstEntry.id) {
+        this.#reportError(entry, error, true);
+      }
+    }
+  }
+
+  #handlePumpReadError(err: unknown): void {
+    const earsErr = toEarsError(err);
+    if (WATCH_ERROR_POLICY[earsErr.code] === 'fatal_handle' || earsErr.code === 'CLOSED') {
+      this.#failStopHandle(earsErr);
+      if (!this.#pumping) {
+        this.#notifySettledIfReady();
+      }
+    }
+  }
+
+  #safeAbortWatchRun(watchId: number, nowMs: number): void {
     try {
-      for (let i = 0; i < batch.length; i++) {
-        if (closed()) break;
-        if (soonLifted) {
-          soonLifted = false;
-          const soonOnes: Watch[] = [];
-          const rest: Watch[] = [];
-          for (let j = i; j < batch.length; j++) {
-            const candidate = batch[j]!;
-            if (candidate.soon) soonOnes.push(candidate);
-            else rest.push(candidate);
+      this.#db.abortWatchRun(watchId, true, nowMs);
+    } catch {
+      // Best-effort if DB closed.
+    }
+  }
+
+  #applyTransientBackoff(entry: WatchEntry, nowMs: number, failedThisTurn: Set<number>): void {
+    failedThisTurn.add(entry.id);
+    entry.backoffMs =
+      entry.backoffMs === 0
+        ? INITIAL_TRANSIENT_BACKOFF_MS
+        : Math.min(MAX_TRANSIENT_BACKOFF_MS, entry.backoffMs * 2);
+    entry.backoffUntilMs = nowMs + entry.backoffMs;
+  }
+
+  #drain(startNowMs: number, scheduleTail: boolean): number {
+    if (this.#pumping || this.#stopped) return 0;
+    this.#pumping = true;
+    this.#rescheduleAfterPump = false;
+    let ran = 0;
+    let nextWakeDelayMs: number | undefined;
+    let sawBackoff = false;
+    const failedThisTurn = new Set<number>();
+
+    try {
+      const turnStart = startNowMs;
+      const maxIterations = Math.max(64, this.#entries.size * 8);
+      for (let i = 0; i < maxIterations; i++) {
+        if (this.#stopped || this.#entries.size === 0) break;
+        let nowMs = startNowMs;
+        if (scheduleTail) {
+          try {
+            nowMs = this.#nowMs();
+          } catch (clockErr) {
+            if (this.#onWatchError) {
+              try {
+                this.#onWatchError(toEarsError(clockErr));
+              } catch {
+                // Isolate throwing error handler.
+              }
+            }
           }
-          let k = i;
-          for (const item of soonOnes) batch[k++] = item;
-          for (const item of rest) batch[k++] = item;
         }
-        const watch = batch[i]!;
-        if (watch.stopped) continue;
-        const now = clock.now();
-        const spent = now - started;
-        // In its gap; or, once another has run — a flush always runs one, so every flush makes progress — out of time,
-        // or a run its last cost says would overrun what remains
-        if (dueAt(watch) > now || (ranOne && spent + watch.costMs > schedule.flushSliceMs)) {
-          left.push(watch);
+        const elapsedTurnMs = Math.max(0, nowMs - turnStart);
+        let watchId: number | undefined;
+
+        if (this.#hasBlockedEntries(nowMs, failedThisTurn)) {
+          // Enforce the 8ms cooperative turn slice even when another watch is backed off!
+          if (scheduleTail && ran > 0 && elapsedTurnMs >= this.#turnSliceMs) {
+            nextWakeDelayMs = 0;
+            break;
+          }
+          let tick;
+          try {
+            tick = this.#db.tickWatches(nowMs);
+          } catch (tickErr) {
+            this.#handlePumpReadError(tickErr);
+            break;
+          }
+          let dbFailed = false;
+          for (const candidate of tick.dueIds) {
+            const candidateEntry = this.#entries.get(candidate);
+            if (!candidateEntry || !candidateEntry.active) {
+              watchId = candidate;
+              break;
+            }
+            if (!failedThisTurn.has(candidate) && candidateEntry.backoffUntilMs <= nowMs) {
+              // Mark running & clear dirty atomically (matching nextDueWatch) so rerunWatch
+              // does not leave the watch permanently dirty after completing!
+              let began: boolean;
+              try {
+                began = this.#db.beginWatchRun(candidate);
+              } catch (beginErr) {
+                this.#handlePumpReadError(beginErr);
+                dbFailed = true;
+                break;
+              }
+              if (!began) {
+                continue;
+              }
+              watchId = candidate;
+              break;
+            }
+          }
+          if (dbFailed) {
+            break;
+          }
+          if (watchId === undefined) {
+            sawBackoff = true;
+            if (tick.nextWakeDelayMs !== null) {
+              nextWakeDelayMs =
+                nextWakeDelayMs === undefined
+                  ? tick.nextWakeDelayMs
+                  : Math.min(nextWakeDelayMs, tick.nextWakeDelayMs);
+            }
+            break;
+          }
+        } else {
+          let due;
+          try {
+            due = this.#db.nextDueWatch(nowMs, elapsedTurnMs);
+          } catch (dueErr) {
+            this.#handlePumpReadError(dueErr);
+            break;
+          }
+          if (due.watchId === undefined) {
+            nextWakeDelayMs = due.nextWakeDelayMs;
+            break;
+          }
+          watchId = due.watchId;
+        }
+
+        const entry = this.#entries.get(watchId);
+        if (!entry || !entry.active) {
+          try {
+            this.#db.unregisterWatch(watchId);
+          } catch {
+            // Already gone.
+          }
           continue;
         }
-        ranOne = true;
-        // A commit an earlier run in this flush made is one this run reads: it needn't run again for it
-        if (removeDirty(watch)) connection.tally()?.watchSkipped(watch.label);
-        let runError: { thrown: unknown } | undefined;
+
+        let needsAbort = true;
+        let runStart = nowMs;
+        let finishRerun: ReturnType<EarsOperationObserver['start']> | undefined;
+        let rerun;
         try {
-          run(watch);
-        } catch (error) {
-          runError = { thrown: error };
+          try {
+            runStart = this.#nowMs();
+          } catch (clockErr) {
+            this.#safeAbortWatchRun(entry.id, nowMs);
+            needsAbort = false;
+            this.#applyTransientBackoff(entry, nowMs, failedThisTurn);
+            sawBackoff = true;
+            this.#reportError(entry, toEarsError(clockErr), true);
+            if (this.#allDueBlocked(nowMs, failedThisTurn)) break;
+            continue;
+          }
+          try {
+            finishRerun = this.#observer?.start({ kind: 'read', ops: 1, watch: true, inUnit: false });
+          } catch (observerErr) {
+            this.#reportError(entry, toEarsError(observerErr), true);
+          }
+          if (!entry.active) {
+            needsAbort = false;
+            try {
+              finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+            } catch (observerErr) {
+              this.#reportError(entry, toEarsError(observerErr), true);
+            }
+            continue;
+          }
+          try {
+            rerun = this.#db.rerunWatch(entry.id, entry.spec, nowMs, entry.lastCostMs);
+            needsAbort = false;
+          } catch (rerunErr) {
+            const earsErr = toEarsError(rerunErr);
+            try {
+              finishRerun?.({ outcome: 'error', requestBytes: 0, responseBytes: 0, errorCode: earsErr.code });
+            } catch (observerErr) {
+              this.#reportError(entry, toEarsError(observerErr), true);
+            }
+            failedThisTurn.add(entry.id);
+            const policy = WATCH_ERROR_POLICY[earsErr.code];
+            if (policy === 'fatal_handle' || earsErr.code === 'CLOSED') {
+              needsAbort = false;
+              this.#failStopHandle(earsErr, entry);
+              break;
+            }
+            if (policy === 'permanent_watch') {
+              needsAbort = false;
+              // Permanent schema/compile/closed error: stop this broken watch so it cannot livelock or starve others.
+              this.#unregister(entry.id);
+            } else {
+              // Ensure Rust WatchScheduler clears `running = false` and requeues `dirty = true` even if
+              // rerunWatch threw before entering Rust's snapshot executor (preventing permanent wedges).
+              this.#safeAbortWatchRun(entry.id, nowMs);
+              needsAbort = false;
+              // Transient error: exponential backoff instead of 0ms spin.
+              this.#applyTransientBackoff(entry, nowMs, failedThisTurn);
+              sawBackoff = true;
+            }
+            this.#reportError(entry, earsErr, true);
+            // Break if all remaining due watches are backed off so we don't pop the same watch again in this turn.
+            if (this.#allDueBlocked(nowMs, failedThisTurn)) break;
+            continue;
+          }
+        } finally {
+          if (needsAbort && entry.active && !this.#stopped) {
+            this.#safeAbortWatchRun(entry.id, nowMs);
+          }
         }
-        if (runError) {
-          // An observer's own throw: reported without stopping other watches or skipping slow-watch charging
-          const thrown = runError.thrown;
-          queueMicrotask(() => { throw thrown; });
-        }
-        if (closed()) break;
         try {
-          charge(watch);
-        } catch (error) {
-          // A warning's own throw: reported, without stopping the other watches' deliveries
-          queueMicrotask(() => { throw error; });
+          finishRerun?.({ outcome: 'ok', requestBytes: 0, responseBytes: 0 });
+        } catch (observerErr) {
+          this.#reportError(entry, toEarsError(observerErr), true);
+        }
+        let runEnd = runStart;
+        try {
+          runEnd = this.#nowMs();
+        } catch (clockErr) {
+          this.#reportError(entry, toEarsError(clockErr), true);
+        }
+        entry.lastCostMs = Math.max(1, runEnd - runStart);
+        entry.backoffMs = 0;
+        entry.backoffUntilMs = 0;
+        ran++;
+        if (entry.active && rerun.changed) {
+          try {
+            entry.deliver(rerun.answer);
+          } catch (callbackErr) {
+            this.#reportError(entry, toEarsError(callbackErr), true);
+          }
         }
       }
     } finally {
-      flushing = false;
-      soonLifted = false;
-      if (closed()) {
-        dirty.clear();
-        earliestDue = Infinity;
-      } else {
-        // Those left over run first next time, then those this flush's commits marked; one stopped meanwhile doesn't
-        const nextDirty = new Set<Watch>();
-        let min = Infinity;
-        for (const watch of left) {
-          if (watch.stopped) continue;
-          nextDirty.add(watch);
-          if (watch.soon) anySoon = true;
-          const due = dueAt(watch);
-          if (due < min) min = due;
-        }
-        for (const watch of dirty) {
-          if (watch.stopped) continue;
-          nextDirty.add(watch);
-          if (watch.soon) anySoon = true;
-          const due = dueAt(watch);
-          if (due < min) min = due;
-        }
-        dirty = nextDirty;
-        earliestDue = min;
+      this.#pumping = false;
+    }
+
+    if (this.#stopped || this.#entries.size === 0) {
+      this.#clearTimer();
+      this.#notifySettledIfReady();
+      return ran;
+    }
+
+    // Recompute live next wake delay from the Rust scheduler + current active backoff deadlines
+    // (avoiding stale orphan timers if a failing watch stopped itself inside `onError`).
+    const candidates: number[] = [];
+    if (nextWakeDelayMs !== undefined && !sawBackoff) {
+      candidates.push(Math.max(0, nextWakeDelayMs));
+    }
+    if (this.#rescheduleAfterPump || !scheduleTail || sawBackoff || candidates.length === 0) {
+      let tailNow = startNowMs;
+      try {
+        tailNow = this.#nowMs();
+      } catch {
+        // Fallback to startNowMs if clock throws during tail scheduling.
+      }
+      const scheduledDelay = this.#computeNextDelay(tailNow);
+      if (scheduledDelay !== undefined) {
+        candidates.push(scheduledDelay);
       }
     }
-    if (dirty.size > 0) plan(anySoon, anySoon);
-    settleWaiting();
-  }
-
-  /** Resolves `settled()`'s callers once nothing waits to run: no watch dirty, no flush queued and no timer set */
-  function settleWaiting() {
-    if (dirty.size > 0 || queued || timer) return;
-    const resolve = waiting;
-    waiting = [];
-    for (const waiter of resolve) {
-      waiter.cancel?.();
-      waiter.cancel = undefined;
-      waiter.resolve();
+    if (this.#stopped || this.#entries.size === 0) {
+      this.#clearTimer();
+      this.#notifySettledIfReady();
+      return ran;
     }
+    if (candidates.length === 0) {
+      this.#clearTimer();
+    } else {
+      this.#armTimer(Math.min(...candidates));
+    }
+    this.#notifySettledIfReady();
+    return ran;
   }
 
-  return {
-    watch(read, observer, options) {
-      const watch: Watch = {
-        token: nextToken++,
-        label: options?.label ?? connection.callSite(),
-        read,
-        causes: options?.recordCauses && new WatchCauses(options.recordCauses),
-        observer: (typeof observer === 'function' ? { next: observer } : observer) as WatchObserver<unknown>,
-        last: undefined,
-        stopped: false,
-        ranAt: -1,
-        costMs: 0,
-        overBudget: 0,
-        warned: false,
-        owed: true,
-        running: false,
-        waiters: [],
-        soon: false,
-        lastRunCommit: -1,
-        lastDeliveredCommit: null,
-      };
-      if (!unlisten) {
-        const current = databaseCommit(false);
-        if (current !== undefined) {
-          if (current > lastSeenCommit) lastSeenCommit = current;
-          if (current > builderSyncedThrough) builderSyncedThrough = current;
-        }
-        unlisten = connection.onCommit(onCommit);
-      }
-      open.set(watch.token, watch);
-      addDirty(watch);
-      if (!flushing) plan(true);
-      return {
-        stop() {
-          if (closed() || watch.stopped) return;
-          watch.stopped = true;
-          answer(watch.waiters.splice(0));
-          open.delete(watch.token);
-          const wasDirty = removeDirty(watch);
-          connection.untrack(watch.token);
-          if (open.size === 0) {
-            unlisten?.();
-            unlisten = undefined;
-          }
-          if (!flushing) {
-            if (dirty.size === 0) {
-              if (timer) {
-                clock.clearTimeout(timer.handle);
-                timer = undefined;
-              }
-              queued?.cancel?.();
-              queued = undefined;
-            } else if (timer) {
-              const held = caughtUpWaiting > 0 || waiting.length > 0;
-              const earliestChanged = wasDirty && earliestDue === undefined;
-              if (timer.held !== held || earliestChanged) {
-                clock.clearTimeout(timer.handle);
-                timer = undefined;
-                plan(true);
-              }
-            }
-            settleWaiting();
-          }
-        },
-        caughtUp(options) {
-          if (closed() || watch.stopped) return Promise.resolve();
-          const currentCommit = databaseCommit();
-          if (currentCommit === undefined) return Promise.resolve();
-          if (!watch.owed && !watch.running) {
-            if (currentCommit <= lastSeenCommit) return Promise.resolve();
-            // The database sequence is ahead of the scheduler's last seen commit (e.g. an async builder callback has
-            // not fired on the event loop yet): wait one turn so pending commit notifications can mark this watch owed
-            return new Promise((resolve) => {
-              const waiter: { resolve: () => void; cancel?: () => void } = { resolve };
-              watch.waiters.push(waiter);
-              caughtUpWaiting++;
-              waiter.cancel = defer(() => {
-                waiter.cancel = undefined;
-                if (closed() || watch.stopped) return;
-                const index = watch.waiters.indexOf(waiter);
-                if (index === -1) return;
-                if (watch.owed || watch.running) {
-                  if (options?.soon && !watch.soon) {
-                    watch.soon = true;
-                    if (flushing) soonLifted = true;
-                    if (dirty.has(watch) && earliestDue !== undefined) {
-                      const due = dueAt(watch);
-                      if (due < earliestDue) earliestDue = due;
-                    }
-                  }
-                  if (!flushing) plan(true, watch.soon);
-                  return;
-                }
-                if (currentCommit > lastSeenCommit) lastSeenCommit = currentCommit;
-                watch.waiters.splice(index, 1);
-                caughtUpWaiting--;
-                syncTimerHeld();
-                resolve();
-              }) ?? undefined;
-            });
-          }
-          return new Promise((resolve) => {
-            watch.waiters.push({ resolve });
-            caughtUpWaiting++;
-            if (options?.soon) {
-              watch.soon = true;
-              if (flushing) soonLifted = true;
-              if (dirty.has(watch) && earliestDue !== undefined) {
-                const due = dueAt(watch);
-                if (due < earliestDue) earliestDue = due;
-              }
-            }
-            // A timer set for its gap before anything waited is set again: as one to stay alive for, and for
-            // sooner where the wait lifted the floor
-            if (!flushing) plan(true, watch.soon);
-          });
-        },
-      };
-    },
-    settled() {
-      if (closed()) return Promise.resolve();
-      const currentCommit = databaseCommit();
-      if (currentCommit === undefined) return Promise.resolve();
-      // A flush under way still holds watches it hasn't run, which it settles when it ends
-      if (!flushing && !queued && !timer && dirty.size === 0) {
-        if (open.size === 0 || currentCommit <= lastSeenCommit) return Promise.resolve();
-        return new Promise((resolve) => {
-          const waiter: { resolve: () => void; cancel?: () => void } = { resolve };
-          waiting.push(waiter);
-          waiter.cancel = defer(() => {
-            waiter.cancel = undefined;
-            if (closed()) return;
-            if (!flushing && !queued && !timer && dirty.size === 0 && currentCommit > lastSeenCommit) {
-              lastSeenCommit = currentCommit;
-            }
-            settleWaiting();
-          }) ?? undefined;
-        });
-      }
-      return new Promise((resolve) => {
-        waiting.push({ resolve });
-        // A timer set for a gap before anything waited is set again, as one to stay alive for
-        if (!flushing) plan(true);
+  #hasBlockedEntries(nowMs: number, failedThisTurn: ReadonlySet<number>): boolean {
+    if (failedThisTurn.size > 0) return true;
+    for (const entry of this.#entries.values()) {
+      if (entry.backoffUntilMs > nowMs) return true;
+    }
+    return false;
+  }
+
+  #allDueBlocked(nowMs: number, failedThisTurn: ReadonlySet<number>): boolean {
+    try {
+      const tick = this.#db.tickWatches(nowMs);
+      if (tick.dueIds.length === 0) return true;
+      return tick.dueIds.every((id) => {
+        if (failedThisTurn.has(id)) return true;
+        const entry = this.#entries.get(id);
+        return entry !== undefined && entry.backoffUntilMs > nowMs;
       });
-    },
-    stats: () => {
-      const { keys, ranges } = connection.trackStats();
-      return { watches: open.size, keys, ranges };
-    },
-    diagnostics: () => ({
-      scheduler: {
-        flushing,
-        queued: queued ? (queued.later ? 'later' : 'microtask') : 'none',
-        timerAt: timer ? timer.at : null,
-        timerHeld: timer ? timer.held : false,
-        dirtyCount: dirty.size,
-        caughtUpWaiting,
-        settledWaiting: waiting.length,
-        lastSeenCommit,
-        databaseCommit: databaseCommit(false) ?? lastSeenCommit,
-      },
-      watches: [...open.values()].map((watch) => ({
-        label: watch.label,
-        owed: watch.owed,
-        soon: watch.soon,
-        running: watch.running,
-        costMs: watch.costMs,
-        dueAt: watch.owed && watch.ranAt >= 0 ? dueAt(watch) : null,
-        waiters: watch.waiters.length,
-        lastDeliveredCommit: watch.lastDeliveredCommit,
-      })),
-    }),
-    syncBuilder() {
-      if (closed() || open.size === 0) return;
-      const current = databaseCommit();
-      if (current === undefined || current <= builderSyncedThrough) return;
-      builderSyncedThrough = current;
-      onCommit({ sequence: current, touched: 'all', source: 'builder' });
-    },
-    stopAll,
-  };
-}
+    } catch (err) {
+      this.#handlePumpReadError(err);
+      return true;
+    }
+  }
 
-function sameValueInner(a: unknown, b: unknown, seen?: WeakMap<object, Set<object>>): boolean {
-  if (Object.is(a, b)) return true;
-  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
-  const proto = Object.getPrototypeOf(a);
-  if (proto !== Object.getPrototypeOf(b)) return false;
-  if (a instanceof Date) return Object.is(a.getTime(), (b as Date).getTime());
-  if (a instanceof RegExp) {
-    const rb = b as RegExp;
-    return a.source === rb.source && a.flags === rb.flags && a.lastIndex === rb.lastIndex;
+  #reportError(entry: WatchEntry, error: EarsError, isolateHandler: boolean): void {
+    const handler = entry.onError ?? this.#onWatchError;
+    if (!handler) return;
+    if (!isolateHandler) {
+      handler(error);
+      return;
+    }
+    try {
+      handler(error);
+    } catch {
+      // Isolate throwing error handlers during pump drain so healthy watches still get scheduled.
+    }
   }
-  if (a instanceof URL) return a.href === (b as URL).href;
-  if (ArrayBuffer.isView(a)) {
-    const vb = b as ArrayBufferView;
-    if (a.byteLength !== vb.byteLength) return false;
-    const x = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
-    const y = new Uint8Array(vb.buffer, vb.byteOffset, vb.byteLength);
-    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
-    return true;
-  }
-  if (a instanceof ArrayBuffer) {
-    const bb = b as ArrayBuffer;
-    if (a.byteLength !== bb.byteLength) return false;
-    const x = new Uint8Array(a);
-    const y = new Uint8Array(bb);
-    for (let i = 0; i < x.length; i++) if (x[i] !== y[i]) return false;
-    return true;
-  }
-  // Members of a set are compared as the collection itself finds them, by identity
-  if (a instanceof Set) {
-    const sb = b as Set<unknown>;
-    if (a.size !== sb.size) return false;
-    for (const member of a) if (!sb.has(member)) return false;
-    return true;
-  }
-  const isArray = Array.isArray(a);
-  const isMap = !isArray && a instanceof Map;
-  // Distinct non-plain objects (Errors, WeakMaps, Promises, custom instances) are never equal by empty own keys
-  if (!isArray && !isMap && proto !== Object.prototype && proto !== null) return false;
-
-  let pairs = seen?.get(a);
-  if (pairs?.has(b)) return true;
-  const nextSeen = seen ?? new WeakMap<object, Set<object>>();
-  if (!pairs) nextSeen.set(a, pairs = new Set());
-  pairs.add(b);
-
-  if (isArray) {
-    const ab = b as unknown[];
-    if (a.length !== ab.length) return false;
-    for (let i = 0; i < a.length; i++) if (!sameValueInner(a[i], ab[i], nextSeen)) return false;
-    return true;
-  }
-  // Keys of a map are compared as the collection itself finds them, by identity
-  if (isMap) {
-    const mb = b as Map<unknown, unknown>;
-    if (a.size !== mb.size) return false;
-    for (const [key, value] of a) if (!mb.has(key) || !sameValueInner(value, mb.get(key), nextSeen)) return false;
-    return true;
-  }
-  // Each side's own enumerable string keys: as many on each, and every one of `a`'s enumerable on `b` too, so that
-  // neither a key `b` holds unenumerated nor the order of the two decides
-  const keys = Object.keys(a);
-  if (keys.length !== Object.keys(b).length) return false;
-  for (const key of keys) {
-    if (!Object.prototype.propertyIsEnumerable.call(b, key)) return false;
-    if (!sameValueInner((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], nextSeen)) return false;
-  }
-  return true;
-}
-
-/** Whether two results are the same data: primitives, lists, plain objects, maps, sets, bytes, regexes, URLs and dates, compared through */
-export function sameValue(a: unknown, b: unknown): boolean {
-  return sameValueInner(a, b);
 }

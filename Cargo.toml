@@ -1,6 +1,20 @@
 [workspace]
 resolver = "3"
-members = ["crates/elmdb", "crates/elmdb-node", "crates/elmdb-cli", "xtask"]
+members = [
+    "crates/elmdb",
+    "crates/elmdb-storage",
+    "crates/elmdb-sim",
+    "crates/elmdb-lmdb",
+    "crates/elmdb-wire",
+    "crates/elmdb-engine",
+    "crates/elmdb-projections",
+    "crates/elmdb-vec",
+    "crates/elmdb-query",
+    "crates/elmdb-invalidation",
+    "crates/elmdb-node",
+    "crates/elmdb-cli",
+    "xtask",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,14 +27,19 @@ repository = "https://github.com/spankyed/elmdb"
 libc = "0.2.191"
 windows-sys = "0.61.2"
 elmdb = { path = "crates/elmdb" }
-# Without heed's default features, which add serde codecs (bincode's, unmaintained, and serde_json's) that nothing
-# here uses: every database is read and written as `heed::types::Bytes`
-heed = { version = "0.23.0", default-features = false }
+elmdb-storage = { path = "crates/elmdb-storage" }
+elmdb-sim = { path = "crates/elmdb-sim" }
+elmdb-lmdb = { path = "crates/elmdb-lmdb" }
+elmdb-wire = { path = "crates/elmdb-wire" }
+elmdb-engine = { path = "crates/elmdb-engine" }
+elmdb-projections = { path = "crates/elmdb-projections" }
+elmdb-vec = { path = "crates/elmdb-vec" }
+elmdb-query = { path = "crates/elmdb-query" }
+elmdb-invalidation = { path = "crates/elmdb-invalidation" }
+lmdb-master-sys = "0.2.6"
 serde = { version = "1.0.229", features = ["derive"] }
-serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_json = { version = "1.0.154", features = ["preserve_order", "float_roundtrip"] }
 sha2 = "0.11.1"
-rmp-serde = "1.3.1"
-rmpv = { version = "1.3.1", features = ["with-serde"] }
 getrandom = "0.4.3"
 # The collator, and every crate its code and data are, each required exactly: a sort key is the collator's output, and
 # stored ones are stale under any other version (`engine/order.rs`, the stamp). Those the engine names nothing of are
@@ -37,21 +56,12 @@ icu_normalizer_data = { version = "=2.4.0", default-features = false }
 icu_properties = { version = "=2.4.0", default-features = false }
 icu_properties_data = { version = "=2.4.0", default-features = false }
 icu_provider = { version = "=2.4.0", default-features = false }
-ryu-js = "1.0.3"
 parking_lot = { version = "0.13.0", features = ["arc_lock"] }
-rmp = "0.8.15"
 proptest = "1.12.0"
-proptest-state-machine = "0.9.0"
-criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
-gungraun = "=0.20.0"
-loom = "0.7.2"
-shuttle = "=0.9.7"
-dhat = "0.3.3"
 thiserror = "2.0.21"
 ts-rs = "12.0.1"
 schemars = "1.2.3"
 tempfile = "3.27.0"
-fail = "0.5.1"
 regex = "1.13.1"
 regex-syntax = "0.8.11"
 zstd = "0.14.3"
@@ -60,19 +70,17 @@ napi = { version = "3.15.0", default-features = false, features = ["napi9", "ser
 process_path = "0.1.4"
 napi-derive = "3.6.13"
 napi-build = "2.6.0"
-# What a text index stores is charabia's tokens and rust-stemmers' stems, and a vector index stores hannoy's graph:
+# What a text index stores is charabia's tokens and rust-stemmers' stems:
 # each required exactly, as the collator is, so no build reads an index another version made (`cargo xtask check-exact`)
 charabia = { version = "=0.10.0", default-features = false, features = ["latin-camelcase", "latin-snakecase"] }
 roaring = "0.11.5"
 levenshtein_automata = "0.2.1"
 rust-stemmers = "=1.2.0"
-hannoy = "=0.3.0"
 # What charabia normalizes, detects a language and segments by, which it requires as ranges: dependencies of elmdb
 # only to hold their versions, as the collator's crates are
 unicode-normalization = "=0.1.26"
 whatlang = "=0.18.0"
 finl_unicode = "=1.5.0"
-rand = "0.10.2"
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 leiden-rs = { version = "=0.8.1", default-features = false }
 libm = "=0.2.16"
@@ -80,8 +88,6 @@ rustc-hash = "=2.1.3"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
-# The concurrency models' builds (`docs/architecture/testing.md`, Concurrency models)
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(shuttle)"] }
 
 [workspace.lints.clippy]
 dbg_macro = "deny"

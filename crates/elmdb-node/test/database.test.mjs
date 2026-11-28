@@ -1,185 +1,637 @@
+// Full v2 Database binding lifecycle: open/openAsync, schema + O(1) rename + archive/purge,
+// binary wire batches, beforeCommit savepoint rollback & cascade, backup, dump/load, check/rebuild/flush.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFileSync, mkdtempSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { fileURLToPath } from 'node:url';
-import { Packr } from 'msgpackr';
 
 const require = createRequire(import.meta.url);
 const { Database } = require('../index.js');
-const here = dirname(fileURLToPath(import.meta.url));
+const { buildWireBatch } = require('../client.js');
 
-/** A fresh directory, removed when the test ends */
-function tempDir(t) {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  return dir;
-}
-
-const noteSchema = {
-  $schema: 'https://elmdb.dev/schema/1.json',
-  types: { Note: { shortCode: { prefix: 'NTE' }, fields: { title: { type: 'string' } } } },
+const baseSchema = {
+  types: {
+    Note: {
+      fields: {
+        title: { type: 'string' },
+        tag: { type: 'string', optional: true },
+        audit: { type: 'boolean', optional: true },
+      },
+      indexes: {
+        byTitle: { kind: 'value', fields: ['title'], unique: true },
+      },
+    },
+    Audit: {
+      fields: {
+        noteId: { type: 'string' },
+      },
+    },
+  },
+  relations: {
+    refs: { endpoints: [{ source: 'Note', target: 'Note' }] },
+  },
 };
 
-test('opens a database, creating its files, and closes it', (t) => {
-  const dir = join(tempDir(t), 'db');
-  const db = Database.open(dir, { syncs: false });
-  assert.equal(db.isOpen, true);
-  assert.equal(db.readOnly, false);
-  assert.equal(db.schema, null);
-  assert.ok(existsSync(join(dir, 'data.mdb')));
-  db.close();
-  assert.equal(db.isOpen, false);
-  db.close();
-  assert.throws(() => db.syncs, { code: 'CLOSED' });
-});
-
-test('a second open in one process throws ALREADY_OPEN', (t) => {
-  const dir = tempDir(t);
-  const db = Database.open(dir, { syncs: false });
-  assert.throws(() => Database.open(dir), { code: 'ALREADY_OPEN' });
-  db.close();
-  Database.open(dir, { syncs: false }).close();
-});
-
-test('a read-only open of an empty directory throws NO_DATABASE', (t) => {
-  const dir = tempDir(t);
-  assert.throws(() => Database.open(dir, { readOnly: true }), { code: 'NO_DATABASE', message: /No database at/ });
-});
-
-test('stores a schema, reports what opening did, and refuses an invalid one listing every problem', (t) => {
-  const dir = tempDir(t);
-  const db = Database.open(dir, { schema: noteSchema, syncs: false });
-  assert.deepEqual(db.openReport, {
-    schemaChanges: [{ path: 'types.Note', change: 'added', effect: 'applied' }],
-    restored: null,
-    notBorneOut: false,
-  });
-  // No restore to acknowledge: nothing changes, and a read-only handle is refused
-  db.acknowledgeRestore();
-  assert.equal(db.schema.types.Note.additionalFields, 'refuse', 'the canonical form, defaults written');
-  db.close();
-  const reader = Database.open(dir, { readOnly: true });
-  assert.throws(() => reader.acknowledgeRestore(), { code: 'READ_ONLY' });
-  reader.close();
-  const bad = structuredClone(noteSchema);
-  bad.types.Note.fields.title.type = 'text';
-  bad.types.Note.extra = true;
-  assert.throws(() => Database.open(dir, { schema: bad }), (error) => {
-    assert.equal(error.code, 'SCHEMA_INVALID');
-    assert.match(error.message, /2 problems/);
-    assert.match(error.message, /types\.Note\.extra: unknown key/);
-    assert.match(error.message, /types\.Note\.fields\.title\.type: "text" isn't a field type/);
-    return true;
-  });
-});
-
-test('setSchema changes an open database\'s schema, and refuses while a unit is open', (t) => {
-  const dir = tempDir(t);
-  const db = Database.open(dir, { schema: noteSchema, syncs: false });
-  const wider = structuredClone(noteSchema);
-  wider.types.Note.fields.body = { type: 'string', optional: true };
-  assert.deepEqual(db.setSchema(wider).map((c) => c.path), ['types.Note.fields.body']);
-  assert.ok('body' in db.schema.types.Note.fields);
-  assert.deepEqual(db.setSchema(wider), [], 'the same schema changes nothing');
-  const unit = db.begin();
-  assert.throws(() => db.setSchema(noteSchema), (error) => error.code === 'UNIT_OPEN');
-  unit.abort();
-  assert.throws(() => db.setSchema({ ...noteSchema, types: { note: {} } }), (error) => error.code === 'SCHEMA_INVALID');
-  db.close();
-});
-
-test('durable() resolves once what was committed is on disk', async (t) => {
-  const dir = tempDir(t);
-  const db = Database.open(dir, { schema: noteSchema });
-  // Opening stored the schema with a sync of its own, so nothing is owed
-  const before = db.syncs;
-  await db.durable();
-  assert.equal(db.syncs, before);
-  db.close();
-});
-
-test('rebuild() takes a type and an index, or neither', (t) => {
-  const db = Database.open(tempDir(t), { schema: noteSchema, syncs: false });
-  for (const args of [['Note'], [null, 'byTitle'], [undefined, 'byTitle']]) {
-    assert.throws(() => db.rebuild(...args), { code: 'BATCH_INVALID' }, JSON.stringify(args));
-  }
-  db.rebuild();
-  db.close();
-});
-
-test('another elmdb binary in the process is refused at open, naming both files', (t) => {
-  const dir = tempDir(t);
-  // The first open claims the process for the binary index.js loaded
-  Database.open(join(dir, 'first'), { syncs: false }).close();
-  const binary = readdirSync(join(here, '..')).find((f) => f.endsWith('.node'));
-  // Windows holds a loaded binary's file open until the process exits, so the copy can't be removed after the test
-  const copyDir = mkdtempSync(join(tmpdir(), 'elmdb-binary-'));
+test('open, schema evolution, O(1) rename, archive & purge, backup, dump/load, and async ops', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'elmdb-v2-db-'));
+  const dir = join(tmp, 'main');
+  const db = await Database.openAsync(dir, { schema: baseSchema, durability: 'strict', buildPolicy: 'eager' });
   t.after(() => {
+    try { db.close(); } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  assert.equal(db.readOnly, false);
+  assert.equal(db.path, dir);
+  assert.equal(db.openReport().status, 'fresh');
+
+  // Execute batch + enforce unique index
+  db.executeWireBatch(buildWireBatch((b) => {
+    const a = b.create('Note', { title: 'Unique-1', tag: 'a' }, 'n1');
+    const c = b.create('Note', { title: 'Unique-2', tag: 'b' }, 'n2');
+    b.link(a, 'refs', c);
+  }));
+
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Unique-1' }, 'n3'); })),
+    (err) => err.code === 'UNIQUE_VIOLATION',
+  );
+
+  // O(1) rename field
+  const epoch = db.renameField('Note', 'tag', 'label');
+  assert.ok(epoch > 1);
+  assert.equal(db.get('n1').fields.label, 'a');
+
+  // beforeCommit: throwing aborts cleanly via native savepoint; returning a wire batch cascades derived writes!
+  let abortFlag = true;
+  const hookId = db.registerBeforeCommit(['Note'], (ev) => {
+    if (abortFlag) throw new Error('rejected by policy');
+    const created = ev.entities.filter((e) => e.op === 'create');
+    if (created.length === 0) return null;
+    return buildWireBatch((b) => {
+      for (const c of created) b.create('Audit', { noteId: c.id }, `audit-${c.id}`);
+    });
+  });
+
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Rolled-back' }, 'n-bad'); })),
+    (err) => err.code === 'HOOK_ABORTED',
+  );
+  assert.equal(db.get('n-bad'), null);
+
+  abortFlag = false;
+  db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Cascaded' }, 'n-good'); }));
+  assert.ok(db.get('n-good'));
+  assert.equal(db.get('audit-n-good').fields.noteId, 'n-good');
+  assert.equal(db.unregisterBeforeCommit(hookId), true);
+
+  // Check, rebuild, flush (sync + async)
+  await db.flushAsync();
+  const chk = await db.checkAsync();
+  assert.equal(chk.clean, true);
+  await db.rebuildAsync();
+  assert.equal(db.check().clean, true);
+  assert.ok(db.indexStatus().every((s) => s.state === 'ready'));
+  assert.equal(db.stats().typeCounts.Note, 3);
+
+  // Backup + overwrite guard + async backup
+  const backupDir = join(tmp, 'backup');
+  await db.backupAsync(backupDir, false);
+  assert.throws(() => db.backup(backupDir, false), (err) => err.code === 'ALREADY_EXISTS');
+  db.backup(backupDir, true);
+
+  // Dump + Database.load
+  const dumpFile = join(tmp, 'dump.json');
+  const dumpRep = db.dump(dumpFile);
+  assert.equal(dumpRep.entities, 4); // 3 Notes + 1 Audit
+  assert.equal(dumpRep.relations, 1);
+
+  const loadedDir = join(tmp, 'loaded');
+  const loadRep = Database.load(dumpFile, loadedDir);
+  assert.equal(loadRep.entities, 4);
+  const loaded = Database.open(loadedDir, { readOnly: true });
+  assert.equal(loaded.get('n1').fields.title, 'Unique-1');
+  assert.equal(loaded.check().clean, true);
+  loaded.close();
+
+  // P0-1: db.setSchema(db.getSchema()) roundtrips cleanly (including relations & Ref onDelete)!
+  const currentSchema = db.getSchema();
+  db.setSchema(currentSchema);
+
+  // Archive Audit type and purgeArchived
+  db.setSchema({ types: { Note: currentSchema.types.Note }, relations: currentSchema.relations });
+  assert.equal(db.purgeArchived('Audit'), 1);
+  assert.equal(db.get('audit-n-good'), null);
+
+  // P0-3 & P1-6: Re-entrant beforeCommit hook + per-round deltas + edge sourceId/targetId + readOnly rejection
+  let reentrantRan = false;
+  let seenEdge = null;
+  const h2 = db.registerBeforeCommit(null, (ev) => {
+    if (ev.edges.length > 0) seenEdge = ev.edges[0];
+    // Re-entrant unregister/register inside callback must NOT panic with BorrowMutError!
+    if (!reentrantRan) {
+      reentrantRan = true;
+      db.unregisterBeforeCommit(h2);
+    }
+    return null;
+  });
+  db.executeWireBatch(buildWireBatch((b) => {
+    const x = b.create('Note', { title: 'EdgeSrc' }, 'n-src');
+    const y = b.create('Note', { title: 'EdgeDst' }, 'n-dst');
+    b.link(x, 'refs', y);
+  }));
+  assert.equal(reentrantRan, true);
+  assert.equal(seenEdge.sourceId, 'n-src');
+  assert.equal(seenEdge.targetId, 'n-dst');
+
+  // P0-5: Backup opens with clean openReport status (verified synced.v2 sidecar)
+  const bakCheck = Database.open(backupDir, { readOnly: true });
+  assert.equal(bakCheck.openReport().status, 'clean');
+  bakCheck.close();
+
+  // P1-8: Reject readOnly + schema and out-of-range u32 maxDbs before touching disk
+  assert.throws(
+    () => Database.open(dir, { readOnly: true, schema: baseSchema }),
+    (err) => err.code === 'READ_ONLY',
+  );
+  assert.throws(
+    () => Database.open(dir, { maxDbs: 2 ** 32 }),
+    (err) => err.code === 'INVALID_ARGUMENT',
+  );
+
+  db.close();
+  assert.throws(() => db.stats(), (err) => err.code === 'CLOSED');
+});
+
+test('transact nested savepoints, RYOW, counters, runBeforeCommit: false, and Promise rejection', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'elmdb-v2-txn-'));
+  const dir = join(tmp, 'main');
+  const db = Database.open(dir, { schema: baseSchema, durability: 'strict', buildPolicy: 'eager' });
+  t.after(() => {
+    try { db.close(); } catch { /* already closed */ }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  assert.equal(db.pendingCommitSeq(), null);
+  assert.equal(db.getCounter('NOTE'), 0);
+
+  let hookRuns = 0;
+  let hookSawSeq = null;
+  let hookSawOuter = false;
+  const hid = db.registerBeforeCommit(['Note'], (delta) => {
+    hookRuns++;
+    hookSawSeq = delta.commitSeq;
+    assert.equal(db.pendingCommitSeq(), delta.commitSeq);
+    hookSawOuter = db.get('n-outer') !== null && db.get('n-inner-abort') === null;
+    db.nextCounter('HOOK');
+    return null;
+  });
+
+  // Outer + nested savepoints + RYOW + custom Error preservation!
+  class CustomRollbackError extends Error {
+    constructor(msg) {
+      super(msg);
+      this.customTag = 'keep-me';
+    }
+  }
+
+  const ret = db.transact(() => {
+    const seq = db.pendingCommitSeq();
+    assert.equal(typeof seq, 'number');
+    assert.equal(db.nextCounter('NOTE'), 1);
+    db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Outer' }, 'n-outer'); }));
+
+    // Inner savepoint commits
+    const innerVal = db.transact(() => {
+      assert.equal(db.nextCounter('NOTE'), 2);
+      db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Inner-OK' }, 'n-inner-ok'); }));
+      return 'ok-inner';
+    });
+    assert.equal(innerVal, 'ok-inner');
+    assert.equal(hookRuns, 0, 'beforeCommit must not run on inner savepoint release');
+
+    // Inner savepoint throws custom Error -> rolled back without losing outer writes!
+    assert.throws(
+      () => db.transact(() => {
+        assert.equal(db.nextCounter('NOTE'), 3);
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Inner-Abort' }, 'n-inner-abort'); }));
+        assert.notEqual(db.get('n-inner-abort'), null);
+        throw new CustomRollbackError('abort inner');
+      }),
+      (err) => err instanceof CustomRollbackError && err.customTag === 'keep-me',
+    );
+
+    assert.equal(db.get('n-inner-abort'), null);
+    assert.equal(db.getCounter('NOTE'), 2);
+    assert.notEqual(db.get('n-outer'), null);
+    assert.notEqual(db.get('n-inner-ok'), null);
+    return { seq, count: db.query({ source: { kind: 'type', typeName: 'Note' }, terminal: { kind: 'count' } }).count };
+  });
+
+  assert.equal(ret.count, 2);
+  assert.equal(db.pendingCommitSeq(), null);
+  assert.equal(hookRuns, 1);
+  assert.equal(hookSawSeq, ret.seq);
+  assert.equal(hookSawOuter, true);
+  assert.equal(db.getCounter('NOTE'), 2);
+  assert.equal(db.getCounter('HOOK'), 1);
+
+  // Async/Promise callback aborts immediately with ASYNC_CALLBACK_FORBIDDEN!
+  assert.throws(
+    () => db.transact(async () => {
+      db.nextCounter('NOTE');
+      db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'AsyncBad' }, 'n-async'); }));
+    }),
+    (err) => err.code === 'ASYNC_CALLBACK_FORBIDDEN',
+  );
+  assert.equal(db.get('n-async'), null);
+  assert.equal(db.getCounter('NOTE'), 2);
+
+  // P0 #4 + P1-1: Returning an object with a throwing `.then` getter OR throwing JS primitives
+  // (outer or nested savepoint) MUST roll back cleanly and rethrow the EXACT JS value verbatim!
+  assert.throws(
+    () => db.transact(() => {
+      db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'GetterThrow' }, 'n-getter'); }));
+      return {
+        get then() {
+          throw new Error('getter boom');
+        },
+      };
+    }),
+    /getter boom/,
+  );
+  assert.equal(db.get('n-getter'), null, 'writes must roll back when .then getter throws');
+
+  for (const primitive of ['raw-string-error', 42, false, null, undefined]) {
+    let caught = Symbol('not-caught');
     try {
-      rmSync(copyDir, { recursive: true, force: true });
-    } catch (error) {
-      if (process.platform !== 'win32' || error.code !== 'EPERM') throw error;
+      db.transact(() => {
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'PrimRB' }, 'n-prim-rb'); }));
+        throw primitive;
+      });
+    } catch (err) {
+      caught = err;
     }
-  });
-  const copy = join(copyDir, binary);
-  copyFileSync(join(here, '..', binary), copy);
-  const second = require(copy);
-  assert.throws(() => second.Database.open(join(dir, 'second'), { syncs: false }), (error) => {
-    assert.equal(error.code, 'ALREADY_LOADED');
-    assert.ok(error.message.includes(copy), error.message);
-    assert.ok(error.message.includes(binary), error.message);
-    return true;
-  });
-});
-
-test('an open refuses a sync or map option that is not a whole number in range, rather than casting it', (t) => {
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-'));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  for (const options of [{ syncIdleMs: -1 }, { syncIntervalMs: 1.5 }, { syncIdleMs: Number.NaN }, { mapSizeBytes: 0 }, { mapSizeBytes: Infinity }]) {
-    assert.throws(() => Database.open(dir, { syncs: false, ...options }), { code: 'VALUE_INVALID' }, JSON.stringify(options));
+    assert.strictEqual(caught, primitive, `outer transact must rethrow primitive ${String(primitive)} verbatim`);
+    assert.equal(db.get('n-prim-rb'), null);
   }
-  Database.open(dir, { syncIdleMs: 0, syncIntervalMs: 5000 }).close();
-});
 
-test('adoptReplacement refuses an epoch that is not a non-negative whole number in range, rather than casting it', (t) => {
-  const db = Database.open(tempDir(t), { syncs: false });
+  // Hostile `.then` getter throwing a primitive string also rethrows verbatim & rolls back
+  let hostileCaught = null;
   try {
-    for (const epoch of [Number.NaN, -1, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, 2 ** 53 + 2]) {
-      assert.throws(() => db.adoptReplacement(epoch), { code: 'VALUE_INVALID' }, String(epoch));
+    db.transact(() => {
+      db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'HostilePrim' }, 'n-hostile-prim'); }));
+      return {
+        get then() {
+          throw 'hostile-then-string';
+        },
+      };
+    });
+  } catch (err) {
+    hostileCaught = err;
+  }
+  assert.strictEqual(hostileCaught, 'hostile-then-string');
+  assert.equal(db.get('n-hostile-prim'), null);
+
+  // { runBeforeCommit: false } skips hooks cleanly
+  db.transact(() => {
+    db.setCounter('IMPORT', 99);
+    db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'Catchup' }, 'n-catchup'); }));
+  }, { runBeforeCommit: false });
+  assert.equal(hookRuns, 1);
+  assert.equal(db.getCounter('IMPORT'), 99);
+  assert.equal(db.unregisterBeforeCommit(hid), true);
+
+  // Nested savepoint throwing a primitive rolls back inner only and preserves outer write
+  db.transact(() => {
+    db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'OuterSurvives' }, 'n-outer-prim'); }));
+    let nestedCaught = null;
+    try {
+      db.transact(() => {
+        db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'InnerRB' }, 'n-inner-prim'); }));
+        throw 'nested-primitive-abort';
+      });
+    } catch (err) {
+      nestedCaught = err;
     }
-    assert.equal(db.adoptReplacement(0), true);
-    assert.equal(db.adoptReplacement(1), false);
-  } finally {
-    db.close();
-  }
+    assert.strictEqual(nestedCaught, 'nested-primitive-abort');
+    assert.equal(db.get('n-inner-prim'), null);
+  });
+  assert.equal(db.get('n-outer-prim')?.fields.title, 'OuterSurvives');
+  assert.equal(db.get('n-inner-prim'), null);
+
+  // P1 #6: Calling db.close() inside db.transact() rejects with INVALID_ARGUMENT without wiping hooks!
+  let hookStillAlive = false;
+  const hAlive = db.registerBeforeCommit(['Note'], () => {
+    hookStillAlive = true;
+    return null;
+  });
+  db.transact(() => {
+    assert.throws(() => db.close(), (err) => err.code === 'INVALID_ARGUMENT');
+    db.executeWireBatch(buildWireBatch((b) => { b.create('Note', { title: 'AfterCloseAttempt' }, 'n-alive'); }));
+  });
+  assert.equal(hookStillAlive, true, 'failed db.close() inside transact must not wipe registered hooks');
+  assert.equal(db.unregisterBeforeCommit(hAlive), true);
+
+  // Dump & load preserves counters
+  const dumpFile = join(tmp, 'counters.json');
+  db.dump(dumpFile);
+  const loadedDir = join(tmp, 'loaded');
+  Database.load(dumpFile, loadedDir);
+  const loaded = Database.open(loadedDir, { readOnly: true });
+  assert.equal(loaded.getCounter('NOTE'), 2);
+  assert.equal(loaded.getCounter('HOOK'), 1);
+  assert.equal(loaded.getCounter('IMPORT'), 99);
+  loaded.close();
 });
 
-test("committedElsewhere is never a handle's own commit, a unit reads its pending changes, and a checkpoint commits with its unit", () => {
-  const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
-  const dir = mkdtempSync(join(tmpdir(), 'elmdb-changes-'));
+test('PR #268 Batch 3: unified JSON-to-JS numbers (> u32::MAX, no BigInt) and beforeCommit ASYNC_CALLBACK_FORBIDDEN', async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'elmdb-v2-b3-'));
+  const dir = join(tmp, 'main');
+  const numSchema = {
+    types: {
+      Metric: {
+        fields: {
+          bigPos: { type: 'integer' },
+          bigNeg: { type: 'integer' },
+          maxSafe: { type: 'integer' },
+          hugePos: { type: 'int64', optional: true },
+          hugeNeg: { type: 'int64', optional: true },
+          ts: { type: 'timestamp' },
+        },
+        indexes: {},
+      },
+    },
+    relations: {
+      link: { endpoints: [{ source: 'Metric', target: 'Metric' }], weighted: true },
+    },
+  };
+  const db = Database.open(dir, { schema: numSchema, durability: 'strict', buildPolicy: 'eager' });
+  t.after(() => {
+    try { db.close(); } catch { /* already closed */ }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const nowTs = Date.now();
+  const bigPos = 5_000_000_000;
+  const bigNeg = -5_000_000_000;
+  const maxSafe = Number.MAX_SAFE_INTEGER;
+  let hookDelta = null;
+  const hid = db.registerBeforeCommit(['Metric'], (delta) => {
+    hookDelta = delta;
+    return null;
+  });
+
+  const batchRes = db.executeWireBatch(buildWireBatch((b) => {
+    const a = b.create('Metric', { bigPos, bigNeg, maxSafe, ts: new Date(nowTs) }, 'm-1');
+    const c = b.create('Metric', { bigPos, bigNeg, maxSafe, ts: new Date(nowTs) }, 'm-2');
+    b.link(a, 'link', c, { weight: 1.5, info: { big: bigPos, ts: new Date(nowTs) } });
+  }));
+  db.unregisterBeforeCommit(hid);
+
+  // Every single N-API surface emits JS `number` (NEVER `BigInt`) and passes `JSON.stringify` cleanly!
+  const row = db.get('m-1');
+  assert.equal(typeof row.fields.bigPos, 'number');
+  assert.equal(typeof row.fields.bigNeg, 'number');
+  assert.equal(typeof row.fields.maxSafe, 'number');
+  assert.equal(typeof row.fields.ts, 'number');
+  assert.equal(row.fields.bigPos, bigPos);
+  assert.equal(row.fields.bigNeg, bigNeg);
+  assert.equal(row.fields.maxSafe, maxSafe);
+  assert.equal(row.fields.ts, nowTs);
+  assert.doesNotThrow(() => JSON.stringify(row));
+
+  const edges = db.getEdges('m-1', 'link', 'out');
+  assert.equal(edges.length, 1);
+  assert.equal(typeof edges[0].info.big, 'number');
+  assert.equal(typeof edges[0].info.ts, 'number');
+  assert.equal(edges[0].info.big, bigPos);
+  assert.doesNotThrow(() => JSON.stringify(edges));
+
+  const qSpec = { source: { kind: 'type', typeName: 'Metric' }, steps: [], terminal: { kind: 'rows' } };
+  const qSync = db.query(qSpec);
+  assert.equal(typeof qSync.rows[0].fields.bigPos, 'number');
+  assert.equal(typeof qSync.rows[0].fields.ts, 'number');
+  assert.doesNotThrow(() => JSON.stringify(qSync));
+
+  const qAsync = await db.queryAsync(qSpec);
+  assert.equal(typeof qAsync.rows[0].fields.bigPos, 'number');
+  assert.equal(typeof qAsync.rows[0].fields.ts, 'number');
+  assert.doesNotThrow(() => JSON.stringify(qAsync));
+
+  const st = db.stats();
+  assert.equal(typeof st.mapSizeBytes, 'number');
+  assert.equal(typeof st.pageSizeBytes, 'number');
+  assert.doesNotThrow(() => JSON.stringify(st));
+
+  const rep = db.openReport();
+  assert.equal(typeof rep.observedTxnid, 'number');
+  assert.doesNotThrow(() => JSON.stringify(rep));
+
+  assert.equal(typeof batchRes.commitSeq, 'number');
+  assert.doesNotThrow(() => JSON.stringify(batchRes));
+
+  assert.equal(typeof hookDelta.commitSeq, 'number');
+  assert.doesNotThrow(() => JSON.stringify(hookDelta));
+
+  const dumpFile = join(tmp, 'metrics.json');
+  const dumpRep = db.dump(dumpFile);
+  assert.equal(typeof dumpRep.entities, 'number');
+  assert.doesNotThrow(() => JSON.stringify(dumpRep));
+
+  const reg = db.registerWatch(qSpec, { minGapMs: 0 }, nowTs);
+  assert.equal(typeof reg.answer.rows[0].fields.bigPos, 'number');
+  assert.doesNotThrow(() => JSON.stringify(reg));
+  db.executeWireBatch(buildWireBatch((b) => { b.patch('m-1', { bigPos: 6_000_000_000 }); }));
+  const rerun = db.rerunWatch(reg.watchId, qSpec, nowTs + 10, 1);
+  assert.equal(typeof rerun.answer.rows[0].fields.bigPos, 'number');
+  assert.doesNotThrow(() => JSON.stringify(rerun));
+  db.unregisterWatch(reg.watchId);
+
+  // Item 3.6: beforeCommit preserves `ASYNC_CALLBACK_FORBIDDEN` when nested sync API throws it or callback is async.
+  const hAsyncNested = db.registerBeforeCommit(['Metric'], () => {
+    db.transact(async () => {});
+    return null;
+  });
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.patch('m-1', { bigPos: 7_000_000_000 }); })),
+    (err) => err.code === 'ASYNC_CALLBACK_FORBIDDEN',
+  );
+  db.unregisterBeforeCommit(hAsyncNested);
+
+  // Hostile `.code` getter on a thrown hook error clears pending exception and still extracts `.message`.
+  const hHostileCode = db.registerBeforeCommit(['Metric'], () => {
+    const errObj = {
+      get code() { throw new Error('hostile code getter'); },
+      message: 'keep-this-hook-message',
+    };
+    throw errObj;
+  });
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.patch('m-1', { bigPos: 8_000_000_000 }); })),
+    (err) => err.code === 'HOOK_ABORTED' && err.message.includes('keep-this-hook-message'),
+  );
+  db.unregisterBeforeCommit(hHostileCode);
+
+  // Phase 0B (0.7): int64 outside JS safe integer range (> 2^53 - 1) crosses cleanly as BigInt,
+  // distinct from safe <= 2^53 integers which stay JS `number`!
+  const hugePos = 9007199254740993n; // 2^53 + 1
+  const hugeNeg = -9007199254740993n;
+  db.executeWireBatch(buildWireBatch((b) => {
+    b.create('Metric', { bigPos: 5_000_000_000, bigNeg: -5_000_000_000, maxSafe: 0, hugePos, hugeNeg, ts: new Date(nowTs) }, 'm-bigint');
+  }));
+  const biRow = db.get('m-bigint');
+  assert.ok(biRow);
+  assert.equal(typeof biRow.fields.hugePos, 'bigint');
+  assert.equal(biRow.fields.hugePos, hugePos);
+  assert.equal(typeof biRow.fields.hugeNeg, 'bigint');
+  assert.equal(biRow.fields.hugeNeg, hugeNeg);
+  assert.equal(typeof biRow.fields.bigPos, 'number');
+  assert.equal(biRow.fields.bigPos, 5_000_000_000);
+
+  // Phase 0B (0.7): Lone UTF-16 surrogates rejected across N-API string arguments with INVALID_ARGUMENT.
+  assert.throws(() => db.get('bad\uD800id'), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => db.getEdges('bad\uDC00id'), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => db.nextCounter('bad\uD800ctr'), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => db.renameType('Metric', 'Bad\uD800Metric'), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => db.dump(join(tmp, 'bad\uD800.json')), (err) => err.code === 'INVALID_ARGUMENT');
+  assert.throws(() => Database.open(join(tmp, 'bad\uD800dir')), (err) => err.code === 'INVALID_ARGUMENT');
+});
+
+test('transact() and beforeCommit direct writes auto-grow map on STORAGE_FULL across N-API boundary', (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), 'elmdb-node-mapfull-'));
+  const db = Database.open(join(tmp, 'db'), { mapSizeBytes: 512 * 1024 });
+  t.after(() => {
+    try { db.close(); } catch { /* already closed */ }
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const blobSchema = {
+    types: { Blob: { fields: { body: { type: 'bytes' } }, indexes: {} } },
+    relations: {},
+  };
+  db.setSchema(blobSchema);
+
+  // Full 8-bit uniform pseudo-random bytes (8.0 bits/byte entropy) defeat zstd FSE on every OS/page size.
+  const incompressibleBytes = (len, seed) => {
+    let x = (seed >>> 0) || 1;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i += 1) {
+      x ^= (x << 13) >>> 0;
+      x ^= (x >>> 17) >>> 0;
+      x ^= (x << 5) >>> 0;
+      bytes[i] = (x >>> 16) & 0xff;
+    }
+    return bytes;
+  };
+
+  // 1. Spoofed STORAGE_FULL thrown from a JS beforeCommit hook (without hitting real MDB_MAP_FULL on this DB)
+  //    must fail with HOOK_ABORTED and must NOT grow mapSizeBytes.
+  const beforeSize = db.stats().mapSizeBytes;
+  const hSpoof = db.registerBeforeCommit(['Blob'], () => {
+    const err = new Error('storage map is full (fake)');
+    err.code = 'STORAGE_FULL';
+    throw err;
+  });
+  assert.throws(
+    () => db.executeWireBatch(buildWireBatch((b) => { b.create('Blob', { body: new Uint8Array([1, 2, 3]) }, 'spoof-1'); })),
+    (err) => err.code === 'HOOK_ABORTED',
+  );
+  assert.equal(db.stats().mapSizeBytes, beforeSize);
+  db.unregisterBeforeCommit(hSpoof);
+
+  // 2. db.transact() hitting STORAGE_FULL via executeWireBatch throws STORAGE_FULL, grows mapSizeBytes,
+  //    and succeeds on caller retry!
+  const bigLen = beforeSize + 8 * 1024;
+  const bigWire = buildWireBatch((b) => {
+    b.create('Blob', { body: incompressibleBytes(bigLen, 1) }, 'big-node-tx');
+  });
+  let threwInsideCallback = false;
+  assert.throws(
+    () => db.transact(() => {
+      try {
+        db.executeWireBatch(bigWire);
+      } catch (e) {
+        threwInsideCallback = e.code === 'STORAGE_FULL';
+        throw e;
+      }
+    }),
+    (err) => err.code === 'STORAGE_FULL',
+  );
+  assert.equal(threwInsideCallback, true);
+  const afterTxSize = db.stats().mapSizeBytes;
+  assert.ok(afterTxSize > beforeSize, `expected mapSizeBytes to grow (${afterTxSize} <= ${beforeSize})`);
+  db.transact(() => {
+    db.executeWireBatch(bigWire);
+  });
+  assert.ok(db.query({ source: { kind: 'type', typeName: 'Blob' }, steps: [], terminal: { kind: 'ids' } }).ids.includes('big-node-tx'));
+
+  // 3. Standalone executeWireBatch whose JS beforeCommit hook writes directly via executeWireBatch and
+  //    hits real MDB_MAP_FULL MUST NOT silently re-run hooks: first call fails with STORAGE_FULL with
+  //    hookCalls === 1, mapSizeBytes grows, and an explicit caller retry succeeds with hookCalls === 2!
+  const sizeBeforeHook = db.stats().mapSizeBytes;
+  const hugeHookWire = buildWireBatch((b) => {
+    b.create('Blob', { body: incompressibleBytes(sizeBeforeHook * 2 + 64 * 1024, 2) }, 'hook-big-node');
+  });
+  let hookCalls = 0;
+  const hReal = db.registerBeforeCommit(['Blob'], (delta) => {
+    if (delta.entities.some((e) => e.id === 'hook-trigger-node')) {
+      hookCalls += 1;
+      db.executeWireBatch(hugeHookWire);
+    }
+    return null;
+  });
+  const triggerWire = buildWireBatch((b) => {
+    b.create('Blob', { body: new Uint8Array([4, 5, 6]) }, 'hook-trigger-node');
+  });
+  assert.throws(
+    () => db.executeWireBatch(triggerWire),
+    (err) => err.code === 'STORAGE_FULL',
+  );
+  assert.equal(hookCalls, 1, `beforeCommit hook must run once on MapFull (got ${hookCalls})`);
+  const sizeAfterFirstHook = db.stats().mapSizeBytes;
+  assert.ok(sizeAfterFirstHook > sizeBeforeHook, `expected mapSizeBytes to grow (${sizeAfterFirstHook} <= ${sizeBeforeHook})`);
+
+  // Explicit caller retry doubles again if needed and succeeds cleanly.
+  let extraDoublings = 0;
+  for (;;) {
+    try {
+      db.executeWireBatch(triggerWire);
+      break;
+    } catch (e) {
+      if (e.code === 'STORAGE_FULL' && extraDoublings < 4) {
+        extraDoublings += 1;
+        continue;
+      }
+      throw e;
+    }
+  }
+  assert.equal(hookCalls, 2 + extraDoublings);
+  assert.ok(db.query({ source: { kind: 'type', typeName: 'Blob' }, steps: [], terminal: { kind: 'ids' } }).ids.includes('hook-big-node'));
+  db.unregisterBeforeCommit(hReal);
+
+  // 4. `db.transact()` MUST propagate a `grow_map` failure (e.g. `DURABILITY_FAILED` on an
+  //    unacknowledged reboot Grouped DB) instead of rethrowing the inner JS `STORAGE_FULL`!
+  const grpDir = join(tmp, 'grouped-grow-err');
+  const g1 = Database.open(grpDir, { durability: 'grouped', mapSizeBytes: 512 * 1024 });
+  g1.setSchema(blobSchema);
+  g1.close();
+  rmSync(join(grpDir, 'synced.v2'));
+  const g2 = Database.open(grpDir, { durability: 'grouped', mapSizeBytes: 512 * 1024 });
   try {
-    const db = Database.open(join(dir, 'db'), { schema: {
-      $schema: 'https://elmdb.dev/schema/1.json', roles: {}, relations: {}, types: { Task: { fields: {} } },
-    } });
-    db.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-1' }], now: 1 }));
-    assert.equal(db.committedElsewhere(), false);
-
-    const unit = db.begin();
-    unit.write(packr.pack({ ops: [{ op: 'create', type: 'Task', id: 'Task-2' }], now: 1 }));
-    assert.deepEqual(Object.keys(packr.unpack(unit.pendingChanges()).entities), ['Task-2']);
-    unit.abort();
-
-    const reading = db.begin();
-    reading.setCheckpoint('reader', Buffer.from('there'));
-    assert.equal(reading.checkpoint('reader').toString(), 'there');
-    assert.equal(db.checkpoint('reader'), null, 'not until it commits');
-    reading.commit();
-    assert.equal(db.checkpoint('reader').toString(), 'there');
-    db.close();
+    assert.equal(g2.openReport().status, 'unsyncedAfterReboot');
+    const unackedWire = buildWireBatch((b) => {
+      b.create('Blob', { body: incompressibleBytes(g2.stats().mapSizeBytes + 8 * 1024, 5) }, 'unacked-big-node');
+    });
+    assert.throws(
+      () =>
+        g2.transact(() => {
+          g2.executeWireBatch(unackedWire);
+        }),
+      (err) => err.code === 'DURABILITY_FAILED',
+    );
   } finally {
-    rmSync(dir, { recursive: true, force: true });
+    g2.close();
   }
 });

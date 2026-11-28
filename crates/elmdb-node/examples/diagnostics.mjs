@@ -8,26 +8,28 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
-import { Packr } from 'msgpackr';
+import { WireBatchBuilder } from '../client.js';
 
 const binding = process.argv[2];
 if (!binding) throw new Error('usage: node diagnostics.mjs <a binding built with --features diagnostics>');
 const { Database, collectDiagnostics, takeDiagnostics } = createRequire(import.meta.url)(binding);
 if (!collectDiagnostics) throw new Error(`${binding} was built without the diagnostics feature`);
 
-const packr = new Packr({ useRecords: false, moreTypes: true, mapsAsObjects: true });
 const schema = {
-  $schema: 'https://elmdb.dev/schema/1.json',
+  $schema: 'https://elmdb.dev/schema/2.json',
   types: { Note: { fields: { title: { type: 'string' } }, indexes: { title: { kind: 'value', fields: ['title'] } } } },
 };
 
 collectDiagnostics();
 const dir = mkdtempSync(join(tmpdir(), 'elmdb-diagnostics-'));
-const db = Database.open(dir, { schema, syncs: false });
+const db = Database.open(dir, { schema, durability: 'unsafe' });
 try {
-  const ops = Array.from({ length: 1000 }, (_, i) => ({ op: 'create', type: 'Note', fields: { title: `note ${i}` } }));
-  db.write(packr.pack({ ops, now: 1000 }));
-  db.rebuild('Note', 'title');
+  const b = new WireBatchBuilder();
+  for (let i = 0; i < 1000; i++) {
+    b.create('Note', { title: `note ${i}` });
+  }
+  db.executeWireBatch(b.encode());
+  db.rebuild('Note.title');
 } finally {
   db.close();
   rmSync(dir, { recursive: true, force: true });

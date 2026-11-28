@@ -1,30 +1,18 @@
 import type { Schema } from './protocol/Schema.js'
 import type { SchemaChange } from './protocol/SchemaChange.js'
+import type { OpenReport } from './protocol/OpenReport.js'
+import type { BatchResult } from './protocol/BatchResult.js'
 import type { CheckReport } from './protocol/CheckReport.js'
 import type { IndexStatus } from './protocol/IndexStatus.js'
-import type { Stats } from './protocol/Stats.js'
-import type { OpenReport } from './protocol/OpenReport.js'
-import type { Restore } from './protocol/Restore.js'
+import type { DatabaseStats } from './protocol/DatabaseStats.js'
+import type { DumpReport } from './protocol/DumpReport.js'
+import type { WatchTick } from './protocol/WatchTick.js'
+import type { Row } from './protocol/Row.js'
+import type { RelationRow } from './protocol/RelationRow.js'
+import type { QuerySpec } from './protocol/QuerySpec.js'
+import type { QueryAnswer } from './protocol/QueryAnswer.js'
 export type { ErrorCode } from './protocol/ErrorCode.js'
-export type { Written } from './protocol/Written.js'
-export type { BatchResult } from './protocol/BatchResult.js'
-export type { OpResult } from './protocol/OpResult.js'
-export type { ChangeSet } from './protocol/ChangeSet.js'
-export type { Reads } from './protocol/Reads.js'
-export type { ReadOp } from './protocol/ReadOp.js'
-export type { Plan } from './protocol/Plan.js'
-export type { Start } from './protocol/Start.js'
-export type { Step } from './protocol/Step.js'
-export type { Terminal } from './protocol/Terminal.js'
-export type { Batch } from './protocol/Batch.js'
-export type { Op } from './protocol/Op.js'
-export type { Answers } from './protocol/Answers.js'
-export type { Answer } from './protocol/Answer.js'
-export type { Row } from './protocol/Row.js'
-export type { RelationRow } from './protocol/RelationRow.js'
-export type { Hit } from './protocol/Hit.js'
-export type { Stage } from './protocol/Stage.js'
-export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats, OpenReport, Restore }
+export type { Schema, SchemaChange, OpenReport, BatchResult, CheckReport, IndexStatus, DatabaseStats, DumpReport, WatchTick, Row, RelationRow, QuerySpec, QueryAnswer }
 
 /**
  * Which binding artifact the generated loader actually loaded: `'native'` for
@@ -34,282 +22,143 @@ export type { Schema, SchemaChange, CheckReport, IndexStatus, Stats, OpenReport,
  */
 export declare const __napiBindingTarget: 'native' | 'wasm32-wasi' | 'wasm32-wasip1'
 
-/** An open database: one directory holding one LMDB environment */
+/** Handle to an open elmdb v2 database directory. */
 export declare class Database {
-  /**
-   * Opens the database at `path`, creating it unless `readOnly`. Refused where the path is open in this process
-   * already (`ALREADY_OPEN`), in a process another copy of the binding has opened a database in
-   * (`ALREADY_LOADED`), read-only where there is no database (`NO_DATABASE`), in another mode than a process that
-   * has it open for writing (`MODE_MISMATCH`), and where a restore is owed that this open can't make
-   * (`RESTORE_PENDING`)
-   */
-  static open(path: string, options?: OpenOptions | undefined | null): Database
-  /** The directory the database was opened at */
+  /** Opens an existing elmdb v2 database or creates a new one in `dir`. */
+  static open(dir: string, options?: OpenOptions | undefined | null): Database
+  /** Opens an elmdb v2 database asynchronously on Node's worker pool. */
+  static openAsync(dir: string, options?: OpenOptions | undefined | null): Promise<Database>
+  /** Loads a portable v2 JSON dump file into a brand-new database directory. */
+  static load(dumpFile: string, targetDir: string): DumpReport
   get path(): string
-  /** Whether the database was opened read-only */
   get readOnly(): boolean
-  /** Whether the database is still open: false once `close` has closed it */
-  get isOpen(): boolean
-  /** The schema the database holds, in its canonical form, or `null` when none was ever given */
-  get schema(): Schema | null
-  /**
-   * Changes the open database's schema as opening with it would, answering each change and what was done about it.
-   * Refused while a unit is open (`UNIT_OPEN`), and with `SCHEMA_CHANGE_REFUSED` for a schema that differs from
-   * the stored one in a read-only database, and for a change opening refuses
-   */
-  setSchema(schema: Schema): SchemaChange[]
-  /**
-   * What opening did: `{ schemaChanges: [{ path, change, effect }], restored, notBorneOut }`. `restored` is a
-   * restore this open or an earlier one made, a power loss or a failed sync having taken the database back to its
-   * last synced commit, with the sequence it opened at; every open reports it until `acknowledgeRestore()`.
-   * `notBorneOut` says the record beside the data file named another file than this one, which was opened as it is
-   */
-  get openReport(): OpenReport
-  /** Says the restore an open reported was read, so that no open reports it after; refused on a read-only handle */
+  openReport(): OpenReport
   acknowledgeRestore(): void
-  /** Group commit's syncs so far */
-  get syncs(): number
+  setSchema(schema: Schema): SchemaChange
+  getSchema(): Schema
+  renameType(oldType: string, newType: string, rewriteIds?: boolean | undefined | null): number
+  renameField(typeName: string, oldField: string, newField: string): number
+  renameRelation(oldRel: string, newRel: string): number
+  /** Executes an atomic `elmdb-wire` binary batch directly (single FFI crossing, zero MsgPack/JSON). */
+  executeWireBatch(payload: Uint8Array): BatchResult
   /**
-   * Applies a batch (msgpack bytes of a `Batch`) as one unit, on this thread, answering msgpack bytes of a `Written`
-   * once it has committed. `durable` commits it with a sync, and where that sync fails throws `NOT_DURABLE`: the
-   * commit has landed, so the batch isn't to be written again. Refused while a unit is open (`UNIT_OPEN`): writes
-   * go through the unit then
+   * Executes a strictly-synchronous callback inside a write transaction (or native LMDB savepoint when nested).
+   *
+   * - Reads (`get`, `getEdges`, `query`, `getCounter`) and writes (`executeWireBatch`, `nextCounter`, `setCounter`)
+   *   see all uncommitted outer and inner writes immediately (RYOW).
+   * - Throwing rolls back this transaction (or nested savepoint only, preserving outer writes).
+   * - Returning a Promise or thenable aborts immediately with `ASYNC_CALLBACK_FORBIDDEN`.
+   * - `beforeCommit` hooks run once on the outermost commit unless `{ runBeforeCommit: false }`.
    */
-  write(batch: Uint8Array, durable?: boolean | undefined | null): Uint8Array
+  transact(callback: () => unknown, options?: TransactOptions | undefined | null): unknown
+  /** Returns the pending commit sequence while inside `transact()` or `beforeCommit`, or `null` outside a write txn. */
+  pendingCommitSeq(): number | null
   /**
-   * Answers reads (msgpack bytes of a `Reads`) from one snapshot, on this thread, as msgpack bytes of its `Answers`:
-   * an `Answer` per read, in the order asked
+   * Atomically increments and returns the named persistent counter (`1, 2, 3, ...`).
+   * Participates in the active `transact()` / `beforeCommit` savepoint and rolls back on abort.
    */
-  read(reads: Uint8Array): Uint8Array
+  nextCounter(name: string): number
+  /** Reads the current value of the named persistent counter (`0` if unset), with RYOW inside `transact()`. */
+  getCounter(name: string): number
   /**
-   * `read` on a thread of the pool, so a large read doesn't hold up the event loop: msgpack bytes of a `Reads`, and
-   * a promise of msgpack bytes of its `Answers`, what `read` would have answered at the call. Its snapshot is the
-   * last commit as it is at the call, and a write made after the call is never in its answer. A tracked read that a
-   * commit wrote into before it was filed is told to the listener of `hearBuilderCommits`, once its promise has
-   * settled. elmdb's refusals of the read reject the promise: `NO_LISTENER` for a tracked read asked while there is
-   * no such listener, and `CLOSED` when the database closes before it runs. Once sixteen snapshots are held for
-   * reads still waiting, a read asked at a commit that holds none runs at the call, on this thread
+   * Sets the named persistent counter (e.g. preserving imported high-water marks).
+   * Participates in the active `transact()` / `beforeCommit` savepoint and rolls back on abort.
    */
-  readAsync(reads: Uint8Array): Promise<Uint8Array>
-  /** Drops what the reads tracked under `token` touched (`{ reads, track: token }`): no commit names it after */
-  untrack(token: number): void
+  setCounter(name: string, value: number): void
+  /** Sets primary vector embeddings for `extId` on `indexName`. */
+  setEmbeddings(indexName: string, extId: string, vectors: Array<Array<number>>): void
+  /** Permanently destroys all entities belonging to an archived type. */
+  purgeArchived(typeName: string): number
   /**
-   * Calls `listener` after each commit the index builder makes that wrote into a tracked read, with its sequence and
-   * those reads' tokens: a write's result names its own, and nothing else tells of a builder's. It is called too once
-   * a tracked `readAsync` has settled, for the last commit since its call that wrote into what it read, which no
-   * commit's result could name, the read not being filed yet. There is one listener, a second being refused
-   * (`ALREADY_LISTENING`), which keeps no process alive, and closing the database drops it
+   * Registers a synchronous same-thread JS `beforeCommit` hook.
+   *
+   * The callback receives `{ commitSeq, entities, edges }` inside a native LMDB nested savepoint:
+   * - Full read-your-own-writes (`get`, `getEdges`, `query`, `getCounter`, `nextCounter`, `setCounter`,
+   *   `pendingCommitSeq`, `executeWireBatch`, and nested `transact`) are available directly inside the hook.
+   * - Throwing an error aborts the commit cleanly with `HOOK_ABORTED`.
+   * - Returning a `Uint8Array`/`Buffer` containing an `elmdb-wire` batch applies those derived writes
+   *   in the same savepoint cascade (up to `MAX_HOOK_ROUNDS`).
    */
-  hearBuilderCommits(listener: (commit: { sequence: number; touched: number[] }) => void): void
-  /**
-   * Tells `listener` of commits other processes make as soon as each lands, which `committedElsewhere` then answers, a
-   * second being refused (`ALREADY_LISTENING`). It keeps no process alive, and closing the database drops it
-   */
-  hearCommitsElsewhere(listener: () => void): void
-  /**
-   * The epoch another process's replacement of every row moved the database to, when this handle hasn't adopted it:
-   * until it does (`adoptReplacement`), its commits are refused (`DATA_REPLACED`)
-   */
-  replacedElsewhere(): number | null
-  /**
-   * Takes the replacement that moved the database to `epoch` as seen, so commits here are taken again; false, adopting
-   * nothing, when another has landed since
-   */
-  adoptReplacement(epoch: number): boolean
-  /** How many tokens have tracked reads filed, and how many keys and ranges they hold */
-  trackStats(): { owners: number; keys: number; ranges: number }
-  /**
-   * The last commit's sequence, or 0 before the first: a number that only increases for as long as the database
-   * exists
-   */
-  get sequence(): number
-  /**
-   * Opens a unit that stays open across calls until it is committed or aborted, and writes go through it. While it
-   * is open, what would write or wait outside it is refused (`UNIT_OPEN`): a write, a rebuild, a second `begin`,
-   * `setSchema`, `purge`, a rename, `reset`, `replaceWith`, `bulkLoad`, `close`, and `waitForIndexBuilds` once the
-   * index builder has started
-   */
-  begin(): Unit
-  /** Compares derived data with primary data and every row with the schema's rules */
-  check(): CheckReport
-  /** `check` on a thread of the pool, in a snapshot of its own: the database's writes go on beside it */
-  checkAsync(): Promise<CheckReport>
-  /**
-   * Deletes derived data and writes what primary data derives: every index's, or with `type` and `index`, one's, in
-   * one unit of its own. Refused while a unit is open (`UNIT_OPEN`)
-   */
-  rebuild(entityType?: string | undefined | null, index?: string | undefined | null): void
-  /** `rebuild` on a thread of the pool: a write made on this thread while it runs waits for it to commit */
-  rebuildAsync(entityType?: string | undefined | null, index?: string | undefined | null): Promise<void>
-  /**
-   * Every value index of every declared type, and every rank index: whether it is built, and why it couldn't be when
-   * a build failed
-   */
-  indexStatus(): IndexStatus[]
-  /** Whether another handle has committed since this one last asked, or since it opened; never for this handle's own */
-  committedElsewhere(): boolean
-  /** The checkpoint named `name`, as the latest commit left it */
-  checkpoint(name: string): Uint8Array | null
-  /**
-   * The entities of `types` that changed after `from` (msgpack of a `Position`), at most `limit`: msgpack bytes of
-   * its `Changed`
-   */
-  changedSince(types: Array<string>, from: Uint8Array, limit: number): Uint8Array
-  /**
-   * Blocks until every index waiting to be built is built, as the database says once the builder is idle, throwing
-   * `INDEX_BUILD_FAILED` when a build failed, `BUILDS_STOPPED` where a close at exit gave up and left builds,
-   * `THREAD_REFUSED` where the system won't start the builder's thread (call it again to start it), or
-   * throws what holds a build up while the builder waits it out (`SYNC_BEHIND`, `READERS_FULL`): call it again
-   * after a pause to wait on. Refused with a unit open while there is something to build (`UNIT_OPEN`): commit
-   * or abort it, then wait. Throws `CLOSED` on a closed database, and `DATA_REPLACED` while
-   * another process's replacement of every row is not adopted. It doesn't wait for the order of an index's
-   * strings where another elmdb's writes ended its build: reads sort meanwhile, and `indexStatus` answers
-   * `ordered: false`
-   */
-  waitForIndexBuilds(): void
-  /**
-   * Deletes what a removed declaration left: `{ type }`, `{ type, field }`, `{ relationKind }` or `{ role }`. A
-   * name the schema still declares is refused (`SCHEMA_CHANGE_REFUSED`), as the call is while a unit is open
-   * (`UNIT_OPEN`)
-   */
-  purge(what: PurgeTarget): void
-  /**
-   * Renames a type to one the schema declares, rewriting its entities' ids and the relations and declared `ref`
-   * fields naming them, in one durable unit. Refused while a unit is open (`UNIT_OPEN`)
-   */
-  renameType(from: string, to: string): void
-  /**
-   * Moves a field's values, on every entity of a type, to another name the type declares, in one durable unit.
-   * Refused while a unit is open (`UNIT_OPEN`)
-   */
-  renameField(entityType: string, from: string, to: string): void
-  /**
-   * Moves every relation of a kind to another kind the schema declares, in one durable unit. Refused while a unit
-   * is open (`UNIT_OPEN`)
-   */
-  renameRelation(from: string, to: string): void
-  /** A compacted copy of one moment of the database into `target`, which opens as a database of its own */
-  backup(target: string): void
-  /** `backup` on a thread of the pool, copying a snapshot: the database's writes go on beside it */
-  backupAsync(target: string): Promise<void>
-  /** Every entry replaced by another database's primary data, derived data rebuilt under this schema */
-  replaceWith(source: string): void
-  /** Every entry removed but the database's format and schema */
-  reset(): void
-  /**
-   * What the database holds: entities per type and field, relations per kind, entries per index and the bytes of
-   * each value index, and its sizes
-   */
-  stats(): Stats
-  /**
-   * Loads (msgpack bytes of `Load[]`) applied in one durable unit without a write's checks, as an import does; a
-   * value outside the value spec is refused all the same
-   */
-  bulkLoad(loads: Uint8Array): void
-  /**
-   * Resolves once every unit committed before the call is on disk, and rejects when the sync it waits on fails or
-   * the database is closed. It resolves at once where nothing is owed: with `syncs: false`, under `syncEachCommit`,
-   * and in a read-only database
-   */
-  durable(): Promise<void>
-  /**
-   * Syncs what is owed and releases the environment; closing a closed database does nothing. Refused while a
-   * unit is open (`UNIT_OPEN`): commit or abort it, then close
-   */
+  registerBeforeCommit(typeNames: Array<string> | null | undefined, callback: (delta: { commitSeq: number; entities: Array<{ id: string; typeName: string; op: 'create' | 'update' | 'trash' | 'restore' | 'destroy' }>; edges: Array<{ relKind: string; op: 'link' | 'unlink' | 'update'; sourceId: string; targetId: string }> }) => unknown): number
+  unregisterBeforeCommit(hookId: number): boolean
+  /** Reads one entity row by external ID with all `EntityRef`s resolved in a single pinned MVCC snapshot. */
+  get(extId: string): Row | null
+  /** Lists outgoing, incoming, or both-direction relations for `extId`. */
+  getEdges(extId: string, relKind?: string | null | undefined, dir?: string | null | undefined): Array<RelationRow>
+  /** Executes a `QuerySpec` synchronously on a pinned lock-free MVCC read snapshot. */
+  query(spec: QuerySpec): QueryAnswer
+  /** Executes a `QuerySpec` off-thread on Node's libuv worker pool. */
+  queryAsync(spec: QuerySpec): Promise<QueryAnswer>
+  registerWatch(spec: QuerySpec, policy?: WatchPolicyOptions | undefined | null, nowMs?: number | undefined | null): WatchRegistration
+  rerunWatch(watchId: number, spec: QuerySpec, nowMs?: number | undefined | null, costMs?: number | undefined | null): WatchRerun
+  unregisterWatch(watchId: number): boolean
+  catchUpCrossProcess(nowMs?: number | undefined | null): Array<number>
+  tickWatches(nowMs?: number | undefined | null): WatchTick
+  nextDueWatch(nowMs?: number | undefined | null, elapsedTurnMs?: number | undefined | null): NextDueWatch
+  beginWatchRun(watchId: number): boolean
+  abortWatchRun(watchId: number, requeueDirty: boolean, nowMs?: number | undefined | null): boolean
+  caughtUp(nowMs?: number | undefined | null, soon?: boolean | undefined | null): boolean
+  watchesSettled(): boolean
+  stopWatches(): void
+  driveBackgroundWork(maxEntities?: number | undefined | null): boolean
+  flush(): void
+  flushAsync(): Promise<void>
+  check(indexName?: string | null | undefined): CheckReport
+  checkAsync(indexName?: string | null | undefined): Promise<CheckReport>
+  rebuild(indexName?: string | null | undefined): void
+  rebuildAsync(indexName?: string | null | undefined): Promise<void>
+  stats(): DatabaseStats
+  indexStatus(): Array<IndexStatus>
+  backup(targetDir: string, overwriteBackup?: boolean | undefined | null): void
+  backupAsync(targetDir: string, overwriteBackup?: boolean | undefined | null): Promise<void>
+  dump(targetFile: string): DumpReport
   close(): void
 }
 
-/** A unit open across calls, on the thread that began it */
-export declare class Unit {
-  /**
-   * Applies a batch (msgpack bytes) in the unit, keeping none of it when any operation is refused; answers msgpack
-   * bytes of a `BatchResult`
-   */
-  write(batch: Uint8Array): Uint8Array
-  /** Records `value` as the checkpoint `name`, committing with this unit or not at all */
-  setCheckpoint(name: string, value: Uint8Array): void
-  /** The checkpoint named `name`, as this unit sees it */
-  checkpoint(name: string): Uint8Array | null
-  /** What the unit has changed so far: msgpack bytes of its `ChangeSet` */
-  pendingChanges(): Uint8Array
-  /** `Database.changedSince` read in the unit, before its own writes are stamped */
-  changedSince(types: Array<string>, from: Uint8Array, limit: number): Uint8Array
-  /** The sequence this unit commits as, which what it writes is stamped with */
-  nextSequence(): number
-  /**
-   * Answers reads (msgpack bytes of a `Reads`) from the unit's transaction, which sees the unit's own writes, as
-   * msgpack bytes of its `Answers`
-   */
-  read(reads: Uint8Array): Uint8Array
-  /** Opens a savepoint, answering its depth */
-  savepoint(): number
-  /** Undoes everything since the savepoint at `depth`, closing it */
-  rollbackTo(depth: number): void
-  /** Closes the savepoint at `depth`, keeping its writes */
-  release(depth: number): void
-  /** Commits the unit, answering msgpack bytes of its `ChangeSet` */
-  commit(durable?: boolean | undefined | null): Uint8Array
-  /** Ends the unit, keeping nothing of it */
-  abort(): void
-  /** Whether the unit is still open: false once it has committed, aborted, or been ended by a panic */
-  get isOpen(): boolean
+/** Return value of `nextDueWatch`. */
+export interface NextDueWatch {
+  watchId?: number
+  nextWakeDelayMs?: number
+  settled: boolean
 }
 
-/**
- * A commit that wrote into tracked reads, as the listener of `hearBuilderCommits` hears it: its sequence and those
- * reads' tokens
- */
-export interface BuilderCommit {
-  sequence: number
-  touched: Array<number>
-}
-
+/** Options for `Database.open` / `Database.openAsync`. */
 export interface OpenOptions {
-  /**
-   * Opens existing files and refuses every write (`READ_ONLY`). The stored schema is used, and a `schema` that
-   * differs from it is refused (`SCHEMA_CHANGE_REFUSED`). Of the database's data it writes only to make a restore a
-   * power loss or a failed sync left owed, and is refused (`RESTORE_PENDING`) where it can't
-   */
   readOnly?: boolean
-  /**
-   * The schema, as the canonical JSON `docs/architecture/schema.md` describes; a schema that differs from the stored one
-   * changes it
-   */
   schema?: Schema
-  /**
-   * Group commit's syncs, on by default; off, nothing is synced, for a test's temporary directory. With
-   * `syncEachCommit` it chooses the mode the database is written in, and a writable open in another mode than a
-   * process that has the database open for writing is refused (`MODE_MISMATCH`)
-   */
-  syncs?: boolean
-  /**
-   * Sync every commit as it is made, so that one that returned survives the machine losing power, at the price of a
-   * sync per commit. It syncs whatever `syncs` says, and is ignored by a read-only database. Off by default, where
-   * commits are synced in groups, a moment after they return
-   */
-  syncEachCommit?: boolean
-  /**
-   * Group commit syncs once writes have paused for this many milliseconds: 100 by default. A whole number, as the
-   * next is, or refused (`VALUE_INVALID`)
-   */
-  syncIdleMs?: number
-  /** Group commit syncs no later than this many milliseconds after the first commit not yet synced: 1000 by default */
-  syncIntervalMs?: number
-  /**
-   * The map's size at open: by default twice the data file, and 64 MiB at least. A whole number of 1 at least, or
-   * refused (`VALUE_INVALID`), and a multiple of the system's page size, or refused by LMDB's binding (`IO`)
-   */
+  /** `"strict"` (default), `"grouped"`, or `"unsafe"` (tests). */
+  durability?: string
+  /** `"deferred"` (default, watermarked background builds) or `"eager"` (build inline on setSchema). */
+  buildPolicy?: string
   mapSizeBytes?: number
+  maxDbs?: number
+  maxReaders?: number
+  planCacheCapacity?: number
+  watchTurnSliceMs?: number
 }
 
-/** What `purge` deletes: one of a type's entities, a field of a type, a relation kind's relations, or a role */
-export interface PurgeTarget {
-  /** The removed type whose entities go, or with `field` the type the field is of */
-  type?: string
-  /** The removed field, of `type` */
-  field?: string
-  /** The removed relation kind whose relations go */
-  relationKind?: string
-  /** The removed role, which goes from every entity holding it */
-  role?: string
+/** Options for `Database.transact`. */
+export interface TransactOptions {
+  /** Whether registered `beforeCommit` hooks run when the outermost transaction commits (default `true`). */
+  runBeforeCommit?: boolean
+}
+
+/** Watch throttling & delivery mode policy for `registerWatch`. */
+export interface WatchPolicyOptions {
+  /** `"declarative"` (default, 128-bit result dedup) or `"imperative"` (always deliver on invalidation). */
+  mode?: string
+  minGapMs?: number
+  adaptiveMultiplier?: number
+}
+
+/** Return value of `registerWatch`. */
+export interface WatchRegistration {
+  watchId: number
+  answer: QueryAnswer
+}
+
+/** Return value of `rerunWatch`. */
+export interface WatchRerun {
+  answer: QueryAnswer
+  changed: boolean
 }

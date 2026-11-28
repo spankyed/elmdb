@@ -1,114 +1,278 @@
-/**
- * EARS query helpers typed against an entity shape map: `defineEars<Schema>()`, over the
- * schema a program declares (its entities' shapes, and the names, relation kinds and roles they
- * take). There is no global registry, so each facade's typing depends only on its own schema.
- *
- * CHANGE CONTROL: these types are a specified contract, and editor completions and error messages
- * depend on their exact form. Don't change them to make one call site compile; fix the call site.
- * docs/architecture/ears.md, Typed contract, says what checks a change to them.
- * Overload order here is part of the contract: a signature that accepts more than the one before
- * it lets a call that should fail (a typo'd name or field) fall through to it.
- */
-import type { EARS, EntityNameArg, EntityShapes, ShapeOf } from './entities.ts';
-import type { CreateFields, EarsSchema, QueryBuilder, RequiredField, RowIdentity, ShortCodeIdentity, WriteBuilder, WriteOptions, WriteTarget } from './runtime.ts';
-import type { Ears } from './engine.ts';
+import type { BatchResult, QueryAnswer, QuerySpec, RelationRow, TransactOptions } from 'elmdb';
+import type { BatchSlot, BatchWriter, LinkOptions } from './batch.ts';
+import type { CommitDelta } from './database.ts';
+import type { EarsAdmin, EarsEngine, GetEdgesOptions } from './engine.ts';
+import type { EntityRow, QueryBuilder, SourceOptions } from './query.ts';
+import type { WatchController } from './watch.ts';
 
 /**
- * The query entry points: `query(type)` from a declared entity type (its name checked, its rows typed), `query.ids`
- * from ids (typed by the entity an id is tagged with), `query.all` from every entity. A name and an id are
- * different arguments to different functions, so an id passed where a type is meant fails to compile.
+ * Compile-time branded entity ID and intra-batch slot utilities (`EARS.EntityId<'Task'>`).
+ * Zero runtime overhead — branded IDs are plain strings and branded slots are `BatchSlot` instances.
  */
-export interface TypedQueryEntries<D extends EarsSchema> {
-  <E extends string>(type: EntityNameArg<D['names'], E>): QueryBuilder<E, D>;
-  <E extends string>(types: readonly EntityNameArg<D['names'], E>[]): QueryBuilder<string, D>;
-  ids<E extends string>(ids: EARS.EntityId<E> | readonly EARS.EntityId<E>[]): QueryBuilder<E, D>;
-  all(): QueryBuilder<string, D>;
+export namespace EARS {
+  declare const entityTypeBrand: unique symbol;
+  declare const batchSlotTypeBrand: unique symbol;
+
+  /**
+   * Branded external entity ID carrying its entity type name at compile time.
+   * Assignable to `string`, while rejecting raw unbranded `string` values where a typed ID is expected.
+   */
+  export type EntityId<TName extends string = string> = string & {
+    readonly [entityTypeBrand]: TName;
+  };
+
+  /** Branded intra-batch slot returned by `TypedBatchWriter.create<TName>(...)`. */
+  export type TypedBatchSlot<TName extends string = string> = BatchSlot & {
+    readonly [batchSlotTypeBrand]: TName;
+  };
 }
 
-/** The typed queries, which reach no entity in the trash; `withTrashed` reaches those too, `trashed` only those */
-export interface TypedQuery<D extends EarsSchema> extends TypedQueryEntries<D> {
-  withTrashed: TypedQueryEntries<D>;
-  trashed: TypedQueryEntries<D>;
+/** Casts a raw string ID into a branded `EARS.EntityId<TName>` at zero runtime cost. */
+export function asEntityId<TName extends string>(id: string): EARS.EntityId<TName> {
+  return id as EARS.EntityId<TName>;
 }
 
-/** The argument after a type: required when the shape requires a field, so an incomplete row doesn't compile */
-export type RowArg<S extends EntityShapes, E extends string, Row> = [RequiredField<S, E>] extends [never] ? [row?: Row] : [row: Row];
+/** Compile-time schema contract accepted by `defineEars<TSchema>`. */
+export interface EarsSchemaShape {
+  readonly entities: { readonly [typeName: string]: Record<string, unknown> };
+  readonly relations?: string;
+}
+
+/** Entity type names declared in `TSchema`. */
+export type EntityTypeName<TSchema extends EarsSchemaShape> = Extract<keyof TSchema['entities'], string>;
+
+/** Relation kind names declared in `TSchema` (defaults to `string` when omitted). */
+export type RelationKindName<TSchema extends EarsSchemaShape> =
+  TSchema['relations'] extends string ? TSchema['relations'] : string;
 
 /**
- * Creates an entity of a declared type with its row: every field the shape requires and any it allows, beside the id
- * and times it keeps when it brings them (`RowIdentity`) — one argument, so nothing lands in the wrong place
+ * Strongly typed entity row for entity type `TName` in `TSchema`.
+ * Distributive over union `TName` so `ofTypes(['Project', 'Issue'])` narrows cleanly on `row.typeName`.
  */
-export interface TypedCreate<D extends EarsSchema> {
-  <E extends string>(type: EntityNameArg<D['names'], E>, ...row: RowArg<D['shapes'], E, CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E>>): WriteBuilder<E, D>;
+export type TypedEntityRow<
+  TSchema extends EarsSchemaShape,
+  TName extends EntityTypeName<TSchema>,
+> = TName extends EntityTypeName<TSchema>
+  ? {
+      readonly id: EARS.EntityId<TName>;
+      readonly typeName: TName;
+      readonly trashed: boolean;
+      readonly fields: Readonly<TSchema['entities'][TName]>;
+    }
+  : never;
+
+/** Synchronous `beforeCommit` hook whose derived batch builder is typed to `TSchema`. */
+export type TypedBeforeCommitHook<TSchema extends EarsSchemaShape> = (
+  delta: CommitDelta,
+) => void | Uint8Array | ((batch: TypedBatchWriter<TSchema>) => void);
+
+/** Strongly typed `BatchWriter` scoped to `TSchema`. */
+export interface TypedBatchWriter<TSchema extends EarsSchemaShape> {
+  create<TName extends EntityTypeName<TSchema>>(
+    typeName: TName,
+    fields: TSchema['entities'][TName],
+    externalId?: EARS.EntityId<TName> | string,
+  ): EARS.TypedBatchSlot<TName>;
+  patch<TName extends EntityTypeName<TSchema>>(
+    target: EARS.EntityId<TName> | EARS.TypedBatchSlot<TName>,
+    fields: Partial<TSchema['entities'][TName]>,
+  ): this;
+  unset<TName extends EntityTypeName<TSchema>>(
+    target: EARS.EntityId<TName> | EARS.TypedBatchSlot<TName>,
+    fields: ReadonlyArray<Extract<keyof TSchema['entities'][TName], string>>,
+  ): this;
+  trash(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
+  restore(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
+  destroy(target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>): this;
+  link(
+    source: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>,
+    relKind: RelationKindName<TSchema>,
+    target: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>,
+    opts?: LinkOptions,
+  ): this;
+  unlink(
+    source: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>,
+    relKind?: RelationKindName<TSchema>,
+    target?: EARS.EntityId<EntityTypeName<TSchema>> | EARS.TypedBatchSlot<EntityTypeName<TSchema>>,
+  ): this;
+  readonly length: number;
+}
+
+/** Strongly typed query entrypoints scoped to `TSchema`. */
+export interface TypedQueryRoot<TSchema extends EarsSchemaShape> {
+  of<TName extends EntityTypeName<TSchema>>(
+    typeName: TName,
+    opts?: SourceOptions,
+  ): QueryBuilder<TypedEntityRow<TSchema, TName>>;
+  ofTypes<TName extends EntityTypeName<TSchema>>(
+    typeNames: readonly TName[],
+    opts?: SourceOptions,
+  ): QueryBuilder<TypedEntityRow<TSchema, TName>>;
+  allEntities(opts?: SourceOptions): QueryBuilder<EntityRow>;
+  ids<TName extends EntityTypeName<TSchema>>(
+    ids: ReadonlyArray<EARS.EntityId<TName>>,
+  ): QueryBuilder<TypedEntityRow<TSchema, TName>>;
+  raw(spec: QuerySpec): QueryAnswer;
+  rawAsync(spec: QuerySpec): Promise<QueryAnswer>;
+}
+
+/** Strongly typed EARS facade returned by `defineEars<TSchema>(getEngine)`. */
+export interface TypedEars<TSchema extends EarsSchemaShape> {
+  readonly engine: () => EarsEngine;
+  readonly query: TypedQueryRoot<TSchema>;
+  readonly watches: () => WatchController;
+  readonly admin: () => EarsAdmin;
+  get<TName extends EntityTypeName<TSchema>>(
+    id: EARS.EntityId<TName>,
+  ): TypedEntityRow<TSchema, TName> | null;
+  getEdges(
+    id: EARS.EntityId<EntityTypeName<TSchema>>,
+    opts?: GetEdgesOptions,
+  ): RelationRow[];
+  create<TName extends EntityTypeName<TSchema>>(
+    typeName: TName,
+    fields: TSchema['entities'][TName],
+    externalId?: EARS.EntityId<TName> | string,
+  ): EARS.EntityId<TName>;
+  patch<TName extends EntityTypeName<TSchema>>(
+    id: EARS.EntityId<TName>,
+    fields: Partial<TSchema['entities'][TName]>,
+  ): BatchResult;
+  unset<TName extends EntityTypeName<TSchema>>(
+    id: EARS.EntityId<TName>,
+    fields: ReadonlyArray<Extract<keyof TSchema['entities'][TName], string>>,
+  ): BatchResult;
+  trash(id: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
+  restore(id: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
+  destroy(id: EARS.EntityId<EntityTypeName<TSchema>>): BatchResult;
+  link(
+    sourceId: EARS.EntityId<EntityTypeName<TSchema>>,
+    relKind: RelationKindName<TSchema>,
+    targetId: EARS.EntityId<EntityTypeName<TSchema>>,
+    opts?: LinkOptions,
+  ): BatchResult;
+  unlink(
+    sourceId: EARS.EntityId<EntityTypeName<TSchema>>,
+    relKind?: RelationKindName<TSchema>,
+    targetId?: EARS.EntityId<EntityTypeName<TSchema>>,
+  ): BatchResult;
+  setEmbeddings(
+    indexName: string,
+    id: EARS.EntityId<EntityTypeName<TSchema>>,
+    vectors: ReadonlyArray<ReadonlyArray<number>>,
+  ): void;
+  batch(fn: (batch: TypedBatchWriter<TSchema>) => void): BatchResult;
+  transact<T>(fn: () => T, opts?: TransactOptions): T;
+  pendingCommitSeq(): number | null;
+  nextCounter(name: string): number;
+  getCounter(name: string): number;
+  setCounter(name: string, value: number): void;
+  beforeCommit(
+    typeNames: readonly EntityTypeName<TSchema>[] | null,
+    callback: TypedBeforeCommitHook<TSchema>,
+  ): () => void;
 }
 
 /**
- * Writes the row to the entity with its `id`, creating it as `type` with the row when no entity has it: `create`'s row,
- * with the id always given — one argument, as `create` takes
+ * Creates a strongly-typed facade over a lazily-resolved `EarsEngine` getter.
+ * Holds zero module-level state: callers control the engine lifecycle and binding.
  */
-export interface TypedUpsert<D extends EarsSchema> {
-  <E extends string>(type: EntityNameArg<D['names'], E>, row: CreateFields<D['shapes'], E> & RowIdentity & ShortCodeIdentity<D['shapes'], E> & { id: EARS.EntityId }): WriteBuilder<E, D>;
-}
+export function defineEars<TSchema extends EarsSchemaShape>(
+  getEngine: () => EarsEngine,
+): TypedEars<TSchema> {
+  const query: TypedQueryRoot<TSchema> = {
+    of<TName extends EntityTypeName<TSchema>>(typeName: TName, opts?: SourceOptions) {
+      return getEngine().query.of(typeName, opts) as unknown as QueryBuilder<
+        TypedEntityRow<TSchema, TName>
+      >;
+    },
+    ofTypes<TName extends EntityTypeName<TSchema>>(typeNames: readonly TName[], opts?: SourceOptions) {
+      return getEngine().query.ofTypes(typeNames, opts) as unknown as QueryBuilder<
+        TypedEntityRow<TSchema, TName>
+      >;
+    },
+    allEntities(opts?: SourceOptions) {
+      return getEngine().query.allEntities(opts);
+    },
+    ids<TName extends EntityTypeName<TSchema>>(ids: ReadonlyArray<EARS.EntityId<TName>>) {
+      return getEngine().query.ids(ids) as unknown as QueryBuilder<TypedEntityRow<TSchema, TName>>;
+    },
+    raw(spec) {
+      return getEngine().query.raw(spec);
+    },
+    rawAsync(spec) {
+      return getEngine().query.rawAsync(spec);
+    },
+  };
 
-/** Writes to an existing entity; an id tagged with its type checks writes to declared fields, a plain one doesn't */
-export interface TypedWrite<D extends EarsSchema> {
-  <E extends string>(id: WriteTarget<E>, options?: WriteOptions): WriteBuilder<E, D>;
-}
-
-/** Brands the id with the entity type when the schema declares its shape; other types stay unbranded. */
-export type TypedNewId<D extends EarsSchema> =
-  <E extends string>(t: EntityNameArg<D['names'], E>) => EARS.EntityId<E extends keyof D['shapes'] ? E : string>;
-
-/**
- * One field of an entity's row, read as `getRow` reads it (the trash included), or undefined when it holds none: the
- * field typed by a branded id's shape, and `unknown` for an id with no type in it
- */
-export interface TypedGetAttr<D extends EarsSchema> {
-  <E extends string, K extends keyof ShapeOf<D['shapes'], E> & string>(id: EARS.EntityId<E>, field: K): ShapeOf<D['shapes'], E>[K] | undefined;
-  (id: EARS.EntityId, field: string): unknown;
-}
-
-export interface TypedEars<D extends EarsSchema> {
-  query: TypedQuery<D>;
-  create: TypedCreate<D>;
-  upsert: TypedUpsert<D>;
-  write: TypedWrite<D>;
-  transact: Ears['transact'];
-  /** Generates a branded entity id stamped with the engine's clock (`engine.newId`) */
-  newId: TypedNewId<D>;
-  /** The engine's current wall-clock time in milliseconds (`engine.now`) */
-  now: Ears['now'];
-  getAttr: TypedGetAttr<D>;
-}
-
-/**
- * The EARS query helpers typed against the schema `D` — its entity shapes, and the entity names, relation kinds and
- * roles they take — each acting on the engine `engine` returns when it is called. A getter rather than an engine,
- * so a facade can be defined before its engine exists: a module that defines one at import, before the program has
- * opened its database, passes a getter of whichever engine the program has bound by the time a helper is called.
- */
-export function defineEars<D extends EarsSchema>(engine: () => Ears): TypedEars<D> {
-  const on = <K extends keyof Ears>(name: K) =>
-    ((...args: unknown[]) => (engine()[name] as (...a: unknown[]) => unknown)(...args));
   return {
-    query: Object.assign(on('query'), {
-      ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().query.ids(ids),
-      all: () => engine().query.all(),
-      withTrashed: Object.assign((start: never) => engine().query.withTrashed(start), {
-        ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().query.withTrashed.ids(ids),
-        all: () => engine().query.withTrashed.all(),
-      }),
-      trashed: Object.assign((start: never) => engine().query.trashed(start), {
-        ids: (ids: EARS.EntityId | readonly EARS.EntityId[]) => engine().query.trashed.ids(ids),
-        all: () => engine().query.trashed.all(),
-      }),
-    }),
-    create: on('create'),
-    upsert: on('upsert'),
-    write: on('write'),
-    transact: on('transact'),
-    newId: on('newId'),
-    now: on('now'),
-    getAttr: on('getAttr'),
-  } as unknown as TypedEars<D>;
+    engine: getEngine,
+    query,
+    watches: () => getEngine().watches,
+    admin: () => getEngine().admin,
+    get<TName extends EntityTypeName<TSchema>>(id: EARS.EntityId<TName>) {
+      return getEngine().get(id) as TypedEntityRow<TSchema, TName> | null;
+    },
+    getEdges(id, opts) {
+      return getEngine().getEdges(id, opts);
+    },
+    create<TName extends EntityTypeName<TSchema>>(
+      typeName: TName,
+      fields: TSchema['entities'][TName],
+      externalId?: EARS.EntityId<TName> | string,
+    ): EARS.EntityId<TName> {
+      return getEngine().create(typeName, fields, externalId) as EARS.EntityId<TName>;
+    },
+    patch(id, fields) {
+      return getEngine().patch(id, fields as Record<string, unknown>);
+    },
+    unset(id, fields) {
+      return getEngine().unset(id, fields);
+    },
+    trash(id) {
+      return getEngine().trash(id);
+    },
+    restore(id) {
+      return getEngine().restore(id);
+    },
+    destroy(id) {
+      return getEngine().destroy(id);
+    },
+    link(sourceId, relKind, targetId, opts) {
+      return getEngine().link(sourceId, relKind, targetId, opts);
+    },
+    unlink(sourceId, relKind, targetId) {
+      return getEngine().unlink(sourceId, relKind, targetId);
+    },
+    setEmbeddings(indexName, id, vectors) {
+      getEngine().setEmbeddings(indexName, id, vectors);
+    },
+    batch(fn) {
+      return getEngine().batch((raw: BatchWriter) => fn(raw as unknown as TypedBatchWriter<TSchema>));
+    },
+    transact(fn, opts) {
+      return getEngine().transact(fn, opts);
+    },
+    pendingCommitSeq() {
+      return getEngine().pendingCommitSeq();
+    },
+    nextCounter(name) {
+      return getEngine().nextCounter(name);
+    },
+    getCounter(name) {
+      return getEngine().getCounter(name);
+    },
+    setCounter(name, value) {
+      getEngine().setCounter(name, value);
+    },
+    beforeCommit(typeNames, callback) {
+      return getEngine().beforeCommit(typeNames, (delta) => {
+        const ret = callback(delta);
+        if (typeof ret === 'function') {
+          return (raw: BatchWriter) => ret(raw as unknown as TypedBatchWriter<TSchema>);
+        }
+        return ret;
+      });
+    },
+  };
 }
