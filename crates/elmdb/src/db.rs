@@ -2231,9 +2231,43 @@ mod tests {
         );
         assert!(!fb_clean.exists(), "fallback must remove partial destination on copy failure");
 
-        // `dump` refuses self/descendant target; `load` refuses overlapping target; `backup_into` refuses regular file without leaking staging dir.
+        // `atomic_publish_file_no_overwrite_with`: CrossesDevices falls back & succeeds (kills `false`),
+        // while non-fallback I/O errors fail without falling back (kills `true`).
+        let exdev_tmp = dir.path().join("exdev.tmp");
+        let exdev_dst = dir.path().join("exdev.dst");
+        fs::write(&exdev_tmp, b"exdev-ok").unwrap();
+        crate::fs_publish::atomic_publish_file_no_overwrite_with(&exdev_tmp, &exdev_dst, |_, _| {
+            Err(std::io::Error::from(std::io::ErrorKind::CrossesDevices))
+        })
+        .unwrap();
+        assert_eq!(fs::read(&exdev_dst).unwrap(), b"exdev-ok");
+
+        let no_fb_tmp = dir.path().join("nofb.tmp");
+        let no_fb_dst = dir.path().join("nofb.dst");
+        fs::write(&no_fb_tmp, b"must-not-publish").unwrap();
+        assert_eq!(
+            crate::fs_publish::atomic_publish_file_no_overwrite_with(&no_fb_tmp, &no_fb_dst, |_, _| {
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound))
+            })
+            .unwrap_err()
+            .code,
+            ErrorCode::Io
+        );
+        assert!(!no_fb_dst.exists(), "non-EXDEV hard_link error must not silently fall back");
+
+        // Replacing an existing backup MUST clean up `.elmdb-backup-old-*` (kills `OldAsideCleanup::drop -> ()`).
         let live_dir = dir.path().join("live_db_0b");
         let live_db = Database::open(&live_dir, OpenOptions::default()).unwrap();
+        let bak_dir = dir.path().join("bak_replace_0b");
+        live_db.backup_into(&bak_dir, BackupInto::New).unwrap();
+        live_db.backup_into(&bak_dir, BackupInto::Backups).unwrap();
+        let stray_old = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with(".elmdb-backup-old-"));
+        assert!(!stray_old, "atomic_publish_dir_replace must clean up .elmdb-backup-old-*");
+
+        // `dump` refuses self/descendant target; `load` refuses overlapping or non-dir target; `backup_into` refuses regular file without leaking staging dir.
         assert_eq!(
             crate::dump::dump(&live_db, live_dir.join("inside.json")).unwrap_err().code,
             ErrorCode::InvalidArgument
@@ -2243,6 +2277,7 @@ mod tests {
         assert_eq!(crate::dump::load(&good_dump, dir.path()).unwrap_err().code, ErrorCode::InvalidArgument);
         let file_as_backup = dir.path().join("regular_file_target");
         fs::write(&file_as_backup, b"not a dir").unwrap();
+        assert_eq!(crate::dump::load(&good_dump, &file_as_backup).unwrap_err().code, ErrorCode::AlreadyExists);
         assert_eq!(live_db.backup_into(&file_as_backup, BackupInto::New).unwrap_err().code, ErrorCode::AlreadyExists);
         let stray_tmp = fs::read_dir(dir.path())
             .unwrap()

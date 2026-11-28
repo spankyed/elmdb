@@ -305,7 +305,13 @@ pub fn load(dump_file: impl AsRef<Path>, target_dir: impl AsRef<Path>) -> Result
     let (clean_target, existing) = crate::fs_publish::normalize_non_symlink_target_dir(target_dir)?;
     let target_dir = clean_target.as_path();
     crate::fs_publish::ensure_paths_disjoint(dump_file, target_dir)?;
-    if existing.is_some() {
+    if let Some(meta) = existing {
+        if !meta.is_dir() {
+            return Err(ElmdbError::new(
+                ErrorCode::AlreadyExists,
+                format!("load target '{}' is not a directory", target_dir.display()),
+            ));
+        }
         let mut it = fs::read_dir(target_dir).map_err(|e| ElmdbError::new(ErrorCode::Io, e.to_string()))?;
         if it.next().is_some() {
             return Err(ElmdbError::new(

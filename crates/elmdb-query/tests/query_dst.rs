@@ -1817,20 +1817,60 @@ fn review_regression_read_recorder_building_transition_and_p1_p2_hardening() {
     assert!(es_tiny.add(-f64::MAX));
     assert_eq!(es_tiny.try_total(), Some(1e-300), "exact cancellation preserves sub-ULP low-band value");
 
-    // Low-band folding when high-band stays non-empty and < 2^1000, plus tiny-tail sign tie-breaking above 2^1000.
-    let mut es_fold = ExactSum::default();
-    let two_501 = f64::from_bits((1023u64 + 501) << 52);
-    let two_460 = f64::from_bits((1023u64 + 460) << 52);
-    assert!(es_fold.add(two_501));
-    assert!(es_fold.add(two_460));
-    assert!(es_fold.add(-(two_501 - two_460)));
-    assert_eq!(es_fold.try_total(), Some(two_460 * 2.0));
+    // Low-band cancellation + quantitative tiny fold + signed overflow + exact tie-break counterexamples!
+    let mut es_neg_ov = ExactSum::default();
+    assert!(es_neg_ov.add(-f64::MAX));
+    assert!(es_neg_ov.add(-f64::MAX));
+    assert_eq!(es_neg_ov.try_total(), None);
+    assert_eq!(es_neg_ov.total(), f64::NEG_INFINITY);
 
+    // High band cancels with low band to exact zero -> preserves tiny sub-2^-450 value bit-exactly!
+    let two_512 = f64::from_bits((1023u64 + 512) << 52);
+    let two_511 = f64::from_bits((1023u64 + 511) << 52);
+    let mut es_cancel_tiny = ExactSum::default();
+    assert!(es_cancel_tiny.add(two_512));
+    assert!(es_cancel_tiny.add(-two_511));
+    assert!(es_cancel_tiny.add(-two_511));
+    assert!(es_cancel_tiny.add(1e-300));
+    assert_eq!(es_cancel_tiny.try_total(), Some(1e-300));
+
+    // High + low cancels to a small non-zero residual (< 2^512) -> folds quantitatively with tiny!
+    let two_neg_449 = f64::from_bits((1023u64 - 449) << 52);
+    let two_neg_451 = f64::from_bits((1023u64 - 451) << 52);
+    let mut es_fold = ExactSum::default();
+    assert!(es_fold.add(two_512));
+    assert!(es_fold.add(-two_511));
+    assert!(es_fold.add(-two_511));
+    assert!(es_fold.add(two_neg_449));
+    assert!(es_fold.add(two_neg_451));
+    assert_eq!(es_fold.try_total(), Some(two_neg_449 + two_neg_451));
+
+    // Exact midpoint tie-breaks above 2^1000:
+    // 1. `[2^1000, 2^947 (half-ULP), -1.0, 1e-200]`: true sum < midpoint -> rounds DOWN to `2^1000`!
+    let two_1000 = f64::from_bits((1023u64 + 1000) << 52);
+    let half_ulp_1000 = f64::from_bits((1023u64 + 947) << 52);
+    let mut es_tie_down = ExactSum::default();
+    assert!(es_tie_down.add(two_1000));
+    assert!(es_tie_down.add(half_ulp_1000));
+    assert!(es_tie_down.add(-1.0));
+    assert!(es_tie_down.add(1e-200));
+    assert_eq!(es_tie_down.try_total(), Some(two_1000));
+
+    // 2. `[f64::MAX, 2^970 (half-ULP), -1.0, 1e-200]`: true sum < midpoint -> MUST NOT overflow (`Some(f64::MAX)`)!
+    let half_ulp_max = f64::from_bits((1023u64 + 970) << 52);
+    let mut es_no_spurious_ov = ExactSum::default();
+    assert!(es_no_spurious_ov.add(f64::MAX));
+    assert!(es_no_spurious_ov.add(half_ulp_max));
+    assert!(es_no_spurious_ov.add(-1.0));
+    assert!(es_no_spurious_ov.add(1e-200));
+    assert_eq!(es_no_spurious_ov.try_total(), Some(f64::MAX));
+
+    // 3. `[2^1001, 2^948 (half-ULP), 1e-300]`: true sum > midpoint -> breaks tie UPWARD!
     let mut es_high_plus_tiny = ExactSum::default();
     let two_1001 = f64::from_bits((1023u64 + 1001) << 52);
     assert!(es_high_plus_tiny.add(two_1001));
-    assert!(es_high_plus_tiny.add(f64::from_bits((1023u64 + 1001 - 53) << 52))); // exact half-ULP
-    assert!(es_high_plus_tiny.add(1e-300)); // tiny tail breaks midpoint tie upward!
+    assert!(es_high_plus_tiny.add(f64::from_bits((1023u64 + 1001 - 53) << 52)));
+    assert!(es_high_plus_tiny.add(1e-300));
     assert!(es_high_plus_tiny.try_total().unwrap() > two_1001);
 }
 

@@ -1174,5 +1174,30 @@ describe('@elmdb/ears sans-I/O WatchPump', () => {
     const beforeEmbed = nowCalls;
     expect(() => eng3.setEmbeddings('noSuchVec', 'missing', [[1, 0]])).toThrow();
     expect(nowCalls).toBeGreaterThan(beforeEmbed);
+
+    // 4. On `transact()` abort, observer `finish({ outcome: 'aborted' })` runs AFTER `txnDepth--`
+    //    so `watches.flushSync()` is permitted inside the abort finish callback.
+    let abortFinishCalled = false;
+    const handle4 = temps.open({ schema: watchSchema });
+    const eng4 = createEarsEngine({
+      database: handle4.database,
+      clock: createFakeClock(80_000),
+      observer: {
+        start(op) {
+          return (res) => {
+            if (op.kind === 'unit' && res.outcome === 'aborted') {
+              abortFinishCalled = true;
+              expect(() => eng4.watches.flushSync()).not.toThrow();
+            }
+          };
+        },
+      },
+    });
+    expect(() =>
+      eng4.transact(() => {
+        throw new Error('abort-for-observer');
+      }),
+    ).toThrow('abort-for-observer');
+    expect(abortFinishCalled).toBe(true);
   });
 });

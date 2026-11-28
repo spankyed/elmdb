@@ -513,23 +513,27 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
       const prevOuterMutated = outerTxnMutated;
       if (isOuter) outerTxnMutated = false;
       let commitSeq: number | undefined;
-      txnDepth++;
       let value: T;
       try {
-        value = db.transact(() => {
-          const result = fn();
-          if (isThenable(result)) {
-            throw new EarsError(
-              'ASYNC_CALLBACK_FORBIDDEN',
-              'transact() callbacks must be synchronous (Promises and async callbacks are forbidden)',
-            );
-          }
-          if (isOuter && finish !== undefined && outerTxnMutated) {
-            const pending = db.pendingCommitSeq();
-            if (pending !== null) commitSeq = pending;
-          }
-          return result;
-        }, opts) as T;
+        txnDepth++;
+        try {
+          value = db.transact(() => {
+            const result = fn();
+            if (isThenable(result)) {
+              throw new EarsError(
+                'ASYNC_CALLBACK_FORBIDDEN',
+                'transact() callbacks must be synchronous (Promises and async callbacks are forbidden)',
+              );
+            }
+            if (isOuter && finish !== undefined && outerTxnMutated) {
+              const pending = db.pendingCommitSeq();
+              if (pending !== null) commitSeq = pending;
+            }
+            return result;
+          }, opts) as T;
+        } finally {
+          txnDepth--;
+        }
       } catch (error) {
         outerTxnMutated = prevOuterMutated;
         if (hasKnownErrorCode(error)) {
@@ -540,7 +544,6 @@ export function createEarsEngine(options: CreateEarsEngineOptions): EarsEngine {
         finish?.({ outcome: 'aborted', requestBytes: 0, responseBytes: 0 });
         throw error;
       } finally {
-        txnDepth--;
         if (isOuter) {
           pump.notifyMutation();
         }

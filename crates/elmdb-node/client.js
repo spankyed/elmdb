@@ -89,6 +89,7 @@ class BatchSlot {
     }
     /** @readonly */
     this.slot = index;
+    Object.freeze(this);
   }
 }
 

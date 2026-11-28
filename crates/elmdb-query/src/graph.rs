@@ -30,19 +30,15 @@ fn check_cancel(cancel: Option<&AtomicBool>) -> Result<()> {
 // Shewchuk's Exact Floating-Point Expansion (`ExactSum`)
 // ---------------------------------------------------------------------------
 
-/// `2^-512`: exact power-of-two downscale for large values (`|x| >= 2^500`), preventing
-/// intermediate `f64` overflow (e.g. `[f64::MAX, f64::MAX, -f64::MAX]`) with zero rounding error.
-const EXACT_SCALE_DOWN: f64 = f64::from_bits((1023u64 - 512) << 52);
-/// `2^+512`: exact inverse of `EXACT_SCALE_DOWN`.
-const EXACT_SCALE_UP: f64 = f64::from_bits((1023u64 + 512) << 52);
-/// `2^+500`: boundary separating the scaled high band from the unscaled low band.
-const EXACT_HIGH_THRESHOLD: f64 = f64::from_bits((1023u64 + 500) << 52);
-/// `2^+1000`: threshold below which unscaled high-band parts safely fold into the low band.
-const EXACT_UNSCALED_FOLD_LIMIT: f64 = f64::from_bits((1023u64 + 1000) << 52);
-/// `2^-510`: minimum magnitude whose `EXACT_SCALE_DOWN` product stays normal (`>= 2^-1022`).
-const EXACT_LOW_NORMAL_MIN: f64 = f64::from_bits((1023u64 - 510) << 52);
-/// `2^-500`: tiny tie-break sentinel in scaled space (935+ bits below ULP when `|high| >= 2^1000`).
-const EXACT_TINY_SIGN: f64 = f64::from_bits((1023u64 - 500) << 52);
+/// `2^-512` (biased exponent `1023 - 512 = 0x1ff`): exact power-of-two downscale for large values
+/// (`|x| >= 2^512`), preventing intermediate `f64` overflow with zero rounding error.
+const EXACT_SCALE_DOWN: f64 = f64::from_bits(0x1ff0_0000_0000_0000);
+/// `2^+512` (biased exponent `1023 + 512 = 0x5ff`): exact inverse of `EXACT_SCALE_DOWN`.
+const EXACT_SCALE_UP: f64 = f64::from_bits(0x5ff0_0000_0000_0000);
+/// `2^-572` (biased exponent `1023 - 572 = 0x1c3`): `(p * EXACT_LOW_GUARD).is_normal()` iff
+/// `|p| >= 2^-450`, guaranteeing `|p * 2^-512| >= 2^-962` (all 53 mantissa bits `>= 2^-1014`,
+/// strictly `256x` larger than `f64::MIN_POSITIVE = 2^-1022`).
+const EXACT_LOW_GUARD: f64 = f64::from_bits(0x1c30_0000_0000_0000);
 
 #[derive(Debug, Default, Clone)]
 struct ShewchukBand {
@@ -116,7 +112,7 @@ impl ExactSum {
         if x == 0.0 {
             return true;
         }
-        if x.abs() >= EXACT_HIGH_THRESHOLD {
+        if (x * EXACT_SCALE_UP).is_infinite() {
             self.high.add(x * EXACT_SCALE_DOWN);
         } else {
             self.low.add(x);
@@ -124,44 +120,48 @@ impl ExactSum {
         true
     }
 
-    /// Returns the exact nearest-even finite `f64` sum, or `None` if the true mathematical sum
-    /// overflows finite `f64` (order-independent across all permutations).
-    pub fn try_total(&self) -> Option<f64> {
+    fn try_total_raw(&self) -> f64 {
         if self.high.parts.is_empty() {
-            let v = self.low.total();
-            return v.is_finite().then_some(v);
-        }
-        let can_fold_unscaled = self.high.parts.iter().all(|&p| {
-            let unscaled = p * EXACT_SCALE_UP;
-            unscaled.is_finite() && unscaled.abs() < EXACT_UNSCALED_FOLD_LIMIT
-        });
-        if can_fold_unscaled {
-            let mut combined = self.low.clone();
-            for &p in &self.high.parts {
-                combined.add(p * EXACT_SCALE_UP);
-            }
-            let v = combined.total();
-            return v.is_finite().then_some(v);
+            return self.low.total();
         }
         let mut combined = self.high.clone();
         let mut tiny = ShewchukBand::default();
         for &p in &self.low.parts {
-            if p.abs() >= EXACT_LOW_NORMAL_MIN {
+            if (p * EXACT_LOW_GUARD).is_normal() {
                 combined.add(p * EXACT_SCALE_DOWN);
             } else {
                 tiny.add(p);
             }
         }
+        let mid = combined.total();
+        if mid == 0.0 {
+            return tiny.total();
+        }
+        if combined.parts.iter().all(|&p| ((p * EXACT_SCALE_UP) * EXACT_SCALE_UP).is_finite()) {
+            for &p in &combined.parts {
+                tiny.add(p * EXACT_SCALE_UP);
+            }
+            return tiny.total();
+        }
         let tiny_total = tiny.total();
         if tiny_total != 0.0 {
-            combined.add(tiny_total.signum() * EXACT_TINY_SIGN);
+            // `f64::MIN_POSITIVE` (`2^-1022`) is strictly smaller than the lowest mantissa bit
+            // (`2^-1014`) of any term in `combined`, so it breaks exact half-ULP ties without
+            // ever canceling or flipping any non-zero residual in `combined`.
+            combined.add(tiny_total.signum() * f64::MIN_POSITIVE);
         }
-        let unscaled = combined.total() * EXACT_SCALE_UP;
-        unscaled.is_finite().then_some(unscaled)
+        combined.total() * EXACT_SCALE_UP
+    }
+
+    /// Returns the exact nearest-even finite `f64` sum, or `None` if the true mathematical sum
+    /// overflows finite `f64` (order-independent across all permutations).
+    pub fn try_total(&self) -> Option<f64> {
+        let v = self.try_total_raw();
+        v.is_finite().then_some(v)
     }
 
     pub fn total(&self) -> f64 {
-        self.try_total().unwrap_or(f64::INFINITY)
+        self.try_total_raw()
     }
 }
 

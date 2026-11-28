@@ -123,7 +123,14 @@ pub(crate) fn ensure_paths_disjoint(path_a: &Path, path_b: &Path) -> Result<()> 
 /// Uses `hard_link` on supporting filesystems and falls back to atomic `create_new` copy + fsync
 /// when the filesystem rejects hard links (`Unsupported`, `CrossesDevices`, `PermissionDenied`).
 pub(crate) fn atomic_publish_file_no_overwrite(tmp_path: &Path, target: &Path) -> Result<()> {
-    match fs::hard_link(tmp_path, target) {
+    atomic_publish_file_no_overwrite_with(tmp_path, target, |src, dst| fs::hard_link(src, dst))
+}
+
+pub(crate) fn atomic_publish_file_no_overwrite_with<F>(tmp_path: &Path, target: &Path, link_fn: F) -> Result<()>
+where
+    F: FnOnce(&Path, &Path) -> std::io::Result<()>,
+{
+    match link_fn(tmp_path, target) {
         Ok(()) => {
             let _ = fs::remove_file(tmp_path);
             OsVfs::new().sync_dir(parent_dir(target))?;
