@@ -2,10 +2,9 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use elmdb_storage::locks::sync::{AtomicBool, AtomicU32, Ordering, PlainMutex as Mutex};
 use elmdb_storage::{BootId, StorageError, Vfs};
-use parking_lot::Mutex;
 
 use crate::rng::SimRng;
 
@@ -119,7 +118,10 @@ impl SimVfs {
     }
 
     fn take_fault(counter: &AtomicU32) -> bool {
-        counter.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)).is_ok()
+        #[cfg(not(any(loom, shuttle)))]
+        return counter.try_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)).is_ok();
+        #[cfg(any(loom, shuttle))]
+        counter.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)).is_ok()
     }
 }
 

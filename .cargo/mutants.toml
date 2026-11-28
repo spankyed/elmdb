@@ -8,6 +8,9 @@ exclude_globs = [
     "crates/*/tests/**",
     "crates/*/benches/**",
     "crates/*/examples/**",
+    # Built only with --cfg loom or --cfg shuttle, which no suite cargo-mutants runs builds
+    # (`docs/architecture/testing.md`, Concurrency models)
+    "crates/*/src/**/*model.rs",
     "xtask/**",
     # The binding's exports and the conversions they make for JavaScript: only JavaScript reaches them, its suite
     # (`crates/elmdb-node/test/`, `npm test`) holds them, and cargo-mutants runs no JavaScript, so no mutant of this file

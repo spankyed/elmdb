@@ -425,6 +425,29 @@ class CfgParsingTests(unittest.TestCase):
         self.assertEqual(mid.compiled_out_text(source, "linux"), {1, 2})
         self.assertEqual(mid.compiled_out_text(source, "windows"), {5, 6})
 
+    def test_loom_and_shuttle_cfg_blocks_are_excluded_in_plain_builds(self):
+        source = "\n".join([
+            "#[cfg(not(any(loom, shuttle)))]",
+            "fn plain_only() {}",
+            "#[cfg(any(loom, shuttle))]",
+            "fn model_only() {}",
+            "#[cfg(loom)]",
+            "fn loom_only() {}",
+            "#[cfg(shuttle)]",
+            "fn shuttle_only() {}",
+            "#[cfg(any(debug_assertions, loom, shuttle))]",
+            "fn debug_or_model() {}",
+        ]) + "\n"
+        self.assertEqual(mid.compiled_out_text(source, "linux"), {3, 4, 5, 6, 7, 8})
+        self.assertEqual(mid.compiled_out_text(source, "windows"), {3, 4, 5, 6, 7, 8})
+        # On `--windows-only` (`linux - windows`), loom/shuttle blocks cancel out cleanly.
+        self.assertEqual(
+            mid.compiled_out_text(source, "linux") - mid.compiled_out_text(source, "windows"),
+            set(),
+        )
+        # Under `shuttle-linux` (used by scripts/mutants-models.py), plain-only and loom-only are excluded.
+        self.assertEqual(mid.compiled_out_text(source, "shuttle-linux"), {1, 2, 5, 6})
+
     def test_string_literals_and_comments_containing_cfg_are_ignored(self):
         source = "\n".join([
             "fn kept() {",

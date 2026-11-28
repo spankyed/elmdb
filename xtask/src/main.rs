@@ -117,6 +117,7 @@ const SYNC_CHECKED_CRATES: &[&str] = &[
     "elmdb-lmdb",
     "elmdb-projections",
     "elmdb-query",
+    "elmdb-sim",
     "elmdb-storage",
     "elmdb-vec",
     "elmdb-wire",
@@ -126,16 +127,8 @@ const SYNC_CHECKED_CRATES: &[&str] = &[
 /// `elmdb-storage::locks`, each with why. A listed file that no longer locks is flagged as stale.
 const UNMODELLED: &[(&str, &str)] = &[
     (
-        "elmdb/src/db.rs",
-        "handle lifecycle RwLock/Condvar dropping LmdbStore deterministically on close/atexit + ACTIVE_TXNS TLS",
-    ),
-    (
         "elmdb/src/diagnostics.rs",
         "optional tracing span collector installed by host program, outside engine concurrency",
-    ),
-    (
-        "elmdb-invalidation/src/lib.rs",
-        "LiveQueryHub Mutex protecting in-memory InvalidationIndex and sans-I/O WatchScheduler",
     ),
     (
         "elmdb-lmdb/src/env.rs",
@@ -1032,7 +1025,10 @@ fn locks_outside_sync(source: &str) -> bool {
         .is_match(&code);
     let parking_lot_direct = regex::Regex::new(r"\bparking_lot\s*::").expect("valid regex").is_match(&code);
     let thread_local_re = regex::Regex::new(r"\bthread_local\s*!").expect("valid regex");
-    let sync_prefix_re = regex::Regex::new(r"\bcrate\s*::\s*sync\s*::\s*$").expect("valid regex");
+    let sync_prefix_re = regex::Regex::new(
+        r"(?:\bcrate\s*::\s*sync|\belmdb_storage\s*::\s*locks\s*::\s*sync|\bcrate\s*::\s*locks\s*::\s*sync)\s*::\s*$",
+    )
+    .expect("valid regex");
     let thread_local_direct = thread_local_re.find_iter(&code).any(|m| !sync_prefix_re.is_match(&code[..m.start()]));
     std_lock_direct || parking_lot_direct || thread_local_direct
 }
@@ -1962,7 +1958,7 @@ fn a() {
         std::fs::write(src.join("engine/local.rs"), "thread_local! { static X: u8 = 0; }\n").unwrap();
         std::fs::write(
             src.join("engine/modelled.rs"),
-            "use crate::sync::{Mutex, PlainCondvar};\ncrate::sync::thread_local! {}\n",
+            "use elmdb_storage::locks::sync::{Mutex, Condvar};\nelmdb_storage::locks::sync::thread_local! {}\n",
         )
         .unwrap();
         std::fs::write(
@@ -2176,7 +2172,13 @@ jobs:
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("crates/elmdb/src")).unwrap();
         let refused = super::check_sync(dir.path()).unwrap_err();
-        assert!(refused.contains("no longer lock") && refused.contains("db.rs"), "{refused}");
+        assert!(
+            refused.contains("no longer lock")
+                && refused.contains("diagnostics.rs")
+                && refused.contains("env.rs")
+                && !refused.contains("db.rs"),
+            "{refused}"
+        );
     }
 
     #[test]

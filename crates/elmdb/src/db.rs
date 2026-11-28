@@ -4,10 +4,9 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
-use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU64 as StdAtomicU64;
 use std::time::Duration;
 
 use elmdb_engine::{
@@ -20,10 +19,12 @@ use elmdb_invalidation::{LiveQueryHub, NextDue, TickResult, WatchId, WatchPolicy
 use elmdb_lmdb::{LmdbConfig, LmdbStore};
 use elmdb_projections::{BuildPolicy, ProjectionRegistry, rank};
 use elmdb_query::{EdgeDir, ExecBudgets, LogicalPlan, QueryEngine, QueryOutput};
+use elmdb_storage::locks::sync::{AtomicU64, Mutex, Ordering};
 use elmdb_storage::{Clock, DurabilityMode, KvCursor, KvRead, OsVfs, SystemClock};
 use elmdb_vec::{DEFAULT_DRAIN_BATCH, VectorProjection, drain_pending_batch_with_receipt, read_entity_embeddings};
 use elmdb_wire::{CanonicalValue, ElmdbError, EntityTarget, ErrorCode, Result, WireOp, decode_batch};
 
+use crate::lifecycle::{DbLifecycle, LifecycleGuard};
 use crate::protocol::{
     BatchResult, CheckReport, DatabaseStats, IndexStatus, OpenReport, QueryAnswer, QuerySpec, RelationRow, Row, Schema,
     SchemaChange, compile_query_spec, materialize_query_answer,
@@ -33,8 +34,8 @@ type EngineHandle = Engine<LmdbStore, OsVfs, SystemClock>;
 
 const BACKUP_MARKER: &str = ".elmdb-backup";
 
-static NEXT_STAGING_NONCE: AtomicU64 = AtomicU64::new(1);
-static NEXT_DB_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_STAGING_NONCE: StdAtomicU64 = StdAtomicU64::new(1);
+static NEXT_DB_ID: StdAtomicU64 = StdAtomicU64::new(1);
 /// High bit tag distinguishing host `beforeCommit` hook IDs from engine Rust hook IDs.
 /// Kept at bit 48 so every hook ID stays exact within IEEE-754 JS safe integers (`< 2^53`).
 const HOST_HOOK_ID_FLAG: u64 = 1u64 << 48;
@@ -115,8 +116,16 @@ impl ActiveTxnSlot {
     }
 }
 
-thread_local! {
+elmdb_storage::locks::sync::thread_local! {
     static ACTIVE_TXNS: RefCell<HashMap<u64, ActiveTxnSlot>> = RefCell::new(HashMap::new());
+}
+
+#[inline]
+fn try_with_active_txns<R>(f: impl FnOnce(&RefCell<HashMap<u64, ActiveTxnSlot>>) -> R) -> Option<R> {
+    #[cfg(not(any(loom, shuttle)))]
+    return ACTIVE_TXNS.try_with(f).ok();
+    #[cfg(any(loom, shuttle))]
+    Some(ACTIVE_TXNS.with(f))
 }
 
 fn now_unix_ms() -> u64 {
@@ -160,20 +169,14 @@ pub enum BackupInto {
     Backups,
 }
 
-#[derive(Default)]
-struct CloseSync {
-    done: bool,
-    outcome: Option<(ErrorCode, String)>,
-}
-
 /// Unified embedded elmdb v2 database handle (thread-safe, MVCC lock-free reads, serialized writes).
 ///
-/// Holding `engine` inside `RwLock<Option<Arc<EngineHandle>>>` with a `SeqCst` Dekker handshake +
-/// `Condvar` drain guarantees `close()` / `close_at_exit()` drops `LmdbStore` (`mdb_env_close`)
-/// deterministically once active operations drain, releasing macOS LMDB named POSIX semaphores.
+/// Holding `engine` inside `DbLifecycle<EngineHandle>` with a `SeqCst` handshake + `Condvar` drain
+/// guarantees `close()` / `close_at_exit()` drops `LmdbStore` (`mdb_env_close`) deterministically
+/// once active operations drain, releasing macOS LMDB named POSIX semaphores.
 pub struct Database {
     id: u64,
-    engine: RwLock<Option<Arc<EngineHandle>>>,
+    lifecycle: DbLifecycle<EngineHandle>,
     registry: Arc<ProjectionRegistry<LmdbStore, OsVfs>>,
     query_engine: QueryEngine,
     hub: LiveQueryHub,
@@ -182,46 +185,9 @@ pub struct Database {
     dir: PathBuf,
     read_only: bool,
     open_report: OpenReport,
-    closed: AtomicBool,
-    active_ops: AtomicUsize,
-    drain_mu: Mutex<()>,
-    drain_cv: Condvar,
-    close_mu: Mutex<CloseSync>,
-    close_cv: Condvar,
 }
 
-struct OpGuard<'a> {
-    db: &'a Database,
-    engine: Option<Arc<EngineHandle>>,
-}
-
-impl OpGuard<'_> {
-    fn arc(&self) -> &Arc<EngineHandle> {
-        self.engine.as_ref().expect("OpGuard engine live until Drop")
-    }
-}
-
-impl Deref for OpGuard<'_> {
-    type Target = EngineHandle;
-
-    fn deref(&self) -> &Self::Target {
-        self.engine.as_ref().expect("OpGuard engine live until Drop")
-    }
-}
-
-impl Drop for OpGuard<'_> {
-    fn drop(&mut self) {
-        // Drop our local `Arc<EngineHandle>` strictly BEFORE decrementing `active_ops` so that when
-        // `close_inner` observes `active_ops == 0`, zero other threads can still hold an `Arc` and
-        // `mdb_env_close()` is guaranteed to complete before `close()` returns!
-        drop(self.engine.take());
-        let prev = self.db.active_ops.fetch_sub(1, Ordering::SeqCst);
-        if prev == 1 && self.db.closed.load(Ordering::SeqCst) {
-            let _lock = self.db.drain_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.db.drain_cv.notify_all();
-        }
-    }
-}
+type OpGuard<'a> = LifecycleGuard<'a, EngineHandle>;
 
 struct DirCleanupGuard(Option<PathBuf>);
 impl DirCleanupGuard {
@@ -277,7 +243,7 @@ impl Database {
 
         Ok(Self {
             id: NEXT_DB_ID.fetch_add(1, Ordering::Relaxed),
-            engine: RwLock::new(Some(Arc::new(engine))),
+            lifecycle: DbLifecycle::new(engine),
             registry,
             query_engine: QueryEngine::new(opts.plan_cache_capacity),
             hub,
@@ -286,33 +252,12 @@ impl Database {
             dir,
             read_only: opts.read_only,
             open_report: OpenReport::from(&report),
-            closed: AtomicBool::new(false),
-            active_ops: AtomicUsize::new(0),
-            drain_mu: Mutex::new(()),
-            drain_cv: Condvar::new(),
-            close_mu: Mutex::new(CloseSync::default()),
-            close_cv: Condvar::new(),
         })
     }
 
     #[inline]
     fn enter_op(&self) -> Result<OpGuard<'_>> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(ElmdbError::new(ErrorCode::Closed, "database is closed"));
-        }
-        // Hold `engine.read()` across the `active_ops` increment and `closed` re-check so
-        // `close_within` (which takes `engine.write()` after setting `closed = true`) can
-        // never race past an entering operation on weakly-ordered CPUs.
-        let guard = self.engine.read().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(ElmdbError::new(ErrorCode::Closed, "database is closed"));
-        }
-        let Some(engine) = guard.as_ref().map(Arc::clone) else {
-            return Err(ElmdbError::new(ErrorCode::Closed, "database is closed"));
-        };
-        self.active_ops.fetch_add(1, Ordering::SeqCst);
-        drop(guard);
-        Ok(OpGuard { db: self, engine: Some(engine) })
+        self.lifecycle.enter_op()
     }
 
     #[inline]
@@ -325,7 +270,7 @@ impl Database {
 
     #[inline]
     fn has_active_txn(&self) -> bool {
-        ACTIVE_TXNS.try_with(|m| m.try_borrow().map_or(true, |map| map.contains_key(&self.id))).unwrap_or(false)
+        try_with_active_txns(|m| m.try_borrow().map_or(true, |map| map.contains_key(&self.id))).unwrap_or(false)
     }
 
     #[inline]
@@ -570,7 +515,7 @@ impl Database {
             impl Drop for NestedGuard {
                 fn drop(&mut self) {
                     if self.armed {
-                        let _ = ACTIVE_TXNS.try_with(|m| {
+                        let _ = try_with_active_txns(|m| {
                             if let Ok(mut map) = m.try_borrow_mut()
                                 && let Some(slot) = map.get_mut(&self.db_id)
                             {
@@ -652,7 +597,7 @@ impl Database {
             impl Drop for OuterGuard<'_> {
                 fn drop(&mut self) {
                     if self.armed {
-                        let _ = ACTIVE_TXNS.try_with(|m| {
+                        let _ = try_with_active_txns(|m| {
                             if let Ok(mut map) = m.try_borrow_mut()
                                 && let Some(slot) = map.remove(&self.db_id)
                             {
@@ -1507,129 +1452,25 @@ impl Database {
         if !propagate_sync_err && in_self_txn {
             // Process exit while a transact() is still on the calling thread's stack:
             // abort its thread-local RwTxn immediately and skip waiting on our own OpGuard.
-            let _ = ACTIVE_TXNS.try_with(|m| {
+            let _ = try_with_active_txns(|m| {
                 if let Ok(mut map) = m.try_borrow_mut() {
                     let _ = map.remove(&self.id);
                 }
             });
         }
-        if self.closed.swap(true, Ordering::SeqCst) {
-            let mut st = self.close_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let deadline = timeout.map(|d| std::time::Instant::now() + d);
-            while !st.done {
-                match deadline {
-                    Some(dl) => {
-                        let now = std::time::Instant::now();
-                        if now >= dl {
-                            return if !propagate_sync_err {
-                                Ok(())
-                            } else if self.read_only {
-                                Err(ElmdbError::new(
-                                    ErrorCode::DatabaseLocked,
-                                    "database close timed out waiting for concurrent close",
-                                ))
-                            } else {
-                                Err(ElmdbError::new(
-                                    ErrorCode::DurabilityFailed,
-                                    "database close timed out waiting for concurrent close",
-                                ))
-                            };
-                        }
-                        let (next_st, _) = self
-                            .close_cv
-                            .wait_timeout(st, dl.saturating_duration_since(now))
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        st = next_st;
-                    }
-                    None => {
-                        st = self.close_cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
-                    }
-                }
-            }
-            if propagate_sync_err && let Some((code, msg)) = &st.outcome {
-                return Err(ElmdbError::new(*code, msg.clone()));
-            }
-            return Ok(());
-        }
-
-        struct MarkCloseDone<'a> {
-            db: &'a Database,
-            outcome: Option<(ErrorCode, String)>,
-        }
-        impl Drop for MarkCloseDone<'_> {
-            fn drop(&mut self) {
-                let mut st = self.db.close_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                st.outcome = self.outcome.take();
-                st.done = true;
-                self.db.close_cv.notify_all();
-            }
-        }
-        // Default to a failure outcome so unwinding on panic never reports `Ok(())` to waiters.
-        let mut mark_done = MarkCloseDone {
-            db: self,
-            outcome: Some((ErrorCode::DurabilityFailed, "database close panicked before completing".to_owned())),
-        };
-
-        self.hub.stop_watches();
-
-        // Take the engine handle out under `engine.write()`, which acts as a full barrier against
-        // any concurrent `enter_op` acquiring `engine.read()` + incrementing `active_ops`.
-        let taken = self.engine.write().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-
-        // Wait for already-entered operations to drain cleanly via `drain_cv` (unless this very
-        // thread is tearing down inside its own aborted active transaction).
-        let drained = if in_self_txn {
-            false
-        } else {
-            let mut lock = self.drain_mu.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            let deadline = timeout.map(|d| std::time::Instant::now() + d);
-            loop {
-                if self.active_ops.load(Ordering::SeqCst) == 0 {
-                    break true;
-                }
-                match deadline {
-                    Some(dl) => {
-                        let now = std::time::Instant::now();
-                        if now >= dl {
-                            break false;
-                        }
-                        let (next_lock, _) = self
-                            .drain_cv
-                            .wait_timeout(lock, dl.saturating_duration_since(now))
-                            .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        lock = next_lock;
-                    }
-                    None => {
-                        lock = self.drain_cv.wait(lock).unwrap_or_else(std::sync::PoisonError::into_inner);
-                    }
-                }
-            }
-        };
-
-        let outcome = if !drained {
-            drop(taken);
-            if self.read_only {
-                Err(ElmdbError::new(
-                    ErrorCode::DatabaseLocked,
-                    "database close timed out waiting for active operations to drain",
-                ))
-            } else {
-                Err(ElmdbError::new(
-                    ErrorCode::DurabilityFailed,
-                    "database close timed out waiting for active operations to drain; durability sync skipped",
-                ))
-            }
-        } else if let Some(eng) = taken {
-            let sync_res = if self.read_only { Ok(()) } else { eng.sync() };
-            drop(eng);
-            sync_res
-        } else {
-            Ok(())
-        };
-
-        mark_done.outcome = outcome.as_ref().err().map(|err| (err.code, err.message.clone()));
-        drop(mark_done);
-        if propagate_sync_err { outcome } else { Ok(()) }
+        let read_only = self.read_only;
+        self.lifecycle.close(
+            timeout,
+            propagate_sync_err,
+            read_only,
+            in_self_txn,
+            || self.hub.stop_watches(),
+            |eng| {
+                let sync_res = if read_only { Ok(()) } else { eng.sync() };
+                drop(eng);
+                sync_res
+            },
+        )
     }
 
     /// Restores persisted entity and relation timestamps during lossless `dump::load`.
@@ -1828,7 +1669,7 @@ struct RestoreCtxGuard {
 impl Drop for RestoreCtxGuard {
     fn drop(&mut self) {
         if let Some(ctx) = self.ctx.take() {
-            let _ = ACTIVE_TXNS.try_with(|m| {
+            let _ = try_with_active_txns(|m| {
                 if let Ok(mut map) = m.try_borrow_mut()
                     && let Some(slot) = map.get_mut(&self.db_id)
                 {
@@ -1898,7 +1739,7 @@ mod tests {
         {
             let dir = tempfile::tempdir().unwrap();
             let db = Database::open(dir.path(), OpenOptions { durability: mode, ..Default::default() }).unwrap();
-            let is_no_sync = db.engine.read().unwrap().as_ref().unwrap().gate().store().is_no_sync();
+            let is_no_sync = db.lifecycle.handle.read().unwrap().as_ref().unwrap().gate().store().is_no_sync();
             assert_eq!(is_no_sync, expect_no_sync, "unexpected MDB_NOSYNC state for {mode:?}");
             db.close().unwrap();
         }
@@ -1916,7 +1757,7 @@ mod tests {
 
             let db_closer = Arc::clone(&db);
             let closer = std::thread::spawn(move || db_closer.close_within(Some(Duration::from_millis(500))));
-            while !db.closed.load(Ordering::SeqCst) {
+            while !db.lifecycle.closed.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }
             // Waiter with shorter timeout fails immediately on waiter deadline (writable -> DurabilityFailed).
@@ -1945,7 +1786,7 @@ mod tests {
 
             let db_closer = Arc::clone(&db);
             let closer = std::thread::spawn(move || db_closer.close_within(Some(Duration::from_millis(500))));
-            while !db.closed.load(Ordering::SeqCst) {
+            while !db.lifecycle.closed.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }
             let db_waiter = Arc::clone(&db);
@@ -1978,7 +1819,7 @@ mod tests {
             let held_op = ro.enter_op().unwrap();
             let ro_closer = Arc::clone(&ro);
             let closer = std::thread::spawn(move || ro_closer.close_within(Some(Duration::from_millis(500))));
-            while !ro.closed.load(Ordering::SeqCst) {
+            while !ro.lifecycle.closed.load(Ordering::SeqCst) {
                 std::thread::yield_now();
             }
             let ro_waiter_err = ro.close_within(Some(Duration::from_millis(15))).unwrap_err();
@@ -2437,5 +2278,45 @@ mod tests {
         db3.acknowledge_restore().unwrap();
         db3.backup_into(&bak_target, BackupInto::New).unwrap();
         assert!(bak_target.join("data.mdb").exists());
+    }
+
+    #[test]
+    fn nested_transact_panic_aborts_savepoint_and_restores_outer_txn() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open(dir.path(), OpenOptions::default()).unwrap();
+        let schema: Schema = serde_json::from_value(serde_json::json!({
+            "types": {
+                "Task": {
+                    "fields": { "title": { "type": "string", "optional": true } }
+                }
+            }
+        }))
+        .unwrap();
+        db.set_schema(&schema).unwrap();
+
+        db.transact_scoped(TransactOptions::default(), || {
+            db.execute_batch(&[WireOp::Create {
+                type_name: "Task".into(),
+                external_id: Some("outer".into()),
+                fields: vec![("title".into(), CanonicalValue::String("keep".into()))],
+            }])?;
+            let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let _ = db.transact_scoped(TransactOptions::default(), || -> Result<()> {
+                    db.execute_batch(&[WireOp::Create {
+                        type_name: "Task".into(),
+                        external_id: Some("inner".into()),
+                        fields: vec![("title".into(), CanonicalValue::String("abort".into()))],
+                    }])?;
+                    panic!("inner savepoint panic");
+                });
+            }));
+            assert!(caught.is_err());
+            // Outer transaction must still commit cleanly after NestedGuard::drop aborted the inner savepoint.
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(db.get_row("outer").unwrap().is_some());
+        assert!(db.get_row("inner").unwrap().is_none(), "panicking nested transact must roll back its savepoint");
     }
 }

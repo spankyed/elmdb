@@ -44,10 +44,52 @@ const FIRST: &[Step] = &[
     step("mutants-in-diff's own tests", &[PYTHON, "-B", "scripts/test-mutants-in-diff.py"]),
 ];
 
-/// After the repository checks: workspace test suites and doc tests
+/// After the repository checks: workspace test suites, doc tests, and concurrency models
 const THEN: &[Step] = &[
     step("tests", &["cargo", "nextest", "run", "--workspace"]),
     step("doc tests", &["cargo", "test", "--workspace", "--doc"]),
+    Step {
+        name: "concurrency models (Loom: locks)",
+        command: &["cargo", "test", "-p", "elmdb-storage", "--release", "--lib", "locks::model"],
+        env: &[("RUSTFLAGS", "--cfg loom"), ("LOOM_MAX_PREEMPTIONS", "3"), ("CARGO_TARGET_DIR", "target/loom")],
+        stdout_to: None,
+        expect: None,
+    },
+    Step {
+        name: "concurrency models (Loom: lifecycle)",
+        command: &["cargo", "test", "-p", "elmdb", "--release", "--lib", "lifecycle::model"],
+        env: &[("RUSTFLAGS", "--cfg loom"), ("LOOM_MAX_PREEMPTIONS", "3"), ("CARGO_TARGET_DIR", "target/loom")],
+        stdout_to: None,
+        expect: None,
+    },
+    Step {
+        name: "concurrency models (Shuttle: locks)",
+        command: &["cargo", "test", "-p", "elmdb-storage", "--release", "--lib", "locks::model"],
+        env: &[("RUSTFLAGS", "--cfg shuttle"), ("CARGO_TARGET_DIR", "target/shuttle")],
+        stdout_to: None,
+        expect: None,
+    },
+    Step {
+        name: "concurrency models (Shuttle: durability)",
+        command: &["cargo", "test", "-p", "elmdb-sim", "--release", "--lib", "durability_model"],
+        env: &[("RUSTFLAGS", "--cfg shuttle"), ("CARGO_TARGET_DIR", "target/shuttle")],
+        stdout_to: None,
+        expect: None,
+    },
+    Step {
+        name: "concurrency models (Shuttle: lifecycle)",
+        command: &["cargo", "test", "-p", "elmdb", "--release", "--lib", "lifecycle::model"],
+        env: &[("RUSTFLAGS", "--cfg shuttle"), ("CARGO_TARGET_DIR", "target/shuttle")],
+        stdout_to: None,
+        expect: None,
+    },
+    Step {
+        name: "concurrency models (Shuttle: invalidation)",
+        command: &["cargo", "test", "-p", "elmdb-invalidation", "--release", "--lib", "model"],
+        env: &[("RUSTFLAGS", "--cfg shuttle"), ("CARGO_TARGET_DIR", "target/shuttle")],
+        stdout_to: None,
+        expect: None,
+    },
 ];
 
 /// The binding and EARS checks as CI runs them

@@ -4,6 +4,8 @@
 //! for TigerStyle crash, torn-page, fault-injection, and MVCC verification of elmdb v2.
 
 pub mod clock;
+#[cfg(all(test, shuttle))]
+mod durability_model;
 pub mod kv;
 pub mod rng;
 pub mod vfs;

@@ -136,6 +136,41 @@ jobs:
       - name: the generated loader and declarations are committed
         run: git diff --exit-code -- crates/elmdb-node/index.js crates/elmdb-node/index.d.ts
 
+  loom:
+    name: concurrency models (Loom)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      RUSTFLAGS: --cfg loom
+      LOOM_MAX_PREEMPTIONS: 3
+      CARGO_TARGET_DIR: target/loom
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo test -p elmdb-storage --release --lib locks::model
+      - run: cargo test -p elmdb --release --lib lifecycle::model
+
+  shuttle:
+    name: concurrency models (Shuttle)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      RUSTFLAGS: --cfg shuttle
+      CARGO_TARGET_DIR: target/shuttle
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - run: cargo test -p elmdb-storage --release --lib locks::model
+      - run: cargo test -p elmdb-sim --release --lib durability_model
+      - run: cargo test -p elmdb --release --lib lifecycle::model
+      - run: cargo test -p elmdb-invalidation --release --lib model
+
   platforms:
     needs: changes
     if: needs.changes.outputs.code == 'true' && github.event_name != 'push'
@@ -183,7 +218,7 @@ jobs:
   ci-pass:
     name: ${{ github.event_name != 'workflow_dispatch' && 'ci-pass' || 'CI (dispatched, not a merge gate)' }}
     if: always()
-    needs: [changes, checks, repo, platforms, ears]
+    needs: [changes, checks, repo, loom, shuttle, platforms, ears]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:

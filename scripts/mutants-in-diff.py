@@ -76,11 +76,34 @@ IN_USE_SECS = 60 * 60
 # What a build's log says when a file of the tree it was built in is missing or doesn't read
 DAMAGED = re.compile(r"could not parse .* \(manifest\)|failed to (read|load) |No such file or directory")
 
-# What each runner's platform answers for the cfg predicates that name one; anything else (test, a feature, loom) is
-# unknown, and code behind an unknown predicate is never taken for another platform's
+# What each runner's platform answers for the cfg predicates that name one; anything else (test, a feature) is
+# unknown, and code behind an unknown predicate is never taken for another platform's. Plain mutation builds never
+# pass `--cfg loom` or `--cfg shuttle`, so those cfgs are False on both platforms (cancelling out in --windows-only).
 PLATFORMS = {
-    "linux": {"unix": True, "windows": False, "target_os": "linux", "target_family": "unix"},
-    "windows": {"unix": False, "windows": True, "target_os": "windows", "target_family": "windows"},
+    "linux": {
+        "unix": True,
+        "windows": False,
+        "target_os": "linux",
+        "target_family": "unix",
+        "loom": False,
+        "shuttle": False,
+    },
+    "windows": {
+        "unix": False,
+        "windows": True,
+        "target_os": "windows",
+        "target_family": "windows",
+        "loom": False,
+        "shuttle": False,
+    },
+    "shuttle-linux": {
+        "unix": True,
+        "windows": False,
+        "target_os": "linux",
+        "target_family": "unix",
+        "loom": False,
+        "shuttle": True,
+    },
 }
 
 

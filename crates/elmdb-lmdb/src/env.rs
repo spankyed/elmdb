@@ -524,7 +524,7 @@ unsafe impl Sync for LmdbEnvInner {}
 impl Drop for LmdbEnvInner {
     fn drop(&mut self) {
         // Abort any active Grouped durable pin strictly BEFORE `mdb_env_close`.
-        drop(self.durable_pin.get_mut().take());
+        drop(self.durable_pin.take_unlocked());
         // SAFETY: `LmdbEnvInner` is held inside `Arc`, so `Drop` only runs after every
         // `LmdbRoTxn`, `LmdbRwTxn`, and `LmdbStore` handle has been dropped.
         unsafe {

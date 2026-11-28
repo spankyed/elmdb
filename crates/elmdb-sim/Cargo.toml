@@ -11,5 +11,4 @@ workspace = true
 
 [dependencies]
 elmdb-storage.workspace = true
-parking_lot.workspace = true
 sha2.workspace = true
