@@ -16,6 +16,7 @@ on:
       - .github/workflows/lossy-filesystem.yml
       - crates/elmdb/tests/power_loss.rs
       - crates/elmdb-storage/src/durability.rs
+      - crates/elmdb-storage/src/failpoints.rs
       - crates/elmdb-lmdb/src/**
       - crates/elmdb/src/db.rs
 
@@ -48,7 +49,7 @@ jobs:
           (cd "$RUNNER_TEMP/lazyfs/lazyfs" && ./build.sh)
 
       - name: The tests, built before the filesystem is mounted
-        run: cargo test -p elmdb --test power_loss --no-run
+        run: cargo test -p elmdb --features failpoints --test power_loss --no-run
 
       - name: LazyFS mounted, and the scripts that drop what wasn't synced, tear a write, and mount it again
         run: |
@@ -96,6 +97,19 @@ jobs:
           printf '[[injection]]\ntype="torn-op"\nfile="%s"\noccurrence=%s\nparts=3\npersist=[1,3]\n' "\$file" "\$2" >> "$RUNNER_TEMP/torn.toml"
           sh "$RUNNER_TEMP/mount.sh" "$RUNNER_TEMP/torn.toml"
           EOF
+          # Arms a LazyFS torn-seq fault on the given file on the mount via the control FIFO, persisting
+          # only the listed data-page writes before crashing LazyFS (dropping later writes & meta pages)
+          cat > "$RUNNER_TEMP/arm-seq.sh" <<EOF
+          file="$root\${1#$mnt}"
+          cmd="lazyfs::torn-seq::op=write::file=\$file::persist=\$2::occurrence=1"
+          echo "\$cmd" > "$fifo"
+          for _ in \$(seq 1 50); do
+            grep -Fq "configured successfully '\$cmd'" "$RUNNER_TEMP/lazyfs.log" && exit 0
+            sleep 0.05
+          done
+          echo "failed to arm torn-seq: \$cmd" >&2
+          exit 1
+          EOF
           # Mounts LazyFS again as it was, after the tear, the kernel's copy of the files dropped
           cat > "$RUNNER_TEMP/heal.sh" <<EOF
           sh "$RUNNER_TEMP/mount.sh" "$RUNNER_TEMP/lazyfs.toml"
@@ -108,25 +122,55 @@ jobs:
           ELMDB_LOSSY_LOSE: ${{ runner.temp }}/lose.sh
         run: |
           mkdir -p "$ELMDB_LOSSY_DIR"
-          cargo test -p elmdb --test power_loss -- --ignored --exact "$TEST" --nocapture --test-threads=1
+          cargo test -p elmdb --features failpoints --test power_loss -- --ignored --exact "$TEST" --nocapture --test-threads=1
 
-      - name: Without the pin it doesn't, so the test above can fail
+      - name: Without fsync it doesn't, so the clear-cache test above can fail
         env:
-          ELMDB_LOSSY_DIR: ${{ runner.temp }}/lazyfs.mnt/unpinned
+          ELMDB_LOSSY_DIR: ${{ runner.temp }}/lazyfs.mnt/unsynced
           ELMDB_LOSSY_LOSE: ${{ runner.temp }}/lose.sh
-          ELMDB_LOSSY_UNPINNED: "1"
+          ELMDB_LOSSY_UNSYNCED: "1"
         run: |
           mkdir -p "$ELMDB_LOSSY_DIR"
           # Only the failure of the database's check counts: what it held against what its last sync held. Another
           # failure, a writer that never synced or a script that broke, says nothing of the test
-          if cargo test -p elmdb --test power_loss -- --ignored --exact "$TEST" --nocapture --test-threads=1 > unpinned.log 2>&1; then
+          if cargo test -p elmdb --features failpoints --test power_loss -- --ignored --exact "$TEST" --nocapture --test-threads=1 > unsynced.log 2>&1; then
+            cat unsynced.log
+            echo "::error::the clear-cache test passed without fsync: it can't tell a lost write from a synced one"
+            exit 1
+          fi
+          cat unsynced.log
+          if ! grep -Eq "round [0-9]+, synced at [0-9]+" unsynced.log; then
+            echo "::error::the clear-cache negative control failed, but not at the database's check"
+            exit 1
+          fi
+
+      - name: Persisting unsynced data pages without meta pages (torn-seq) leaves pinned Grouped DB intact
+        env:
+          ELMDB_SEQ_DIR: ${{ runner.temp }}/lazyfs.mnt/seq-pinned
+          ELMDB_SEQ_ARM: ${{ runner.temp }}/arm-seq.sh
+          ELMDB_TORN_HEAL: ${{ runner.temp }}/heal.sh
+          SEQ_TEST: a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_intact
+        run: |
+          mkdir -p "$ELMDB_SEQ_DIR"
+          cargo test -p elmdb --features failpoints --test power_loss -- --ignored --exact "$SEQ_TEST" --nocapture --test-threads=1
+
+      - name: Without the Grouped MDB_RDONLY durable pin (SKIP_GROUPED_DURABLE_PIN), torn-seq corrupts snapshot D
+        env:
+          ELMDB_SEQ_DIR: ${{ runner.temp }}/lazyfs.mnt/seq-unpinned
+          ELMDB_SEQ_ARM: ${{ runner.temp }}/arm-seq.sh
+          ELMDB_TORN_HEAL: ${{ runner.temp }}/heal.sh
+          ELMDB_LOSSY_UNPINNED: "1"
+          SEQ_TEST: a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_intact
+        run: |
+          mkdir -p "$ELMDB_SEQ_DIR"
+          if cargo test -p elmdb --features failpoints --test power_loss -- --ignored --exact "$SEQ_TEST" --nocapture --test-threads=1 > unpinned.log 2>&1; then
             cat unpinned.log
-            echo "::error::the test passed with the writer's pin turned off: it can't tell a torn database from a whole one"
+            echo "::error::torn-seq passed with SKIP_GROUPED_DURABLE_PIN: the test can't detect unpinned freelist page reuse"
             exit 1
           fi
           cat unpinned.log
           if ! grep -Eq "round [0-9]+, synced at [0-9]+" unpinned.log; then
-            echo "::error::the test failed with the pin off, but not at the database's check"
+            echo "::error::torn-seq unpinned negative control failed, but not at the database's check"
             exit 1
           fi
 
@@ -138,7 +182,7 @@ jobs:
           TORN: a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync
         run: |
           mkdir -p "$ELMDB_TORN_DIR"
-          cargo test -p elmdb --test power_loss -- --ignored --exact "$TORN" --nocapture --test-threads=1
+          cargo test -p elmdb --features failpoints --test power_loss -- --ignored --exact "$TORN" --nocapture --test-threads=1
 
       - name: LazyFS's log
         if: always()

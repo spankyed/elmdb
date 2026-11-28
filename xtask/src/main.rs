@@ -67,6 +67,7 @@ fn main() -> ExitCode {
         Some("check-one-lmdb") => check_one_lmdb(&workspace_root()),
         Some("check-exact") => check_exact(&workspace_root()),
         Some("check-diagnostics-off") => check_diagnostics_off(&workspace_root()),
+        Some("check-failpoints-off") => check_failpoints_off(&workspace_root()),
         Some("check-leiden-serial") => check_leiden_serial(&workspace_root()),
         Some("sweep") => build_dir::sweep(&workspace_root()),
         Some("scratch-target") => scratch_target(&workspace_root()),
@@ -86,6 +87,7 @@ fn main() -> ExitCode {
                     ("one LMDB", &|| check_one_lmdb(&root)),
                     ("exact crates", &|| check_exact(&root)),
                     ("diagnostics off by default", &|| check_diagnostics_off(&root)),
+                    ("failpoints off by default", &|| check_failpoints_off(&root)),
                     ("serial Leiden", &|| check_leiden_serial(&root)),
                     ("elmdb-storage::locks", &|| check_sync(&root)),
                     ("one place commits", &|| check_commits(&root)),
@@ -96,7 +98,7 @@ fn main() -> ExitCode {
             )
         }
         _ => Err(
-            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-versions | check-workspace-deps | check-one-lmdb | check-exact | check-diagnostics-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
+            "usage: cargo xtask <generate | check-generated | notices | check-notices | check-versions | check-workspace-deps | check-one-lmdb | check-exact | check-diagnostics-off | check-failpoints-off | check-leiden-serial | check-sync | check-commits | mutant-exclusions | check-mutant-exclusions | compare | sweep | scratch-target | pre-push>"
                 .to_owned(),
         ),
     };
@@ -1695,6 +1697,53 @@ fn check_diagnostics_off(root: &Path) -> Result<(), String> {
     }
 }
 
+/// Failpoints are off by default (`crates/elmdb-storage/src/failpoints.rs`): neither default workspace builds nor
+/// `elmdb-node` (npm/release) builds may enable `failpoints` via feature unification.
+fn check_failpoints_off(root: &Path) -> Result<(), String> {
+    for scope in [&["--workspace"][..], &["-p", "elmdb-node"][..]] {
+        let output = Command::new(env!("CARGO"))
+            .arg("tree")
+            .args(scope)
+            .args(["--edges", "normal,build", "--prefix", "none", "--format", "{p}|{f}"])
+            .current_dir(root)
+            .output()
+            .map_err(|e| format!("cargo tree didn't run: {e}"))?;
+        if !output.status.success() {
+            return Err(format!("cargo tree failed:\n{}", String::from_utf8_lossy(&output.stderr)));
+        }
+        let tree = String::from_utf8_lossy(&output.stdout);
+        verify_no_failpoints_in_tree(&tree)?;
+    }
+    Ok(())
+}
+
+fn verify_no_failpoints_in_tree(tree: &str) -> Result<(), String> {
+    let mut saw_storage = false;
+    let mut violations = Vec::new();
+    for line in tree.lines() {
+        let Some((pkg_part, feats_part)) = line.split_once('|') else { continue };
+        let Some(pkg) = pkg_part.split_whitespace().next() else { continue };
+        if pkg == "elmdb-storage" {
+            saw_storage = true;
+        }
+        if matches!(pkg, "elmdb-storage" | "elmdb-lmdb" | "elmdb")
+            && feats_part.split(',').map(str::trim).any(|f| f == "failpoints")
+        {
+            violations.push(format!("{pkg} ({})", feats_part.trim()));
+        }
+    }
+    if !saw_storage {
+        return Err(format!("cargo tree listed no elmdb-storage, so check-failpoints-off checked nothing:\n{tree}"));
+    }
+    if violations.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "default build enabled `failpoints` via feature unification: {violations:?}; failpoints must remain opt-in"
+        ))
+    }
+}
+
 fn check_leiden_serial(root: &Path) -> Result<(), String> {
     let output = Command::new(env!("CARGO"))
         .args(["tree", "--workspace", "--edges", "features", "--invert", "leiden-rs", "--depth", "0"])
@@ -2204,5 +2253,13 @@ jobs:
     fn counts_two_versions_and_two_crates_apart() {
         let tree = "lmdb-master-sys v0.2.6\nlmdb-master-sys v0.2.5\nlmdb-master3-sys v0.2.6\nlmdb-rkv v0.14.0\n";
         assert_eq!(lmdb_sys_crates(tree).len(), 3);
+    }
+
+    #[test]
+    fn failpoints_off_check_rejects_unified_failpoints_feature_and_empty_tree() {
+        assert!(super::verify_no_failpoints_in_tree("elmdb v0.1.0|\nelmdb-storage v0.1.0|\n").is_ok());
+        assert!(super::verify_no_failpoints_in_tree("other v0.1.0|\n").is_err());
+        let err = super::verify_no_failpoints_in_tree("elmdb v0.1.0|\nelmdb-storage v0.1.0|failpoints\n").unwrap_err();
+        assert!(err.contains("elmdb-storage"), "{err}");
     }
 }

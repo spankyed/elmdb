@@ -1057,6 +1057,15 @@ impl KvStore for LmdbStore {
         // Release any Grouped durable pin strictly BEFORE `mdb_env_set_mapsize` unmaps `me_map`
         // so its `MDB_txn` never holds dangling `me_metas` pointers.
         self.inner.clear_durable_pin_before_remap();
+        elmdb_storage::failure_point!(
+            LMDB_ENV_SET_MAPSIZE at self.inner.data_mdb.parent().unwrap_or(self.inner.data_mdb.as_path()),
+            {
+                self.inner.map_broken.store(true, Ordering::SeqCst);
+                StorageError::Corrupted(format!(
+                    "injected mdb_env_set_mapsize({aligned}) failure; environment is unusable"
+                ))
+            }
+        );
         // SAFETY: Exclusive L2 `map_guard` guarantees zero active transactions (`env->me_txn == NULL`),
         // zero `me_metas` readers, and `durable_pin` has been cleared above.
         let rc = unsafe { ffi::mdb_env_set_mapsize(self.inner.env.as_ptr(), aligned) };
@@ -1103,6 +1112,10 @@ impl KvStore for LmdbStore {
     fn sync(&self, map_guard: &Self::MapReadGuard) -> Result<(), StorageError> {
         self.inner.assert_map_guard(map_guard)?;
         self.inner.check_map_ok()?;
+        elmdb_storage::failure_point!(
+            LMDB_ENV_SYNC at self.inner.data_mdb.parent().unwrap_or(self.inner.data_mdb.as_path()),
+            StorageError::Io(std::io::Error::other("injected mdb_env_sync failure"))
+        );
         // SAFETY: `self.inner.env` is open and protected by L2 `map_guard`; `force = 1` flushes even under `MDB_NOSYNC`.
         let rc = unsafe { ffi::mdb_env_sync(self.inner.env.as_ptr(), 1) };
         if rc != ffi::MDB_SUCCESS {
@@ -1114,6 +1127,10 @@ impl KvStore for LmdbStore {
     fn sync_under_write(&self, map_guard: &Self::MapWriteGuard<'_>) -> Result<(), StorageError> {
         self.inner.assert_map_write_guard(map_guard)?;
         self.inner.check_map_ok()?;
+        elmdb_storage::failure_point!(
+            LMDB_ENV_SYNC at self.inner.data_mdb.parent().unwrap_or(self.inner.data_mdb.as_path()),
+            StorageError::Io(std::io::Error::other("injected mdb_env_sync failure"))
+        );
         // SAFETY: `self.inner.env` is open and protected by exclusive L2 `map_guard`; `force = 1` flushes even under `MDB_NOSYNC`.
         let rc = unsafe { ffi::mdb_env_sync(self.inner.env.as_ptr(), 1) };
         if rc != ffi::MDB_SUCCESS {

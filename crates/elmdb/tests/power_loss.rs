@@ -6,20 +6,33 @@
 //!      every `SYNC_EVERY` commits, writes 1..=4 unsynced commits, and aborts.
 //!    - LazyFS clears its unsynced page cache (`lazyfs::clear-cache`) and drops kernel page caches.
 //!    - Reopened DB MUST pass `check(None)` and hold exact `model_after(synced)`.
-//!    - With `ELMDB_LOSSY_UNPINNED=1` (negative control: `DurabilityMode::Unsafe` skipping `flush()`),
+//!    - With `ELMDB_LOSSY_UNSYNCED=1` (negative control: `DurabilityMode::Unsafe` skipping `flush()`),
 //!      LazyFS drops the claimed synced writes and the test MUST fail at the model check.
-//! 2. `a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync`:
+//! 2. `a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_intact`:
+//!    - Writer runs in `DurabilityMode::Grouped`, commits + `flush()`es snapshot `D` (40 x 80 KiB),
+//!      deletes all rows in unsynced commit `D+1` (freeing `D`'s pages), ages the freelist in unsynced
+//!      commit `D+2`, then arms LazyFS `torn-seq` (`op=write`, `persist=1,2` / `1,2,3`) right before
+//!      unsynced commit `D+3` (~3.2 MiB data-page writes + 1 final meta-page write).
+//!    - LazyFS persists ONLY the first 2..3 data-page writes of `D+3` and crashes BEFORE `D+3`'s meta
+//!      write (dropping `D+1`, `D+2`, and `D+3`'s meta pages).
+//!    - Pinned (`DurabilityMode::Grouped`): `MDB_RDONLY` durable pin prevents `D+3` from reusing `D`'s
+//!      pages -> reopened DB MUST be `clean`, pass `check(None)`, and hold exact snapshot `D`.
+//!    - With `ELMDB_LOSSY_UNPINNED=1` (`--features failpoints`, STILL `DurabilityMode::Grouped` + `flush()`,
+//!      ONLY disabling the `MDB_RDONLY` durable pin via `SKIP_GROUPED_DURABLE_PIN`): `D+3`'s persisted
+//!      data-page writes smash `D`'s pages on disk -> reopen / `check(None)` / model check MUST fail!
+//! 3. `a_filesystem_that_tears_a_write_leaves_each_database_at_its_last_sync`:
 //!    - LazyFS `torn-op` splits a write to `data.mdb` into 3 parts (`persist=[1,3]`) and crashes.
 //!    - Writer runs in `DurabilityMode::Strict` until the torn write kills it.
 //!    - After remounting LazyFS, reopened DB MUST pass `check(None)` and hold `model_after(synced)`
 //!      (or `model_after(synced + 1)` if the tear happened after LMDB finished committing the next txn).
-//! 3. `torn_sidecar_slot_falls_back_to_intact_ping_pong_slot` (always-on unit test, no FUSE required):
+//! 4. `torn_sidecar_slot_falls_back_to_intact_ping_pong_slot` (always-on unit test, no FUSE required):
 //!    - Tears the older slot, newer slot, or both slots of `synced.v2` and verifies dual-slot SHA-256
 //!      ping-pong recovery and fail-closed rejection when neither slot is intact.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use elmdb::protocol::{FieldDefinition, FieldSpec, IndexDefinition, OpenReport, Schema, TypeDefinition};
 use elmdb::{BuildPolicy, CanonicalValue, Database, DurabilityMode, EntityTarget, ErrorCode, OpenOptions, WireOp};
@@ -215,12 +228,12 @@ fn child_writes_until_it_dies() {
         return;
     };
     let round: usize = round.parse().unwrap();
-    let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
+    let unsynced = std::env::var("ELMDB_LOSSY_UNSYNCED").is_ok();
     let torn = std::env::var("ELMDB_LOSSY_TORN").is_ok();
 
     let mode = if torn {
         DurabilityMode::Strict
-    } else if unpinned {
+    } else if unsynced {
         DurabilityMode::Unsafe
     } else {
         DurabilityMode::Grouped
@@ -232,7 +245,7 @@ fn child_writes_until_it_dies() {
     )
     .unwrap();
     db.set_schema(&schema()).unwrap();
-    if !unpinned && !torn {
+    if !unsynced && !torn {
         // Persist initial schema before starting grouped workload so even synced == 0 is clean.
         db.flush().unwrap();
     }
@@ -247,7 +260,7 @@ fn child_writes_until_it_dies() {
             continue;
         }
         if (n + 1) % SYNC_EVERY == 0 {
-            if !unpinned {
+            if !unsynced {
                 db.flush().unwrap();
             }
             println!("synced {}", n + 1);
@@ -268,16 +281,16 @@ fn child_writes_until_it_dies() {
 fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_sync() {
     let dir = std::path::PathBuf::from(std::env::var("ELMDB_LOSSY_DIR").expect("ELMDB_LOSSY_DIR"));
     let lose = std::env::var("ELMDB_LOSSY_LOSE").expect("ELMDB_LOSSY_LOSE");
-    let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
+    let unsynced = std::env::var("ELMDB_LOSSY_UNSYNCED").is_ok();
 
     for round in 0..4usize {
         let path = dir.join(format!("round-{round}"));
-        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
         cmd.args(["--ignored", "--exact", "child_writes_until_it_dies", "--nocapture"])
             .env("ELMDB_LOSSY_DB", &path)
             .env("ELMDB_LOSSY_ROUND", round.to_string());
-        if unpinned {
-            cmd.env("ELMDB_LOSSY_UNPINNED", "1");
+        if unsynced {
+            cmd.env("ELMDB_LOSSY_UNSYNCED", "1");
         }
         let child = cmd.output().unwrap();
         assert!(!child.status.success(), "round {round}: child should have aborted mid-workload");
@@ -290,13 +303,203 @@ fn a_filesystem_that_drops_what_was_not_synced_leaves_each_database_at_its_last_
             .unwrap_or(0);
         assert!(synced > 0, "round {round}: writer never reached a sync: {said}");
 
-        let dropped = std::process::Command::new("sh").arg(&lose).status().unwrap();
+        let dropped = Command::new("sh").arg(&lose).status().unwrap();
         assert!(dropped.success(), "round {round}: lose.sh failed");
 
         let (actual, open_report) = held_at(&path, COMMITS).unwrap_or_else(|e| {
             panic!("round {round}, synced at {synced}: failed to reopen/check after cache drop: {e}")
         });
         assert_eq!(actual, model_after(synced), "round {round}, synced at {synced}");
+        if !unsynced {
+            assert_eq!(open_report.status, "clean", "round {round}: unexpected open_report {open_report:?}");
+            assert_eq!(open_report.durable_txnid, Some(open_report.observed_txnid));
+            assert!(open_report.valid_slots >= 1);
+        }
+    }
+}
+
+const TORN_SEQ_ITEMS: usize = 40;
+
+fn torn_seq_payload(i: usize, tag: &str) -> String {
+    // 80 KiB incompressible deterministic payload (40 items ≈ 3.2 MiB) so a single bulk commit
+    // always produces multiple FUSE data-page writes before LMDB's final 4 KiB meta-page write.
+    let mut state = 0x517c_c1b7_u32 ^ (i as u32).wrapping_mul(2_246_822_519) ^ (tag.len() as u32);
+    let body: String = (0..80 * 1024)
+        .map(|_| {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            char::from(b'!' + (state >> 24) as u8 % 90)
+        })
+        .collect();
+    format!("{tag} {body}")
+}
+
+fn torn_seq_expected_model() -> Model {
+    (0..TORN_SEQ_ITEMS).map(|i| (format!("Task-{i:03}"), torn_seq_payload(i, "durable"))).collect()
+}
+
+/// Child writer for LazyFS `torn-seq` freelist-reuse verification.
+///
+/// Stays in `DurabilityMode::Grouped` and calls `db.flush()` in BOTH pinned and unpinned modes;
+/// when `ELMDB_LOSSY_UNPINNED=1`, ONLY the `MDB_RDONLY` durable pin is disabled via the
+/// `SKIP_GROUPED_DURABLE_PIN` failpoint so the negative control tests the exact P0 invariant.
+#[test]
+#[ignore = "run only by the LazyFS torn-seq test as a child process"]
+fn child_writes_torn_seq() {
+    let Ok(path) = std::env::var("ELMDB_LOSSY_DB") else {
+        return;
+    };
+    let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
+    #[cfg(feature = "failpoints")]
+    let _unpin_guard = if unpinned {
+        Some(elmdb_storage::failpoints::fail_while_at(
+            elmdb_storage::failpoints::points::SKIP_GROUPED_DURABLE_PIN,
+            Path::new(&path),
+        ))
+    } else {
+        None
+    };
+    #[cfg(not(feature = "failpoints"))]
+    if unpinned {
+        panic!("ELMDB_LOSSY_UNPINNED=1 requires `--features failpoints`");
+    }
+
+    let db = Database::open(
+        &path,
+        OpenOptions {
+            durability: DurabilityMode::Grouped,
+            build_policy: BuildPolicy::EagerInSchemaChange,
+            map_size: Some(32 * 1024 * 1024),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.set_schema(&schema()).unwrap();
+
+    // Snapshot D: write 40 x 80 KiB (~3.2 MiB) and flush() so D is synced to disk and pinned.
+    let create_d: Vec<WireOp> = (0..TORN_SEQ_ITEMS)
+        .map(|i| WireOp::Create {
+            type_name: "Task".into(),
+            external_id: Some(format!("Task-{i:03}")),
+            fields: vec![("c".into(), CanonicalValue::String(torn_seq_payload(i, "durable")))],
+        })
+        .collect();
+    db.execute_batch(&create_d).unwrap();
+    db.flush().unwrap();
+    println!("synced {TORN_SEQ_ITEMS}");
+    let _ = std::io::stdout().flush();
+
+    // Unsynced D+1: destroy all 40 tasks so LMDB places D's ~3.2 MiB of pages onto the freelist.
+    let destroy_d: Vec<WireOp> = (0..TORN_SEQ_ITEMS)
+        .map(|i| WireOp::Destroy { target: EntityTarget::ExternalId(format!("Task-{i:03}")) })
+        .collect();
+    db.execute_batch(&destroy_d).unwrap();
+
+    // Unsynced D+2: tiny commit aging D+1's freelist entry to 2 txns old (immediately reusable on D+3 if unpinned).
+    db.execute_batch(&[WireOp::Create {
+        type_name: "Task".into(),
+        external_id: Some("Marker-0".into()),
+        fields: vec![("c".into(), CanonicalValue::String("age-freelist".into()))],
+    }])
+    .unwrap();
+
+    // Handshake with parent so LazyFS arms `torn-seq` strictly before D+3's data-page writes.
+    println!("ready-for-reuse");
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+
+    // Unsynced D+3: write 40 x 80 KiB (~3.2 MiB) of brand-new data pages. LazyFS persists only
+    // the first 2..3 data-page writes and crashes BEFORE D+3's final meta-page write!
+    let overwrite_ops: Vec<WireOp> = (0..TORN_SEQ_ITEMS)
+        .map(|i| WireOp::Create {
+            type_name: "Task".into(),
+            external_id: Some(format!("Reuse-{i:03}")),
+            fields: vec![("c".into(), CanonicalValue::String(torn_seq_payload(i, "overwritten")))],
+        })
+        .collect();
+    let _ = db.execute_batch(&overwrite_ops);
+    println!("wrote torn-seq reuse batch");
+    let _ = std::io::stdout().flush();
+}
+
+/// Run over LazyFS (`.github/workflows/lossy-filesystem.yml`): persists unsynced data-page writes
+/// of commit `D+3` while crashing LazyFS before any unsynced meta-page write (`D+1`, `D+2`, `D+3`)
+/// hits backing storage.
+///
+/// - Pinned (`DurabilityMode::Grouped`): `MDB_RDONLY` durable pin keeps `D`'s pages off LMDB's
+///   freelist, so reopened DB passes `check(None)` and holds exact snapshot `D`.
+/// - Unpinned (`ELMDB_LOSSY_UNPINNED=1`): `SKIP_GROUPED_DURABLE_PIN` disables ONLY the durable pin
+///   (staying in `DurabilityMode::Grouped` with `db.flush()`), so `D+3` overwrites `D`'s pages and
+///   reopen / `check(None)` / model verification MUST fail.
+#[test]
+#[ignore = "run by the lossy-filesystem job, which mounts LazyFS and injects torn-seq crashes"]
+fn a_filesystem_that_persists_unsynced_data_without_meta_leaves_pinned_database_intact() {
+    let dir = std::path::PathBuf::from(std::env::var("ELMDB_SEQ_DIR").expect("ELMDB_SEQ_DIR"));
+    let arm_seq = std::env::var("ELMDB_SEQ_ARM").expect("ELMDB_SEQ_ARM");
+    let heal = std::env::var("ELMDB_TORN_HEAL").expect("ELMDB_TORN_HEAL");
+    let unpinned = std::env::var("ELMDB_LOSSY_UNPINNED").is_ok();
+    let expected = torn_seq_expected_model();
+
+    for (round, persist) in ["1,2", "1,2,3"].into_iter().enumerate() {
+        let path = dir.join(format!("round-{round}"));
+        let mut cmd = Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--ignored", "--exact", "child_writes_torn_seq", "--nocapture"])
+            .env("ELMDB_LOSSY_DB", &path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if unpinned {
+            cmd.env("ELMDB_LOSSY_UNPINNED", "1");
+        }
+        let mut child = cmd.spawn().unwrap();
+        let mut child_stdin = child.stdin.take().unwrap();
+        let child_stdout = child.stdout.take().unwrap();
+        let mut reader = BufReader::new(child_stdout);
+
+        let mut synced = 0usize;
+        let mut ready = false;
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap() > 0 {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("synced ") {
+                if let Ok(n) = rest.trim().parse::<usize>() {
+                    synced = n;
+                }
+            } else if trimmed == "ready-for-reuse" {
+                ready = true;
+                break;
+            }
+            line.clear();
+        }
+        assert!(
+            ready && synced == TORN_SEQ_ITEMS,
+            "round {round}: child did not reach ready-for-reuse (synced={synced})"
+        );
+
+        // Arm LazyFS `torn-seq` on `data.mdb` strictly before D+3 writes begin.
+        let armed =
+            Command::new("sh").args([&arm_seq, path.join("data.mdb").to_str().unwrap(), persist]).status().unwrap();
+        assert!(armed.success(), "round {round}: arm-seq.sh failed");
+
+        let _ = writeln!(child_stdin, "go");
+        let _ = child_stdin.flush();
+        drop(child_stdin);
+
+        let mut tail = String::new();
+        let _ = std::io::Read::read_to_string(&mut reader, &mut tail);
+        let _ = child.wait();
+        assert!(
+            !tail.contains("wrote torn-seq reuse batch"),
+            "round {round}: torn-seq (persist={persist}) did not crash LazyFS before D+3 completed: {tail}"
+        );
+
+        let healed = Command::new("sh").arg(&heal).status().unwrap();
+        assert!(healed.success(), "round {round}: heal.sh failed");
+
+        let (actual, open_report) = held_at(&path, TORN_SEQ_ITEMS).unwrap_or_else(|e| {
+            panic!("round {round}, synced at {synced}: failed to reopen/check after torn-seq persist={persist}: {e}")
+        });
+        assert_eq!(actual, expected, "round {round}, synced at {synced}: model mismatch after torn-seq");
         if !unpinned {
             assert_eq!(open_report.status, "clean", "round {round}: unexpected open_report {open_report:?}");
             assert_eq!(open_report.durable_txnid, Some(open_report.observed_txnid));

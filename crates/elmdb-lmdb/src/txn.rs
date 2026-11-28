@@ -429,6 +429,10 @@ impl KvWrite for LmdbRwTxn<'_> {
         if depth != 0 {
             return Err(StorageError::SavepointMismatch { expected: 0, actual: depth });
         }
+        elmdb_storage::failure_point!(
+            LMDB_TXN_COMMIT at self.inner.data_mdb.parent().unwrap_or(self.inner.data_mdb.as_path()),
+            StorageError::Io(std::io::Error::other("injected mdb_txn_commit failure"))
+        );
         let root = self.stack.pop().expect("root txn present");
         let is_dirty = self.dirty_stack.pop().unwrap_or(true);
         // Capture `mdb_txn_id(root)` BEFORE `mdb_txn_commit` while this write transaction holds

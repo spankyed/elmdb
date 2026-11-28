@@ -130,6 +130,10 @@ pub(crate) fn atomic_publish_file_no_overwrite_with<F>(tmp_path: &Path, target: 
 where
     F: FnOnce(&Path, &Path) -> std::io::Result<()>,
 {
+    elmdb_storage::failure_point!(
+        FS_PUBLISH_RENAME at parent_dir(target),
+        ElmdbError::new(ErrorCode::Io, format!("injected fs_publish failure for '{}'", target.display()))
+    );
     match link_fn(tmp_path, target) {
         Ok(()) => {
             let _ = fs::remove_file(tmp_path);
@@ -222,6 +226,11 @@ pub(crate) fn atomic_publish_dir_new(staging: &Path, target_dir: &Path) -> Resul
 
     let vfs = OsVfs::new();
     vfs.sync_dir(staging)?;
+
+    elmdb_storage::failure_point!(
+        FS_PUBLISH_RENAME at parent_dir(target_dir),
+        ElmdbError::new(ErrorCode::Io, format!("injected fs_publish dir failure for '{}'", target_dir.display()))
+    );
 
     #[cfg(unix)]
     {

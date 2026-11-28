@@ -22,6 +22,8 @@ Repository-wide static checks run in `ci.yml`'s `repo` job and `cargo xtask pre-
 - **`cargo xtask check-one-lmdb`**: verifies the workspace builds exactly one `lmdb-master-sys` C library.
 - **`cargo xtask check-exact`**: verifies exact-pinned tokenizer/collator/graph dependency versions match `Cargo.lock`.
 - **`cargo xtask check-diagnostics-off`**: verifies default workspace builds do not pull `tracing` into `elmdb`.
+- **`cargo xtask check-failpoints-off`**: verifies default workspace and `elmdb-node` builds never enable the opt-in
+  `failpoints` feature via Cargo feature unification.
 - **`cargo xtask check-leiden-serial`**: verifies `leiden-rs` stays single-threaded and deterministic.
 - **`cargo xtask check-workspace-deps`**: verifies every `[workspace.dependencies]` entry is referenced by at least one
   workspace member.
@@ -40,8 +42,25 @@ real LMDB (`crates/elmdb-lmdb`) and the deterministic pure-Rust simulator (`crat
   Grouped-mode durable-pin freelist-reuse protection, `MapResized` adoption, and fail-stop poisoning on sync failures.
 - `crates/elmdb-lmdb/tests/differential.rs`: real `LmdbStore` MVCC snapshot isolation, savepoints, `MDB_INTEGERKEY`,
   O(1) sub-DB truncation, durable pin invariants, and cross-thread concurrency.
+- `crates/elmdb-lmdb/tests/sim_differential.rs`: differential fidelity proofs comparing `SimKvStore`+`SimVfs` directly
+  against real `LmdbStore`+`OsVfs` on MVCC snapshot visibility, freelist page reuse (pinned vs. unpinned), cross-process
+  `MAP_RESIZED` adoption, and `RecoveryStatus` transitions.
 - `crates/elmdb-engine/tests/oracle_dst.rs`: randomized CRUD, links, nested savepoints, `beforeCommit` hooks, schema
   evolution, O(1) renames, archive/purge, and `check()` against a reference oracle on `SimKvStore`.
+- `crates/elmdb/tests/oracle_state_machine.rs`: shrinking `proptest-state-machine` oracle running on real `Database`
+  (`LmdbStore` + `OsVfs`) verifying exact state, exact refusal `ErrorCode`s, nested savepoints, host `beforeCommit`
+  cascades, O(1) `rename_field`, archive + `purge_archived`, `dump`/`load` round-trips, `check(None)`, and all five
+  deterministic indexes (`Value`, `Unique`, `Order`, `Text`, `Trigram`) with a step-coverage guard; plus an
+  approximate-index oracle proving `Vector` (HNSW SQ8), `Rank` (PageRank), `GraphPpr`, and `GraphLeiden` satisfy
+  `derived == rebuild(primary)` within strict tolerances and HNSW recall@5 `>= 0.85`.
+- `crates/elmdb/tests/multiprocess_stress.rs`: real child-process stress tests exercising Grouped cross-process
+  pin-txnid races, concurrent `MAP_RESIZED` adoption across multiple reader and writer processes (`256 KiB -> 4+ MiB`),
+  same-process `DatabaseLocked` collision vs. cross-process isolation, hard-killed child lock/reader-slot recovery, and
+  cross-process `LiveQueryHub` watch catch-up across creates, patches, destroys, and schema bumps.
+- `crates/elmdb/tests/failpoints.rs` (`--features elmdb/failpoints`): zero-cost thread-scoped and path-scoped failpoint
+  hooks (`crates/elmdb-storage/src/failpoints.rs`, compiled out in default/release builds) testing real OS/LMDB/durability
+  seams (`mdb_txn_commit`, `mdb_env_sync`, `mdb_env_set_mapsize`, sidecar write/fsync/rename, `fs_publish`,
+  `close_inner`, and `SKIP_GROUPED_DURABLE_PIN`).
 - `crates/elmdb-projections/tests/projections_dst.rs`: Value, Unique, Order (ICU collator), Text (BM25F + highlights),
   and Trigram projections, deferred watermarks, rebuilds, and corruption detection.
 - `crates/elmdb-vec/tests/vector_and_rank_dst.rs`: SQ8 HNSW vector index and incremental PageRank (`Rank`) rebuilds,
@@ -105,11 +124,25 @@ RUSTFLAGS="--cfg shuttle" CARGO_TARGET_DIR=target/shuttle \
 Each uses its own `CARGO_TARGET_DIR` (`target/loom`, `target/shuttle`) so model builds never invalidate the default
 workspace target directory.
 
-## Power loss (LazyFS)
+## Power loss (LazyFS), read-only mounts & negative controls
 
-`.github/workflows/lossy-filesystem.yml` mounts LazyFS on Linux and runs `crates/elmdb/tests/power_loss.rs`, dropping
-unsynced writes (`clear-cache`) and tearing writes (`torn-op`) while verifying recovery back to the last durable
-`synced.v2` checkpoint.
+- **`.github/workflows/lossy-filesystem.yml`** mounts LazyFS on Linux and runs `crates/elmdb/tests/power_loss.rs`
+  (compiled with `--features failpoints`), covering:
+  - **`clear-cache`** (`a_filesystem_that_drops_what_was_not_synced_...`): drops unsynced writes and proves recovery to
+    the last `synced.v2` checkpoint (plus an `ELMDB_LOSSY_UNSYNCED=1` negative control that must fail).
+  - **`torn-seq`** (`a_filesystem_that_persists_unsynced_data_without_meta_...`): persists ONLY unsynced `D+3`
+    data-page writes while crashing LazyFS before any unsynced meta-page write lands, proving the Grouped `MDB_RDONLY`
+    durable pin keeps snapshot `D` intact — paired with an `ELMDB_LOSSY_UNPINNED=1` negative control that stays in
+    `DurabilityMode::Grouped` with `db.flush()` and disables ONLY the durable pin via `SKIP_GROUPED_DURABLE_PIN` (must
+    fail at DB open/check/model verification).
+  - **`torn-op`** (`a_filesystem_that_tears_a_write_...`): splits a write to `data.mdb` into 3 parts (`persist=[1,3]`)
+    and crashes LazyFS mid-write.
+- **`scripts/check-read-only-mount.py`** (`crates/elmdb/tests/read_only_mount.rs`, run in `ci.yml`'s `repo` job) mounts
+  a real Linux read-only bind mount (`sudo -n unshare --mount --propagation private`) proving v2 `read_only: true` opens
+  succeed without creating `synced.v2.lock` or `lock.mdb`, block writes with `ErrorCode::ReadOnly`, and fail loudly on a
+  disposable-copy mutation that attempts writable sidecar locking.
+- **`scripts/check-negative-controls.py`** (run in `ci.yml`'s `repo` job) applies disposable-copy mutations (such as
+  removing `install_durable_pin` in `crates/elmdb-storage/src/durability.rs`) and proves core safety assertions fail.
 
 ## Sanitizers (Miri, ASan, UBSan)
 
